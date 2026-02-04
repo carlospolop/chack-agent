@@ -39,7 +39,7 @@ class SerpApiWebSearchTool:
             return _clamp(default_max, 1, 10)
         return _clamp(_coerce_int(requested, default_max), 1, 10)
 
-    def _request(self, params: dict, timeout_seconds: int = 20, max_results: Optional[int] = None) -> str:
+    def _request_payload(self, params: dict, timeout_seconds: int = 20):
         api_key = self._api_key()
         if not api_key:
             return "ERROR: SerpAPI key not configured."
@@ -65,6 +65,12 @@ class SerpApiWebSearchTool:
 
         if isinstance(payload, dict) and payload.get("error"):
             return f"ERROR: SerpAPI error ({payload.get('error')})"
+        return payload
+
+    def _request(self, params: dict, timeout_seconds: int = 20, max_results: Optional[int] = None) -> str:
+        payload = self._request_payload(params, timeout_seconds=timeout_seconds)
+        if isinstance(payload, str):
+            return payload
         results = payload.get("organic_results") if isinstance(payload, dict) else []
         if not isinstance(results, list):
             return "ERROR: Unexpected SerpAPI response format"
@@ -92,6 +98,94 @@ class SerpApiWebSearchTool:
                 lines.append(f"   {' | '.join(meta)}")
             if snippet:
                 lines.append(f"   {snippet}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _extract_text_blocks(payload: dict) -> list[str]:
+        blocks = payload.get("text_blocks") or payload.get("answer_blocks") or []
+        out: list[str] = []
+        if isinstance(blocks, list):
+            for block in blocks:
+                if isinstance(block, dict):
+                    text = str(
+                        block.get("text")
+                        or block.get("snippet")
+                        or block.get("content")
+                        or ""
+                    ).strip()
+                    if text:
+                        out.append(text)
+                elif isinstance(block, str) and block.strip():
+                    out.append(block.strip())
+        for key in ["answer", "chat_response", "response", "output"]:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                out.append(value.strip())
+            elif isinstance(value, dict):
+                text = str(value.get("text") or value.get("content") or "").strip()
+                if text:
+                    out.append(text)
+        return out
+
+    @staticmethod
+    def _extract_reference_rows(payload: dict) -> list[dict]:
+        refs = payload.get("references") or payload.get("citations") or payload.get("sources") or []
+        rows: list[dict] = []
+        if not isinstance(refs, list):
+            refs = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            url = str(ref.get("link") or ref.get("url") or "").strip()
+            if not url:
+                continue
+            rows.append(
+                {
+                    "title": ref.get("title") or ref.get("source") or "(no title)",
+                    "url": url,
+                    "snippet": ref.get("snippet") or ref.get("description") or "",
+                    "source": ref.get("source") or "",
+                }
+            )
+        if rows:
+            return rows
+        organic = payload.get("organic_results") or []
+        if isinstance(organic, list):
+            for item in organic:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("link") or item.get("tracking_link") or "").strip()
+                if not url:
+                    continue
+                rows.append(
+                    {
+                        "title": item.get("title") or "(no title)",
+                        "url": url,
+                        "snippet": item.get("snippet") or item.get("description") or "",
+                        "source": item.get("source") or "",
+                    }
+                )
+        return rows
+
+    def _format_ai_mode(self, engine: str, query: str, payload: dict) -> str:
+        text_blocks = self._extract_text_blocks(payload)
+        refs = self._extract_reference_rows(payload)
+        if not text_blocks and not refs:
+            return f"SUCCESS: No SerpAPI {engine} results found for '{query}'."
+        lines = [f"SUCCESS: SerpAPI {engine} results for '{query}':"]
+        if text_blocks:
+            lines.append("Summary:")
+            for block in text_blocks[:4]:
+                lines.append(f"- {_normalize_snippet(block, max_chars=300)}")
+        if refs:
+            shown = refs[: self._max_results()]
+            lines.append(f"References (top {len(shown)}):")
+            for idx, ref in enumerate(shown, start=1):
+                lines.append(f"{idx}. {ref['title']} - {ref['url']}")
+                if ref.get("source"):
+                    lines.append(f"   {ref['source']}")
+                if ref.get("snippet"):
+                    lines.append(f"   {_normalize_snippet(str(ref['snippet']))}")
         return "\n".join(lines)
 
     def search_google_web(
@@ -137,6 +231,36 @@ class SerpApiWebSearchTool:
             timeout_seconds=timeout_seconds,
             max_results=max_results,
         )
+
+    def search_google_ai_mode(
+        self,
+        query: str,
+        timeout_seconds: int = 45,
+    ) -> str:
+        if not query.strip():
+            return "ERROR: Query cannot be empty"
+        payload = self._request_payload(
+            {"engine": "google_ai_mode", "q": query},
+            timeout_seconds=timeout_seconds,
+        )
+        if isinstance(payload, str):
+            return payload
+        return self._format_ai_mode("google_ai_mode", query, payload)
+
+    def search_bing_copilot(
+        self,
+        query: str,
+        timeout_seconds: int = 45,
+    ) -> str:
+        if not query.strip():
+            return "ERROR: Query cannot be empty"
+        payload = self._request_payload(
+            {"engine": "bing_copilot", "q": query},
+            timeout_seconds=timeout_seconds,
+        )
+        if isinstance(payload, str):
+            return payload
+        return self._format_ai_mode("bing_copilot", query, payload)
 
 
 def build_google_web_search_tool(config: ToolsConfig) -> StructuredTool:
@@ -198,4 +322,54 @@ def build_bing_web_search_tool(config: ToolsConfig) -> StructuredTool:
         name="search_bing_web",
         description=_search_bing_web.__doc__ or "Search Bing web results via SerpAPI.",
         func=_search_bing_web,
+    )
+
+
+def build_google_ai_mode_search_tool(config: ToolsConfig) -> StructuredTool:
+    helper = SerpApiWebSearchTool(config)
+
+    def _search_google_ai_mode(
+        query: str,
+        timeout_seconds: int = 45,
+    ) -> str:
+        """Search Google AI Mode via SerpAPI and return summary + references.
+
+        Args:
+            query: Search query string.
+            timeout_seconds: Request timeout in seconds.
+        """
+        return helper.search_google_ai_mode(
+            query=query,
+            timeout_seconds=timeout_seconds,
+        )
+
+    return StructuredTool.from_function(
+        name="search_google_ai_mode",
+        description=_search_google_ai_mode.__doc__ or "Search Google AI Mode via SerpAPI.",
+        func=_search_google_ai_mode,
+    )
+
+
+def build_bing_copilot_search_tool(config: ToolsConfig) -> StructuredTool:
+    helper = SerpApiWebSearchTool(config)
+
+    def _search_bing_copilot(
+        query: str,
+        timeout_seconds: int = 45,
+    ) -> str:
+        """Search Bing Copilot via SerpAPI and return summary + references.
+
+        Args:
+            query: Search query string.
+            timeout_seconds: Request timeout in seconds.
+        """
+        return helper.search_bing_copilot(
+            query=query,
+            timeout_seconds=timeout_seconds,
+        )
+
+    return StructuredTool.from_function(
+        name="search_bing_copilot",
+        description=_search_bing_copilot.__doc__ or "Search Bing Copilot via SerpAPI.",
+        func=_search_bing_copilot,
     )

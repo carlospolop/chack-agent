@@ -30,4 +30,6 @@ class ToolsConfig:
     pdf_text_enabled: bool = True
     pdf_text_max_chars: int = 12000
 
+    websearcher_enabled: bool = True
+
     min_tools_used: int = 10

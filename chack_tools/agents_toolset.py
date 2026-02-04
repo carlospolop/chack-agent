@@ -14,6 +14,7 @@ from .scientific_search import ScientificSearchTool
 from .scientific_research_agent import ScientificResearchAgentTool
 from .social_network_agent import SocialNetworkAgentTool
 from .task_list_tool import TaskListTool
+from .websearcher_agent import WebSearcherAgentTool
 
 
 def _exec_command(command: str) -> str:
@@ -39,15 +40,19 @@ class AgentsToolset:
         tool_profile: str = "all",
         social_network_model: str = "",
         scientific_model: str = "",
+        websearcher_model: str = "",
         social_network_max_turns: int = 30,
         scientific_max_turns: int = 30,
+        websearcher_max_turns: int = 30,
     ):
         self.config = config
         self.tool_profile = tool_profile
         self.social_network_model = social_network_model
         self.scientific_model = scientific_model
+        self.websearcher_model = websearcher_model
         self.social_network_max_turns = social_network_max_turns
         self.scientific_max_turns = scientific_max_turns
+        self.websearcher_max_turns = websearcher_max_turns
         self.tools = self._build_tools()
 
     @staticmethod
@@ -433,6 +438,22 @@ class AgentsToolset:
         return scientific_research
 
     @staticmethod
+    def _make_websearcher_tool(helper: WebSearcherAgentTool):
+        @function_tool(name_override="websearcher_research")
+        def websearcher_research(prompt: str) -> str:
+            """Run a dedicated web-research sub-agent for extensive web research.
+
+            Args:
+                prompt: Detailed research request for the nested sub-agent.
+            """
+            try:
+                return helper.run(prompt=prompt)
+            except Exception as exc:
+                return f"ERROR: websearcher_research failed ({exc})"
+
+        return websearcher_research
+
+    @staticmethod
     def _make_task_list_tool(helper: TaskListTool):
         @function_tool(name_override="task_list")
         def task_list(
@@ -506,6 +527,13 @@ class AgentsToolset:
         if has_serpapi and self.config.serpapi_bing_web_enabled and include_bing_web:
             web_helper = SerpApiWebSearchTool(self.config)
             tools.append(self._make_bing_web_tool(web_helper))
+        if self.config.websearcher_enabled and (self.config.brave_enabled or has_serpapi):
+            websearcher_helper = WebSearcherAgentTool(
+                self.config,
+                model_name=self.websearcher_model,
+                max_turns=self.websearcher_max_turns,
+            )
+            tools.append(self._make_websearcher_tool(websearcher_helper))
 
         include_forumscout = self.tool_profile in {"all", "telegram"}
         if self.config.forumscout_enabled and include_forumscout:
