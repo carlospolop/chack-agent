@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chack-tools"
+version = "0.1.0"
+description = "Reusable tool library for Chack-compatible agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Carlos Polop" }
+]
+dependencies = [
+  "requests>=2.31.0",
+  "langchain-core>=0.3.0",
+  "pypdf>=4.0.0",
+]
+
+[project.optional-dependencies]
+openai_agents = [
+  "openai-agents>=0.2.0",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["chack_tools*"]
