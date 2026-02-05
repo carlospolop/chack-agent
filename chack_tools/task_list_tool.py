@@ -38,11 +38,11 @@ class TaskListTool:
         reminders = []
         if action_name == "init" and result.startswith("SUCCESS:"):
             reminders.append(
-                "Reminder: update this task list every time you complete a task."
+                "Reminder: update this task list every time you complete a task calling this tool with `action=complete` and providing any relevant `notes` about the completion. This will help you keep track of your progress and next steps."
             )
         if action_name == "complete" and result.startswith("SUCCESS:"):
             reminders.append(
-                "Reminder: only if needed, update/modify/add tasks based on new knowledge."
+                "Reminder: only if needed, update/modify/add tasks based on new knowledge to be able to get all the needed context and information to solve the user's problem perfectly."
             )
         if reminders:
             return f"{result}\n\n" + "\n".join(reminders) + f"\n\n{board}"
