@@ -19,6 +19,7 @@ class TaskListTool:
         tasks: str = "",
         notes: str = "",
     ) -> str:
+        action_name = (action or "").strip().lower()
         session_id = current_session_id()
         if not session_id:
             return "ERROR: Task list context is not available for this request."
@@ -26,7 +27,7 @@ class TaskListTool:
         result = STORE.apply(
             session_id=session_id,
             run_label=run_label,
-            action=action,
+            action=action_name,
             task_id=task_id,
             text=text,
             status=status,
@@ -34,6 +35,17 @@ class TaskListTool:
             notes=notes,
         )
         board = STORE.render(session_id)
+        reminders = []
+        if action_name == "init" and result.startswith("SUCCESS:"):
+            reminders.append(
+                "Reminder: update this task list every time you complete a task."
+            )
+        if action_name == "complete" and result.startswith("SUCCESS:"):
+            reminders.append(
+                "Reminder: only if needed, update/modify/add tasks based on new knowledge."
+            )
+        if reminders:
+            return f"{result}\n\n" + "\n".join(reminders) + f"\n\n{board}"
         return f"{result}\n\n{board}"
 
 

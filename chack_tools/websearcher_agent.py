@@ -5,6 +5,7 @@ from .brave_search import BraveSearchTool
 from .config import ToolsConfig
 from .serpapi_web_search import SerpApiWebSearchTool
 from .subagent_runner import SubAgentRunner
+from .serpapi_keys import has_serpapi_keys
 
 try:
     from agents import function_tool
@@ -128,7 +129,7 @@ class WebSearcherAgentTool:
 
     def run(self, prompt: str) -> str:
         has_brave = bool((self.config.brave_api_key or "").strip())
-        has_serpapi = bool((self.config.serpapi_api_key or "").strip())
+        has_serpapi = has_serpapi_keys(getattr(self.config, "serpapi_api_key", ""))
         if not has_brave and not has_serpapi:
             return "ERROR: Neither Brave API key nor SerpAPI key is configured."
         tools = self._build_subagent_tools()

@@ -7,6 +7,7 @@ from .scientific_research_agent import build_scientific_research_tool
 from .social_network_agent import build_social_network_research_tool
 from .task_list_tool import build_task_list_tool
 from .websearcher_agent import build_websearcher_research_tool
+from .serpapi_keys import has_serpapi_keys
 
 
 class Toolset:
@@ -38,7 +39,7 @@ class Toolset:
         tools.append(build_task_list_tool(self.config))
         if self.config.brave_enabled:
             tools.append(build_brave_search_tool(self.config))
-        has_serpapi = bool((self.config.serpapi_api_key or "").strip())
+        has_serpapi = has_serpapi_keys(getattr(self.config, "serpapi_api_key", ""))
         if has_serpapi and self.config.serpapi_google_web_enabled:
             tools.append(build_google_web_search_tool(self.config))
         include_bing_web = self.tool_profile in {"all", "telegram"}

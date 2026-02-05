@@ -6,6 +6,7 @@ import requests
 from langchain_core.tools import StructuredTool
 
 from .config import ToolsConfig
+from .serpapi_keys import is_serpapi_rate_limited, shuffled_serpapi_keys
 
 
 def _clamp(value: int, minimum: int, maximum: int) -> int:
@@ -38,30 +39,41 @@ class ScientificSearchTool:
         return _clamp(_coerce_int(requested, cfg_limit), 1, 50)
 
     def _serpapi_key(self) -> str:
-        return str(getattr(self.config, "serpapi_api_key", "") or "").strip()
+        keys = shuffled_serpapi_keys(getattr(self.config, "serpapi_api_key", ""))
+        return keys[0] if keys else ""
 
     def _serpapi_request(self, params: dict[str, Any], timeout_seconds: int = 20) -> Any:
-        api_key = self._serpapi_key()
-        if not api_key:
+        api_keys = shuffled_serpapi_keys(getattr(self.config, "serpapi_api_key", ""))
+        if not api_keys:
             return "ERROR: SerpAPI key not configured."
-        req_params = dict(params)
-        req_params["api_key"] = api_key
-        req_params["output"] = "json"
-        try:
-            response = requests.get("https://serpapi.com/search", params=req_params, timeout=timeout_seconds)
-            response.raise_for_status()
-            payload = response.json()
-        except requests.exceptions.Timeout:
-            return "ERROR: SerpAPI request timed out"
-        except requests.exceptions.ConnectionError:
-            return "ERROR: Failed to connect to SerpAPI"
-        except requests.exceptions.HTTPError as exc:
-            return f"ERROR: SerpAPI returned HTTP {exc.response.status_code}"
-        except ValueError:
-            return "ERROR: SerpAPI returned invalid JSON"
-        if isinstance(payload, dict) and payload.get("error"):
-            return f"ERROR: SerpAPI error ({payload.get('error')})"
-        return payload
+        for idx, api_key in enumerate(api_keys):
+            req_params = dict(params)
+            req_params["api_key"] = api_key
+            req_params["output"] = "json"
+            try:
+                response = requests.get("https://serpapi.com/search", params=req_params, timeout=timeout_seconds)
+            except requests.exceptions.Timeout:
+                return "ERROR: SerpAPI request timed out"
+            except requests.exceptions.ConnectionError:
+                return "ERROR: Failed to connect to SerpAPI"
+
+            if response.status_code >= 400:
+                body = (response.text or "").strip().replace("\n", " ")
+                if is_serpapi_rate_limited(response.status_code, body) and idx < len(api_keys) - 1:
+                    continue
+                return f"ERROR: SerpAPI returned HTTP {response.status_code}"
+
+            try:
+                payload = response.json()
+            except ValueError:
+                return "ERROR: SerpAPI returned invalid JSON"
+            if isinstance(payload, dict) and payload.get("error"):
+                error_text = str(payload.get("error") or "")
+                if is_serpapi_rate_limited(response.status_code, error_text) and idx < len(api_keys) - 1:
+                    continue
+                return f"ERROR: SerpAPI error ({error_text})"
+            return payload
+        return "ERROR: All configured SerpAPI keys are rate limited."
 
     @staticmethod
     def _format_results(source: str, query: str, rows: list[dict[str, Any]]) -> str:

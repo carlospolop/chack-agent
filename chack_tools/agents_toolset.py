@@ -15,6 +15,7 @@ from .scientific_research_agent import ScientificResearchAgentTool
 from .social_network_agent import SocialNetworkAgentTool
 from .task_list_tool import TaskListTool
 from .websearcher_agent import WebSearcherAgentTool
+from .serpapi_keys import has_serpapi_keys
 
 
 def _exec_command(command: str) -> str:
@@ -519,7 +520,7 @@ class AgentsToolset:
         if self.config.brave_enabled:
             brave_helper = BraveSearchTool(self.config)
             tools.append(self._make_brave_tool(brave_helper))
-        has_serpapi = bool((self.config.serpapi_api_key or "").strip())
+        has_serpapi = has_serpapi_keys(getattr(self.config, "serpapi_api_key", ""))
         if has_serpapi and self.config.serpapi_google_web_enabled:
             web_helper = SerpApiWebSearchTool(self.config)
             tools.append(self._make_google_web_tool(web_helper))

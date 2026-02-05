@@ -1,4 +1,8 @@
 from io import BytesIO
+import os
+import re
+from urllib.parse import urlparse
+from uuid import uuid4
 from typing import Optional
 
 import requests
@@ -6,12 +10,6 @@ from langchain_core.tools import StructuredTool
 from pypdf import PdfReader
 
 from .config import ToolsConfig
-
-
-def _truncate(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "\n\n[truncated]"
 
 
 class PdfTextTool:
@@ -26,11 +24,6 @@ class PdfTextTool:
     ) -> str:
         if not url or not str(url).strip():
             return "ERROR: url cannot be empty"
-        limit = int(max_chars or self.config.pdf_text_max_chars or 12000)
-        if limit < 500:
-            limit = 500
-        if limit > 100000:
-            limit = 100000
         try:
             response = requests.get(
                 url,
@@ -75,12 +68,23 @@ class PdfTextTool:
         if not full_text:
             return "ERROR: No extractable text found in PDF"
 
-        text = _truncate(full_text, limit)
+        output_dir = "/tmp/chack-pdf-text"
+        os.makedirs(output_dir, exist_ok=True)
+        parsed = urlparse(url)
+        base_name = os.path.basename(parsed.path or "").strip() or "document.pdf"
+        base_name = re.sub(r"[^A-Za-z0-9._-]", "_", base_name)
+        if base_name.lower().endswith(".pdf"):
+            base_name = base_name[:-4]
+        file_path = os.path.join(output_dir, f"{base_name}_{uuid4().hex}.txt")
+        with open(file_path, "w", encoding="utf-8") as handle:
+            handle.write(full_text)
+
         return (
-            "SUCCESS: Extracted PDF text.\n"
+            "SUCCESS: Extracted PDF text and saved to filesystem.\n"
             f"URL: {url}\n"
             f"Characters: {len(full_text)}\n\n"
-            f"{text}"
+            f"Saved file: {file_path}\n"
+            "Use exec tool with grep/sed/cat on this file to locate relevant data."
         )
 
 
@@ -96,7 +100,7 @@ def build_pdf_text_tool(config: ToolsConfig) -> StructuredTool:
 
         Args:
             url: PDF URL to download and parse.
-            max_chars: Optional max output size.
+            max_chars: Deprecated, ignored (kept for compatibility).
             timeout_seconds: Request timeout in seconds.
         """
         return helper.download_pdf_as_text(

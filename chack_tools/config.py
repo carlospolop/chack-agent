@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -19,7 +20,7 @@ class ToolsConfig:
     forumscout_base_url: str = "https://forumscout.app"
     forumscout_max_results: int = 6
 
-    serpapi_api_key: str = ""
+    serpapi_api_key: Any = ""
     serpapi_google_web_enabled: bool = True
     serpapi_bing_web_enabled: bool = True
     serpapi_web_max_results: int = 6
@@ -28,7 +29,6 @@ class ToolsConfig:
     scientific_max_results: int = 10
 
     pdf_text_enabled: bool = True
-    pdf_text_max_chars: int = 12000
 
     websearcher_enabled: bool = True
 
