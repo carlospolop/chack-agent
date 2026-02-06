@@ -89,7 +89,12 @@ class ForumScoutTool:
         try:
             payload = response.json()
         except ValueError:
-            return "ERROR: ForumScout returned invalid JSON"
+            # Retry once on transient HTML/invalid payloads.
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=timeout_seconds)
+                payload = response.json()
+            except Exception:
+                return "ERROR: ForumScout returned invalid JSON"
 
         if isinstance(payload, str):
             try:
