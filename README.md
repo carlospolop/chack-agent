@@ -86,8 +86,8 @@ The agent can delegate to specialized sub‑agents. Sub‑agents run with restri
   * `serpapi`: Google/Bing web and AI‑mode endpoints.
 
 ### 3. Memory Architecture
-*   **Short-Term Memory**: Managed via `memory_max_messages` in `SessionConfig`. Keeps the immediate context window efficient.
-*   **Long-Term Memory**: File-based persistence. The agent reads/writes summaries to a `long_term_memory_dir`. This allows it to recall key facts across different runs of the same `session_id`.
+* **Short‑Term Memory**: Compaction is driven by `max_context_tokens` and `compaction_threshold_ratio`.
+* **Long‑Term Memory**: File-based persistence. The agent reads/writes summaries to a `long_term_memory_dir`.
 
 ## Configuration & Environment Variables
 

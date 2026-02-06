@@ -291,13 +291,15 @@ class Chack:
                 str(self.config.session.long_term_memory_max_chars or 1500),
             )
         )
+        memory_max_messages = max(1, int(self.config.session.max_turns or 50))
+        memory_reset_to_messages = memory_max_messages
         if tools_override is not None or tools_append is not None:
             return build_executor(
                 self.config,
                 system_prompt=system_prompt_override or self.config.system_prompt,
                 max_turns=self.config.session.max_turns,
-                memory_max_messages=self.config.session.memory_max_messages,
-                memory_reset_to_messages=self.config.session.memory_reset_to_messages,
+                memory_max_messages=memory_max_messages,
+                memory_reset_to_messages=memory_reset_to_messages,
                 memory_summary_prompt=self._memory_summary_prompt,
                 summary_max_chars=summary_max_chars,
                 tool_profile=tool_profile or self.tool_profile,
@@ -313,8 +315,8 @@ class Chack:
                 self.config,
                 system_prompt=system_prompt,
                 max_turns=self.config.session.max_turns,
-                memory_max_messages=self.config.session.memory_max_messages,
-                memory_reset_to_messages=self.config.session.memory_reset_to_messages,
+                memory_max_messages=memory_max_messages,
+                memory_reset_to_messages=memory_reset_to_messages,
                 memory_summary_prompt=self._memory_summary_prompt,
                 summary_max_chars=summary_max_chars,
                 tool_profile=tool_profile or self.tool_profile,

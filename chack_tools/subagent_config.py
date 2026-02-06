@@ -56,8 +56,6 @@ def build_subagent_config(
     session_overrides = overrides.get("session") or {}
     session = SessionConfig(
         max_turns=int(session_overrides.get("max_turns") or max_turns),
-        memory_max_messages=int(session_overrides.get("memory_max_messages") or 8),
-        memory_reset_to_messages=int(session_overrides.get("memory_reset_to_messages") or 8),
         long_term_memory_enabled=bool(
             session_overrides.get("long_term_memory_enabled", False)
         ),

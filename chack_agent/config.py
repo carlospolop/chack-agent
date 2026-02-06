@@ -49,8 +49,6 @@ class AgentConfig:
 @dataclass
 class SessionConfig:
     max_turns: int = 50
-    memory_max_messages: int = 16
-    memory_reset_to_messages: int = 0
     long_term_memory_enabled: bool = True
     long_term_memory_max_chars: int = 1500
     long_term_memory_dir: str = "longterm"
