@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Any
 
@@ -89,6 +90,12 @@ class ForumScoutTool:
             payload = response.json()
         except ValueError:
             return "ERROR: ForumScout returned invalid JSON"
+
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                return "ERROR: ForumScout returned invalid JSON"
 
         results = payload if isinstance(payload, list) else payload.get("results", [])
         if not isinstance(results, list):
