@@ -15,7 +15,6 @@ from .serpapi_keys import has_serpapi_keys
 from .task_list_tool import TaskListTool, get_task_list_tool
 from .subagent_config import build_subagent_config
 from .task_list_state import current_session_id
-from chack_agent import Chack
 
 try:
     from agents import function_tool
