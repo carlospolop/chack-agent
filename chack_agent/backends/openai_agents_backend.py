@@ -328,6 +328,7 @@ def build_executor(
     summary_max_chars: int,
     tool_profile: str = "all",
     tools_override: Optional[list[Any]] = None,
+    tools_append: Optional[list[Any]] = None,
 ) -> AgentsExecutor:
     model_name = config.model.primary
 
@@ -347,6 +348,8 @@ def build_executor(
             toolset_kwargs["websearcher_max_turns"] = config.model.websearcher_max_turns
         toolset = AgentsToolset(config.tools, **toolset_kwargs)
         tools = toolset.tools
+        if tools_append:
+            tools = list(tools) + list(tools_append)
     else:
         tools = list(tools_override)
 

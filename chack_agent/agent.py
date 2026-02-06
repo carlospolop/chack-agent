@@ -283,6 +283,7 @@ class Chack:
         system_prompt_override: Optional[str] = None,
         tool_profile: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
+        tools_append: Optional[list[Any]] = None,
     ):
         summary_max_chars = int(
             os.environ.get(
@@ -290,7 +291,7 @@ class Chack:
                 str(self.config.session.long_term_memory_max_chars or 1500),
             )
         )
-        if tools_override is not None:
+        if tools_override is not None or tools_append is not None:
             return build_executor(
                 self.config,
                 system_prompt=system_prompt_override or self.config.system_prompt,
@@ -301,6 +302,7 @@ class Chack:
                 summary_max_chars=summary_max_chars,
                 tool_profile=tool_profile or self.tool_profile,
                 tools_override=tools_override,
+                tools_append=tools_append,
             )
 
         cache_key = f"{session_id}:{tool_profile or self.tool_profile}:{system_prompt_override or ''}"
@@ -403,6 +405,7 @@ class Chack:
         tools_override: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
         usage_session_id: Optional[str] = None,
+        tools_append: Optional[list[Any]] = None,
     ) -> RunResult:
         if enable_self_critique is None:
             enable_self_critique = bool(self.config.agent.self_critique_enabled)
@@ -412,6 +415,7 @@ class Chack:
             system_prompt_override=system_prompt_override,
             tool_profile=tool_profile,
             tools_override=tools_override,
+            tools_append=tools_append,
         )
         self._last_activity_at[session_id] = time.time()
 
