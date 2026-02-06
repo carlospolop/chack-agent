@@ -150,6 +150,7 @@ def _respect_max_tools_used(data) -> ToolGuardrailFunctionOutput:
 
     used = non_task_tool_count(TOOL_USAGE_STORE.snapshot(session_id))
     if used >= max_tools_used:
+        print(f"Tool usage limit reached: used {used} tools, max is {max_tools_used}. Rejecting tool call to {tool_name}.")
         return ToolGuardrailFunctionOutput.reject_content(
             "Tool budget reached. Please use the information already gathered and finish the execution."
         )
