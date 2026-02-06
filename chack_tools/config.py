@@ -63,3 +63,9 @@ class ToolsConfig:
     websearcher_agent: dict = field(default_factory=dict)
 
     min_tools_used: int = 10
+    max_tools_used: int = 0
+
+    social_network_max_tools_used: int = 0
+    scientific_max_tools_used: int = 0
+    websearcher_max_tools_used: int = 0
+    tester_max_tools_used: int = 0

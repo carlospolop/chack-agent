@@ -108,6 +108,7 @@ class TesterAgentTool:
                 "long_term_memory_dir": "",
             },
             "tools": {
+                "max_tools_used": self.config.tester_max_tools_used,
                 "tester_enabled": True,
                 "tester_exec_enabled": self.config.tester_exec_enabled,
                 "tester_brave_enabled": self.config.tester_brave_enabled,
@@ -140,6 +141,7 @@ class TesterAgentTool:
             session_id=f"tester:{int(time.time() * 1000)}",
             text=prompt,
             min_tools_used_override=0,
+            max_tools_used_override=self.config.tester_max_tools_used,
             enable_self_critique=None,
             require_task_list_init_first=True,
             tools_override=tools,

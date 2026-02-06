@@ -374,6 +374,7 @@ class Chack:
         text: str,
         *,
         min_tools_used_override: Optional[int] = None,
+        max_tools_used_override: Optional[int] = None,
         enable_self_critique: Optional[bool] = None,
         require_task_list_init_first: bool = True,
         on_task_list_update: Optional[Callable[[str], None]] = None,
@@ -386,6 +387,7 @@ class Chack:
             session_id,
             text,
             min_tools_used_override=min_tools_used_override,
+            max_tools_used_override=max_tools_used_override,
             enable_self_critique=enable_self_critique,
             require_task_list_init_first=require_task_list_init_first,
             on_task_list_update=on_task_list_update,
@@ -400,6 +402,7 @@ class Chack:
         text: str,
         *,
         min_tools_used_override: Optional[int] = None,
+        max_tools_used_override: Optional[int] = None,
         enable_self_critique: Optional[bool] = None,
         require_task_list_init_first: bool = True,
         on_task_list_update: Optional[Callable[[str], None]] = None,
@@ -424,6 +427,9 @@ class Chack:
         min_tools_used = max(0, int(self.config.tools.min_tools_used or 0))
         if min_tools_used_override is not None:
             min_tools_used = max(0, int(min_tools_used_override))
+        max_tools_used = max(0, int(self.config.tools.max_tools_used or 0))
+        if max_tools_used_override is not None:
+            max_tools_used = max(0, int(max_tools_used_override))
 
         task_session_id = f"{session_id}:{int(time.time() * 1000)}"
         STORE.create_session(task_session_id, title="Task List")
@@ -462,6 +468,7 @@ class Chack:
             effective_min_tools = (
                 min_tools_used if min_tools_target is None else max(0, int(min_tools_target))
             )
+            effective_max_tools = max_tools_used
             effective_require_init = (
                 require_task_list_init_first
                 if require_task_list_init is None
@@ -514,7 +521,10 @@ class Chack:
                 non_task_tools = self._non_task_tool_count(all_steps)
                 missing_init = effective_require_init and not has_init
                 missing_tools = effective_min_tools > 0 and non_task_tools < effective_min_tools
+                max_tools_reached = effective_max_tools > 0 and non_task_tools >= effective_max_tools
                 if not missing_init and not missing_tools:
+                    break
+                if max_tools_reached:
                     break
                 if (
                     missing_tools

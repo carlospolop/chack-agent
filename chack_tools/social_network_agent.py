@@ -107,6 +107,7 @@ class SocialNetworkAgentTool:
                 "long_term_memory_dir": "",
             },
             "tools": {
+                "max_tools_used": self.config.social_network_max_tools_used,
                 "social_network_enabled": True,
                 "social_network_forum_search_enabled": True,
                 "social_network_linkedin_enabled": True,
@@ -138,6 +139,7 @@ class SocialNetworkAgentTool:
             session_id=f"social:{int(time.time() * 1000)}",
             text=prompt,
             min_tools_used_override=0,
+            max_tools_used_override=self.config.social_network_max_tools_used,
             enable_self_critique=None,
             require_task_list_init_first=True,
             tools_override=tools,

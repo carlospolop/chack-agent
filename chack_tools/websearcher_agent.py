@@ -106,6 +106,7 @@ class WebSearcherAgentTool:
                 "long_term_memory_dir": "",
             },
             "tools": {
+                "max_tools_used": self.config.websearcher_max_tools_used,
                 "websearcher_enabled": True,
                 "websearcher_brave_enabled": True,
                 "websearcher_google_web_enabled": True,
@@ -134,6 +135,7 @@ class WebSearcherAgentTool:
             session_id=f"websearch:{int(time.time() * 1000)}",
             text=prompt,
             min_tools_used_override=0,
+            max_tools_used_override=self.config.websearcher_max_tools_used,
             enable_self_critique=None,
             require_task_list_init_first=True,
             tools_override=tools,
