@@ -48,7 +48,7 @@ class ForumScoutTool:
         return os.environ.get("FORUMSCOUT_API_KEY", "")
 
     def _base_url(self) -> str:
-        return "https://forumscout.app"
+        return os.environ.get("FORUMSCOUT_BASE_URL", "https://forumscout.app")
 
     def _serpapi_key(self) -> str:
         keys = shuffled_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
