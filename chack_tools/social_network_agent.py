@@ -18,6 +18,7 @@ from .serpapi_keys import has_serpapi_keys
 from .task_list_tool import TaskListTool, get_task_list_tool
 from .subagent_config import build_subagent_config
 from .task_list_state import current_session_id
+from .tool_usage_state import STORE as TOOL_USAGE_STORE
 
 try:
     from agents import function_tool
@@ -143,6 +144,10 @@ class SocialNetworkAgentTool:
             system_prompt_override=config.system_prompt,
             usage_session_id=parent_session_id,
         )
+        if parent_session_id:
+            for tool_name, count in result.tool_counts.items():
+                if tool_name:
+                    TOOL_USAGE_STORE.add(tool_name, count=count, session_id=parent_session_id)
         return result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
 
 
