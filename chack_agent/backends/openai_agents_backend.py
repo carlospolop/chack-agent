@@ -13,7 +13,6 @@ from agents import Agent, ModelSettings, Runner, ToolGuardrailFunctionOutput, to
 from agents.items import ToolCallItem
 
 from ..config import ChackConfig
-from chack.conversation_memory import build_memory_summary, format_messages
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_list_state import current_run_label, current_session_id
 from chack_tools.tool_usage_state import (
@@ -176,8 +175,6 @@ class AgentsExecutor:
     _conversation: list[dict[str, Any]]
     _memory_limit: int
     _memory_reset_to: int
-    _summary_text: str
-    _summary_max_chars: int
     _base_system_prompt: str
     _previous_response_id: Optional[str]
     _compaction_threshold_ratio: float
@@ -186,12 +183,7 @@ class AgentsExecutor:
 
     def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
         user_input = payload.get("input", "")
-        if self._summary_text:
-            self.agent.instructions = (
-                f"{self._base_system_prompt}\n\n### MEMORY SUMMARY\n{self._summary_text}"
-            )
-        else:
-            self.agent.instructions = self._base_system_prompt
+        self.agent.instructions = self._base_system_prompt
         input_items: list[dict[str, Any]] = []
         if self._previous_response_id:
             if user_input:
@@ -218,23 +210,13 @@ class AgentsExecutor:
                 self._conversation.append({"role": "user", "content": user_input})
             if output:
                 self._conversation.append({"role": "assistant", "content": output})
-        if self._memory_limit:
-            if len(self._conversation) > self._memory_limit:
-                reset_to = self._memory_reset_to or self._memory_limit
-                if reset_to > self._memory_limit:
-                    reset_to = self._memory_limit
-                if reset_to < 1:
-                    reset_to = 1
-                removed = self._conversation[:-reset_to]
-                self._conversation = self._conversation[-reset_to:]
-                if removed:
-                    conversation = format_messages(removed)
-                    self._summary_text = build_memory_summary(
-                        self._config,
-                        conversation,
-                        self._summary_text,
-                        self._summary_max_chars,
-                    )
+        if self._memory_limit and len(self._conversation) > self._memory_limit:
+            reset_to = self._memory_reset_to or self._memory_limit
+            if reset_to > self._memory_limit:
+                reset_to = self._memory_limit
+            if reset_to < 1:
+                reset_to = 1
+            self._conversation = self._conversation[-reset_to:]
         if result.last_response_id:
             self._previous_response_id = result.last_response_id
         self._maybe_compact(result)
@@ -377,8 +359,6 @@ def build_executor(
     max_turns: int,
     memory_max_messages: int,
     memory_reset_to_messages: int,
-    memory_summary_prompt: str,
-    summary_max_chars: int,
     tool_profile: str = "all",
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
@@ -432,8 +412,6 @@ def build_executor(
         _conversation=[],
         _memory_limit=max_messages,
         _memory_reset_to=reset_to,
-        _summary_text="",
-        _summary_max_chars=summary_max_chars,
         _base_system_prompt=system_prompt,
         _previous_response_id=None,
         _compaction_threshold_ratio=float(

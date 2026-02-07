@@ -40,36 +40,6 @@ _SELF_CRITIQUE_PROMPT = """Is this the best you can do? Make sure you have gathe
   - Improve the answer recommendation you gave
 Your response to this improvement request will be the final one you give to the user, so don't mention the previous answer, just give the improved final answer or PR and give the user the best possible solution and answer."""
 
-_MEMORY_SUMMARY_PROMPT = """### ROLE
-You are a rolling-memory summarization assistant for Chack, a helpful autonomous AI assistant specialized in code execution and cloud and ci/cd infrastructure management.
-
-### TASK
-Integrate the new conversation lines into the existing summary so the assistant can keep context after older messages are removed.
-Preserve decisions, commitments, constraints, preferences, code changes, open questions and relevant data. Exclude chit-chat and transient details.
-
-## SUMMARY CONSTRAINS
-Your given summary cannot be bigger than 2000 characters.
-
-### INPUTS
-Current summary:
-
-======
-{summary}
-======
-
-
-
-New lines of conversation:
-
-======
-{new_lines}
-======
-
-
-### OUTPUT
-Updated summary:"""
-
-
 def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -147,7 +117,6 @@ class Chack:
         self._last_activity_at: Dict[str, float] = {}
         self._pricing = load_pricing(resolve_pricing_path())
         self._self_critique_prompt = _SELF_CRITIQUE_PROMPT
-        self._memory_summary_prompt = _MEMORY_SUMMARY_PROMPT
         export_env(config, self.config_path)
 
     def _require_self_critique_prompt(self) -> str:
@@ -292,12 +261,6 @@ class Chack:
         tools_override: Optional[list[Any]] = None,
         tools_append: Optional[list[Any]] = None,
     ):
-        summary_max_chars = int(
-            os.environ.get(
-                "CHACK_MEMORY_SUMMARY_MAX_CHARS",
-                str(self.config.session.long_term_memory_max_chars or 1500),
-            )
-        )
         memory_max_messages = max(1, int(self.config.session.max_turns or 50))
         memory_reset_to_messages = memory_max_messages
         if tools_override is not None or tools_append is not None:
@@ -307,8 +270,6 @@ class Chack:
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
-                memory_summary_prompt=self._memory_summary_prompt,
-                summary_max_chars=summary_max_chars,
                 tool_profile=tool_profile or self.tool_profile,
                 tools_override=tools_override,
                 tools_append=tools_append,
@@ -332,8 +293,6 @@ class Chack:
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
-                memory_summary_prompt=self._memory_summary_prompt,
-                summary_max_chars=summary_max_chars,
                 tool_profile=tool_profile or self.tool_profile,
             )
             self._executors[cache_key] = executor
