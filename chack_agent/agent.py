@@ -5,6 +5,7 @@ import logging
 import os
 import time
 import json
+from datetime import datetime, timezone
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
@@ -67,6 +68,10 @@ New lines of conversation:
 
 ### OUTPUT
 Updated summary:"""
+
+
+def _log_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 
@@ -312,6 +317,14 @@ class Chack:
         cache_key = f"{session_id}:{tool_profile or self.tool_profile}:{system_prompt_override or ''}"
         executor = self._executors.get(cache_key)
         if executor is None:
+            self.logger.info(
+                "Building executor for session %s (tool_profile=%s, override=%s, append=%s, ts=%s).",
+                session_id,
+                tool_profile or self.tool_profile,
+                "yes" if tools_override is not None else "no",
+                "yes" if tools_append is not None else "no",
+                _log_timestamp(),
+            )
             system_prompt = self._system_prompt_for_session(session_id, system_prompt_override)
             executor = build_executor(
                 self.config,
@@ -324,6 +337,13 @@ class Chack:
                 tool_profile=tool_profile or self.tool_profile,
             )
             self._executors[cache_key] = executor
+        else:
+            self.logger.debug(
+                "Reusing cached executor for session %s (tool_profile=%s, ts=%s).",
+                session_id,
+                tool_profile or self.tool_profile,
+                _log_timestamp(),
+            )
         return executor
 
     async def _finalize_long_term_memory(self, session_id: str) -> None:
@@ -351,6 +371,12 @@ class Chack:
 
         updated = await asyncio.to_thread(_build)
         if updated:
+            self.logger.info(
+                "Long-term memory updated for session %s (chars=%s ts=%s).",
+                session_id,
+                len(updated),
+                _log_timestamp(),
+            )
             save_long_term_memory(path, updated, max_chars)
 
     async def afinalize_long_term_memory(self, session_id: str) -> None:
@@ -448,6 +474,18 @@ class Chack:
         if on_task_list_update is not None:
             STORE.register_listener(task_session_id, _listener)
 
+        self.logger.info(
+            "Run start: session=%s task_session=%s tool_profile=%s min_tools=%s max_tools=%s self_critique=%s require_task_list_init=%s ts=%s",
+            session_id,
+            task_session_id,
+            tool_profile or self.tool_profile,
+            min_tools_used,
+            max_tools_used,
+            enable_self_critique,
+            require_task_list_init_first,
+            _log_timestamp(),
+        )
+
         max_attempts = 6
         max_missing_tools_reminders = max(
             0, int(self.config.tools.missing_tools_reminders_max or 0)
@@ -477,7 +515,16 @@ class Chack:
                 else bool(require_task_list_init)
             )
 
-            for _ in range(max_attempts):
+            for attempt in range(1, max_attempts + 1):
+                self.logger.info(
+                    "%s: attempt %s/%s (min_tools_target=%s require_task_list_init=%s ts=%s).",
+                    run_label,
+                    attempt,
+                    max_attempts,
+                    effective_min_tools,
+                    effective_require_init,
+                    _log_timestamp(),
+                )
                 def _invoke():
                     tokens = set_active_context(task_session_id, run_label)
                     effective_usage_session = usage_session_id or task_session_id
@@ -517,6 +564,12 @@ class Chack:
 
                 if result.get("error") == "max_turns_exceeded":
                     all_steps.extend(result.get("intermediate_steps", []))
+                    self.logger.warning(
+                        "%s: max turns exceeded after attempt %s ts=%s.",
+                        run_label,
+                        attempt,
+                        _log_timestamp(),
+                    )
                     break
 
                 current_steps = result.get("intermediate_steps", [])
@@ -526,6 +579,16 @@ class Chack:
                 missing_init = effective_require_init and not has_init
                 missing_tools = effective_min_tools > 0 and non_task_tools < effective_min_tools
                 max_tools_reached = effective_max_tools > 0 and non_task_tools >= effective_max_tools
+                self.logger.info(
+                    "%s: steps=%s non_task_tools=%s has_init=%s missing_tools=%s max_tools_reached=%s ts=%s.",
+                    run_label,
+                    len(all_steps),
+                    non_task_tools,
+                    has_init,
+                    missing_tools,
+                    max_tools_reached,
+                    _log_timestamp(),
+                )
                 if not missing_init and not missing_tools:
                     break
                 if max_tools_reached:
@@ -570,12 +633,20 @@ class Chack:
         run1_output = output
         rounds_used = len(run1_all_steps) + (1 if run1_output else 0)
         tools_used = self._non_task_tool_count(run1_all_steps)
+        self.logger.info(
+            "Run 1 complete: output_chars=%s steps=%s non_task_tools=%s ts=%s.",
+            len(run1_output or ""),
+            len(run1_all_steps),
+            tools_used,
+            _log_timestamp(),
+        )
 
         nested_counts_run1 = TOOL_USAGE_STORE.snapshot(task_session_id)
 
         run2_all_steps: list = []
         run2_output = ""
         if enable_self_critique:
+            self.logger.info("Run 2 (self-critique) starting. ts=%s", _log_timestamp())
             critique_prompt = self._require_self_critique_prompt()
             critique_input = (
                 f"{text}\n\nPrevious answer:\n{output}\n\n{critique_prompt}"
@@ -601,6 +672,13 @@ class Chack:
             output = critique_output or output
             rounds_used += len(run2_all_steps) + (1 if run2_output else 0)
             tools_used = self._non_task_tool_count(run1_all_steps + run2_all_steps)
+            self.logger.info(
+                "Run 2 complete: output_chars=%s steps=%s non_task_tools=%s ts=%s.",
+                len(run2_output or ""),
+                len(run2_all_steps),
+                tools_used,
+                _log_timestamp(),
+            )
 
         nested_counts_total = TOOL_USAGE_STORE.snapshot(task_session_id)
         nested_counts_run2 = Counter(nested_counts_total)
@@ -662,6 +740,14 @@ class Chack:
         if self.config.session.long_term_memory_enabled:
             asyncio.run(self._finalize_long_term_memory(session_id))
 
+        self.logger.info(
+            "Run finished: session=%s rounds=%s tools_used=%s cost=%s ts=%s.",
+            session_id,
+            rounds_used,
+            tools_used,
+            cost_text,
+            _log_timestamp(),
+        )
         return RunResult(
             output=output,
             steps=result.get("intermediate_steps", []),

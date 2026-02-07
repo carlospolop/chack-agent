@@ -4,6 +4,7 @@ import inspect
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -33,6 +34,10 @@ def _run_scope_key() -> str:
     session_id = current_session_id() or "no-session"
     run_label = current_run_label() or "Run 1"
     return f"{session_id}:{run_label}"
+
+
+def _log_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _item_type(item: Any) -> str:
@@ -150,7 +155,7 @@ def _respect_max_tools_used(data) -> ToolGuardrailFunctionOutput:
 
     used = non_task_tool_count(TOOL_USAGE_STORE.snapshot(session_id))
     if used >= max_tools_used:
-        print(f"Tool usage limit reached: used {used} tools, max is {max_tools_used}. Rejecting tool call to {tool_name}.")
+        _LOGGER.warning(f"Tool usage limit reached: used {used} tools, max is {max_tools_used}. Rejecting tool call to {tool_name}.")
         return ToolGuardrailFunctionOutput.reject_content(
             "Tool budget reached. Please use the information already gathered and finish the execution."
         )
@@ -263,8 +268,20 @@ class AgentsExecutor:
         if input_tokens < int(self._compaction_threshold_ratio * self._max_context_tokens):
             return
 
+        _LOGGER.info(
+            "Triggering response compaction: input_tokens=%s max_context=%s threshold_ratio=%s ts=%s.",
+            input_tokens,
+            self._max_context_tokens,
+            self._compaction_threshold_ratio,
+            _log_timestamp(),
+        )
         new_response_id = self._run_compaction(self._previous_response_id)
         if new_response_id:
+            _LOGGER.info(
+                "Responses compaction complete. New response id: %s ts=%s.",
+                new_response_id,
+                _log_timestamp(),
+            )
             self._previous_response_id = new_response_id
 
     def _run_compaction(self, response_id: str) -> Optional[str]:
@@ -291,6 +308,13 @@ def _extract_tool_steps(items: list[Any]) -> list[tuple[ToolAction, Any]]:
         raw = item.raw_item
         tool_name = _get_tool_name(raw) or "tool"
         tool_input = _get_tool_input(raw)
+        _LOGGER.info(
+            "Tool call: tool=%s session=%s run=%s ts=%s",
+            tool_name,
+            current_session_id() or "no-session",
+            current_run_label() or "Run 1",
+            _log_timestamp(),
+        )
         steps.append((ToolAction(tool=tool_name, tool_input=tool_input), None))
     return steps
 
