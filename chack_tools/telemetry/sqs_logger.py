@@ -13,9 +13,16 @@ try:
 except Exception:  # pragma: no cover
     boto3 = None
 
+try:
+    import requests
+except Exception:  # pragma: no cover
+    requests = None
+
 
 _QUEUE_URL_ENV = "CHACK_LOG_QUEUE_URL"
 _QUEUE_REGION_ENV = "CHACK_LOG_QUEUE_REGION"
+_HTTP_URL_ENV = "CHACK_LOGS_HTTP_URL"
+_HTTP_TIMEOUT_ENV = "CHACK_LOGS_HTTP_TIMEOUT"
 _SOURCE = "chack-agent"
 
 _LOCK = threading.Lock()
@@ -92,11 +99,7 @@ def _sanitize(value: Any, *, max_str_len: int = 4000) -> Any:
 
 
 def log_event(event_type: str, payload: Optional[Dict[str, Any]] = None, **context) -> bool:
-    client = _get_client()
-    queue_url = _queue_url()
-    if not client or not queue_url:
-        return False
-
+    http_url = (os.environ.get(_HTTP_URL_ENV, "") or "").strip()
     event_type = (event_type or "").strip().lower()
     if not event_type:
         return False
@@ -117,6 +120,22 @@ def log_event(event_type: str, payload: Optional[Dict[str, Any]] = None, **conte
         "payload": _sanitize(payload or {}),
     }
 
+    if http_url and requests is not None:
+        timeout_raw = os.environ.get(_HTTP_TIMEOUT_ENV, "")
+        try:
+            timeout = float(timeout_raw) if timeout_raw else 5.0
+        except Exception:
+            timeout = 5.0
+        try:
+            resp = requests.post(http_url, json=event, timeout=timeout)
+            return 200 <= resp.status_code < 300
+        except Exception:
+            return False
+
+    client = _get_client()
+    queue_url = _queue_url()
+    if not client or not queue_url:
+        return False
     try:
         client.send_message(
             QueueUrl=queue_url,
