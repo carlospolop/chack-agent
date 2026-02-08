@@ -13,6 +13,7 @@ setup(
     packages=find_packages(include=['chack_agent', 'chack_agent.*', 'chack_tools', 'chack_tools.*']),
     python_requires='>=3.9',
     install_requires=[
+        'boto3>=1.28.0',
         'requests>=2.31.0',
         'pypdf>=4.0.0',
         'openai-agents>=0.7.0',

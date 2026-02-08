@@ -5,6 +5,7 @@ import logging
 import os
 import time
 import json
+import traceback
 from datetime import datetime, timezone
 from collections import Counter
 from dataclasses import dataclass
@@ -27,6 +28,12 @@ from chack_tools.tool_usage_state import (
     reset_active_usage_session,
     set_active_max_tools_used,
     set_active_usage_session,
+)
+from chack_tools.telemetry import (
+    log_event,
+    set_log_context,
+    update_log_context,
+    reset_log_context,
 )
 from .pricing import estimate_cost, estimate_costs_by_model, load_pricing, resolve_pricing_path
 
@@ -399,335 +406,415 @@ class Chack:
         usage_session_id: Optional[str] = None,
         tools_append: Optional[list[Any]] = None,
     ) -> RunResult:
-        if enable_self_critique is None:
-            enable_self_critique = bool(self.config.agent.self_critique_enabled)
-
-        executor = self._get_executor(
-            session_id,
-            system_prompt_override=system_prompt_override,
-            tool_profile=tool_profile,
-            tools_override=tools_override,
-            tools_append=tools_append,
+        log_token = set_log_context(
+            main_action=str(self.config.agent.main_action or ""),
+            sub_action=str(self.config.agent.sub_action or ""),
+            session_id=session_id,
+            tool_profile=tool_profile or self.tool_profile,
+            model=str(self.config.model.primary or ""),
         )
-        self._last_activity_at[session_id] = time.time()
+        task_session_id = ""
+        try:
+            if enable_self_critique is None:
+                enable_self_critique = bool(self.config.agent.self_critique_enabled)
 
-        min_tools_used = max(0, int(self.config.tools.min_tools_used or 0))
-        if min_tools_used_override is not None:
-            min_tools_used = max(0, int(min_tools_used_override))
-        max_tools_used = max(0, int(self.config.tools.max_tools_used or 0))
-        if max_tools_used_override is not None:
-            max_tools_used = max(0, int(max_tools_used_override))
-
-        task_session_id = f"{session_id}:{int(time.time() * 1000)}"
-        STORE.create_session(task_session_id, title="Task List")
-        TOOL_USAGE_STORE.reset_session(task_session_id)
-
-        def _listener(board_text: str) -> None:
-            if on_task_list_update is None:
-                return
-            try:
-                on_task_list_update(board_text)
-            except Exception:
-                pass
-
-        if on_task_list_update is not None:
-            STORE.register_listener(task_session_id, _listener)
-
-        self.logger.info(
-            "Run start: session=%s task_session=%s tool_profile=%s min_tools=%s max_tools=%s self_critique=%s require_task_list_init=%s ts=%s",
-            session_id,
-            task_session_id,
-            tool_profile or self.tool_profile,
-            min_tools_used,
-            max_tools_used,
-            enable_self_critique,
-            require_task_list_init_first,
-            _log_timestamp(),
-        )
-
-        max_attempts = 6
-        max_missing_tools_reminders = max(
-            0, int(self.config.tools.missing_tools_reminders_max or 0)
-        )
-
-        def _invoke_with_min_tools(
-            prompt_text: str,
-            run_label: str,
-            *,
-            min_tools_target: Optional[int] = None,
-            require_task_list_init: Optional[bool] = None,
-        ):
-            result = {}
-            all_steps: list = []
-            prompt_total = 0
-            completion_total = 0
-            cached_total = 0
-            current_prompt = prompt_text
-            missing_tools_reminders_sent = 0
-            effective_min_tools = (
-                min_tools_used if min_tools_target is None else max(0, int(min_tools_target))
+            executor = self._get_executor(
+                session_id,
+                system_prompt_override=system_prompt_override,
+                tool_profile=tool_profile,
+                tools_override=tools_override,
+                tools_append=tools_append,
             )
-            effective_max_tools = max_tools_used
-            effective_require_init = (
-                require_task_list_init_first
-                if require_task_list_init is None
-                else bool(require_task_list_init)
+            self._last_activity_at[session_id] = time.time()
+
+            min_tools_used = max(0, int(self.config.tools.min_tools_used or 0))
+            if min_tools_used_override is not None:
+                min_tools_used = max(0, int(min_tools_used_override))
+            max_tools_used = max(0, int(self.config.tools.max_tools_used or 0))
+            if max_tools_used_override is not None:
+                max_tools_used = max(0, int(max_tools_used_override))
+
+            task_session_id = f"{session_id}:{int(time.time() * 1000)}"
+            update_log_context(task_session_id=task_session_id)
+            STORE.create_session(task_session_id, title="Task List")
+            TOOL_USAGE_STORE.reset_session(task_session_id)
+
+            log_event(
+                "agent_start",
+                payload={
+                    "session_id": session_id,
+                    "task_session_id": task_session_id,
+                    "main_action": str(self.config.agent.main_action or ""),
+                    "sub_action": str(self.config.agent.sub_action or ""),
+                    "model": str(self.config.model.primary or ""),
+                    "tool_profile": tool_profile or self.tool_profile,
+                    "min_tools": min_tools_used,
+                    "max_tools": max_tools_used,
+                    "max_turns": int(self.config.session.max_turns or 0),
+                    "self_critique_enabled": bool(enable_self_critique),
+                    "require_task_list_init_first": bool(require_task_list_init_first),
+                    "system_prompt_override": bool(system_prompt_override),
+                    "tools_override": bool(tools_override),
+                    "tools_append": bool(tools_append),
+                },
             )
 
-            for attempt in range(1, max_attempts + 1):
-                self.logger.info(
-                    "%s: attempt %s/%s (min_tools_target=%s require_task_list_init=%s ts=%s).",
-                    run_label,
-                    attempt,
-                    max_attempts,
-                    effective_min_tools,
-                    effective_require_init,
-                    _log_timestamp(),
+            def _listener(board_text: str) -> None:
+                if on_task_list_update is None:
+                    return
+                try:
+                    on_task_list_update(board_text)
+                except Exception:
+                    pass
+
+            if on_task_list_update is not None:
+                STORE.register_listener(task_session_id, _listener)
+
+            self.logger.info(
+                "Run start: session=%s task_session=%s tool_profile=%s min_tools=%s max_tools=%s self_critique=%s require_task_list_init=%s ts=%s",
+                session_id,
+                task_session_id,
+                tool_profile or self.tool_profile,
+                min_tools_used,
+                max_tools_used,
+                enable_self_critique,
+                require_task_list_init_first,
+                _log_timestamp(),
+            )
+
+            max_attempts = 6
+            max_missing_tools_reminders = max(
+                0, int(self.config.tools.missing_tools_reminders_max or 0)
+            )
+            def _invoke_with_min_tools(
+                prompt_text: str,
+                run_label: str,
+                *,
+                min_tools_target: Optional[int] = None,
+                require_task_list_init: Optional[bool] = None,
+            ):
+                result = {}
+                all_steps: list = []
+                prompt_total = 0
+                completion_total = 0
+                cached_total = 0
+                current_prompt = prompt_text
+                missing_tools_reminders_sent = 0
+                effective_min_tools = (
+                    min_tools_used if min_tools_target is None else max(0, int(min_tools_target))
                 )
-                def _invoke():
-                    tokens = set_active_context(task_session_id, run_label)
-                    effective_usage_session = usage_session_id or task_session_id
-                    usage_token = set_active_usage_session(effective_usage_session)
-                    max_tools_token = set_active_max_tools_used(max_tools_used)
-                    try:
-                        return executor.invoke({"input": current_prompt})
-                    except Exception as exc:
-                        try:
-                            from agents.exceptions import MaxTurnsExceeded
-                        except Exception:
-                            MaxTurnsExceeded = None
-                        if MaxTurnsExceeded is not None and isinstance(exc, MaxTurnsExceeded):
-                            return {
-                                "output": (
-                                    "I reached the maximum number of turns for this run. "
-                                    "Please try again or increase max_turns in the config if you need longer responses."
-                                ),
-                                "intermediate_steps": [],
-                                "raw_result": None,
-                                "error": "max_turns_exceeded",
-                            }
-                        raise
-                    finally:
-                        reset_active_max_tools_used(max_tools_token)
-                        reset_active_usage_session(usage_token)
-                        reset_active_context(tokens)
-
-                result = _invoke()
-
-                attempt_prompt, attempt_completion, attempt_cached = self._usage_from_raw_result(
-                    result.get("raw_result")
+                effective_max_tools = max_tools_used
+                effective_require_init = (
+                    require_task_list_init_first
+                    if require_task_list_init is None
+                    else bool(require_task_list_init)
                 )
-                prompt_total += attempt_prompt
-                completion_total += attempt_completion
-                cached_total += attempt_cached
 
-                if result.get("error") == "max_turns_exceeded":
-                    all_steps.extend(result.get("intermediate_steps", []))
-                    self.logger.warning(
-                        "%s: max turns exceeded after attempt %s ts=%s.",
+                for attempt in range(1, max_attempts + 1):
+                    self.logger.info(
+                        "%s: attempt %s/%s (min_tools_target=%s require_task_list_init=%s ts=%s).",
                         run_label,
                         attempt,
+                        max_attempts,
+                        effective_min_tools,
+                        effective_require_init,
                         _log_timestamp(),
                     )
-                    break
 
-                current_steps = result.get("intermediate_steps", [])
-                all_steps.extend(current_steps)
-                has_init = any(self._is_task_list_init_step(step) for step in all_steps)
-                non_task_tools = self._non_task_tool_count(all_steps)
-                missing_init = effective_require_init and not has_init
-                missing_tools = effective_min_tools > 0 and non_task_tools < effective_min_tools
-                max_tools_reached = effective_max_tools > 0 and non_task_tools >= effective_max_tools
-                self.logger.info(
-                    "%s: steps=%s non_task_tools=%s has_init=%s missing_tools=%s max_tools_reached=%s ts=%s.",
-                    run_label,
-                    len(all_steps),
-                    non_task_tools,
-                    has_init,
-                    missing_tools,
-                    max_tools_reached,
-                    _log_timestamp(),
-                )
-                if not missing_init and not missing_tools:
-                    break
-                if max_tools_reached:
-                    break
-                if (
-                    missing_tools
-                    and not missing_init
-                    and missing_tools_reminders_sent >= max_missing_tools_reminders
-                ):
-                    break
+                    def _invoke():
+                        tokens = set_active_context(task_session_id, run_label)
+                        effective_usage_session = usage_session_id or task_session_id
+                        usage_token = set_active_usage_session(effective_usage_session)
+                        max_tools_token = set_active_max_tools_used(max_tools_used)
+                        try:
+                            return executor.invoke({"input": current_prompt})
+                        except Exception as exc:
+                            try:
+                                from agents.exceptions import MaxTurnsExceeded
+                            except Exception:
+                                MaxTurnsExceeded = None
+                            if MaxTurnsExceeded is not None and isinstance(exc, MaxTurnsExceeded):
+                                return {
+                                    "output": (
+                                        "I reached the maximum number of turns for this run. "
+                                        "Please try again or increase max_turns in the config if you need longer responses."
+                                    ),
+                                    "intermediate_steps": [],
+                                    "raw_result": None,
+                                    "error": "max_turns_exceeded",
+                                }
+                            raise
+                        finally:
+                            reset_active_max_tools_used(max_tools_token)
+                            reset_active_usage_session(usage_token)
+                            reset_active_context(tokens)
 
-                reminders = []
-                if missing_init:
-                    reminders.append(
-                        "Before continuing, call task_list with action=init and a concise plan."
+                    result = _invoke()
+
+                    attempt_prompt, attempt_completion, attempt_cached = self._usage_from_raw_result(
+                        result.get("raw_result")
                     )
-                if missing_tools:
-                    remaining = max(0, effective_min_tools - non_task_tools)
-                    reminders.append(
-                        f"Use at least {remaining} more non-task tool calls to gather context before finalizing. "
-                        "Use these extra tool calls to get more context to be able to answer the question more "
-                        "accurately and confidently, rather than rushing to a final answer."
+                    prompt_total += attempt_prompt
+                    completion_total += attempt_completion
+                    cached_total += attempt_cached
+
+                    if result.get("error") == "max_turns_exceeded":
+                        all_steps.extend(result.get("intermediate_steps", []))
+                        self.logger.warning(
+                            "%s: max turns exceeded after attempt %s ts=%s.",
+                            run_label,
+                            attempt,
+                            _log_timestamp(),
+                        )
+                        break
+
+                    current_steps = result.get("intermediate_steps", [])
+                    all_steps.extend(current_steps)
+                    has_init = any(self._is_task_list_init_step(step) for step in all_steps)
+                    non_task_tools = self._non_task_tool_count(all_steps)
+                    missing_init = effective_require_init and not has_init
+                    missing_tools = effective_min_tools > 0 and non_task_tools < effective_min_tools
+                    max_tools_reached = effective_max_tools > 0 and non_task_tools >= effective_max_tools
+                    self.logger.info(
+                        "%s: steps=%s non_task_tools=%s has_init=%s missing_tools=%s max_tools_reached=%s ts=%s.",
+                        run_label,
+                        len(all_steps),
+                        non_task_tools,
+                        has_init,
+                        missing_tools,
+                        max_tools_reached,
+                        _log_timestamp(),
                     )
-                    missing_tools_reminders_sent += 1
-                current_prompt = (
-                    "Continue the same run from your current context. "
-                    "Do not provide your final answer yet.\n"
-                    + " ".join(reminders)
-                    + f"\n\nOriginal request:\n{prompt_text}"
-                )
+                    if not missing_init and not missing_tools:
+                        break
+                    if max_tools_reached:
+                        break
+                    if (
+                        missing_tools
+                        and not missing_init
+                        and missing_tools_reminders_sent >= max_missing_tools_reminders
+                    ):
+                        break
 
-            return result, all_steps, prompt_total, completion_total, cached_total
+                    reminders = []
+                    if missing_init:
+                        reminders.append(
+                            "Before continuing, call task_list with action=init and a concise plan."
+                        )
+                    if missing_tools:
+                        remaining = max(0, effective_min_tools - non_task_tools)
+                        reminders.append(
+                            f"Use at least {remaining} more non-task tool calls to gather context before finalizing. "
+                            "Use these extra tool calls to get more context to be able to answer the question more "
+                            "accurately and confidently, rather than rushing to a final answer."
+                        )
+                        missing_tools_reminders_sent += 1
+                    current_prompt = (
+                        "Continue the same run from your current context. "
+                        "Do not provide your final answer yet.\n"
+                        + " ".join(reminders)
+                        + f"\n\nOriginal request:\n{prompt_text}"
+                    )
 
-        (
-            result,
-            run1_all_steps,
-            prompt_tokens,
-            completion_tokens,
-            cached_prompt_tokens,
-        ) = _invoke_with_min_tools(text, "Run 1")
-        output = result.get("output", "")
-        run1_output = output
-        rounds_used = len(run1_all_steps) + (1 if run1_output else 0)
-        tools_used = self._non_task_tool_count(run1_all_steps)
-        self.logger.info(
-            "Run 1 complete: output_chars=%s steps=%s non_task_tools=%s ts=%s.",
-            len(run1_output or ""),
-            len(run1_all_steps),
-            tools_used,
-            _log_timestamp(),
-        )
+                return result, all_steps, prompt_total, completion_total, cached_total
 
-        nested_counts_run1 = TOOL_USAGE_STORE.snapshot(task_session_id)
-
-        run2_all_steps: list = []
-        run2_output = ""
-        if enable_self_critique:
-            self.logger.info("Run 2 (self-critique) starting. ts=%s", _log_timestamp())
-            critique_prompt = self._require_self_critique_prompt()
-            critique_input = (
-                f"{text}\n\nPrevious answer:\n{output}\n\n{critique_prompt}"
-            )
             (
-                critique_result,
-                run2_all_steps,
-                run2_prompt_tokens,
-                run2_completion_tokens,
-                run2_cached_prompt_tokens,
-            ) = _invoke_with_min_tools(
-                critique_input,
-                "Run 2 (self-critique)",
-                min_tools_target=0,
-                require_task_list_init=False,
-            )
-            prompt_tokens += run2_prompt_tokens
-            completion_tokens += run2_completion_tokens
-            cached_prompt_tokens += run2_cached_prompt_tokens
-
-            critique_output = critique_result.get("output", "")
-            run2_output = critique_output
-            output = critique_output or output
-            rounds_used += len(run2_all_steps) + (1 if run2_output else 0)
-            tools_used = self._non_task_tool_count(run1_all_steps + run2_all_steps)
+                result,
+                run1_all_steps,
+                prompt_tokens,
+                completion_tokens,
+                cached_prompt_tokens,
+            ) = _invoke_with_min_tools(text, "Run 1")
+            output = result.get("output", "")
+            run1_output = output
+            rounds_used = len(run1_all_steps) + (1 if run1_output else 0)
+            tools_used = self._non_task_tool_count(run1_all_steps)
             self.logger.info(
-                "Run 2 complete: output_chars=%s steps=%s non_task_tools=%s ts=%s.",
-                len(run2_output or ""),
-                len(run2_all_steps),
+                "Run 1 complete: output_chars=%s steps=%s non_task_tools=%s ts=%s.",
+                len(run1_output or ""),
+                len(run1_all_steps),
                 tools_used,
                 _log_timestamp(),
             )
 
-        nested_counts_total = TOOL_USAGE_STORE.snapshot(task_session_id)
-        nested_counts_run2 = Counter(nested_counts_total)
-        nested_counts_run2.subtract(nested_counts_run1)
-        nested_counts_run2 = Counter({k: v for k, v in nested_counts_run2.items() if v > 0})
+            nested_counts_run1 = TOOL_USAGE_STORE.snapshot(task_session_id)
 
-        run1_tool_counts = self._step_tool_counts(run1_all_steps)
-        run2_tool_counts = self._step_tool_counts(run2_all_steps)
-        run1_tool_counts.update(nested_counts_run1)
-        run2_tool_counts.update(nested_counts_run2)
+            run2_all_steps: list = []
+            run2_output = ""
+            if enable_self_critique:
+                self.logger.info("Run 2 (self-critique) starting. ts=%s", _log_timestamp())
+                critique_prompt = self._require_self_critique_prompt()
+                critique_input = (
+                    f"{text}\n\nPrevious answer:\n{output}\n\n{critique_prompt}"
+                )
+                (
+                    critique_result,
+                    run2_all_steps,
+                    run2_prompt_tokens,
+                    run2_completion_tokens,
+                    run2_cached_prompt_tokens,
+                ) = _invoke_with_min_tools(
+                    critique_input,
+                    "Run 2 (self-critique)",
+                    min_tools_target=0,
+                    require_task_list_init=False,
+                )
+                prompt_tokens += run2_prompt_tokens
+                completion_tokens += run2_completion_tokens
+                cached_prompt_tokens += run2_cached_prompt_tokens
 
-        tool_counts = Counter(run1_tool_counts)
-        tool_counts.update(run2_tool_counts)
-        nested_usage_by_model = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
+                critique_output = critique_result.get("output", "")
+                run2_output = critique_output
+                output = critique_output or output
+                rounds_used += len(run2_all_steps) + (1 if run2_output else 0)
+                tools_used = self._non_task_tool_count(run1_all_steps + run2_all_steps)
+                self.logger.info(
+                    "Run 2 complete: output_chars=%s steps=%s non_task_tools=%s ts=%s.",
+                    len(run2_output or ""),
+                    len(run2_all_steps),
+                    tools_used,
+                    _log_timestamp(),
+                )
 
-        run1_tools_used = (
-            self._non_task_tool_count(run1_all_steps)
-            + self._non_task_tool_count_from_counter(nested_counts_run1)
-        )
-        run2_tools_used = (
-            self._non_task_tool_count(run2_all_steps)
-            + self._non_task_tool_count_from_counter(nested_counts_run2)
-        )
+            nested_counts_total = TOOL_USAGE_STORE.snapshot(task_session_id)
+            nested_counts_run2 = Counter(nested_counts_total)
+            nested_counts_run2.subtract(nested_counts_run1)
+            nested_counts_run2 = Counter({k: v for k, v in nested_counts_run2.items() if v > 0})
 
-        model_name = self.config.model.primary
-        main_cost = estimate_cost(
-            self._pricing,
-            model_name,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cached_prompt_tokens=cached_prompt_tokens,
-        )
-        nested_cost, _missing_nested_models = estimate_costs_by_model(
-            self._pricing,
-            nested_usage_by_model,
-        )
-        if main_cost is None and nested_cost == 0:
-            total_cost = None
-        else:
-            total_cost = (main_cost or 0.0) + nested_cost
-        if total_cost is None:
-            cost_text = "unknown"
-        else:
-            cost_text = f"${total_cost:.4f}"
+            run1_tool_counts = self._step_tool_counts(run1_all_steps)
+            run2_tool_counts = self._step_tool_counts(run2_all_steps)
+            run1_tool_counts.update(nested_counts_run1)
+            run2_tool_counts.update(nested_counts_run2)
 
-        run1_steps = len(run1_all_steps)
-        run2_steps = len(run2_all_steps)
-        max_turns = int(self.config.session.max_turns or 0)
-        tool_counts_text = self._format_tool_counts(tool_counts)
-        suffix = (
-            f"\n\n🔁 {run1_steps}/{run2_steps}/{max_turns} | 🧰 {run1_tools_used}/{run2_tools_used} | 💲 {cost_text}\n"
-            f"{tool_counts_text}"
-        )
+            tool_counts = Counter(run1_tool_counts)
+            tool_counts.update(run2_tool_counts)
+            nested_usage_by_model = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
 
-        if on_task_list_update is not None:
-            STORE.unregister_listener(task_session_id, _listener)
-        TOOL_USAGE_STORE.clear(task_session_id)
+            run1_tools_used = (
+                self._non_task_tool_count(run1_all_steps)
+                + self._non_task_tool_count_from_counter(nested_counts_run1)
+            )
+            run2_tools_used = (
+                self._non_task_tool_count(run2_all_steps)
+                + self._non_task_tool_count_from_counter(nested_counts_run2)
+            )
 
-        if self.config.session.long_term_memory_enabled:
-            asyncio.run(self._finalize_long_term_memory(session_id))
+            model_name = self.config.model.primary
+            main_cost = estimate_cost(
+                self._pricing,
+                model_name,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cached_prompt_tokens=cached_prompt_tokens,
+            )
+            nested_cost, _missing_nested_models = estimate_costs_by_model(
+                self._pricing,
+                nested_usage_by_model,
+            )
+            if main_cost is None and nested_cost == 0:
+                total_cost = None
+            else:
+                total_cost = (main_cost or 0.0) + nested_cost
+            if total_cost is None:
+                cost_text = "unknown"
+            else:
+                cost_text = f"${total_cost:.4f}"
 
-        self.logger.info(
-            "Run finished: session=%s rounds=%s tools_used=%s cost=%s ts=%s.",
-            session_id,
-            rounds_used,
-            tools_used,
-            cost_text,
-            _log_timestamp(),
-        )
-        return RunResult(
-            output=output,
-            steps=result.get("intermediate_steps", []),
-            all_steps=run1_all_steps + run2_all_steps,
-            tool_counts=tool_counts,
-            nested_tool_counts=nested_counts_total,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cached_prompt_tokens=cached_prompt_tokens,
-            rounds_used=rounds_used,
-            tools_used=tools_used,
-            task_session_id=task_session_id,
-            nested_usage_by_model=nested_usage_by_model,
-            run1_output=run1_output,
-            run2_output=run2_output,
-            run1_steps=run1_steps,
-            run2_steps=run2_steps,
-            max_turns=max_turns,
-            run1_tools_used=run1_tools_used,
-            run2_tools_used=run2_tools_used,
-            total_cost=total_cost,
-            tool_counts_text=tool_counts_text,
-            suffix=suffix,
-        )
+            run1_steps = len(run1_all_steps)
+            run2_steps = len(run2_all_steps)
+            max_turns = int(self.config.session.max_turns or 0)
+            tool_counts_text = self._format_tool_counts(tool_counts)
+            suffix = (
+                f"\n\n🔁 {run1_steps}/{run2_steps}/{max_turns} | 🧰 {run1_tools_used}/{run2_tools_used} | 💲 {cost_text}\n"
+                f"{tool_counts_text}"
+            )
+
+            if on_task_list_update is not None:
+                STORE.unregister_listener(task_session_id, _listener)
+            TOOL_USAGE_STORE.clear(task_session_id)
+
+            if self.config.session.long_term_memory_enabled:
+                asyncio.run(self._finalize_long_term_memory(session_id))
+
+            if result.get("error"):
+                log_event(
+                    "agent_error",
+                    payload={
+                        "session_id": session_id,
+                        "task_session_id": task_session_id,
+                        "error": result.get("error"),
+                    },
+                )
+
+            log_event(
+                "agent_end",
+                payload={
+                    "session_id": session_id,
+                    "task_session_id": task_session_id,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "cached_prompt_tokens": cached_prompt_tokens,
+                    "total_cost": total_cost,
+                    "rounds_used": rounds_used,
+                    "tools_used": tools_used,
+                    "run1_steps": run1_steps,
+                    "run2_steps": run2_steps,
+                    "run1_tools_used": run1_tools_used,
+                    "run2_tools_used": run2_tools_used,
+                    "tool_counts": dict(tool_counts),
+                    "nested_tool_counts": dict(nested_counts_total),
+                    "nested_usage_by_model": nested_usage_by_model,
+                },
+            )
+
+            self.logger.info(
+                "Run finished: session=%s rounds=%s tools_used=%s cost=%s ts=%s.",
+                session_id,
+                rounds_used,
+                tools_used,
+                cost_text,
+                _log_timestamp(),
+            )
+            return RunResult(
+                output=output,
+                steps=result.get("intermediate_steps", []),
+                all_steps=run1_all_steps + run2_all_steps,
+                tool_counts=tool_counts,
+                nested_tool_counts=nested_counts_total,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cached_prompt_tokens=cached_prompt_tokens,
+                rounds_used=rounds_used,
+                tools_used=tools_used,
+                task_session_id=task_session_id,
+                nested_usage_by_model=nested_usage_by_model,
+                run1_output=run1_output,
+                run2_output=run2_output,
+                run1_steps=run1_steps,
+                run2_steps=run2_steps,
+                max_turns=max_turns,
+                run1_tools_used=run1_tools_used,
+                run2_tools_used=run2_tools_used,
+                total_cost=total_cost,
+                tool_counts_text=tool_counts_text,
+                suffix=suffix,
+            )
+        except Exception as exc:
+            self.logger.exception(
+                "Run failed: session=%s task_session=%s ts=%s.",
+                session_id,
+                task_session_id,
+                _log_timestamp(),
+            )
+            log_event(
+                "agent_error",
+                payload={
+                    "session_id": session_id,
+                    "task_session_id": task_session_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "traceback": traceback.format_exc(),
+                },
+            )
+            raise
+        finally:
+            reset_log_context(log_token)

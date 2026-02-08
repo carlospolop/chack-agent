@@ -15,6 +15,7 @@ from agents.items import ToolCallItem
 from ..config import ChackConfig
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_list_state import current_run_label, current_session_id
+from chack_tools.telemetry import log_event
 from chack_tools.tool_usage_state import (
     STORE as TOOL_USAGE_STORE,
     current_max_tools_used,
@@ -296,6 +297,15 @@ def _extract_tool_steps(items: list[Any]) -> list[tuple[ToolAction, Any]]:
             current_session_id() or "no-session",
             current_run_label() or "Run 1",
             _log_timestamp(),
+        )
+        log_event(
+            "tool_executed",
+            payload={
+                "tool": tool_name,
+                "tool_input": tool_input,
+            },
+            task_session_id=current_session_id() or "",
+            run_label=current_run_label() or "",
         )
         steps.append((ToolAction(tool=tool_name, tool_input=tool_input), None))
     return steps

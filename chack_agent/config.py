@@ -46,6 +46,8 @@ class AgentConfig:
     self_critique_enabled: bool = True
     compaction_threshold_ratio: float = 0.75
     compaction_model: str = ""
+    main_action: str = ""
+    sub_action: str = ""
 
 
 @dataclass

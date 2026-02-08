@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextvars
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 _ACTIVE_SESSION_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
@@ -30,6 +30,7 @@ class TaskRun:
     initialized: bool = False
     next_id: int = 1
     tasks: List[TaskItem] = field(default_factory=list)
+    completed_emitted: bool = False
 
 
 @dataclass
@@ -84,6 +85,63 @@ class TaskListStore:
             except Exception:
                 pass
 
+    @staticmethod
+    def _is_completed(run: TaskRun) -> bool:
+        if not run.initialized:
+            return False
+        if not run.tasks:
+            return True
+        return all(task.status == "done" for task in run.tasks)
+
+    @staticmethod
+    def _log_event(
+        event_type: str,
+        *,
+        payload: Dict[str, Any],
+        session_id: str,
+        run_label: str,
+    ) -> None:
+        try:
+            from chack_tools.telemetry import log_event
+        except Exception:
+            return
+        log_event(
+            event_type,
+            payload=payload,
+            task_session_id=session_id,
+            run_label=run_label,
+        )
+
+    def _maybe_emit_completion(self, session_id: str, run: TaskRun) -> None:
+        completed = self._is_completed(run)
+        if completed and not run.completed_emitted:
+            self._log_event(
+                "tasklist_completed",
+                payload={
+                    "tasks_total": len(run.tasks),
+                    "tasks_done": len([t for t in run.tasks if t.status == "done"]),
+                    "tasks": self._snapshot(run),
+                },
+                session_id=session_id,
+                run_label=run.label,
+            )
+            run.completed_emitted = True
+            return
+        if not completed:
+            run.completed_emitted = False
+
+    @staticmethod
+    def _snapshot(run: TaskRun) -> List[Dict[str, Any]]:
+        return [
+            {
+                "id": task.id,
+                "text": task.text,
+                "status": task.status,
+                "notes": task.notes,
+            }
+            for task in run.tasks
+        ]
+
     def apply(
         self,
         session_id: str,
@@ -108,11 +166,22 @@ class TaskListStore:
             items = _parse_tasks(tasks_text)
             run.tasks = []
             run.next_id = 1
+            run.completed_emitted = False
             for item in items:
                 run.tasks.append(TaskItem(id=run.next_id, text=item, status="todo"))
                 run.next_id += 1
             run.initialized = True
             self._notify(session_id)
+            self._log_event(
+                "tasklist_defined",
+                payload={
+                    "tasks_total": len(run.tasks),
+                    "tasks": self._snapshot(run),
+                },
+                session_id=session_id,
+                run_label=run.label,
+            )
+            self._maybe_emit_completion(session_id, run)
             return f"SUCCESS: initialized {len(run.tasks)} tasks for {run_label}"
 
         if action == "list":
@@ -127,6 +196,21 @@ class TaskListStore:
             run.tasks.append(TaskItem(id=run.next_id, text=text.strip(), status=(status or "todo")))
             run.next_id += 1
             self._notify(session_id)
+            self._log_event(
+                "tasklist_updated",
+                payload={
+                    "action": "add",
+                    "task_id": run.tasks[-1].id,
+                    "text": run.tasks[-1].text,
+                    "status": run.tasks[-1].status,
+                    "notes": run.tasks[-1].notes,
+                    "tasks_total": len(run.tasks),
+                    "tasks": self._snapshot(run),
+                },
+                session_id=session_id,
+                run_label=run.label,
+            )
+            self._maybe_emit_completion(session_id, run)
             return f"SUCCESS: added task {run.tasks[-1].id}"
 
         if action in {"update", "complete", "delete"}:
@@ -138,12 +222,51 @@ class TaskListStore:
             if action == "delete":
                 run.tasks = [t for t in run.tasks if t.id != int(task_id)]
                 self._notify(session_id)
+                self._log_event(
+                    "tasklist_updated",
+                    payload={
+                        "action": "delete",
+                        "task_id": int(task_id),
+                        "tasks_total": len(run.tasks),
+                        "tasks": self._snapshot(run),
+                    },
+                    session_id=session_id,
+                    run_label=run.label,
+                )
+                self._maybe_emit_completion(session_id, run)
                 return f"SUCCESS: deleted task {task_id}"
             if action == "complete":
                 task.status = "done"
                 if notes.strip():
                     task.notes = notes.strip()
                 self._notify(session_id)
+                self._log_event(
+                    "tasklist_item_completed",
+                    payload={
+                        "task_id": task.id,
+                        "text": task.text,
+                        "notes": task.notes,
+                        "tasks_total": len(run.tasks),
+                        "tasks": self._snapshot(run),
+                    },
+                    session_id=session_id,
+                    run_label=run.label,
+                )
+                self._log_event(
+                    "tasklist_updated",
+                    payload={
+                        "action": "complete",
+                        "task_id": task.id,
+                        "text": task.text,
+                        "status": task.status,
+                        "notes": task.notes,
+                        "tasks_total": len(run.tasks),
+                        "tasks": self._snapshot(run),
+                    },
+                    session_id=session_id,
+                    run_label=run.label,
+                )
+                self._maybe_emit_completion(session_id, run)
                 return f"SUCCESS: completed task {task_id}"
             if text.strip():
                 task.text = text.strip()
@@ -152,6 +275,21 @@ class TaskListStore:
             if notes.strip():
                 task.notes = notes.strip()
             self._notify(session_id)
+            self._log_event(
+                "tasklist_updated",
+                payload={
+                    "action": "update",
+                    "task_id": task.id,
+                    "text": task.text,
+                    "status": task.status,
+                    "notes": task.notes,
+                    "tasks_total": len(run.tasks),
+                    "tasks": self._snapshot(run),
+                },
+                session_id=session_id,
+                run_label=run.label,
+            )
+            self._maybe_emit_completion(session_id, run)
             return f"SUCCESS: updated task {task_id}"
 
         if action == "clear":
@@ -159,17 +297,38 @@ class TaskListStore:
             run.next_id = 1
             run.initialized = True
             self._notify(session_id)
+            self._log_event(
+                "tasklist_defined",
+                payload={
+                    "tasks_total": 0,
+                    "tasks": self._snapshot(run),
+                },
+                session_id=session_id,
+                run_label=run.label,
+            )
+            self._maybe_emit_completion(session_id, run)
             return f"SUCCESS: cleared tasks for {run_label}"
 
         if action == "replace":
             items = _parse_tasks(tasks_text)
             run.tasks = []
             run.next_id = 1
+            run.completed_emitted = False
             for item in items:
                 run.tasks.append(TaskItem(id=run.next_id, text=item, status="todo"))
                 run.next_id += 1
             run.initialized = True
             self._notify(session_id)
+            self._log_event(
+                "tasklist_defined",
+                payload={
+                    "tasks_total": len(run.tasks),
+                    "tasks": self._snapshot(run),
+                },
+                session_id=session_id,
+                run_label=run.label,
+            )
+            self._maybe_emit_completion(session_id, run)
             return f"SUCCESS: replaced tasks for {run_label} with {len(run.tasks)} items"
 
         return (
