@@ -6,7 +6,7 @@ from .context import (
     current_log_context,
 )
 from .sqs_logger import log_event
-from .tool_events import log_tool_started, log_tool_executed
+from .tool_events import log_tool_started, log_tool_executed, log_tool_error
 
 __all__ = [
     "set_log_context",
@@ -17,4 +17,5 @@ __all__ = [
     "log_event",
     "log_tool_started",
     "log_tool_executed",
+    "log_tool_error",
 ]
