@@ -1,4 +1,6 @@
 import subprocess
+import time
+from datetime import datetime, timezone
 
 try:
     from agents import function_tool
@@ -7,6 +9,7 @@ except ImportError:
 
 from .config import ToolsConfig
 from .formatting import _truncate
+from .telemetry import log_tool_started, log_tool_executed
 
 class ExecTool:
     def __init__(self, config: ToolsConfig):
@@ -43,6 +46,25 @@ def get_exec_tool(helper: ExecTool):
         Args:
             command: The shell command to execute.
         """
-        return helper.run(command)
+        tool_input = {"command": command}
+        start_ts = log_tool_started("exec", tool_input)
+        start_time = time.time()
+        error = None
+        try:
+            return helper.run(command)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            duration_ms = int((time.time() - start_time) * 1000)
+            log_tool_executed(
+                "exec",
+                tool_input,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                duration_ms=duration_ms,
+                error=error,
+            )
 
     return exec_tool

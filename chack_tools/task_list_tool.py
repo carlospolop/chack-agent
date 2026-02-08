@@ -1,3 +1,5 @@
+import time
+from datetime import datetime, timezone
 from typing import Optional
 
 try:
@@ -6,6 +8,7 @@ except ImportError:
     function_tool = None
 
 from .config import ToolsConfig
+from .telemetry import log_tool_started, log_tool_executed
 
 from .task_list_state import STORE, current_run_label, current_session_id
 
@@ -88,13 +91,39 @@ def get_task_list_tool(helper: TaskListTool):
         Status values:
         - `todo`, `doing`, `done`.
         """
-        return helper.manage(
-            action=action,
-            task_id=task_id,
-            text=text,
-            status=status,
-            tasks=tasks,
-            notes=notes,
-        )
+        tool_input = {
+            "action": action,
+            "task_id": task_id,
+            "text": text,
+            "status": status,
+            "tasks": tasks,
+            "notes": notes,
+        }
+        start_ts = log_tool_started("task_list", tool_input)
+        start_time = time.time()
+        error = None
+        try:
+            return helper.manage(
+                action=action,
+                task_id=task_id,
+                text=text,
+                status=status,
+                tasks=tasks,
+                notes=notes,
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            duration_ms = int((time.time() - start_time) * 1000)
+            log_tool_executed(
+                "task_list",
+                tool_input,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                duration_ms=duration_ms,
+                error=error,
+            )
 
     return task_list

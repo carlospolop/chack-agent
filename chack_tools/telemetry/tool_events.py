@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
+from .sqs_logger import log_event
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def log_tool_started(tool: str, tool_input: Dict[str, Any]) -> str:
+    start_ts = _timestamp()
+    log_event(
+        "tool_started",
+        payload={
+            "tool": tool,
+            "tool_input": tool_input,
+            "tool_start_ts": start_ts,
+        },
+    )
+    return start_ts
+
+
+def log_tool_executed(
+    tool: str,
+    tool_input: Dict[str, Any],
+    *,
+    start_ts: str,
+    end_ts: Optional[str],
+    duration_ms: Optional[int],
+    error: Optional[str] = None,
+) -> None:
+    payload: Dict[str, Any] = {
+        "tool": tool,
+        "tool_input": tool_input,
+        "tool_start_ts": start_ts,
+        "tool_end_ts": end_ts,
+        "duration_ms": duration_ms,
+    }
+    if error:
+        payload["error"] = error
+    log_event("tool_executed", payload=payload)

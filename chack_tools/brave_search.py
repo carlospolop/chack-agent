@@ -1,6 +1,7 @@
 import os
 import re
 import time
+from datetime import datetime, timezone
 import random
 from typing import Optional
 
@@ -12,6 +13,7 @@ except ImportError:
 import requests
 
 from .config import ToolsConfig
+from .telemetry import log_tool_started, log_tool_executed
 
 
 
@@ -151,6 +153,18 @@ def get_brave_search_tool(helper: BraveSearchTool):
             freshness: Optional freshness filter (pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD).
             timeout_seconds: Request timeout in seconds.
         """
+        tool_input = {
+            "query": query,
+            "count": count,
+            "country": country,
+            "search_lang": search_lang,
+            "ui_lang": ui_lang,
+            "freshness": freshness,
+            "timeout_seconds": timeout_seconds,
+        }
+        start_ts = log_tool_started("brave_search", tool_input)
+        start_time = time.time()
+        error = None
         try:
             return helper.search(
                 query=query,
@@ -162,6 +176,18 @@ def get_brave_search_tool(helper: BraveSearchTool):
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
             return f"ERROR: Brave search failed ({exc})"
+        finally:
+            end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            duration_ms = int((time.time() - start_time) * 1000)
+            log_tool_executed(
+                "brave_search",
+                tool_input,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                duration_ms=duration_ms,
+                error=error,
+            )
 
     return brave_search

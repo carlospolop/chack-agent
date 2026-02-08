@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import time
+from datetime import datetime, timezone
 from typing import Optional
 
 try:
@@ -11,6 +13,7 @@ except ImportError:
 import requests
 
 from .config import ToolsConfig
+from .telemetry import log_tool_started, log_tool_executed
 
 from .serpapi_keys import is_serpapi_rate_limited, shuffled_serpapi_keys
 
@@ -303,6 +306,15 @@ def get_google_web_search_tool(helper: SerpApiWebSearchTool):
             num: Number of results (1-10). Defaults to config value.
             timeout_seconds: Request timeout in seconds.
         """
+        tool_input = {
+            "query": query,
+            "page": page,
+            "num": num,
+            "timeout_seconds": timeout_seconds,
+        }
+        start_ts = log_tool_started("search_google_web", tool_input)
+        start_time = time.time()
+        error = None
         try:
             return helper.search_google_web(
                 query=query,
@@ -311,7 +323,19 @@ def get_google_web_search_tool(helper: SerpApiWebSearchTool):
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
             return f"ERROR: Google web search failed ({exc})"
+        finally:
+            end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            duration_ms = int((time.time() - start_time) * 1000)
+            log_tool_executed(
+                "search_google_web",
+                tool_input,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                duration_ms=duration_ms,
+                error=error,
+            )
 
     return search_google_web
 
@@ -337,6 +361,15 @@ def get_bing_web_search_tool(helper: SerpApiWebSearchTool):
             count: Number of results (1-10). Defaults to config value.
             timeout_seconds: Request timeout in seconds.
         """
+        tool_input = {
+            "query": query,
+            "page": page,
+            "count": count,
+            "timeout_seconds": timeout_seconds,
+        }
+        start_ts = log_tool_started("search_bing_web", tool_input)
+        start_time = time.time()
+        error = None
         try:
             return helper.search_bing_web(
                 query=query,
@@ -345,7 +378,19 @@ def get_bing_web_search_tool(helper: SerpApiWebSearchTool):
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
             return f"ERROR: Bing web search failed ({exc})"
+        finally:
+            end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            duration_ms = int((time.time() - start_time) * 1000)
+            log_tool_executed(
+                "search_bing_web",
+                tool_input,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                duration_ms=duration_ms,
+                error=error,
+            )
 
     return search_bing_web
 
@@ -365,13 +410,29 @@ def get_google_ai_mode_tool(helper: SerpApiWebSearchTool):
             query: Search query string.
             timeout_seconds: Request timeout in seconds.
         """
+        tool_input = {"query": query, "timeout_seconds": timeout_seconds}
+        start_ts = log_tool_started("search_google_ai_mode", tool_input)
+        start_time = time.time()
+        error = None
         try:
             return helper.search_google_ai_mode(
                 query=query,
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
             return f"ERROR: Google AI mode search failed ({exc})"
+        finally:
+            end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            duration_ms = int((time.time() - start_time) * 1000)
+            log_tool_executed(
+                "search_google_ai_mode",
+                tool_input,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                duration_ms=duration_ms,
+                error=error,
+            )
 
     return search_google_ai_mode
 
@@ -391,14 +452,29 @@ def get_bing_copilot_tool(helper: SerpApiWebSearchTool):
             query: Search query string.
             timeout_seconds: Request timeout in seconds.
         """
+        tool_input = {"query": query, "timeout_seconds": timeout_seconds}
+        start_ts = log_tool_started("search_bing_copilot", tool_input)
+        start_time = time.time()
+        error = None
         try:
             return helper.search_bing_copilot(
                 query=query,
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
             return f"ERROR: Bing Copilot search failed ({exc})"
+        finally:
+            end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            duration_ms = int((time.time() - start_time) * 1000)
+            log_tool_executed(
+                "search_bing_copilot",
+                tool_input,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                duration_ms=duration_ms,
+                error=error,
+            )
 
     return search_bing_copilot
-
 

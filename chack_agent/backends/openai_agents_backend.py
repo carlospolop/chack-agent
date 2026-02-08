@@ -299,7 +299,7 @@ def _extract_tool_steps(items: list[Any]) -> list[tuple[ToolAction, Any]]:
             _log_timestamp(),
         )
         log_event(
-            "tool_executed",
+            "tool_called",
             payload={
                 "tool": tool_name,
                 "tool_input": tool_input,
