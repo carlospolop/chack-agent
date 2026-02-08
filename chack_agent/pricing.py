@@ -128,3 +128,21 @@ def estimate_costs_by_model(
             continue
         total += model_cost
     return total, missing_models
+
+
+def estimate_cost_with_defaults(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_prompt_tokens: int = 0,
+) -> Optional[float]:
+    if model not in DEFAULT_PRICING:
+        return None
+    rates = DEFAULT_PRICING[model]
+    billable_prompt = max(prompt_tokens - cached_prompt_tokens, 0)
+    total = (
+        billable_prompt * rates["input"]
+        + cached_prompt_tokens * rates["cached_input"]
+        + completion_tokens * rates["output"]
+    )
+    return total / 1_000_000.0
