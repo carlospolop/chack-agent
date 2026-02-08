@@ -11,6 +11,10 @@ setup(
     long_description_content_type='text/markdown',
     author='Carlos Polop',
     packages=find_packages(include=['chack_agent', 'chack_agent.*', 'chack_tools', 'chack_tools.*']),
+    include_package_data=True,
+    package_data={
+        'chack_agent': ['config/*.yaml'],
+    },
     python_requires='>=3.9',
     install_requires=[
         'boto3>=1.28.0',
