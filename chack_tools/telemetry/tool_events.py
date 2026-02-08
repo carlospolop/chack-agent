@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TypeVar
 
 from .sqs_logger import log_event
+
+T = TypeVar("T")
 
 
 def _timestamp() -> str:
@@ -42,3 +45,29 @@ def log_tool_executed(
     if error:
         payload["error"] = error
     log_event("tool_executed", payload=payload)
+
+
+def run_with_tool_logging(
+    tool: str,
+    tool_input: Dict[str, Any],
+    func: Callable[[], T],
+) -> T:
+    start_ts = log_tool_started(tool, tool_input)
+    start_time = time.time()
+    error = None
+    try:
+        return func()
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        end_ts = _timestamp()
+        duration_ms = int((time.time() - start_time) * 1000)
+        log_tool_executed(
+            tool,
+            tool_input,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            duration_ms=duration_ms,
+            error=error,
+        )

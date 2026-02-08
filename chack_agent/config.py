@@ -181,6 +181,10 @@ def load_config(path: str) -> ChackConfig:
 
     agent = _load_section(raw, "agent", AgentConfig)
     # self_critique_prompt is hardcoded in chack_agent.agent
+    if not str(agent.main_action or "").strip():
+        raise ValueError("agent.main_action is required in config")
+    if not str(agent.sub_action or "").strip():
+        raise ValueError("agent.sub_action is required in config")
 
     config = ChackConfig(
         model=_load_section(raw, "model", ModelConfig),
