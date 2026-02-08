@@ -122,6 +122,19 @@ def _require_task_list_init_first(data) -> ToolGuardrailFunctionOutput:
     )
     tool_name = str(getattr(data.context, "tool_name", "") or "").strip().lower()
     if tool_name != "task_list":
+        try:
+            log_event(
+                "tool_disallowed",
+                payload={
+                    "tool": tool_name or "unknown",
+                    "tool_input": raw_args,
+                    "reason": "first_tool_must_be_task_list_init",
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
+        except Exception:
+            pass
         return ToolGuardrailFunctionOutput.reject_content(reminder)
 
     raw_args = getattr(data.context, "tool_arguments", "") or ""
@@ -133,6 +146,19 @@ def _require_task_list_init_first(data) -> ToolGuardrailFunctionOutput:
     if isinstance(payload, dict):
         action = str(payload.get("action", "")).strip().lower()
     if action != "init":
+        try:
+            log_event(
+                "tool_disallowed",
+                payload={
+                    "tool": tool_name or "task_list",
+                    "tool_input": raw_args,
+                    "reason": "task_list_init_required",
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
+        except Exception:
+            pass
         return ToolGuardrailFunctionOutput.reject_content(reminder)
 
     _open_first_tool_gate()
