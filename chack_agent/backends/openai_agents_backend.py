@@ -121,6 +121,7 @@ def _require_task_list_init_first(data) -> ToolGuardrailFunctionOutput:
         "do so by calling the task_list tool with the appropriate action and providing any relevant notes about the update. "
     )
     tool_name = str(getattr(data.context, "tool_name", "") or "").strip().lower()
+    raw_args = getattr(data.context, "tool_arguments", "") or ""
     if tool_name != "task_list":
         try:
             log_event(
@@ -137,7 +138,6 @@ def _require_task_list_init_first(data) -> ToolGuardrailFunctionOutput:
             pass
         return ToolGuardrailFunctionOutput.reject_content(reminder)
 
-    raw_args = getattr(data.context, "tool_arguments", "") or ""
     try:
         payload = json.loads(raw_args) if isinstance(raw_args, str) and raw_args.strip() else {}
     except Exception:
@@ -182,6 +182,21 @@ def _respect_max_tools_used(data) -> ToolGuardrailFunctionOutput:
     used = non_task_tool_count(TOOL_USAGE_STORE.snapshot(session_id))
     if used >= max_tools_used:
         _LOGGER.warning(f"Tool usage limit reached: used {used} tools, max is {max_tools_used}. Rejecting tool call to {tool_name}.")
+        try:
+            log_event(
+                "tool_disallowed",
+                payload={
+                    "tool": tool_name or "unknown",
+                    "tool_input": getattr(data.context, "tool_arguments", "") or "",
+                    "reason": "max_tools_used_reached",
+                    "max_tools_used": max_tools_used,
+                    "used": used,
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
+        except Exception:
+            pass
         return ToolGuardrailFunctionOutput.reject_content(
             "Tool budget reached. Please use the information already gathered and finish the execution."
         )

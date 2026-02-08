@@ -13,7 +13,8 @@ except ImportError:
 import requests
 
 from .config import ToolsConfig
-from .telemetry import log_tool_started, log_tool_executed
+from .telemetry import log_tool_started, log_tool_executed, log_tool_error
+import traceback
 
 
 
@@ -177,6 +178,15 @@ def get_brave_search_tool(helper: BraveSearchTool):
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            try:
+                log_tool_error(
+                    "brave_search",
+                    tool_input,
+                    error=error,
+                    trace=traceback.format_exc(),
+                )
+            except Exception:
+                pass
             return f"ERROR: Brave search failed ({exc})"
         finally:
             end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")

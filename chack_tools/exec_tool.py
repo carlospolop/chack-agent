@@ -1,5 +1,6 @@
 import subprocess
 import time
+import traceback
 from datetime import datetime, timezone
 
 try:
@@ -9,7 +10,7 @@ except ImportError:
 
 from .config import ToolsConfig
 from .formatting import _truncate
-from .telemetry import log_tool_started, log_tool_executed
+from .telemetry import log_tool_started, log_tool_executed, log_tool_error
 
 class ExecTool:
     def __init__(self, config: ToolsConfig):
@@ -54,6 +55,15 @@ def get_exec_tool(helper: ExecTool):
             return helper.run(command)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            try:
+                log_tool_error(
+                    "exec",
+                    tool_input,
+                    error=error,
+                    trace=traceback.format_exc(),
+                )
+            except Exception:
+                pass
             raise
         finally:
             end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")

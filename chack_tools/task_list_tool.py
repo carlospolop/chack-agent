@@ -1,4 +1,5 @@
 import time
+import traceback
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -8,7 +9,7 @@ except ImportError:
     function_tool = None
 
 from .config import ToolsConfig
-from .telemetry import log_tool_started, log_tool_executed
+from .telemetry import log_tool_started, log_tool_executed, log_tool_error
 
 from .task_list_state import STORE, current_run_label, current_session_id
 
@@ -113,6 +114,15 @@ def get_task_list_tool(helper: TaskListTool):
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            try:
+                log_tool_error(
+                    "task_list",
+                    tool_input,
+                    error=error,
+                    trace=traceback.format_exc(),
+                )
+            except Exception:
+                pass
             raise
         finally:
             end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import traceback
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, TypeVar
 
@@ -47,6 +48,24 @@ def log_tool_executed(
     log_event("tool_executed", payload=payload)
 
 
+def log_tool_error(
+    tool: str,
+    tool_input: Dict[str, Any],
+    *,
+    error: str,
+    trace: str,
+) -> None:
+    log_event(
+        "tool_error",
+        payload={
+            "tool": tool,
+            "tool_input": tool_input,
+            "error": error,
+            "traceback": trace,
+        },
+    )
+
+
 def run_with_tool_logging(
     tool: str,
     tool_input: Dict[str, Any],
@@ -59,6 +78,15 @@ def run_with_tool_logging(
         return func()
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
+        try:
+            log_tool_error(
+                tool,
+                tool_input,
+                error=error,
+                trace=traceback.format_exc(),
+            )
+        except Exception:
+            pass
         raise
     finally:
         end_ts = _timestamp()
