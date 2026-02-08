@@ -14,6 +14,7 @@ import requests
 from pypdf import PdfReader
 
 from .config import ToolsConfig
+from .telemetry import run_with_tool_logging
 
 
 
@@ -107,11 +108,20 @@ def get_pdf_text_tool(helper: PdfTextTool):
 
         Use this to read papers or reports; then inspect the saved text file with exec + grep/sed.
         """
+        tool_input = {
+            "url": url,
+            "max_chars": max_chars,
+            "timeout_seconds": timeout_seconds,
+        }
         try:
-            return helper.download_pdf_as_text(
-                url=url,
-                max_chars=max_chars,
-                timeout_seconds=timeout_seconds,
+            return run_with_tool_logging(
+                "download_pdf_as_text",
+                tool_input,
+                lambda: helper.download_pdf_as_text(
+                    url=url,
+                    max_chars=max_chars,
+                    timeout_seconds=timeout_seconds,
+                ),
             )
         except Exception as exc:
             return f"ERROR: PDF extraction failed ({exc})"

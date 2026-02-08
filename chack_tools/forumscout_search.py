@@ -11,6 +11,7 @@ import requests
 
 from .config import ToolsConfig
 from .serpapi_keys import is_serpapi_rate_limited, shuffled_serpapi_keys
+from .telemetry import run_with_tool_logging
 
 
 
@@ -20,6 +21,13 @@ _LINKEDIN_SORT_OPTIONS = {"date_posted", "relevance"}
 _REDDIT_POSTS_SORT_OPTIONS = {"hot", "new", "relevance", "top"}
 _REDDIT_COMMENTS_SORT_OPTIONS = {"created_utc", "score"}
 _X_SORT_OPTIONS = {"Latest", "Top"}
+
+
+def _run_logged(tool: str, tool_input: dict, func):
+    try:
+        return run_with_tool_logging(tool, tool_input, func)
+    except Exception as exc:
+        return f"ERROR: {tool} failed ({exc})"
 
 
 def _clamp(value: int, minimum: int, maximum: int) -> int:
@@ -355,16 +363,24 @@ def get_forum_search_tool(helper: ForumScoutTool):
             page: Page number (1+).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.forum_search(
+        tool_input = {
+            "query": query,
+            "time": time,
+            "country": country,
+            "page": page,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "forum_search",
+            tool_input,
+            lambda: helper.forum_search(
                 query=query,
                 time=time,
                 country=country,
                 page=page,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: ForumScout forum_search failed ({exc})"
+            ),
+        )
 
     return forum_search
 
@@ -388,15 +404,22 @@ def get_linkedin_search_tool(helper: ForumScoutTool):
             sort_by: Sort order (date_posted, relevance).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.linkedin_search(
+        tool_input = {
+            "query": query,
+            "page": page,
+            "sort_by": sort_by,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "linkedin_search",
+            tool_input,
+            lambda: helper.linkedin_search(
                 query=query,
                 page=page,
                 sort_by=sort_by,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: ForumScout linkedin_search failed ({exc})"
+            ),
+        )
 
     return linkedin_search
 
@@ -420,15 +443,22 @@ def get_instagram_search_tool(helper: ForumScoutTool):
             sort_by: Sort order (recent, top).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.instagram_search(
+        tool_input = {
+            "query": query,
+            "page": page,
+            "sort_by": sort_by,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "instagram_search",
+            tool_input,
+            lambda: helper.instagram_search(
                 query=query,
                 page=page,
                 sort_by=sort_by,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: ForumScout instagram_search failed ({exc})"
+            ),
+        )
 
     return instagram_search
 
@@ -452,15 +482,22 @@ def get_reddit_posts_search_tool(helper: ForumScoutTool):
             sort_by: Sort order (hot, new, relevance, top).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.reddit_posts_search(
+        tool_input = {
+            "query": query,
+            "page": page,
+            "sort_by": sort_by,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "reddit_posts_search",
+            tool_input,
+            lambda: helper.reddit_posts_search(
                 query=query,
                 page=page,
                 sort_by=sort_by,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: ForumScout reddit_posts_search failed ({exc})"
+            ),
+        )
 
     return reddit_posts_search
 
@@ -484,15 +521,22 @@ def get_reddit_comments_search_tool(helper: ForumScoutTool):
             sort_by: Sort order (created_utc, score).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.reddit_comments_search(
+        tool_input = {
+            "query": query,
+            "page": page,
+            "sort_by": sort_by,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "reddit_comments_search",
+            tool_input,
+            lambda: helper.reddit_comments_search(
                 query=query,
                 page=page,
                 sort_by=sort_by,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: ForumScout reddit_comments_search failed ({exc})"
+            ),
+        )
 
     return reddit_comments_search
 
@@ -516,15 +560,22 @@ def get_x_search_tool(helper: ForumScoutTool):
             sort_by: Sort order (Latest, Top).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.x_search(
+        tool_input = {
+            "query": query,
+            "page": page,
+            "sort_by": sort_by,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "x_search",
+            tool_input,
+            lambda: helper.x_search(
                 query=query,
                 page=page,
                 sort_by=sort_by,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: ForumScout x_search failed ({exc})"
+            ),
+        )
 
     return x_search
 
@@ -546,14 +597,20 @@ def get_google_forums_search_tool(helper: ForumScoutTool):
             page: Page number (1+).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.search_google_forums(
+        tool_input = {
+            "query": query,
+            "page": page,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "search_google_forums",
+            tool_input,
+            lambda: helper.search_google_forums(
                 query=query,
                 page=page,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: Google forums search failed ({exc})"
+            ),
+        )
 
     return search_google_forums
 
@@ -575,13 +632,19 @@ def get_google_news_search_tool(helper: ForumScoutTool):
             page: Page number (1+).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.search_google_news(
+        tool_input = {
+            "query": query,
+            "page": page,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "search_google_news",
+            tool_input,
+            lambda: helper.search_google_news(
                 query=query,
                 page=page,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: Google News search failed ({exc})"
+            ),
+        )
 
     return search_google_news

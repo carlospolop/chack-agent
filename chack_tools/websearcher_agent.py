@@ -15,6 +15,7 @@ from .task_list_tool import TaskListTool, get_task_list_tool
 from .subagent_config import build_subagent_config
 from .task_list_state import current_session_id
 from .tool_usage_state import STORE as TOOL_USAGE_STORE
+from .telemetry import run_with_tool_logging
 
 try:
     from agents import function_tool
@@ -165,8 +166,13 @@ def get_websearcher_research_tool(
         Args:
             prompt: Detailed research request for the sub-agent. Be very detailed and specific about what you want the agent to research and find for you, the more specific and detailed you are the better results you will get.
         """
+        tool_input = {"prompt": prompt}
         try:
-            return helper.run(prompt=prompt)
+            return run_with_tool_logging(
+                "websearcher_research",
+                tool_input,
+                lambda: helper.run(prompt=prompt),
+            )
         except Exception as exc:
             return f"ERROR: websearcher_research failed ({exc})"
 

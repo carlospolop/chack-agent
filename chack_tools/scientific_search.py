@@ -11,6 +11,14 @@ except ImportError:
 import requests
 from .config import ToolsConfig
 from .serpapi_keys import is_serpapi_rate_limited, shuffled_serpapi_keys
+from .telemetry import run_with_tool_logging
+
+
+def _run_logged(tool: str, tool_input: dict, func):
+    try:
+        return run_with_tool_logging(tool, tool_input, func)
+    except Exception as exc:
+        return f"ERROR: {tool} failed ({exc})"
 
 
 def _clamp(value: int, minimum: int, maximum: int) -> int:
@@ -618,10 +626,16 @@ def get_arxiv_search_tool(helper: ScientificSearchTool):
             max_results: Optional max number of results.
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.search_arxiv(query=query, max_results=max_results, timeout_seconds=timeout_seconds)
-        except Exception as exc:
-            return f"ERROR: arXiv search failed ({exc})"
+        tool_input = {
+            "query": query,
+            "max_results": max_results,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "search_arxiv",
+            tool_input,
+            lambda: helper.search_arxiv(query=query, max_results=max_results, timeout_seconds=timeout_seconds),
+        )
 
     return search_arxiv
 
@@ -645,15 +659,22 @@ def get_europe_pmc_search_tool(helper: ScientificSearchTool):
             page_size: Number of results per page (1-50).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.search_europe_pmc(
+        tool_input = {
+            "query": query,
+            "page": page,
+            "page_size": page_size,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "search_europe_pmc",
+            tool_input,
+            lambda: helper.search_europe_pmc(
                 query=query,
                 page=page,
                 page_size=page_size,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: Europe PMC search failed ({exc})"
+            ),
+        )
 
     return search_europe_pmc
 
@@ -671,10 +692,16 @@ def get_semantic_scholar_search_tool(helper: ScientificSearchTool):
             limit: Number of results to request (1-20).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.search_semantic_scholar(query=query, limit=limit, timeout_seconds=timeout_seconds)
-        except Exception as exc:
-            return f"ERROR: Semantic Scholar search failed ({exc})"
+        tool_input = {
+            "query": query,
+            "limit": limit,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "search_semantic_scholar",
+            tool_input,
+            lambda: helper.search_semantic_scholar(query=query, limit=limit, timeout_seconds=timeout_seconds),
+        )
 
     return search_semantic_scholar
 
@@ -698,15 +725,22 @@ def get_openalex_search_tool(helper: ScientificSearchTool):
             per_page: Number of results per page.
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.search_openalex(
+        tool_input = {
+            "query": query,
+            "page": page,
+            "per_page": per_page,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "search_openalex",
+            tool_input,
+            lambda: helper.search_openalex(
                 query=query,
                 page=page,
                 per_page=per_page,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: OpenAlex search failed ({exc})"
+            ),
+        )
 
     return search_openalex
 
@@ -725,10 +759,17 @@ def get_plos_search_tool(helper: ScientificSearchTool):
             start: Result offset.
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.search_plos(query=query, rows=rows, start=start, timeout_seconds=timeout_seconds)
-        except Exception as exc:
-            return f"ERROR: PLOS search failed ({exc})"
+        tool_input = {
+            "query": query,
+            "rows": rows,
+            "start": start,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "search_plos",
+            tool_input,
+            lambda: helper.search_plos(query=query, rows=rows, start=start, timeout_seconds=timeout_seconds),
+        )
 
     return search_plos
 
@@ -752,15 +793,22 @@ def get_google_patents_search_tool(helper: ScientificSearchTool):
             num: Number of results (default 10).
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.search_google_patents(
+        tool_input = {
+            "query": query,
+            "page": page,
+            "num": num,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "search_google_patents",
+            tool_input,
+            lambda: helper.search_google_patents(
                 query=query,
                 page=page,
                 num=num,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: Google Patents search failed ({exc})"
+            ),
+        )
 
     return search_google_patents
 
@@ -784,15 +832,22 @@ def get_google_scholar_search_tool(helper: ScientificSearchTool):
             include_patents: Whether to include patents in search.
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.search_google_scholar(
+        tool_input = {
+            "query": query,
+            "num": num,
+            "include_patents": include_patents,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "search_google_scholar",
+            tool_input,
+            lambda: helper.search_google_scholar(
                 query=query,
                 num=num,
                 include_patents=include_patents,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: Google Scholar search failed ({exc})"
+            ),
+        )
 
     return search_google_scholar
 
@@ -818,16 +873,24 @@ def get_youtube_video_search_tool(helper: ScientificSearchTool):
             hl: Language code (e.g. 'en').
             timeout_seconds: Request timeout in seconds.
         """
-        try:
-            return helper.search_youtube_videos(
+        tool_input = {
+            "query": query,
+            "limit": limit,
+            "gl": gl,
+            "hl": hl,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "search_youtube_videos",
+            tool_input,
+            lambda: helper.search_youtube_videos(
                 query=query,
                 limit=limit,
                 gl=gl,
                 hl=hl,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: YouTube search failed ({exc})"
+            ),
+        )
 
     return search_youtube_videos
 
@@ -849,13 +912,19 @@ def get_youtube_transcript_tool(helper: ScientificSearchTool):
             language_code: Optional language code.
             timeout_seconds: Request timeout.
         """
-        try:
-            return helper.get_youtube_video_transcript(
+        tool_input = {
+            "video_id": video_id,
+            "language_code": language_code,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _run_logged(
+            "get_youtube_video_transcript",
+            tool_input,
+            lambda: helper.get_youtube_video_transcript(
                 video_id=video_id,
                 language_code=language_code,
                 timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            return f"ERROR: YouTube transcript failed ({exc})"
+            ),
+        )
 
     return get_youtube_video_transcript

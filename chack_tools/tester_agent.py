@@ -13,6 +13,7 @@ from .serpapi_keys import has_serpapi_keys
 from .task_list_tool import TaskListTool, get_task_list_tool
 from .subagent_config import build_subagent_config
 from .task_list_state import current_session_id
+from .telemetry import run_with_tool_logging
 
 try:
     from agents import function_tool
@@ -171,7 +172,11 @@ def get_tester_agent_tool(
             prompt: Detailed instructions for what to test or verify. Include any code snippets or specific command requirements if known.
         """
         try:
-            return helper.run(prompt=prompt)
+            return run_with_tool_logging(
+                "tester_agent",
+                {"prompt": prompt},
+                lambda: helper.run(prompt=prompt),
+            )
         except Exception as exc:
             return f"ERROR: tester_agent failed ({exc})"
 
