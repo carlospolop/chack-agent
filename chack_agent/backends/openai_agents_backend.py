@@ -4,9 +4,11 @@ import inspect
 import json
 import logging
 import threading
+import time
+import traceback
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from openai import OpenAI
 from agents import Agent, ModelSettings, Runner, ToolGuardrailFunctionOutput, tool_input_guardrail
@@ -15,7 +17,7 @@ from agents.items import ToolCallItem
 from ..config import ChackConfig
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_list_state import current_run_label, current_session_id
-from chack_tools.telemetry import log_event
+from chack_tools.telemetry import log_event, log_tool_started, log_tool_executed, log_tool_error
 from chack_tools.tool_usage_state import (
     STORE as TOOL_USAGE_STORE,
     current_max_tools_used,
@@ -400,7 +402,93 @@ def _apply_guardrails(tools: list[Any]) -> list[Any]:
             setattr(tool, "tool_input_guardrails", [_require_task_list_init_first])
         elif _require_task_list_init_first not in guards:
             guards.append(_require_task_list_init_first)
-    return tools
+    return _wrap_tools_with_logging(tools)
+
+
+def _get_tool_callable(tool: Any) -> tuple[Optional[Callable[..., Any]], Optional[str]]:
+    for attr in ("callable", "func", "_callable", "_function", "_func"):
+        target = getattr(tool, attr, None)
+        if callable(target):
+            return target, attr
+    if callable(tool):
+        return tool, None
+    return None, None
+
+
+def _extract_tool_input(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    if kwargs:
+        return kwargs
+    if len(args) == 1 and isinstance(args[0], dict):
+        return args[0]
+    if len(args) == 1:
+        return args[0]
+    return {"args": list(args)}
+
+
+def _wrap_tools_with_logging(tools: list[Any]) -> list[Any]:
+    wrapped: list[Any] = []
+    for tool in tools:
+        if getattr(tool, "_chack_tool_wrapped", False):
+            wrapped.append(tool)
+            continue
+        call_target, attr = _get_tool_callable(tool)
+        if call_target is None:
+            wrapped.append(tool)
+            continue
+        module_name = getattr(call_target, "__module__", "") or ""
+        if module_name.startswith("chack_tools.") or module_name.startswith("chack_agent."):
+            wrapped.append(tool)
+            continue
+        tool_name = (
+            getattr(tool, "name", None)
+            or getattr(tool, "name_override", None)
+            or getattr(call_target, "__name__", None)
+            or "tool"
+        )
+
+        def _wrapped(*args, **kwargs):
+            tool_input = _extract_tool_input(args, kwargs)
+            start_ts = log_tool_started(tool_name, tool_input)
+            start_time = time.time()
+            error = None
+            try:
+                return call_target(*args, **kwargs)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                try:
+                    log_tool_error(
+                        tool_name,
+                        tool_input,
+                        error=error,
+                        trace=traceback.format_exc(),
+                    )
+                except Exception:
+                    pass
+                raise
+            finally:
+                end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                duration_ms = int((time.time() - start_time) * 1000)
+                log_tool_executed(
+                    tool_name,
+                    tool_input,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    duration_ms=duration_ms,
+                    error=error,
+                )
+
+        _wrapped.__name__ = getattr(call_target, "__name__", "wrapped_tool")
+        _wrapped.__doc__ = getattr(call_target, "__doc__", None)
+        _wrapped.__module__ = module_name
+
+        if attr:
+            setattr(tool, attr, _wrapped)
+            setattr(tool, "_chack_tool_wrapped", True)
+            wrapped.append(tool)
+        else:
+            setattr(_wrapped, "_chack_tool_wrapped", True)
+            wrapped.append(_wrapped)
+    return wrapped
 
 
 def build_executor(
