@@ -774,6 +774,10 @@ class Chack:
                     "completion_tokens": completion_tokens,
                     "cached_prompt_tokens": cached_prompt_tokens,
                     "total_cost": total_cost,
+                    "main_cost": main_cost,
+                    "nested_cost": nested_cost,
+                    "pricing_model": model_name,
+                    "missing_pricing_models": _missing_nested_models,
                     "cost_source": (
                         "fallback_default"
                         if fallback_cost and (main_cost is None or main_cost == 0.0)
