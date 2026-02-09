@@ -23,7 +23,7 @@ from .exec_tool import ExecTool, get_exec_tool
 from .subagent_config import build_subagent_config
 from .task_list_state import current_session_id
 from .tool_usage_state import STORE as TOOL_USAGE_STORE
-from .telemetry import run_with_tool_logging
+from .telemetry import current_log_context, run_with_tool_logging
 
 try:
     from agents import function_tool
@@ -144,6 +144,11 @@ class ScientificResearchAgentTool:
                 "social_network_enabled": False,
             },
         }
+        ctx = current_log_context()
+        main_action = str(ctx.get("main_action") or "").strip()
+        if main_action:
+            overrides["agent"]["main_action"] = main_action
+        overrides["agent"]["sub_action"] = "scientific"
         config = build_subagent_config(
             self.config,
             model_name=model_name,

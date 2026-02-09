@@ -13,7 +13,7 @@ from .serpapi_keys import has_serpapi_keys
 from .task_list_tool import TaskListTool, get_task_list_tool
 from .subagent_config import build_subagent_config
 from .task_list_state import current_session_id
-from .telemetry import run_with_tool_logging
+from .telemetry import current_log_context, run_with_tool_logging
 
 try:
     from agents import function_tool
@@ -125,6 +125,11 @@ class TesterAgentTool:
                 "pdf_text_enabled": False,
             },
         }
+        ctx = current_log_context()
+        main_action = str(ctx.get("main_action") or "").strip()
+        if main_action:
+            overrides["agent"]["main_action"] = main_action
+        overrides["agent"]["sub_action"] = "tester"
         config = build_subagent_config(
             self.config,
             model_name=model_name,
