@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from .model_aliases import resolve_model_alias
+
 from chack_tools.config import ToolsConfig as BaseToolsConfig
 
 
@@ -191,8 +193,23 @@ def load_config(path: str) -> ChackConfig:
     if not str(agent.sub_action or "").strip():
         raise ValueError("agent.sub_action is required in config")
 
+    model_cfg = _load_section(raw, "model", ModelConfig)
+    model_cfg.primary = resolve_model_alias(model_cfg.primary)
+    if not str(model_cfg.social_network or "").strip():
+        model_cfg.social_network = "CHEAP_BUT_QUALITY"
+    if not str(model_cfg.scientific or "").strip():
+        model_cfg.scientific = "CHEAP_BUT_QUALITY"
+    if not str(model_cfg.websearcher or "").strip():
+        model_cfg.websearcher = "CHEAP_BUT_QUALITY"
+    if not str(model_cfg.tester or "").strip():
+        model_cfg.tester = "CHEAP_BUT_QUALITY"
+    model_cfg.social_network = resolve_model_alias(model_cfg.social_network)
+    model_cfg.scientific = resolve_model_alias(model_cfg.scientific)
+    model_cfg.websearcher = resolve_model_alias(model_cfg.websearcher)
+    model_cfg.tester = resolve_model_alias(model_cfg.tester)
+
     config = ChackConfig(
-        model=_load_section(raw, "model", ModelConfig),
+        model=model_cfg,
         agent=agent,
         session=session,
         tools=_load_section(raw, "tools", ToolsConfig),
