@@ -20,7 +20,7 @@ class ToolUsageStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._sessions: Dict[str, Counter[str]] = {}
-        self._token_sessions: Dict[str, Dict[str, Tuple[int, int, int]]] = {}
+        self._token_sessions: Dict[str, Dict[str, Tuple[int, int, int, int]]] = {}
 
     def reset_session(self, session_id: str) -> None:
         with self._lock:
@@ -45,6 +45,7 @@ class ToolUsageStore:
         prompt_tokens: int,
         completion_tokens: int,
         cached_prompt_tokens: int = 0,
+        cache_write_tokens: int = 0,
         session_id: str | None = None,
     ) -> None:
         sid = session_id or _ACTIVE_USAGE_SESSION_ID.get()
@@ -56,16 +57,20 @@ class ToolUsageStore:
         prompt = max(0, int(prompt_tokens or 0))
         completion = max(0, int(completion_tokens or 0))
         cached = max(0, int(cached_prompt_tokens or 0))
+        cache_write = max(0, int(cache_write_tokens or 0))
         with self._lock:
             session = self._token_sessions.setdefault(sid, {})
-            prev_prompt, prev_completion, prev_cached = session.get(model, (0, 0, 0))
+            prev_prompt, prev_completion, prev_cached, prev_cache_write = session.get(
+                model, (0, 0, 0, 0)
+            )
             session[model] = (
                 prev_prompt + prompt,
                 prev_completion + completion,
                 prev_cached + cached,
+                prev_cache_write + cache_write,
             )
 
-    def tokens_snapshot(self, session_id: str) -> Dict[str, Tuple[int, int, int]]:
+    def tokens_snapshot(self, session_id: str) -> Dict[str, Tuple[int, int, int, int]]:
         with self._lock:
             return dict(self._token_sessions.get(session_id, {}))
 

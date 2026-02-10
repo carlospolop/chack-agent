@@ -57,6 +57,7 @@ class SubAgentRunner:
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_cached_prompt_tokens = 0
+        total_cache_write_tokens = 0
         for attempt in range(2):
             attempt_input = run_input
             if attempt:
@@ -73,12 +74,18 @@ class SubAgentRunner:
                 getattr(result, "new_items", []) or [],
                 getattr(result, "raw_responses", []) or [],
             )
-            attempt_prompt, attempt_completion, attempt_cached = self._usage_from_raw_result(
+            (
+                attempt_prompt,
+                attempt_completion,
+                attempt_cached,
+                attempt_cache_write,
+            ) = self._usage_from_raw_result(
                 getattr(result, "raw_responses", []) or [],
             )
             total_prompt_tokens += attempt_prompt
             total_completion_tokens += attempt_completion
             total_cached_prompt_tokens += attempt_cached
+            total_cache_write_tokens += attempt_cache_write
             if sum(nested_counts.values()) > 0:
                 break
 
@@ -90,6 +97,7 @@ class SubAgentRunner:
                 prompt_tokens=total_prompt_tokens,
                 completion_tokens=total_completion_tokens,
                 cached_prompt_tokens=total_cached_prompt_tokens,
+                cache_write_tokens=total_cache_write_tokens,
             )
 
         if result is None:
@@ -192,10 +200,11 @@ class SubAgentRunner:
         return counts
 
     @staticmethod
-    def _usage_from_raw_result(raw_responses: list) -> tuple[int, int, int]:
+    def _usage_from_raw_result(raw_responses: list) -> tuple[int, int, int, int]:
         prompt_tokens = 0
         completion_tokens = 0
         cached_prompt_tokens = 0
+        cache_write_prompt_tokens = 0
         for resp in raw_responses:
             usage = getattr(resp, "usage", None)
             if usage is None and isinstance(resp, dict):
@@ -207,10 +216,21 @@ class SubAgentRunner:
                 completion_tokens += int(usage.get("output_tokens", 0) or 0)
                 input_details = usage.get("input_tokens_details") or {}
                 cached_prompt_tokens += int(input_details.get("cached_tokens", 0) or 0)
+                cache_write_prompt_tokens += int(
+                    input_details.get("cache_write_tokens", 0) or 0
+                )
                 continue
             prompt_tokens += int(getattr(usage, "input_tokens", 0) or 0)
             completion_tokens += int(getattr(usage, "output_tokens", 0) or 0)
             input_details = getattr(usage, "input_tokens_details", None)
             if input_details is not None:
                 cached_prompt_tokens += int(getattr(input_details, "cached_tokens", 0) or 0)
-        return prompt_tokens, completion_tokens, cached_prompt_tokens
+                cache_write_prompt_tokens += int(
+                    getattr(input_details, "cache_write_tokens", 0) or 0
+                )
+        return (
+            prompt_tokens,
+            completion_tokens,
+            cached_prompt_tokens,
+            cache_write_prompt_tokens,
+        )

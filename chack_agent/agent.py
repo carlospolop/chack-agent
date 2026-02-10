@@ -99,10 +99,11 @@ class RunResult:
     prompt_tokens: int
     completion_tokens: int
     cached_prompt_tokens: int
+    cache_write_prompt_tokens: int
     rounds_used: int
     tools_used: int
     task_session_id: str
-    nested_usage_by_model: Dict[str, tuple[int, int, int]]
+    nested_usage_by_model: Dict[str, tuple[int, int, int, int]]
     run1_output: str = ""
     run2_output: str = ""
     run1_steps: int = 0
@@ -222,12 +223,18 @@ class Chack:
         return counts
 
     @staticmethod
-    def _usage_from_raw_result(raw_result) -> tuple[int, int, int]:
+    def _usage_from_raw_result(raw_result) -> tuple[int, int, int, int]:
         prompt_tokens = 0
         completion_tokens = 0
         cached_prompt_tokens = 0
+        cache_write_prompt_tokens = 0
         if raw_result is None:
-            return prompt_tokens, completion_tokens, cached_prompt_tokens
+            return (
+                prompt_tokens,
+                completion_tokens,
+                cached_prompt_tokens,
+                cache_write_prompt_tokens,
+            )
         for resp in getattr(raw_result, "raw_responses", []) or []:
             usage = getattr(resp, "usage", None)
             if usage is None and isinstance(resp, dict):
@@ -239,13 +246,24 @@ class Chack:
                 completion_tokens += int(usage.get("output_tokens", 0) or 0)
                 input_details = usage.get("input_tokens_details") or {}
                 cached_prompt_tokens += int(input_details.get("cached_tokens", 0) or 0)
+                cache_write_prompt_tokens += int(
+                    input_details.get("cache_write_tokens", 0) or 0
+                )
                 continue
             prompt_tokens += int(getattr(usage, "input_tokens", 0) or 0)
             completion_tokens += int(getattr(usage, "output_tokens", 0) or 0)
             input_details = getattr(usage, "input_tokens_details", None)
             if input_details is not None:
                 cached_prompt_tokens += int(getattr(input_details, "cached_tokens", 0) or 0)
-        return prompt_tokens, completion_tokens, cached_prompt_tokens
+                cache_write_prompt_tokens += int(
+                    getattr(input_details, "cache_write_tokens", 0) or 0
+                )
+        return (
+            prompt_tokens,
+            completion_tokens,
+            cached_prompt_tokens,
+            cache_write_prompt_tokens,
+        )
 
     def _system_prompt_for_session(self, session_id: str, system_prompt_override: Optional[str] = None) -> str:
         base = system_prompt_override or self.config.session.system_prompt or self.config.system_prompt
@@ -504,6 +522,7 @@ class Chack:
                 prompt_total = 0
                 completion_total = 0
                 cached_total = 0
+                cache_write_total = 0
                 current_prompt = prompt_text
                 missing_tools_reminders_sent = 0
                 effective_min_tools = (
@@ -557,12 +576,16 @@ class Chack:
 
                     result = _invoke()
 
-                    attempt_prompt, attempt_completion, attempt_cached = self._usage_from_raw_result(
-                        result.get("raw_result")
-                    )
+                    (
+                        attempt_prompt,
+                        attempt_completion,
+                        attempt_cached,
+                        attempt_cache_write,
+                    ) = self._usage_from_raw_result(result.get("raw_result"))
                     prompt_total += attempt_prompt
                     completion_total += attempt_completion
                     cached_total += attempt_cached
+                    cache_write_total += attempt_cache_write
 
                     if result.get("error") == "max_turns_exceeded":
                         all_steps.extend(result.get("intermediate_steps", []))
@@ -622,7 +645,14 @@ class Chack:
                         + f"\n\nOriginal request:\n{prompt_text}"
                     )
 
-                return result, all_steps, prompt_total, completion_total, cached_total
+                return (
+                    result,
+                    all_steps,
+                    prompt_total,
+                    completion_total,
+                    cached_total,
+                    cache_write_total,
+                )
 
             (
                 result,
@@ -630,6 +660,7 @@ class Chack:
                 prompt_tokens,
                 completion_tokens,
                 cached_prompt_tokens,
+                cache_write_prompt_tokens,
             ) = _invoke_with_min_tools(text, "Run 1")
             output = result.get("output", "")
             run1_output = output
@@ -659,6 +690,7 @@ class Chack:
                     run2_prompt_tokens,
                     run2_completion_tokens,
                     run2_cached_prompt_tokens,
+                    run2_cache_write_prompt_tokens,
                 ) = _invoke_with_min_tools(
                     critique_input,
                     "Run 2 (self-critique)",
@@ -668,6 +700,7 @@ class Chack:
                 prompt_tokens += run2_prompt_tokens
                 completion_tokens += run2_completion_tokens
                 cached_prompt_tokens += run2_cached_prompt_tokens
+                cache_write_prompt_tokens += run2_cache_write_prompt_tokens
 
                 critique_output = critique_result.get("output", "")
                 run2_output = critique_output
@@ -712,6 +745,7 @@ class Chack:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_prompt_tokens=cached_prompt_tokens,
+                cache_write_tokens=cache_write_prompt_tokens,
             )
             nested_cost, _missing_nested_models = estimate_costs_by_model(
                 self._pricing,
@@ -720,13 +754,19 @@ class Chack:
             fallback_cost = None
             if (
                 (main_cost is None or main_cost == 0.0)
-                and (prompt_tokens or completion_tokens or cached_prompt_tokens)
+                and (
+                    prompt_tokens
+                    or completion_tokens
+                    or cached_prompt_tokens
+                    or cache_write_prompt_tokens
+                )
             ):
                 fallback_cost = estimate_cost_with_defaults(
                     model_name,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     cached_prompt_tokens=cached_prompt_tokens,
+                    cache_write_tokens=cache_write_prompt_tokens,
                 )
             if main_cost is None and nested_cost == 0:
                 total_cost = None
@@ -773,6 +813,7 @@ class Chack:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "cached_prompt_tokens": cached_prompt_tokens,
+                    "cache_write_prompt_tokens": cache_write_prompt_tokens,
                     "total_cost": total_cost,
                     "main_cost": main_cost,
                     "nested_cost": nested_cost,
@@ -812,6 +853,7 @@ class Chack:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_prompt_tokens=cached_prompt_tokens,
+                cache_write_prompt_tokens=cache_write_prompt_tokens,
                 rounds_used=rounds_used,
                 tools_used=tools_used,
                 task_session_id=task_session_id,

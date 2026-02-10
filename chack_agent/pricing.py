@@ -26,6 +26,7 @@ class ModelPricing:
     input: float
     cached_input: float
     output: float
+    cache_write: float = 0.0
 
 
 @dataclass
@@ -39,10 +40,19 @@ def _build_pricing_table(raw_models: Dict[str, Dict[str, float]]) -> PricingTabl
         if not isinstance(values, dict):
             continue
         try:
+            cache_read = values.get("cached_input")
+            if cache_read is None:
+                cache_read = values.get("cache_read")
+            if cache_read is None:
+                cache_read = values.get("input_cache_read")
+            cache_write = values.get("cache_write")
+            if cache_write is None:
+                cache_write = values.get("input_cache_write")
             models[name] = ModelPricing(
                 input=float(values.get("input", 0.0)),
-                cached_input=float(values.get("cached_input", 0.0)),
+                cached_input=float(cache_read or 0.0),
                 output=float(values.get("output", 0.0)),
+                cache_write=float(cache_write or 0.0),
             )
         except (TypeError, ValueError):
             continue
@@ -95,6 +105,7 @@ def estimate_cost(
     prompt_tokens: int,
     completion_tokens: int,
     cached_prompt_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> Optional[float]:
     if model not in pricing.models:
         return None
@@ -103,6 +114,7 @@ def estimate_cost(
     total = (
         billable_prompt * rates.input
         + cached_prompt_tokens * rates.cached_input
+        + cache_write_tokens * rates.cache_write
         + completion_tokens * rates.output
     )
     return total / 1_000_000.0
@@ -110,18 +122,23 @@ def estimate_cost(
 
 def estimate_costs_by_model(
     pricing: PricingTable,
-    usage_by_model: Dict[str, Tuple[int, int, int]],
+    usage_by_model: Dict[str, Tuple[int, int, int, int]],
 ) -> tuple[float, List[str]]:
     total = 0.0
     missing_models: List[str] = []
     for model_name, usage in usage_by_model.items():
-        prompt_tokens, completion_tokens, cached_prompt_tokens = usage
+        cache_write_tokens = 0
+        if len(usage) == 4:
+            prompt_tokens, completion_tokens, cached_prompt_tokens, cache_write_tokens = usage
+        else:
+            prompt_tokens, completion_tokens, cached_prompt_tokens = usage
         model_cost = estimate_cost(
             pricing,
             model_name,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             cached_prompt_tokens=cached_prompt_tokens,
+            cache_write_tokens=cache_write_tokens,
         )
         if model_cost is None:
             missing_models.append(model_name)
@@ -135,6 +152,7 @@ def estimate_cost_with_defaults(
     prompt_tokens: int,
     completion_tokens: int,
     cached_prompt_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> Optional[float]:
     if model not in DEFAULT_PRICING:
         return None
@@ -143,6 +161,7 @@ def estimate_cost_with_defaults(
     total = (
         billable_prompt * rates["input"]
         + cached_prompt_tokens * rates["cached_input"]
+        + cache_write_tokens * rates.get("cache_write", 0.0)
         + completion_tokens * rates["output"]
     )
     return total / 1_000_000.0
