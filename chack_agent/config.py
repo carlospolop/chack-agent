@@ -30,6 +30,7 @@ def _interpolate_env(value: Any) -> Any:
 @dataclass
 class ModelConfig:
     primary: str
+    provider: str = "openai"
     max_context_tokens: int = 0
     social_network: str = ""
     scientific: str = ""
@@ -82,6 +83,10 @@ class CredentialsConfig:
     openai_admin_key: str = ""
     openai_org_id: str = ""
     openai_org_ids: List[str] = field(default_factory=list)
+    openrouter_api_key: str = ""
+    openrouter_http_referer: str = ""
+    openrouter_app_name: str = ""
+    openrouter_base_url: str = ""
     aws_profile: str = ""
     aws_credentials_file: str = ""
 

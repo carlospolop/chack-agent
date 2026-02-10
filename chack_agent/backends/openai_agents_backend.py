@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
 import threading
 import time
 import traceback
@@ -10,8 +11,16 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from openai import OpenAI
-from agents import Agent, ModelSettings, Runner, ToolGuardrailFunctionOutput, tool_input_guardrail
+from openai import OpenAI, AsyncOpenAI
+from agents import (
+    Agent,
+    ModelSettings,
+    Runner,
+    ToolGuardrailFunctionOutput,
+    tool_input_guardrail,
+    set_default_openai_client,
+    set_tracing_disabled,
+)
 from agents.items import ToolCallItem
 
 from ..config import ChackConfig
@@ -30,6 +39,79 @@ _FIRST_TOOL_LOCK = threading.Lock()
 _FIRST_TOOL_INIT_DONE: dict[str, bool] = {}
 _FIRST_TOOL_STATE_MAX = 5000
 _LOGGER = logging.getLogger("chack.openai_agents_backend")
+
+_OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _select_provider(config: ChackConfig) -> str:
+    provider = str(getattr(config.model, "provider", "") or "openai").strip().lower()
+    if provider not in {"openai", "openrouter"}:
+        raise ValueError(f"Unsupported model.provider: {provider}")
+    return provider
+
+
+def _configure_openai_client(config: ChackConfig) -> str:
+    provider = _select_provider(config)
+    if provider == "openrouter":
+        api_key = (
+            str(config.credentials.openrouter_api_key or "").strip()
+            or os.environ.get("OPENROUTER_API_KEY", "").strip()
+        )
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY is required when model.provider=openrouter")
+        base_url = (
+            str(config.credentials.openrouter_base_url or "").strip()
+            or os.environ.get("OPENROUTER_BASE_URL", "").strip()
+            or _OPENROUTER_DEFAULT_BASE_URL
+        )
+        headers: dict[str, str] = {}
+        referer = (
+            str(config.credentials.openrouter_http_referer or "").strip()
+            or os.environ.get("OPENROUTER_HTTP_REFERER", "").strip()
+        )
+        title = (
+            str(config.credentials.openrouter_app_name or "").strip()
+            or os.environ.get("OPENROUTER_APP_NAME", "").strip()
+        )
+        if not title:
+            main_action = str(config.agent.main_action or "").strip()
+            sub_action = str(config.agent.sub_action or "").strip()
+            if main_action and sub_action:
+                title = f"{main_action}-{sub_action}"
+            elif main_action:
+                title = main_action
+            elif sub_action:
+                title = sub_action
+        if referer:
+            headers["HTTP-Referer"] = referer
+        if title:
+            headers["X-Title"] = title
+
+        client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            default_headers=headers or None,
+        )
+        set_default_openai_client(client, use_for_tracing=False)
+        # OpenRouter doesn't support OpenAI tracing endpoints.
+        set_tracing_disabled(True)
+        return provider
+
+    # OpenAI (default)
+    api_key = (
+        str(config.credentials.openai_api_key or "").strip()
+        or os.environ.get("OPENAI_API_KEY", "").strip()
+    )
+    base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or None
+    organization = str(config.credentials.openai_org_id or "").strip() or None
+    if api_key or base_url or organization:
+        client = AsyncOpenAI(
+            api_key=api_key or None,
+            base_url=base_url,
+            organization=organization,
+        )
+        set_default_openai_client(client)
+    return provider
 
 
 def _run_scope_key() -> str:
@@ -312,7 +394,21 @@ class AgentsExecutor:
 
     def _run_compaction(self, response_id: str) -> Optional[str]:
         try:
-            client = OpenAI()
+            provider = _select_provider(self._config)
+            if provider != "openai":
+                _LOGGER.info("Skipping responses compaction for provider=%s.", provider)
+                return None
+            api_key = (
+                str(self._config.credentials.openai_api_key or "").strip()
+                or os.environ.get("OPENAI_API_KEY", "").strip()
+            )
+            base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or None
+            organization = str(self._config.credentials.openai_org_id or "").strip() or None
+            client = OpenAI(
+                api_key=api_key or None,
+                base_url=base_url,
+                organization=organization,
+            )
             compacted = client.responses.compact(
                 model=self._compaction_model,
                 previous_response_id=response_id,
@@ -502,6 +598,7 @@ def build_executor(
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> AgentsExecutor:
+    _configure_openai_client(config)
     model_name = config.model.primary
 
     if tools_override is None:

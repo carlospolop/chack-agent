@@ -30,6 +30,7 @@ config = ChackConfig(
         social_network="gpt-4o",
         scientific="gpt-4o",
         websearcher="gpt-4o",
+        provider="openai",  # or "openrouter"
     ),
     agent=AgentConfig(
         self_critique_enabled=True,  # Agent critiques its own plan before acting
@@ -49,6 +50,7 @@ config = ChackConfig(
     ),
     credentials=CredentialsConfig(
         openai_api_key=os.environ.get("OPENAI_API_KEY"),
+        # openrouter_api_key=os.environ.get("OPENROUTER_API_KEY"),
     ),
     logging=LoggingConfig(level="INFO"),
     system_prompt="You are an advanced researcher agent.",
@@ -95,7 +97,11 @@ Most tools require API keys. Provide them via env vars (recommended) or your own
 
 | Environment Variable | Description | Required For |
 |----------------------|-------------|--------------|
-| `OPENAI_API_KEY` | OpenAI API Key | Core functionality |
+| `OPENAI_API_KEY` | OpenAI API Key | Core functionality (OpenAI) |
+| `OPENROUTER_API_KEY` | OpenRouter API Key | Core functionality (OpenRouter) |
+| `OPENROUTER_HTTP_REFERER` | App referer for OpenRouter attribution | Optional |
+| `OPENROUTER_APP_NAME` | App name for OpenRouter attribution | Optional |
+| `OPENROUTER_BASE_URL` | OpenRouter base URL | Optional override |
 | `BRAVE_API_KEY` | Brave Search API Key | `brave_search` |
 | `SERPAPI_API_KEY` | SerpAPI Key | Google/Bing web + AI mode |
 | `FORUMSCOUT_API_KEY` | ForumScout API Key | Social network tools |
