@@ -107,9 +107,14 @@ def estimate_cost(
     cached_prompt_tokens: int = 0,
     cache_write_tokens: int = 0,
 ) -> Optional[float]:
-    if model not in pricing.models:
+    lookup = model
+    if lookup not in pricing.models and lookup.startswith("openai/"):
+        stripped = lookup[len("openai/") :]
+        if stripped in pricing.models:
+            lookup = stripped
+    if lookup not in pricing.models:
         return None
-    rates = pricing.models[model]
+    rates = pricing.models[lookup]
     billable_prompt = max(prompt_tokens - cached_prompt_tokens, 0)
     total = (
         billable_prompt * rates.input

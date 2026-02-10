@@ -21,6 +21,7 @@ from agents import (
     set_default_openai_client,
     set_tracing_disabled,
 )
+from agents.models.openai_responses import OpenAIResponsesModel
 from agents.items import ToolCallItem
 
 from ..config import ChackConfig
@@ -43,6 +44,125 @@ _LOGGER = logging.getLogger("chack.openai_agents_backend")
 _OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 
+class _OpenRouterResponsesModel(OpenAIResponsesModel):
+    def _normalize_tool_name(self, name: str, tool_names: set[str]) -> str:
+        if not name or not tool_names:
+            return name
+        if name in tool_names:
+            return name
+        candidate = name
+        if name.startswith("tool_"):
+            candidate = name[len("tool_") :]
+            if candidate in tool_names:
+                return candidate
+        # OpenRouter (Gemini) may append a unique suffix to tool names.
+        sorted_tools = sorted(tool_names, key=len, reverse=True)
+        for tool_name in sorted_tools:
+            if candidate.startswith(f"{tool_name}_"):
+                return tool_name
+            if name.startswith(f"{tool_name}_"):
+                return tool_name
+        return name
+
+    def _normalize_output_tools(self, output_items: list[Any], tool_names: set[str]) -> None:
+        for raw in output_items:
+            current = None
+            if hasattr(raw, "name"):
+                current = getattr(raw, "name", None)
+            elif hasattr(raw, "function"):
+                func = getattr(raw, "function", None)
+                if func is not None and hasattr(func, "name"):
+                    current = getattr(func, "name", None)
+            elif isinstance(raw, dict):
+                current = raw.get("name")
+                if current is None:
+                    func = raw.get("function")
+                    if isinstance(func, dict):
+                        current = func.get("name")
+
+            normalized = self._normalize_tool_name(str(current or ""), tool_names) if current else None
+            if not normalized or normalized == current:
+                continue
+
+            if hasattr(raw, "name"):
+                setattr(raw, "name", normalized)
+                continue
+            if hasattr(raw, "function"):
+                func = getattr(raw, "function", None)
+                if func is not None and hasattr(func, "name"):
+                    setattr(func, "name", normalized)
+                    continue
+            if isinstance(raw, dict):
+                if "name" in raw:
+                    raw["name"] = normalized
+                    continue
+                func = raw.get("function")
+                if isinstance(func, dict) and "name" in func:
+                    func["name"] = normalized
+
+    async def get_response(  # type: ignore[override]
+        self,
+        system_instructions: str | None,
+        input: str | list[Any],
+        model_settings: ModelSettings,
+        tools: list[Any],
+        output_schema,
+        handoffs,
+        tracing,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        prompt=None,
+    ):
+        response = await super().get_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+        tool_names = {getattr(tool, "name", "") for tool in tools if getattr(tool, "name", "")}
+        if tool_names:
+            self._normalize_output_tools(response.output, tool_names)
+        return response
+
+    async def stream_response(  # type: ignore[override]
+        self,
+        system_instructions: str | None,
+        input: str | list[Any],
+        model_settings: ModelSettings,
+        tools: list[Any],
+        output_schema,
+        handoffs,
+        tracing,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        prompt=None,
+    ):
+        tool_names = {getattr(tool, "name", "") for tool in tools if getattr(tool, "name", "")}
+        async for event in super().stream_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        ):
+            if tool_names and getattr(event, "type", "") == "response.completed":
+                response = getattr(event, "response", None)
+                if response is not None and getattr(response, "output", None):
+                    self._normalize_output_tools(response.output, tool_names)
+            yield event
+
+
 def _select_provider(config: ChackConfig) -> str:
     provider = str(getattr(config.model, "provider", "") or "openai").strip().lower()
     if provider not in {"openai", "openrouter"}:
@@ -50,7 +170,7 @@ def _select_provider(config: ChackConfig) -> str:
     return provider
 
 
-def _configure_openai_client(config: ChackConfig) -> str:
+def _configure_openai_client(config: ChackConfig) -> tuple[str, Optional[AsyncOpenAI]]:
     provider = _select_provider(config)
     if provider == "openrouter":
         api_key = (
@@ -95,7 +215,7 @@ def _configure_openai_client(config: ChackConfig) -> str:
         set_default_openai_client(client, use_for_tracing=False)
         # OpenRouter doesn't support OpenAI tracing endpoints.
         set_tracing_disabled(True)
-        return provider
+        return provider, client
 
     # OpenAI (default)
     api_key = (
@@ -104,6 +224,7 @@ def _configure_openai_client(config: ChackConfig) -> str:
     )
     base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or None
     organization = str(config.credentials.openai_org_id or "").strip() or None
+    client: Optional[AsyncOpenAI] = None
     if api_key or base_url or organization:
         client = AsyncOpenAI(
             api_key=api_key or None,
@@ -111,7 +232,7 @@ def _configure_openai_client(config: ChackConfig) -> str:
             organization=organization,
         )
         set_default_openai_client(client)
-    return provider
+    return provider, client
 
 
 def _run_scope_key() -> str:
@@ -598,7 +719,7 @@ def build_executor(
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> AgentsExecutor:
-    _configure_openai_client(config)
+    provider, client = _configure_openai_client(config)
     model_name = config.model.primary
 
     if tools_override is None:
@@ -627,11 +748,15 @@ def build_executor(
         tools = list(tools_override)
 
     tools = _apply_guardrails(tools)
+    model: Any = model_name
+    if provider == "openrouter" and client is not None:
+        model = _OpenRouterResponsesModel(model=model_name, openai_client=client)
+
     agent = Agent(
         name="Chack",
         instructions=system_prompt,
         tools=tools,
-        model=model_name,
+        model=model,
         model_settings=ModelSettings(),
     )
 
