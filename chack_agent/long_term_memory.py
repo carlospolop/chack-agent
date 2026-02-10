@@ -5,6 +5,8 @@ import re
 from typing import Iterable
 
 from agents import Agent, ModelSettings, Runner
+from agents.models.openai_responses import OpenAIResponsesModel
+from openai import AsyncOpenAI
 
 from .config import ChackConfig
 
@@ -90,6 +92,36 @@ def build_long_term_memory(
     max_chars: int,
 ) -> str:
     model_name = config.model.primary
+    model: str | OpenAIResponsesModel = model_name
+
+    provider = str(getattr(config.model, "provider", "") or "openai").strip().lower()
+    if provider == "openrouter":
+        api_key = (
+            str(getattr(config.credentials, "openrouter_api_key", "") or "").strip()
+            or os.environ.get("OPENROUTER_API_KEY", "").strip()
+        )
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY is required when model.provider=openrouter")
+        base_url = (
+            str(getattr(config.credentials, "openrouter_base_url", "") or "").strip()
+            or os.environ.get("OPENROUTER_BASE_URL", "").strip()
+            or "https://openrouter.ai/api/v1"
+        )
+        headers: dict[str, str] = {}
+        referer = (
+            str(getattr(config.credentials, "openrouter_http_referer", "") or "").strip()
+            or os.environ.get("OPENROUTER_HTTP_REFERER", "").strip()
+        )
+        title = (
+            str(getattr(config.credentials, "openrouter_app_name", "") or "").strip()
+            or os.environ.get("OPENROUTER_APP_NAME", "").strip()
+        )
+        if referer:
+            headers["HTTP-Referer"] = referer
+        if title:
+            headers["X-Title"] = title
+        client = AsyncOpenAI(base_url=base_url, api_key=api_key, default_headers=headers or None)
+        model = OpenAIResponsesModel(model=model_name, openai_client=client)
 
     system = _LONG_TERM_MEMORY_SUMMARY_PROMPT.replace("{max_chars}", str(max_chars))
 
@@ -103,7 +135,7 @@ def build_long_term_memory(
     agent = Agent(
         name="ChackMemory",
         instructions=system,
-        model=model_name,
+        model=model,
         model_settings=ModelSettings(),
     )
     result = Runner.run_sync(agent, human)
