@@ -388,9 +388,16 @@ def _item_type(item: Any) -> str:
 
 
 def _item_call_id(item: Any) -> str:
+    val = None
     if isinstance(item, dict):
-        return str(item.get("call_id", "") or "")
-    return str(getattr(item, "call_id", "") or "")
+        val = item.get("call_id") or item.get("id") or item.get("tool_call_id")
+    else:
+        val = (
+            getattr(item, "call_id", None)
+            or getattr(item, "id", None)
+            or getattr(item, "tool_call_id", None)
+        )
+    return str(val or "")
 
 
 def _sanitize_input_items(items: list[Any]) -> list[Any]:
@@ -399,7 +406,7 @@ def _sanitize_input_items(items: list[Any]) -> list[Any]:
     call_ids = set()
     for item in items:
         item_type = _item_type(item)
-        if item_type in {"function_call", "tool_call"}:
+        if item_type in {"function_call", "tool_call", "function"}:
             call_id = _item_call_id(item)
             if call_id:
                 call_ids.add(call_id)
