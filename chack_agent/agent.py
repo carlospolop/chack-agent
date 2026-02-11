@@ -82,8 +82,6 @@ Note that task-list calls do NOT count toward the minimum non-task tool usage re
 When you already have enough reliable information to provide an educated and actionable response, stop calling tools and provide the final answer immediately.
 Do not loop on additional searches for simple requests once the core facts are already verified.
 If a tool fails but available evidence is sufficient, give the best possible answer with a short note about uncertainty.
-Prefer finishing with a clear response over repeated low-value tool calls.
-
 
 ### STARTING POINT
 
