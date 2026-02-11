@@ -21,6 +21,9 @@ MODEL_ALIASES: Dict[str, str] = {
 _LOGGER = logging.getLogger("chack.model_aliases")
 _REMOTE_CACHE_SECONDS = int(os.environ.get("CHACK_MODEL_ALIASES_CACHE_SECONDS", "300") or "300")
 _REMOTE_URL = os.environ.get("CHACK_MODEL_ALIASES_LAMBDA_URL", "").strip()
+_DEFAULT_REMOTE_URL = "https://6lj6nwv3krblocoano5k33zzna0uqebx.lambda-url.us-east-1.on.aws/"
+if not _REMOTE_URL:
+    _REMOTE_URL = _DEFAULT_REMOTE_URL
 _REMOTE_CACHE: Optional[Dict[str, str]] = None
 _REMOTE_CACHE_LOADED_AT: float = 0.0
 
