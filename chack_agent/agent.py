@@ -142,6 +142,18 @@ class Chack:
         return str(getattr(action, "tool", "") or "")
 
     @staticmethod
+    def _available_tool_names(executor: Any) -> list[str]:
+        names: list[str] = []
+        tools = getattr(getattr(executor, "agent", None), "tools", []) or []
+        for tool in tools:
+            name = str(getattr(tool, "name", "") or getattr(tool, "__name__", "") or "").strip()
+            if not name:
+                continue
+            if name not in names:
+                names.append(name)
+        return names
+
+    @staticmethod
     def _tool_emoji(tool_name: str) -> str:
         emojis = {
             "exec": "🖥️",
@@ -462,6 +474,7 @@ class Chack:
             update_log_context(task_session_id=task_session_id)
             STORE.create_session(task_session_id, title="Task List")
             TOOL_USAGE_STORE.reset_session(task_session_id)
+            available_tool_names = self._available_tool_names(executor)
 
             log_event(
                 "agent_start",
@@ -480,6 +493,7 @@ class Chack:
                     "system_prompt_override": bool(system_prompt_override),
                     "tools_override": bool(tools_override),
                     "tools_append": bool(tools_append),
+                    "available_tools": available_tool_names,
                 },
             )
 
