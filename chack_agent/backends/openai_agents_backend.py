@@ -47,6 +47,27 @@ _OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 class _OpenRouterResponsesModel(OpenAIResponsesModel):
+    @staticmethod
+    def _prepare_input_items(
+        items: Any,
+        previous_response_id: str | None,
+    ) -> Any:
+        if not isinstance(items, list):
+            return items
+        prepared = _sanitize_input_items(list(items))
+        # OpenRouter/Gemini rejects orphan tool outputs when no previous_response_id
+        # is available to resolve the corresponding tool call turn.
+        if previous_response_id is None:
+            prepared = _OpenRouterResponsesModel._message_only_items(prepared)
+        if prepared:
+            return prepared
+        return [
+            {
+                "role": "user",
+                "content": "Continue and provide the best possible answer based on current context.",
+            }
+        ]
+
     async def _get_response_with_retries(
         self,
         system_instructions: str | None,
@@ -188,9 +209,10 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
         prompt=None,
     ):
         try:
+            prepared_input = self._prepare_input_items(input, previous_response_id)
             response = await self._get_response_with_retries(
                 system_instructions=system_instructions,
-                input=input,
+                input=prepared_input,
                 model_settings=model_settings,
                 tools=tools,
                 output_schema=output_schema,
@@ -212,7 +234,7 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
             _LOGGER.warning(
                 "OpenRouter rejected response chain with previous_response_id; retrying without it."
             )
-            fallback_input = self._message_only_items(input)
+            fallback_input = self._prepare_input_items(input, None)
             response = await self._get_response_with_retries(
                 system_instructions=system_instructions,
                 input=fallback_input,
