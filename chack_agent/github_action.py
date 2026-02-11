@@ -12,6 +12,7 @@ from chack_agent import (
     SessionConfig,
     ToolsConfig,
 )
+from chack_agent.model_aliases import resolve_model_alias
 
 
 def _load_json(name: str) -> dict:
@@ -109,12 +110,12 @@ def main() -> None:
         raise SystemExit("max_turns must be an integer")
 
     model = ModelConfig(
-        primary=os.environ.get("INPUT_MODEL_PRIMARY", "gpt-4o"),
+        primary=resolve_model_alias(os.environ.get("INPUT_MODEL_PRIMARY", "gpt-4o")),
         provider=provider,
-        social_network=os.environ.get("INPUT_MODEL_SOCIAL", ""),
-        scientific=os.environ.get("INPUT_MODEL_SCIENTIFIC", ""),
-        websearcher=os.environ.get("INPUT_MODEL_WEBSEARCHER", ""),
-        tester=os.environ.get("INPUT_MODEL_TESTER", ""),
+        social_network=resolve_model_alias(os.environ.get("INPUT_MODEL_SOCIAL", "")),
+        scientific=resolve_model_alias(os.environ.get("INPUT_MODEL_SCIENTIFIC", "")),
+        websearcher=resolve_model_alias(os.environ.get("INPUT_MODEL_WEBSEARCHER", "")),
+        tester=resolve_model_alias(os.environ.get("INPUT_MODEL_TESTER", "")),
     )
 
     agent_cfg = AgentConfig(
