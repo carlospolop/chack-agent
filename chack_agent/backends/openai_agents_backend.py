@@ -227,7 +227,6 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
             should_retry = (
                 previous_response_id is not None
                 and "function response turn comes immediately after a function call turn" in err
-                and not self._has_function_outputs(input)
             )
             if not should_retry:
                 raise
