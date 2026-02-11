@@ -159,7 +159,11 @@ def main() -> None:
 
     prompt = _resolve_prompt()
     agent = Chack(config)
-    result = agent.run(session_id="github-action", text=prompt)
+    result = agent.run(
+        session_id="github-action",
+        text=prompt,
+        require_task_list_init_first=bool(agent_cfg.require_task_list_init_first),
+    )
     output = result.output or ""
 
     print(output)

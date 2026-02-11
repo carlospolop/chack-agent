@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextvars
+import logging
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -14,6 +15,7 @@ _ACTIVE_RUN_LABEL: contextvars.ContextVar[str] = contextvars.ContextVar(
     "chack_tasklist_run_label",
     default="Run 1",
 )
+_LOGGER = logging.getLogger("chack.task_list")
 
 
 @dataclass
@@ -76,8 +78,12 @@ class TaskListStore:
             if callback in callbacks:
                 callbacks.remove(callback)
 
-    def _notify(self, session_id: str) -> None:
+    def _notify(self, session_id: str, *, reason: str = "") -> None:
         text = self.render(session_id)
+        if reason:
+            _LOGGER.info("Task list updated (%s):\n%s", reason, text)
+        else:
+            _LOGGER.info("Task list updated:\n%s", text)
         callbacks = list(self._listeners.get(session_id, []))
         for cb in callbacks:
             try:
@@ -171,7 +177,7 @@ class TaskListStore:
                 run.tasks.append(TaskItem(id=run.next_id, text=item, status="todo"))
                 run.next_id += 1
             run.initialized = True
-            self._notify(session_id)
+            self._notify(session_id, reason=f"{run_label}:init")
             self._log_event(
                 "tasklist_defined",
                 payload={
@@ -195,7 +201,7 @@ class TaskListStore:
                 return "ERROR: text is required for action=add"
             run.tasks.append(TaskItem(id=run.next_id, text=text.strip(), status=(status or "todo")))
             run.next_id += 1
-            self._notify(session_id)
+            self._notify(session_id, reason=f"{run_label}:add")
             self._log_event(
                 "tasklist_updated",
                 payload={
@@ -221,7 +227,7 @@ class TaskListStore:
                 return f"ERROR: task_id {task_id} not found"
             if action == "delete":
                 run.tasks = [t for t in run.tasks if t.id != int(task_id)]
-                self._notify(session_id)
+                self._notify(session_id, reason=f"{run_label}:delete:{task_id}")
                 self._log_event(
                     "tasklist_updated",
                     payload={
@@ -239,7 +245,7 @@ class TaskListStore:
                 task.status = "done"
                 if notes.strip():
                     task.notes = notes.strip()
-                self._notify(session_id)
+                self._notify(session_id, reason=f"{run_label}:complete:{task_id}")
                 self._log_event(
                     "tasklist_item_completed",
                     payload={
@@ -274,7 +280,7 @@ class TaskListStore:
                 task.status = status.strip().lower()
             if notes.strip():
                 task.notes = notes.strip()
-            self._notify(session_id)
+            self._notify(session_id, reason=f"{run_label}:update:{task_id}")
             self._log_event(
                 "tasklist_updated",
                 payload={
@@ -296,7 +302,7 @@ class TaskListStore:
             run.tasks = []
             run.next_id = 1
             run.initialized = True
-            self._notify(session_id)
+            self._notify(session_id, reason=f"{run_label}:clear")
             self._log_event(
                 "tasklist_defined",
                 payload={
@@ -318,7 +324,7 @@ class TaskListStore:
                 run.tasks.append(TaskItem(id=run.next_id, text=item, status="todo"))
                 run.next_id += 1
             run.initialized = True
-            self._notify(session_id)
+            self._notify(session_id, reason=f"{run_label}:replace")
             self._log_event(
                 "tasklist_defined",
                 payload={

@@ -47,6 +47,7 @@ class ModelConfig:
 @dataclass
 class AgentConfig:
     self_critique_enabled: bool = True
+    require_task_list_init_first: bool = True
     compaction_threshold_ratio: float = 0.75
     compaction_model: str = ""
     main_action: str = ""
