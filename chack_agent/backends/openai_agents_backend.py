@@ -24,6 +24,7 @@ from agents import (
 )
 from agents.models.openai_responses import OpenAIResponsesModel
 from agents.items import ToolCallItem
+from agents.exceptions import ModelBehaviorError
 
 from ..config import ChackConfig
 from ..output_schema import JsonSchemaOutput
@@ -146,8 +147,9 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
         if name in tool_names:
             return name
         candidate = name
-        if name.startswith("tool_"):
-            candidate = name[len("tool_") :]
+        # OpenRouter/Gemini can prepend `tool_` multiple times.
+        while candidate.startswith("tool_"):
+            candidate = candidate[len("tool_") :]
             if candidate in tool_names:
                 return candidate
         # OpenRouter (Gemini) may append a unique suffix to tool names.
@@ -157,7 +159,21 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
                 return tool_name
             if name.startswith(f"{tool_name}_"):
                 return tool_name
+            if candidate.startswith(f"tool_{tool_name}_"):
+                return tool_name
+            if name.startswith(f"tool_{tool_name}_"):
+                return tool_name
         return name
+
+    @staticmethod
+    def _is_sequence_recoverable_error(exc: Exception) -> bool:
+        err = str(exc).lower()
+        return (
+            "function response turn comes immediately after a function call turn" in err
+            or ("invalid_argument" in err and "function call" in err and "function response" in err)
+            or "not found in agent chack" in err
+            or ("tool " in err and " not found in agent " in err)
+        )
 
     def _normalize_output_tools(self, output_items: list[Any], tool_names: set[str]) -> None:
         for raw in output_items:
@@ -223,10 +239,9 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
                 prompt=prompt,
             )
         except BadRequestError as exc:
-            err = str(exc)
             should_retry = (
                 previous_response_id is not None
-                and "function response turn comes immediately after a function call turn" in err
+                and self._is_sequence_recoverable_error(exc)
             )
             if not should_retry:
                 raise
@@ -552,22 +567,7 @@ class AgentsExecutor:
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         user_input = payload.get("input", "")
         self.agent.instructions = self._base_system_prompt
-        input_items: list[dict[str, Any]] = []
-        if self._previous_response_id:
-            if user_input:
-                input_items.append({"role": "user", "content": user_input})
-        else:
-            input_items = list(self._conversation)
-            if user_input:
-                input_items.append({"role": "user", "content": user_input})
-        input_items = _sanitize_input_items(input_items)
-        result = Runner.run_sync(
-            self.agent,
-            input_items,
-            max_turns=self.max_turns,
-            previous_response_id=self._previous_response_id,
-            context=context,
-        )
+        result = self._invoke_runner_with_recovery(user_input=user_input, context=context)
         output = result.final_output or ""
         updated_transcript = result.to_input_list()
         if isinstance(updated_transcript, list) and updated_transcript:
@@ -595,6 +595,51 @@ class AgentsExecutor:
             "intermediate_steps": steps,
             "raw_result": result,
         }
+
+    def _build_runner_input(self, user_input: str, include_history: bool) -> list[dict[str, Any]]:
+        input_items: list[dict[str, Any]] = []
+        if include_history:
+            input_items = list(self._conversation)
+        if user_input:
+            input_items.append({"role": "user", "content": user_input})
+        return _sanitize_input_items(input_items)
+
+    def _invoke_runner_with_recovery(self, user_input: str, context: Any) -> Any:
+        include_history = not bool(self._previous_response_id)
+        input_items = self._build_runner_input(user_input, include_history=include_history)
+        try:
+            return Runner.run_sync(
+                self.agent,
+                input_items,
+                max_turns=self.max_turns,
+                previous_response_id=self._previous_response_id,
+                context=context,
+            )
+        except (BadRequestError, ModelBehaviorError) as exc:
+            err = str(exc).lower()
+            recoverable = (
+                self._previous_response_id is not None
+                and (
+                    "function response turn comes immediately after a function call turn" in err
+                    or ("invalid_argument" in err and "function call" in err and "function response" in err)
+                    or "not found in agent chack" in err
+                    or ("tool " in err and " not found in agent " in err)
+                )
+            )
+            if not recoverable:
+                raise
+            _LOGGER.warning(
+                "Runner rejected response chain with previous_response_id; retrying with fresh chain."
+            )
+            self._previous_response_id = None
+            retry_input = self._build_runner_input(user_input, include_history=True)
+            return Runner.run_sync(
+                self.agent,
+                retry_input,
+                max_turns=self.max_turns,
+                previous_response_id=None,
+                context=context,
+            )
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
