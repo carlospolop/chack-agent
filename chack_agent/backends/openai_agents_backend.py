@@ -114,6 +114,9 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
         conversation_id: str | None = None,
         prompt=None,
     ):
+        # OpenRouter providers (notably Gemini backends) can reject tool turns when
+        # only `previous_response_id` is used for context chaining. Sending full
+        # turn input without previous_response_id avoids function-call ordering 400s.
         response = await super().get_response(
             system_instructions,
             input,
@@ -122,7 +125,7 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
             output_schema,
             handoffs,
             tracing,
-            previous_response_id=previous_response_id,
+            previous_response_id=None,
             conversation_id=conversation_id,
             prompt=prompt,
         )
@@ -153,7 +156,7 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
             output_schema,
             handoffs,
             tracing,
-            previous_response_id=previous_response_id,
+            previous_response_id=None,
             conversation_id=conversation_id,
             prompt=prompt,
         ):
