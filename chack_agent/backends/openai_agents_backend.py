@@ -571,9 +571,12 @@ class AgentsExecutor:
         output = result.final_output or ""
         updated_transcript = result.to_input_list()
         if isinstance(updated_transcript, list) and updated_transcript:
-            message_items = _filter_message_items(updated_transcript)
-            if message_items:
-                self._conversation = message_items
+            # Keep the full transcript (tool calls + outputs + messages) so a
+            # recovered run without previous_response_id can continue from the
+            # same thread context instead of restarting from message-only state.
+            transcript_items = _sanitize_input_items(updated_transcript)
+            if transcript_items:
+                self._conversation = transcript_items
         else:
             if user_input:
                 self._conversation.append({"role": "user", "content": user_input})
