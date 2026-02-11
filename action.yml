@@ -37,6 +37,22 @@ inputs:
     description: "Path to a prompt file (relative to the repo workspace)"
     required: false
     default: ""
+  output_schema_file:
+    description: "Path to a JSON schema file (relative to the repo workspace)"
+    required: false
+    default: ""
+  output_schema_json:
+    description: "Inline JSON schema (string)"
+    required: false
+    default: ""
+  output_schema_name:
+    description: "Name for the output schema"
+    required: false
+    default: "output_schema"
+  output_schema_strict:
+    description: "Whether to enforce strict JSON schema mode"
+    required: false
+    default: "true"
   main_action:
     description: "Agent main_action"
     required: false
@@ -114,6 +130,10 @@ runs:
         INPUT_SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         INPUT_USER_PROMPT: ${{ inputs.user_prompt }}
         INPUT_PROMPT_FILE: ${{ inputs.prompt_file }}
+        INPUT_OUTPUT_SCHEMA_FILE: ${{ inputs.output_schema_file }}
+        INPUT_OUTPUT_SCHEMA_JSON: ${{ inputs.output_schema_json }}
+        INPUT_OUTPUT_SCHEMA_NAME: ${{ inputs.output_schema_name }}
+        INPUT_OUTPUT_SCHEMA_STRICT: ${{ inputs.output_schema_strict }}
         INPUT_MAIN_ACTION: ${{ inputs.main_action }}
         INPUT_SUB_ACTION: ${{ inputs.sub_action }}
         INPUT_TOOLS_CONFIG_JSON: ${{ inputs.tools_config_json }}
@@ -121,6 +141,11 @@ runs:
         INPUT_AGENT_CONFIG_JSON: ${{ inputs.agent_config_json }}
         INPUT_LOGGING_LEVEL: ${{ inputs.logging_level }}
         INPUT_MAX_TURNS: ${{ inputs.max_turns }}
+        INPUT_OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        INPUT_OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
+        INPUT_OPENROUTER_HTTP_REFERER: ${{ inputs.openrouter_http_referer }}
+        INPUT_OPENROUTER_APP_NAME: ${{ inputs.openrouter_app_name }}
+        INPUT_OPENROUTER_BASE_URL: ${{ inputs.openrouter_base_url }}
       working-directory: ${{ github.workspace }}
       run: |
         python -m chack_agent.github_action

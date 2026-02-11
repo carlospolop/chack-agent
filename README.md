@@ -80,6 +80,7 @@ You can run the agent in GitHub Actions by using the repo as an action.
     model_primary: gpt-5.2-codex
     system_prompt: You are an advanced research agent.
     prompt_file: codex_prompt.txt
+    output_schema_file: .github/chack-agent/pr-merge-schema.json
     tools_config_json: "{\"exec_enabled\": true}"
   env:
     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -87,6 +88,8 @@ You can run the agent in GitHub Actions by using the repo as an action.
 - name: Use output
   run: echo "${{ steps.chack.outputs.final-message }}"
 ```
+
+`output_schema_file` or `output_schema_json` will be forwarded to the OpenAI Agents SDK as an output schema so the model is constrained to return JSON that matches it.
 
 ## Key Features
 

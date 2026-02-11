@@ -40,6 +40,30 @@ def _resolve_prompt() -> str:
     return user_prompt
 
 
+def _load_output_schema() -> tuple[dict, str, bool] | tuple[None, str, bool]:
+    schema_file = os.environ.get("INPUT_OUTPUT_SCHEMA_FILE", "").strip()
+    schema_json_raw = os.environ.get("INPUT_OUTPUT_SCHEMA_JSON", "").strip()
+    schema_name = os.environ.get("INPUT_OUTPUT_SCHEMA_NAME", "").strip() or "output_schema"
+    strict_raw = os.environ.get("INPUT_OUTPUT_SCHEMA_STRICT", "").strip().lower()
+    strict = strict_raw not in {"0", "false", "no"}
+
+    schema = None
+    if schema_file:
+        path = Path(schema_file)
+        if not path.is_absolute():
+            path = Path(os.getcwd()) / path
+        if not path.exists():
+            raise SystemExit(f"output_schema_file not found: {path}")
+        schema = json.loads(path.read_text(encoding="utf-8"))
+    elif schema_json_raw:
+        try:
+            schema = json.loads(schema_json_raw)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Invalid JSON in output_schema_json: {exc}")
+
+    return schema, schema_name, strict
+
+
 def _write_github_output(message: str) -> None:
     output_path = os.environ.get("GITHUB_OUTPUT", "").strip()
     if not output_path:
@@ -71,6 +95,12 @@ def main() -> None:
     tools_overrides = _load_json("INPUT_TOOLS_CONFIG_JSON")
     session_overrides = _load_json("INPUT_SESSION_CONFIG_JSON")
     agent_overrides = _load_json("INPUT_AGENT_CONFIG_JSON")
+
+    output_schema, output_schema_name, output_schema_strict = _load_output_schema()
+    if output_schema is not None:
+        agent_overrides.setdefault("output_schema_json", output_schema)
+        agent_overrides.setdefault("output_schema_name", output_schema_name)
+        agent_overrides.setdefault("output_schema_strict", output_schema_strict)
 
     max_turns_raw = os.environ.get("INPUT_MAX_TURNS", "0").strip()
     try:

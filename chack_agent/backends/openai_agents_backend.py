@@ -25,6 +25,7 @@ from agents.models.openai_responses import OpenAIResponsesModel
 from agents.items import ToolCallItem
 
 from ..config import ChackConfig
+from ..output_schema import JsonSchemaOutput
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_list_state import current_run_label, current_session_id
 from chack_tools.telemetry import log_event, log_tool_started, log_tool_executed, log_tool_error
@@ -752,12 +753,22 @@ def build_executor(
     if provider == "openrouter" and client is not None:
         model = _OpenRouterResponsesModel(model=model_name, openai_client=client)
 
+    output_schema = None
+    schema_json = getattr(config.agent, "output_schema_json", None)
+    if schema_json:
+        output_schema = JsonSchemaOutput(
+            schema_json,
+            name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
+            strict=bool(getattr(config.agent, "output_schema_strict", True)),
+        )
+
     agent = Agent(
         name="Chack",
         instructions=system_prompt,
         tools=tools,
         model=model,
         model_settings=ModelSettings(),
+        output_type=output_schema,
     )
 
     max_messages = memory_max_messages

@@ -51,6 +51,10 @@ class AgentConfig:
     compaction_model: str = ""
     main_action: str = ""
     sub_action: str = ""
+    output_schema_json: Optional[Dict[str, Any]] = None
+    output_schema_file: str = ""
+    output_schema_name: str = ""
+    output_schema_strict: bool = True
 
 
 @dataclass
@@ -192,6 +196,14 @@ def load_config(path: str) -> ChackConfig:
         raise ValueError("agent.main_action is required in config")
     if not str(agent.sub_action or "").strip():
         raise ValueError("agent.sub_action is required in config")
+    if agent.output_schema_file and not agent.output_schema_json:
+        schema_path = agent.output_schema_file
+        if not os.path.isabs(schema_path):
+            schema_path = os.path.join(base_dir, schema_path)
+        if not os.path.exists(schema_path):
+            raise ValueError(f"agent.output_schema_file not found: {schema_path}")
+        with open(schema_path, "r", encoding="utf-8") as handle:
+            agent.output_schema_json = yaml.safe_load(handle) or {}
 
     model_cfg = _load_section(raw, "model", ModelConfig)
     model_cfg.primary = resolve_model_alias(model_cfg.primary)
