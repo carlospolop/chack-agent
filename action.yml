@@ -1,0 +1,126 @@
+name: "chack-agent"
+description: "Run the chack agent with a prompt and parameters."
+inputs:
+  provider:
+    description: "Model provider: openai or openrouter"
+    required: false
+    default: "openai"
+  model_primary:
+    description: "Primary model (e.g., gpt-4o, gpt-5.2-codex)"
+    required: false
+    default: "gpt-4o"
+  model_social_network:
+    description: "Social network model (optional)"
+    required: false
+    default: ""
+  model_scientific:
+    description: "Scientific model (optional)"
+    required: false
+    default: ""
+  model_websearcher:
+    description: "Websearcher model (optional)"
+    required: false
+    default: ""
+  model_tester:
+    description: "Tester model (optional)"
+    required: false
+    default: ""
+  system_prompt:
+    description: "System prompt"
+    required: false
+    default: "You are an advanced research agent."
+  user_prompt:
+    description: "User prompt (ignored if prompt_file is provided)"
+    required: false
+    default: ""
+  prompt_file:
+    description: "Path to a prompt file (relative to the repo workspace)"
+    required: false
+    default: ""
+  main_action:
+    description: "Agent main_action"
+    required: false
+    default: "github_action"
+  sub_action:
+    description: "Agent sub_action"
+    required: false
+    default: "run"
+  tools_config_json:
+    description: "JSON dict for ToolsConfig overrides"
+    required: false
+    default: "{\"exec_enabled\": true}"
+  session_config_json:
+    description: "JSON dict for SessionConfig overrides"
+    required: false
+    default: "{}"
+  agent_config_json:
+    description: "JSON dict for AgentConfig overrides"
+    required: false
+    default: "{}"
+  logging_level:
+    description: "Logging level"
+    required: false
+    default: "INFO"
+  max_turns:
+    description: "Session max_turns override (0 to keep default)"
+    required: false
+    default: "0"
+  openai_api_key:
+    description: "OpenAI API key (optional, prefer env OPENAI_API_KEY)"
+    required: false
+    default: ""
+  openrouter_api_key:
+    description: "OpenRouter API key (optional, prefer env OPENROUTER_API_KEY)"
+    required: false
+    default: ""
+  openrouter_http_referer:
+    description: "OpenRouter HTTP referer (optional)"
+    required: false
+    default: ""
+  openrouter_app_name:
+    description: "OpenRouter app name (optional)"
+    required: false
+    default: ""
+  openrouter_base_url:
+    description: "OpenRouter base URL (optional)"
+    required: false
+    default: ""
+outputs:
+  final-message:
+    description: "Agent output"
+    value: ${{ steps.run.outputs.final-message }}
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    - name: Install chack-agent
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -e "${{ github.action_path }}"
+    - name: Run chack-agent
+      id: run
+      shell: bash
+      env:
+        INPUT_PROVIDER: ${{ inputs.provider }}
+        INPUT_MODEL_PRIMARY: ${{ inputs.model_primary }}
+        INPUT_MODEL_SOCIAL: ${{ inputs.model_social_network }}
+        INPUT_MODEL_SCIENTIFIC: ${{ inputs.model_scientific }}
+        INPUT_MODEL_WEBSEARCHER: ${{ inputs.model_websearcher }}
+        INPUT_MODEL_TESTER: ${{ inputs.model_tester }}
+        INPUT_SYSTEM_PROMPT: ${{ inputs.system_prompt }}
+        INPUT_USER_PROMPT: ${{ inputs.user_prompt }}
+        INPUT_PROMPT_FILE: ${{ inputs.prompt_file }}
+        INPUT_MAIN_ACTION: ${{ inputs.main_action }}
+        INPUT_SUB_ACTION: ${{ inputs.sub_action }}
+        INPUT_TOOLS_CONFIG_JSON: ${{ inputs.tools_config_json }}
+        INPUT_SESSION_CONFIG_JSON: ${{ inputs.session_config_json }}
+        INPUT_AGENT_CONFIG_JSON: ${{ inputs.agent_config_json }}
+        INPUT_LOGGING_LEVEL: ${{ inputs.logging_level }}
+        INPUT_MAX_TURNS: ${{ inputs.max_turns }}
+      working-directory: ${{ github.workspace }}
+      run: |
+        python -m chack_agent.github_action

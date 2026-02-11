@@ -67,6 +67,27 @@ result = agent.run(
 print(result.output)
 ```
 
+## GitHub Action
+
+You can run the agent in GitHub Actions by using the repo as an action.
+
+```yaml
+- name: Run chack-agent
+  id: chack
+  uses: carlospolop/chack-agent@v0
+  with:
+    provider: openai
+    model_primary: gpt-5.2-codex
+    system_prompt: You are an advanced research agent.
+    prompt_file: codex_prompt.txt
+    tools_config_json: "{\"exec_enabled\": true}"
+  env:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+- name: Use output
+  run: echo "${{ steps.chack.outputs.final-message }}"
+```
+
 ## Key Features
 
 ### 1. Specialized Sub‑Agents
