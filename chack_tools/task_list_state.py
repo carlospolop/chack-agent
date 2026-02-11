@@ -169,6 +169,11 @@ class TaskListStore:
             return [p for p in parts if p]
 
         if action == "init":
+            if run.initialized:
+                return (
+                    "SUCCESS: task list already initialized for this run; ignored duplicate init. "
+                    "Use action=replace or action=update instead."
+                )
             items = _parse_tasks(tasks_text)
             run.tasks = []
             run.next_id = 1
