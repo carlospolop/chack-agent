@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import asyncio
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from openai import OpenAI, AsyncOpenAI, BadRequestError
+from openai import OpenAI, AsyncOpenAI, BadRequestError, RateLimitError
 from agents import (
     Agent,
     ModelSettings,
@@ -46,6 +47,47 @@ _OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 class _OpenRouterResponsesModel(OpenAIResponsesModel):
+    async def _get_response_with_retries(
+        self,
+        system_instructions: str | None,
+        input: str | list[Any],
+        model_settings: ModelSettings,
+        tools: list[Any],
+        output_schema,
+        handoffs,
+        tracing,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt,
+    ):
+        max_attempts = 3
+        delay_seconds = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await super().get_response(
+                    system_instructions,
+                    input,
+                    model_settings,
+                    tools,
+                    output_schema,
+                    handoffs,
+                    tracing,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
+                    prompt=prompt,
+                )
+            except RateLimitError:
+                if attempt >= max_attempts:
+                    raise
+                _LOGGER.warning(
+                    "OpenRouter rate limited (attempt %s/%s). Retrying in %ss.",
+                    attempt,
+                    max_attempts,
+                    delay_seconds,
+                )
+                await asyncio.sleep(delay_seconds)
+                delay_seconds = min(delay_seconds * 2, 20)
+
     @staticmethod
     def _has_function_outputs(items: Any) -> bool:
         if not isinstance(items, list):
@@ -146,14 +188,14 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
         prompt=None,
     ):
         try:
-            response = await super().get_response(
-                system_instructions,
-                input,
-                model_settings,
-                tools,
-                output_schema,
-                handoffs,
-                tracing,
+            response = await self._get_response_with_retries(
+                system_instructions=system_instructions,
+                input=input,
+                model_settings=model_settings,
+                tools=tools,
+                output_schema=output_schema,
+                handoffs=handoffs,
+                tracing=tracing,
                 previous_response_id=previous_response_id,
                 conversation_id=conversation_id,
                 prompt=prompt,
@@ -171,14 +213,14 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
                 "OpenRouter rejected response chain with previous_response_id; retrying without it."
             )
             fallback_input = self._message_only_items(input)
-            response = await super().get_response(
-                system_instructions,
-                fallback_input,
-                model_settings,
-                tools,
-                output_schema,
-                handoffs,
-                tracing,
+            response = await self._get_response_with_retries(
+                system_instructions=system_instructions,
+                input=fallback_input,
+                model_settings=model_settings,
+                tools=tools,
+                output_schema=output_schema,
+                handoffs=handoffs,
+                tracing=tracing,
                 previous_response_id=None,
                 conversation_id=conversation_id,
                 prompt=prompt,
