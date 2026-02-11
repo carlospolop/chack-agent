@@ -31,6 +31,18 @@ _QUEUE_URL: Optional[str] = None
 _REGION: Optional[str] = None
 
 
+def _emit_stdout_event(event: Dict[str, Any]) -> None:
+    """Mirror telemetry events to stdout so they are visible in CI logs."""
+    try:
+        print(
+            f"CHACK_EVENT {json.dumps(event, ensure_ascii=False, separators=(',', ':'))}",
+            flush=True,
+        )
+    except Exception:
+        # Logging should never break agent execution.
+        return
+
+
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -119,6 +131,8 @@ def log_event(event_type: str, payload: Optional[Dict[str, Any]] = None, **conte
         "context": _sanitize(base_context),
         "payload": _sanitize(payload or {}),
     }
+
+    _emit_stdout_event(event)
 
     if http_url and requests is not None:
         timeout_raw = os.environ.get(_HTTP_TIMEOUT_ENV, "")
