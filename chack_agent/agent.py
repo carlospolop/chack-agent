@@ -411,6 +411,7 @@ class Chack:
         tool_profile: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
+        context: Optional[Any] = None,
     ) -> RunResult:
         return await asyncio.to_thread(
             self.run,
@@ -424,6 +425,7 @@ class Chack:
             tool_profile=tool_profile,
             tools_override=tools_override,
             system_prompt_override=system_prompt_override,
+            context=context,
         )
 
     def run(
@@ -441,6 +443,7 @@ class Chack:
         system_prompt_override: Optional[str] = None,
         usage_session_id: Optional[str] = None,
         tools_append: Optional[list[Any]] = None,
+        context: Optional[Any] = None,
     ) -> RunResult:
         log_token = set_log_context(
             main_action=str(self.config.agent.main_action or ""),
@@ -566,7 +569,7 @@ class Chack:
                         usage_token = set_active_usage_session(effective_usage_session)
                         max_tools_token = set_active_max_tools_used(max_tools_used)
                         try:
-                            return executor.invoke({"input": current_prompt})
+                            return executor.invoke({"input": current_prompt}, context=context)
                         except Exception as exc:
                             try:
                                 from agents.exceptions import MaxTurnsExceeded

@@ -528,7 +528,7 @@ class AgentsExecutor:
     _max_context_tokens: int
     _compaction_model: str
 
-    def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         user_input = payload.get("input", "")
         self.agent.instructions = self._base_system_prompt
         input_items: list[dict[str, Any]] = []
@@ -545,6 +545,7 @@ class AgentsExecutor:
             input_items,
             max_turns=self.max_turns,
             previous_response_id=self._previous_response_id,
+            context=context,
         )
         output = result.final_output or ""
         updated_transcript = result.to_input_list()
