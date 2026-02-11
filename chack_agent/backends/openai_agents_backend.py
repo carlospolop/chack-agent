@@ -56,10 +56,10 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
         if not isinstance(items, list):
             return items
         prepared = _sanitize_input_items(list(items))
-        # OpenRouter/Gemini rejects orphan tool outputs when no previous_response_id
-        # is available to resolve the corresponding tool call turn.
-        if previous_response_id is None:
-            prepared = _OpenRouterResponsesModel._message_only_items(prepared)
+        # Keep structured tool context even when previous_response_id is missing.
+        # `_sanitize_input_items` already removes orphan function_call_output items.
+        # Dropping to message-only here can make the model lose tool state and
+        # repeatedly restart planning/tool calls in the same run.
         if prepared:
             return prepared
         return [
