@@ -61,7 +61,7 @@ on:
       max_turns:
         description: "Session max_turns override (0 to keep default)"
         required: false
-        default: "0"
+        default: "100"
 
 jobs:
   run-agent:

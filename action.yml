@@ -80,7 +80,7 @@ inputs:
   max_turns:
     description: "Session max_turns override (0 to keep default)"
     required: false
-    default: "0"
+    default: "100"
   openai_api_key:
     description: "OpenAI API key (optional, prefer env OPENAI_API_KEY)"
     required: false
