@@ -1,4 +1,3 @@
-import os
 import time
 from typing import Optional
 
@@ -14,7 +13,11 @@ from .forumscout_search import (
     get_google_forums_search_tool,
     get_google_news_search_tool,
 )
-from .serpapi_keys import has_serpapi_keys
+from .scientific_search import (
+    ScientificSearchTool,
+    get_youtube_video_search_tool,
+    get_youtube_transcript_tool,
+)
 from .task_list_tool import TaskListTool, get_task_list_tool
 from .subagent_config import build_subagent_config
 from .task_list_state import current_session_id
@@ -52,6 +55,7 @@ class SocialNetworkAgentTool:
         self.fallback_model = fallback_model
         self.max_turns = max(2, int(max_turns or 30))
         self.forum = ForumScoutTool(config)
+        self.scientific = ScientificSearchTool(config)
 
     def _resolved_model(self) -> Optional[str]:
         configured = (self.model_name or "").strip()
@@ -67,24 +71,17 @@ class SocialNetworkAgentTool:
         task_list_helper = TaskListTool(self.config)
         tools = [get_task_list_tool(task_list_helper)]
 
-        if self.config.social_network_forum_search_enabled:
-            tools.append(get_forum_search_tool(self.forum))
-        if self.config.social_network_linkedin_enabled:
-            tools.append(get_linkedin_search_tool(self.forum))
-        if self.config.social_network_instagram_enabled:
-            tools.append(get_instagram_search_tool(self.forum))
-        if self.config.social_network_reddit_posts_enabled:
-            tools.append(get_reddit_posts_search_tool(self.forum))
-        if self.config.social_network_reddit_comments_enabled:
-            tools.append(get_reddit_comments_search_tool(self.forum))
-        if self.config.social_network_x_enabled:
-            tools.append(get_x_search_tool(self.forum))
-
-        has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
-        if self.config.social_network_google_forums_enabled and has_serpapi:
-            tools.append(get_google_forums_search_tool(self.forum))
-        if self.config.social_network_google_news_enabled and has_serpapi:
-            tools.append(get_google_news_search_tool(self.forum))
+        # Social sub-agent always has full social tool coverage.
+        tools.append(get_forum_search_tool(self.forum))
+        tools.append(get_linkedin_search_tool(self.forum))
+        tools.append(get_instagram_search_tool(self.forum))
+        tools.append(get_reddit_posts_search_tool(self.forum))
+        tools.append(get_reddit_comments_search_tool(self.forum))
+        tools.append(get_x_search_tool(self.forum))
+        tools.append(get_google_forums_search_tool(self.forum))
+        tools.append(get_google_news_search_tool(self.forum))
+        tools.append(get_youtube_video_search_tool(self.scientific))
+        tools.append(get_youtube_transcript_tool(self.scientific))
 
         return tools
 

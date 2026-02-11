@@ -67,27 +67,20 @@ class WebSearcherAgentTool:
         task_helper = TaskListTool(self.config)
         
         tools = [get_task_list_tool(task_helper)]
-        if self.config.websearcher_brave_enabled:
-            tools.append(get_brave_search_tool(self.brave))
+        tools.append(get_brave_search_tool(self.brave))
 
         has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
-        if has_serpapi and self.config.websearcher_google_web_enabled:
+        if has_serpapi:
             tools.append(get_google_web_search_tool(self.web))
-        if has_serpapi and self.config.websearcher_bing_web_enabled:
             tools.append(get_bing_web_search_tool(self.web))
-        if has_serpapi and self.config.websearcher_google_ai_mode_enabled:
             tools.append(get_google_ai_mode_tool(self.web))
         return tools
 
     def run(self, prompt: str) -> str:
         has_brave = bool(os.environ.get("BRAVE_API_KEY", "").strip())
         has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
-        brave_allowed = self.config.websearcher_brave_enabled
-        serpapi_allowed = has_serpapi and (
-            self.config.websearcher_google_web_enabled
-            or self.config.websearcher_bing_web_enabled
-            or self.config.websearcher_google_ai_mode_enabled
-        )
+        brave_allowed = True
+        serpapi_allowed = has_serpapi
         if not (brave_allowed and has_brave) and not serpapi_allowed:
             return "ERROR: Neither Brave API key nor SerpAPI key is configured."
         if not prompt.strip():

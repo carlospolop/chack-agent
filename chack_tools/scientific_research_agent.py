@@ -1,10 +1,7 @@
-import os
-import subprocess
 import time
 from typing import Optional
 
 from .config import ToolsConfig
-from .formatting import _truncate
 from .pdf_text import PdfTextTool, get_pdf_text_tool
 from .scientific_search import (
     ScientificSearchTool,
@@ -76,32 +73,21 @@ class ScientificResearchAgentTool:
         search = self.search
         pdf = self.pdf
         task_list_helper = TaskListTool(self.config)
+        exec_helper = ExecTool(self.config)
 
         tools = [get_task_list_tool(task_list_helper)]
-        if self.config.scientific_arxiv_enabled:
-            tools.append(get_arxiv_search_tool(search))
-        if self.config.scientific_europe_pmc_enabled:
-            tools.append(get_europe_pmc_search_tool(search))
-        if self.config.scientific_semantic_scholar_enabled:
-            tools.append(get_semantic_scholar_search_tool(search))
-        if self.config.scientific_openalex_enabled:
-            tools.append(get_openalex_search_tool(search))
-        if self.config.scientific_plos_enabled:
-            tools.append(get_plos_search_tool(search))
-        if self.config.scientific_google_patents_enabled:
-            tools.append(get_google_patents_search_tool(search))
-        if self.config.scientific_google_scholar_enabled:
-            tools.append(get_google_scholar_search_tool(search))
-        if self.config.scientific_youtube_search_enabled:
-            tools.append(get_youtube_video_search_tool(search))
-        if self.config.scientific_youtube_transcript_enabled:
-            tools.append(get_youtube_transcript_tool(search))
-        if self.config.scientific_pdf_text_enabled:
-            tools.append(get_pdf_text_tool(pdf))
-        if self.config.scientific_exec_enabled:
-            exec_helper = ExecTool(self.config)
-            tools.append(get_exec_tool(exec_helper))
-            tools.append(get_exec_tool(exec_helper))
+        # Scientific sub-agent always has the full scientific toolset.
+        tools.append(get_arxiv_search_tool(search))
+        tools.append(get_europe_pmc_search_tool(search))
+        tools.append(get_semantic_scholar_search_tool(search))
+        tools.append(get_openalex_search_tool(search))
+        tools.append(get_plos_search_tool(search))
+        tools.append(get_google_patents_search_tool(search))
+        tools.append(get_google_scholar_search_tool(search))
+        tools.append(get_youtube_video_search_tool(search))
+        tools.append(get_youtube_transcript_tool(search))
+        tools.append(get_pdf_text_tool(pdf))
+        tools.append(get_exec_tool(exec_helper))
         return tools
 
     def run(self, prompt: str) -> str:

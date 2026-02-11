@@ -68,24 +68,7 @@ class AgentsToolset:
             web_helper = SerpApiWebSearchTool(self.config)
             tools.append(get_bing_web_search_tool(web_helper))
 
-        websearcher_has_tools = (
-            (self.config.websearcher_brave_enabled and self.config.brave_enabled)
-            or (
-                has_serpapi
-                and (
-                    (
-                        self.config.websearcher_google_web_enabled
-                        and self.config.serpapi_google_web_enabled
-                    )
-                    or (
-                        self.config.websearcher_bing_web_enabled
-                        and self.config.serpapi_bing_web_enabled
-                    )
-                    or self.config.websearcher_google_ai_mode_enabled
-                )
-            )
-        )
-        if self.config.websearcher_enabled and websearcher_has_tools:
+        if self.config.websearcher_enabled:
             websearcher_helper = WebSearcherAgentTool(
                 self.config,
                 model_name=self.websearcher_model,
@@ -94,16 +77,7 @@ class AgentsToolset:
             )
             tools.append(get_websearcher_research_tool(websearcher_helper))
 
-        tester_has_tools = (
-            self.config.tester_exec_enabled
-            or (self.config.tester_brave_enabled and self.config.brave_enabled)
-            or (
-                has_serpapi
-                and self.config.tester_google_web_enabled
-                and self.config.serpapi_google_web_enabled
-            )
-        )
-        if self.config.tester_enabled and tester_has_tools:
+        if self.config.tester_enabled:
             tester_helper = TesterAgentTool(
                 self.config,
                 model_name=self.tester_model,
@@ -113,24 +87,7 @@ class AgentsToolset:
             tools.append(get_tester_agent_tool(tester_helper))
 
         include_forumscout = self.tool_profile in {"all", "telegram"}
-        social_forumscout_tools = any(
-            [
-                self.config.social_network_forum_search_enabled,
-                self.config.social_network_linkedin_enabled,
-                self.config.social_network_instagram_enabled,
-                self.config.social_network_reddit_posts_enabled,
-                self.config.social_network_reddit_comments_enabled,
-                self.config.social_network_x_enabled,
-            ]
-        )
-        social_google_tools = has_serpapi and any(
-            [
-                self.config.social_network_google_forums_enabled,
-                self.config.social_network_google_news_enabled,
-            ]
-        )
-        social_has_tools = social_forumscout_tools or social_google_tools
-        if self.config.social_network_enabled and include_forumscout and social_has_tools:
+        if self.config.social_network_enabled and include_forumscout:
             social_helper = SocialNetworkAgentTool(
                 self.config,
                 model_name=self.social_network_model,
@@ -140,27 +97,7 @@ class AgentsToolset:
             tools.append(get_social_network_research_tool(social_helper))
 
         include_scientific = self.tool_profile in {"all", "telegram"}
-        scientific_search_tools = any(
-            [
-                self.config.scientific_arxiv_enabled,
-                self.config.scientific_europe_pmc_enabled,
-                self.config.scientific_semantic_scholar_enabled,
-                self.config.scientific_openalex_enabled,
-                self.config.scientific_plos_enabled,
-                self.config.scientific_google_patents_enabled,
-                self.config.scientific_google_scholar_enabled,
-                self.config.scientific_youtube_search_enabled,
-                self.config.scientific_youtube_transcript_enabled,
-            ]
-        )
-        scientific_extra_tools = any(
-            [
-                self.config.scientific_pdf_text_enabled and self.config.pdf_text_enabled,
-                self.config.scientific_exec_enabled and self.config.exec_enabled,
-            ]
-        )
-        scientific_has_tools = scientific_search_tools or scientific_extra_tools
-        if self.config.scientific_enabled and include_scientific and scientific_has_tools:
+        if self.config.scientific_enabled and include_scientific:
             scientific_helper = ScientificResearchAgentTool(
                 self.config,
                 model_name=self.scientific_model,

@@ -9,7 +9,6 @@ from .serpapi_web_search import (
     get_google_web_search_tool,
 )
 from .exec_tool import ExecTool, get_exec_tool
-from .serpapi_keys import has_serpapi_keys
 from .task_list_tool import TaskListTool, get_task_list_tool
 from .subagent_config import build_subagent_config
 from .task_list_state import current_session_id
@@ -69,29 +68,14 @@ class TesterAgentTool:
         task_helper = TaskListTool(self.config)
         
         tools = [get_task_list_tool(task_helper)]
+        # Tester sub-agent always has execution and web-search capabilities.
+        tools.append(get_exec_tool(self.exec))
+        tools.append(get_brave_search_tool(self.brave))
+        tools.append(get_google_web_search_tool(self.web))
 
-        if self.config.tester_exec_enabled:
-            tools.append(get_exec_tool(self.exec))
-
-        if self.config.tester_brave_enabled:
-            tools.append(get_brave_search_tool(self.brave))
-
-        has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
-        if has_serpapi and self.config.tester_google_web_enabled:
-            tools.append(get_google_web_search_tool(self.web))
-            
         return tools
 
     def run(self, prompt: str) -> str:
-        # Check if at least one critical tool is available
-        exec_allowed = self.config.tester_exec_enabled
-        brave_allowed = self.config.tester_brave_enabled
-        google_allowed = self.config.tester_google_web_enabled and has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
-        
-        # We need at least exec or search to be useful
-        if not (exec_allowed or brave_allowed or google_allowed):
-             return "ERROR: Tester agent requires at least Exec, Brave, or Google enabled."
-
         if not prompt.strip():
             return "ERROR: prompt cannot be empty"
 
@@ -111,12 +95,12 @@ class TesterAgentTool:
             "tools": {
                 "max_tools_used": self.config.tester_max_tools_used,
                 "tester_enabled": True,
-                "tester_exec_enabled": self.config.tester_exec_enabled,
-                "tester_brave_enabled": self.config.tester_brave_enabled,
-                "tester_google_web_enabled": self.config.tester_google_web_enabled,
-                "exec_enabled": self.config.tester_exec_enabled, # Subagent needs this flag true to use tool if passed, but we pass concrete tools override.
-                "brave_enabled": self.config.brave_enabled and self.config.tester_brave_enabled,
-                "serpapi_google_web_enabled": self.config.serpapi_google_web_enabled and self.config.tester_google_web_enabled,
+                "tester_exec_enabled": True,
+                "tester_brave_enabled": True,
+                "tester_google_web_enabled": True,
+                "exec_enabled": True, # Sub-agent uses explicit tools_override, keep flags aligned.
+                "brave_enabled": True,
+                "serpapi_google_web_enabled": True,
                 
                 # Disable others
                 "websearcher_enabled": False,
