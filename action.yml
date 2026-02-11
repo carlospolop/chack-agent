@@ -4,11 +4,11 @@ inputs:
   provider:
     description: "Model provider: openai or openrouter"
     required: false
-    default: "openai"
+    default: "openrouter"
   model_primary:
     description: "Primary model (e.g., gpt-4o, gpt-5.2-codex)"
     required: false
-    default: "gpt-4o"
+    default: "BEST_QUALITY"
   model_social_network:
     description: "Social network model (optional)"
     required: false
