@@ -383,7 +383,12 @@ def _log_timestamp() -> str:
 
 def _item_type(item: Any) -> str:
     if isinstance(item, dict):
+        # 'function' logic from some older/wrapper libs
+        if item.get("role") == "tool":
+            return "function_call_output"
         return str(item.get("type", "") or "")
+    if getattr(item, "role", None) == "tool":
+        return "function_call_output"
     return str(getattr(item, "type", "") or "")
 
 
@@ -404,19 +409,48 @@ def _sanitize_input_items(items: list[Any]) -> list[Any]:
     # Keep function call/output pairs consistent to avoid Responses API 400s when
     # history truncation drops one side of the pair.
     call_ids = set()
+    has_idless_calls = False
+    
+    # Expanded set of known tool call types to ensure we track ALL calls.
+    # This prevents dropping valid success outputs just because we missed the call type.
+    _call_types = {
+        "function",
+        "function_call", 
+        "tool_call",
+        "computer_call",
+        "computer_20241022", # Anthropic specific
+        "file_search",
+        "code_interpreter",
+        "mcp_call",
+        "local_shell_call",
+    }
+
     for item in items:
         item_type = _item_type(item)
-        if item_type in {"function_call", "tool_call", "function"}:
+        if item_type in _call_types or item_type.endswith("_call"):
             call_id = _item_call_id(item)
             if call_id:
                 call_ids.add(call_id)
+            else:
+                has_idless_calls = True
 
     sanitized: list[Any] = []
     for item in items:
         item_type = _item_type(item)
-        if item_type == "function_call_output":
+        
+        # Check if this looks like a tool output
+        is_output_type = (
+            item_type == "function_call_output" 
+            or item_type.endswith("_call_output")
+            or item_type == "tool_output"
+        )
+        
+        if is_output_type:
             call_id = _item_call_id(item)
-            if call_id and call_id not in call_ids:
+            # If output has a specific ID, it generally must match a known call ID.
+            # However, if we saw calls without IDs (e.g. from OpenRouter/Gemini),
+            # we rely on order/wildcard matching and keep the output to be safe.
+            if call_id and call_id not in call_ids and not has_idless_calls:
                 continue
         sanitized.append(item)
     return sanitized
