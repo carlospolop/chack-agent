@@ -1,0 +1,203 @@
+name: Run Chack Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "Model provider: openai or openrouter"
+        required: true
+        default: "openai"
+      model_primary:
+        description: "Primary model (e.g., gpt-4o, google/gemini-3-pro-preview)"
+        required: true
+        default: "gpt-4o"
+      model_social_network:
+        description: "Social network model (optional)"
+        required: false
+        default: ""
+      model_scientific:
+        description: "Scientific model (optional)"
+        required: false
+        default: ""
+      model_websearcher:
+        description: "Websearcher model (optional)"
+        required: false
+        default: ""
+      model_tester:
+        description: "Tester model (optional)"
+        required: false
+        default: ""
+      system_prompt:
+        description: "System prompt"
+        required: true
+        default: "You are an advanced research agent."
+      user_prompt:
+        description: "User prompt"
+        required: true
+      main_action:
+        description: "Agent main_action"
+        required: true
+        default: "github_action"
+      sub_action:
+        description: "Agent sub_action"
+        required: true
+        default: "run"
+      tools_config_json:
+        description: "JSON dict for ToolsConfig overrides"
+        required: false
+        default: "{\"exec_enabled\": true}"
+      session_config_json:
+        description: "JSON dict for SessionConfig overrides"
+        required: false
+        default: "{}"
+      agent_config_json:
+        description: "JSON dict for AgentConfig overrides"
+        required: false
+        default: "{}"
+      logging_level:
+        description: "Logging level"
+        required: false
+        default: "INFO"
+      max_turns:
+        description: "Session max_turns override (0 to keep default)"
+        required: false
+        default: "0"
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_HTTP_REFERER: ${{ secrets.OPENROUTER_HTTP_REFERER }}
+      OPENROUTER_APP_NAME: ${{ secrets.OPENROUTER_APP_NAME }}
+      OPENROUTER_BASE_URL: ${{ secrets.OPENROUTER_BASE_URL }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Run Chack Agent
+        env:
+          INPUT_PROVIDER: ${{ inputs.provider }}
+          INPUT_MODEL_PRIMARY: ${{ inputs.model_primary }}
+          INPUT_MODEL_SOCIAL: ${{ inputs.model_social_network }}
+          INPUT_MODEL_SCIENTIFIC: ${{ inputs.model_scientific }}
+          INPUT_MODEL_WEBSEARCHER: ${{ inputs.model_websearcher }}
+          INPUT_MODEL_TESTER: ${{ inputs.model_tester }}
+          INPUT_SYSTEM_PROMPT: ${{ inputs.system_prompt }}
+          INPUT_USER_PROMPT: ${{ inputs.user_prompt }}
+          INPUT_MAIN_ACTION: ${{ inputs.main_action }}
+          INPUT_SUB_ACTION: ${{ inputs.sub_action }}
+          INPUT_TOOLS_CONFIG_JSON: ${{ inputs.tools_config_json }}
+          INPUT_SESSION_CONFIG_JSON: ${{ inputs.session_config_json }}
+          INPUT_AGENT_CONFIG_JSON: ${{ inputs.agent_config_json }}
+          INPUT_LOGGING_LEVEL: ${{ inputs.logging_level }}
+          INPUT_MAX_TURNS: ${{ inputs.max_turns }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          from chack_agent import (
+              Chack,
+              ChackConfig,
+              ModelConfig,
+              AgentConfig,
+              SessionConfig,
+              ToolsConfig,
+              CredentialsConfig,
+              LoggingConfig,
+          )
+
+          def _load_json(name):
+              raw = os.environ.get(name, "{}").strip()
+              if not raw:
+                  return {}
+              try:
+                  return json.loads(raw)
+              except json.JSONDecodeError as exc:
+                  raise SystemExit(f"Invalid JSON in {name}: {exc}")
+
+          provider = os.environ.get("INPUT_PROVIDER", "openai").strip() or "openai"
+          if provider not in {"openai", "openrouter"}:
+              raise SystemExit("provider must be 'openai' or 'openrouter'")
+
+          if provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
+              raise SystemExit("OPENAI_API_KEY is required for provider=openai")
+          if provider == "openrouter" and not os.environ.get("OPENROUTER_API_KEY"):
+              raise SystemExit("OPENROUTER_API_KEY is required for provider=openrouter")
+
+          tools_overrides = _load_json("INPUT_TOOLS_CONFIG_JSON")
+          session_overrides = _load_json("INPUT_SESSION_CONFIG_JSON")
+          agent_overrides = _load_json("INPUT_AGENT_CONFIG_JSON")
+
+          max_turns_raw = os.environ.get("INPUT_MAX_TURNS", "0").strip()
+          try:
+              max_turns = int(max_turns_raw) if max_turns_raw else 0
+          except ValueError:
+              raise SystemExit("max_turns must be an integer")
+
+          model = ModelConfig(
+              primary=os.environ.get("INPUT_MODEL_PRIMARY", "gpt-4o"),
+              provider=provider,
+              social_network=os.environ.get("INPUT_MODEL_SOCIAL", ""),
+              scientific=os.environ.get("INPUT_MODEL_SCIENTIFIC", ""),
+              websearcher=os.environ.get("INPUT_MODEL_WEBSEARCHER", ""),
+              tester=os.environ.get("INPUT_MODEL_TESTER", ""),
+          )
+
+          agent_cfg = AgentConfig(
+              main_action=os.environ.get("INPUT_MAIN_ACTION", "github_action"),
+              sub_action=os.environ.get("INPUT_SUB_ACTION", "run"),
+              **agent_overrides,
+          )
+
+          session_cfg = SessionConfig(
+              **session_overrides,
+          )
+          if max_turns > 0:
+              session_cfg.max_turns = max_turns
+
+          tools_cfg = ToolsConfig(
+              **tools_overrides,
+          )
+
+          config = ChackConfig(
+              model=model,
+              agent=agent_cfg,
+              session=session_cfg,
+              tools=tools_cfg,
+              credentials=CredentialsConfig(
+                  openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+                  openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+                  openrouter_http_referer=os.environ.get("OPENROUTER_HTTP_REFERER", ""),
+                  openrouter_app_name=os.environ.get("OPENROUTER_APP_NAME", ""),
+                  openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", ""),
+              ),
+              logging=LoggingConfig(level=os.environ.get("INPUT_LOGGING_LEVEL", "INFO")),
+              system_prompt=os.environ.get("INPUT_SYSTEM_PROMPT", ""),
+              env={},
+          )
+
+          agent = Chack(config)
+          result = agent.run(
+              session_id="github-action",
+              text=os.environ.get("INPUT_USER_PROMPT", ""),
+          )
+
+          print("\n=== AGENT OUTPUT ===\n")
+          print(result.output)
+          if getattr(result, "total_cost", None) is not None:
+              print(f"\nEstimated cost: ${result.total_cost:.6f}")
+          PY
