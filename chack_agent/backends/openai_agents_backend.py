@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from openai import OpenAI, AsyncOpenAI
+from openai import OpenAI, AsyncOpenAI, BadRequestError
 from agents import (
     Agent,
     ModelSettings,
@@ -46,6 +46,37 @@ _OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 class _OpenRouterResponsesModel(OpenAIResponsesModel):
+    @staticmethod
+    def _has_function_outputs(items: Any) -> bool:
+        if not isinstance(items, list):
+            return False
+        for item in items:
+            if isinstance(item, dict) and item.get("type") == "function_call_output":
+                return True
+            if getattr(item, "type", None) == "function_call_output":
+                return True
+        return False
+
+    @staticmethod
+    def _message_only_items(items: Any) -> Any:
+        if not isinstance(items, list):
+            return items
+        filtered = []
+        for item in items:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                role = item.get("role")
+                if item_type == "message" or (
+                    role in {"user", "assistant", "system", "developer"}
+                    and "content" in item
+                ):
+                    filtered.append(item)
+                continue
+            role = getattr(item, "role", None)
+            if role in {"user", "assistant", "system", "developer"}:
+                filtered.append(item)
+        return filtered or items
+
     def _normalize_tool_name(self, name: str, tool_names: set[str]) -> str:
         if not name or not tool_names:
             return name
@@ -114,21 +145,44 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
         conversation_id: str | None = None,
         prompt=None,
     ):
-        # OpenRouter providers (notably Gemini backends) can reject tool turns when
-        # only `previous_response_id` is used for context chaining. Sending full
-        # turn input without previous_response_id avoids function-call ordering 400s.
-        response = await super().get_response(
-            system_instructions,
-            input,
-            model_settings,
-            tools,
-            output_schema,
-            handoffs,
-            tracing,
-            previous_response_id=None,
-            conversation_id=conversation_id,
-            prompt=prompt,
-        )
+        try:
+            response = await super().get_response(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
+        except BadRequestError as exc:
+            err = str(exc)
+            should_retry = (
+                previous_response_id is not None
+                and "function response turn comes immediately after a function call turn" in err
+                and not self._has_function_outputs(input)
+            )
+            if not should_retry:
+                raise
+            _LOGGER.warning(
+                "OpenRouter rejected response chain with previous_response_id; retrying without it."
+            )
+            fallback_input = self._message_only_items(input)
+            response = await super().get_response(
+                system_instructions,
+                fallback_input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id=None,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
         tool_names = {getattr(tool, "name", "") for tool in tools if getattr(tool, "name", "")}
         if tool_names:
             self._normalize_output_tools(response.output, tool_names)
@@ -156,7 +210,7 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
             output_schema,
             handoffs,
             tracing,
-            previous_response_id=None,
+            previous_response_id=previous_response_id,
             conversation_id=conversation_id,
             prompt=prompt,
         ):
