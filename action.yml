@@ -2,7 +2,7 @@ name: "chack-agent"
 description: "Run the chack agent with a prompt and parameters."
 inputs:
   provider:
-    description: "Model provider: openai, openrouter or codex"
+    description: "Model provider: openai, openrouter, codex or langgraph"
     required: false
     default: "openrouter"
   model_primary:

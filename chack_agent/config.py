@@ -119,6 +119,8 @@ def resolve_backend_type(config: ChackConfig) -> str:
     provider = str(getattr(config.model, "provider", "") or "").strip().lower()
     if not provider:
         raise ValueError("model.provider must be defined in config")
+    if provider == "langgraph":
+        return "langgraph"
     if provider == "openrouter":
         return "openrouter"
     if provider == "codex":

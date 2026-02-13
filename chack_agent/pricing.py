@@ -107,13 +107,24 @@ def estimate_cost(
     cached_prompt_tokens: int = 0,
     cache_write_tokens: int = 0,
 ) -> Optional[float]:
-    lookup = model
-    if lookup not in pricing.models and lookup.startswith("openai/"):
-        stripped = lookup[len("openai/") :]
-        if stripped in pricing.models:
-            lookup = stripped
-    if lookup not in pricing.models:
+    lookup = str(model or "").strip()
+    if not lookup:
         return None
+
+    if lookup not in pricing.models:
+        # Provider-agnostic fallback: strip "<provider>/" from pricing keys and
+        # compare against the model name. Use only unique matches.
+        lookup_stripped = lookup.split("/", 1)[1] if "/" in lookup else lookup
+        stripped_matches = [
+            key
+            for key in pricing.models.keys()
+            if (key.split("/", 1)[1] if "/" in key else key) == lookup_stripped
+        ]
+        if len(stripped_matches) == 1:
+            lookup = stripped_matches[0]
+        else:
+            return None
+
     rates = pricing.models[lookup]
     billable_prompt = max(prompt_tokens - cached_prompt_tokens, 0)
     total = (

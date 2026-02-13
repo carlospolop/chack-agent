@@ -1,9 +1,10 @@
 # Backends Overview
 
-This folder contains 3 runtime backends:
+This folder contains 4 runtime backends:
 - `openai_compaction_backend.py`
 - `openrouter_openai_backend.py`
 - `codex_backend.py`
+- `langgraph_backend.py`
 
 ## Shared Architecture
 
@@ -29,7 +30,7 @@ This folder contains 3 runtime backends:
 ### `task_steps_manager init first`
 
 - Enforced in backend tool-input guardrail `require_task_steps_manager_init_first`.
-- Codex backend also synthesizes a compatibility `task_steps_manager init` event if needed.
+- Codex and LangGraph backends enforce this in their tool execution layers.
 
 ## `openai_compaction_backend.py`
 
@@ -115,6 +116,30 @@ This folder contains 3 runtime backends:
 - No backend tool-input guardrail hooks (since execution is external CLI-driven).
 - MCP server hard-enforces `task_steps_manager init first` and `max_tools_used` limits.
 - MCP does not expose command-execution tools (e.g. `exec`) to avoid duplication with Codex native command execution.
+
+---
+
+## `langgraph_backend.py`
+
+### Library/SDK
+
+- Uses LangGraph (`StateGraph`) + LangChain OpenAI-compatible client against OpenRouter.
+- Uses existing `AgentsToolset` so tool set and sub-agent behavior stay aligned with other backends.
+
+### Loop execution
+
+- Native autonomous ReAct-style loop in graph form: `llm_call -> tool_node -> llm_call ...` until no tool calls.
+- Uses runtime recursion limit to avoid infinite loops.
+
+### Memory model
+
+- Uses LangGraph checkpointer thread memory (`thread_id`) for short-term continuity.
+- Adds summary-based context compaction in-model when message history grows.
+- Keeps local `_conversation` for Chack API compatibility.
+
+### Guardrails
+
+- Enforces `task_steps_manager init first` and `max_tools_used` in the graph tool node.
 
 ## Notes for future changes
 

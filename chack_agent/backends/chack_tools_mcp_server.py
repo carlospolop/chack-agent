@@ -5,8 +5,11 @@ import inspect
 import json
 import keyword
 import os
+import time
+import traceback
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -16,6 +19,7 @@ from agents.usage import Usage
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
+from chack_tools.telemetry import log_tool_started, log_tool_executed, log_tool_error
 
 
 _MCP_DENYLIST_TOOL_NAMES = {
@@ -222,28 +226,54 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                 if value is None:
                     continue
                 payload[_mapping.get(py_name, py_name)] = value
+            start_ts = log_tool_started(_name, payload)
+            start_time = time.time()
+            error = None
+            try:
+                if state.require_task_steps_manager_init_first and not state.has_task_steps_manager_init:
+                    if _name != "task_steps_manager" or str(payload.get("action", "")).strip().lower() != "init":
+                        raise RuntimeError(
+                            "You must call task_steps_manager with action=init before using any other tool."
+                        )
 
-            if state.require_task_steps_manager_init_first and not state.has_task_steps_manager_init:
-                if _name != "task_steps_manager" or str(payload.get("action", "")).strip().lower() != "init":
-                    raise RuntimeError(
-                        "You must call task_steps_manager with action=init before using any other tool."
+                is_task_steps_manager_init = (
+                    _name == "task_steps_manager"
+                    and str(payload.get("action", "")).strip().lower() == "init"
+                )
+                if not is_task_steps_manager_init and _name != "task_steps_manager":
+                    if state.max_non_task_tools > 0 and state.non_task_tool_calls >= state.max_non_task_tools:
+                        raise RuntimeError(
+                            f"Tool budget reached ({state.max_non_task_tools}). Finish using gathered context."
+                        )
+                    state.non_task_tool_calls += 1
+
+                result = await _invoke_function_tool(_tool, payload)
+                if is_task_steps_manager_init and str(result).startswith("SUCCESS:"):
+                    state.has_task_steps_manager_init = True
+                return _truncate_tool_output(result)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                try:
+                    log_tool_error(
+                        _name,
+                        payload,
+                        error=error,
+                        trace=traceback.format_exc(),
                     )
-
-            is_task_steps_manager_init = (
-                _name == "task_steps_manager"
-                and str(payload.get("action", "")).strip().lower() == "init"
-            )
-            if not is_task_steps_manager_init and _name != "task_steps_manager":
-                if state.max_non_task_tools > 0 and state.non_task_tool_calls >= state.max_non_task_tools:
-                    raise RuntimeError(
-                        f"Tool budget reached ({state.max_non_task_tools}). Finish using gathered context."
-                    )
-                state.non_task_tool_calls += 1
-
-            result = await _invoke_function_tool(_tool, payload)
-            if is_task_steps_manager_init and str(result).startswith("SUCCESS:"):
-                state.has_task_steps_manager_init = True
-            return _truncate_tool_output(result)
+                except Exception:
+                    pass
+                raise
+            finally:
+                end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                duration_ms = int((time.time() - start_time) * 1000)
+                log_tool_executed(
+                    _name,
+                    payload,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    duration_ms=duration_ms,
+                    error=error,
+                )
 
         _proxy.__name__ = f"tool_{name}".replace("-", "_")
         _proxy.__doc__ = description
