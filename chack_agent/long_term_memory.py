@@ -100,13 +100,18 @@ def build_long_term_memory(
     model: str | OpenAIResponsesModel = model_name
 
     backend_type = resolve_backend_type(config)
-    if backend_type == "openrouter":
+    uses_openrouter_routed_model = (
+        backend_type in {"openrouter", "langgraph"} or "/" in str(model_name or "")
+    )
+    if uses_openrouter_routed_model:
         api_key = (
             str(getattr(config.credentials, "openrouter_api_key", "") or "").strip()
             or os.environ.get("OPENROUTER_API_KEY", "").strip()
         )
         if not api_key:
-            raise ValueError("OPENROUTER_API_KEY is required when model.provider=openrouter")
+            raise ValueError(
+                "OPENROUTER_API_KEY is required when long-term memory uses a routed model"
+            )
         base_url = (
             str(getattr(config.credentials, "openrouter_base_url", "") or "").strip()
             or os.environ.get("OPENROUTER_BASE_URL", "").strip()

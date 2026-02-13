@@ -6,7 +6,8 @@ from .config import ToolsConfig as BaseToolsConfig
 
 
 def _build_tools_config(base: BaseToolsConfig, overrides: Mapping[str, Any] | None) -> BaseToolsConfig:
-    data = dict(base.__dict__)
+    allowed = set(getattr(BaseToolsConfig, "__dataclass_fields__", {}).keys())
+    data = {k: v for k, v in dict(base.__dict__).items() if k in allowed}
     for key, value in (overrides or {}).items():
         if key in data:
             data[key] = value
