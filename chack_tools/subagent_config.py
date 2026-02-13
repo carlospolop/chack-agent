@@ -31,22 +31,53 @@ def build_subagent_config(
         SessionConfig,
         ToolsConfig as AgentToolsConfig,
     )
+
+    def _resolve_alias(name: str, *, provider: str, fallback: str = "") -> str:
+        raw = str(name or "").strip() or fallback
+        if not raw:
+            return ""
+        try:
+            from chack_agent.model_aliases import resolve_model_alias
+
+            return resolve_model_alias(raw, provider=provider)
+        except Exception:
+            return raw
+
     overrides = dict(overrides or {})
     prompt = str(overrides.get("system_prompt") or system_prompt).strip() or system_prompt
 
     model_overrides = overrides.get("model") or {}
-    model_primary = str(model_overrides.get("primary") or model_name or "").strip()
     provider = str(model_overrides.get("provider") or model_provider or "").strip()
     if not provider:
         raise ValueError("model_provider must be defined for sub-agent config")
+    model_primary = _resolve_alias(
+        str(model_overrides.get("primary") or model_name or "").strip(),
+        provider=provider,
+    )
     model = ModelConfig(
         primary=model_primary,
         provider=provider,
         max_context_tokens=int(model_overrides.get("max_context_tokens") or 0),
-        social_network=str(model_overrides.get("social_network") or ""),
-        scientific=str(model_overrides.get("scientific") or ""),
-        websearcher=str(model_overrides.get("websearcher") or ""),
-        tester=str(model_overrides.get("tester") or ""),
+        social_network=_resolve_alias(
+            str(model_overrides.get("social_network") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
+        scientific=_resolve_alias(
+            str(model_overrides.get("scientific") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
+        websearcher=_resolve_alias(
+            str(model_overrides.get("websearcher") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
+        tester=_resolve_alias(
+            str(model_overrides.get("tester") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
         social_network_max_turns=int(model_overrides.get("social_network_max_turns") or 30),
         scientific_max_turns=int(model_overrides.get("scientific_max_turns") or 30),
         websearcher_max_turns=int(model_overrides.get("websearcher_max_turns") or 30),

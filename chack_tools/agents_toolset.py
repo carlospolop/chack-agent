@@ -38,16 +38,39 @@ class AgentsToolset:
         self.model_provider = str(model_provider or "").strip()
         if not self.model_provider:
             raise ValueError("model_provider must be defined")
-        self.default_model = default_model
-        self.social_network_model = social_network_model or "CHEAP_BUT_QUALITY"
-        self.scientific_model = scientific_model or "CHEAP_BUT_QUALITY"
-        self.websearcher_model = websearcher_model or "CHEAP_BUT_QUALITY"
-        self.tester_model = tester_model or "CHEAP_BUT_QUALITY"
+        self.default_model = self._resolve_alias(default_model, fallback="")
+        self.social_network_model = self._resolve_alias(
+            social_network_model,
+            fallback="CHEAP_BUT_QUALITY",
+        )
+        self.scientific_model = self._resolve_alias(
+            scientific_model,
+            fallback="CHEAP_BUT_QUALITY",
+        )
+        self.websearcher_model = self._resolve_alias(
+            websearcher_model,
+            fallback="CHEAP_BUT_QUALITY",
+        )
+        self.tester_model = self._resolve_alias(
+            tester_model,
+            fallback="CHEAP_BUT_QUALITY",
+        )
         self.social_network_max_turns = social_network_max_turns
         self.scientific_max_turns = scientific_max_turns
         self.websearcher_max_turns = websearcher_max_turns
         self.tester_max_turns = tester_max_turns
         self.tools = self._build_tools()
+
+    def _resolve_alias(self, value: str, *, fallback: str) -> str:
+        raw = str(value or "").strip() or fallback
+        if not raw:
+            return ""
+        try:
+            from chack_agent.model_aliases import resolve_model_alias
+
+            return resolve_model_alias(raw, provider=self.model_provider)
+        except Exception:
+            return raw
 
     def _build_tools(self):
         tools = []
