@@ -104,6 +104,9 @@ class LangGraphExecutor:
     _summary_max_chars: int
     _compaction_threshold_ratio: float
     _max_context_tokens: int
+    _output_schema_json: str
+    _output_schema_name: str
+    _output_schema_strict: bool
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
@@ -362,8 +365,20 @@ class LangGraphExecutor:
         summary_block = ""
         if summary:
             summary_block = f"\n\n### MEMORY SUMMARY\n{summary}"
+        output_schema_block = ""
+        if self._output_schema_json:
+            schema_name = str(self._output_schema_name or "output_schema").strip() or "output_schema"
+            strict_text = "true" if self._output_schema_strict else "false"
+            output_schema_block = (
+                "\n\n### OUTPUT FORMAT (REQUIRED)\n"
+                "Your final response must be valid JSON matching exactly this JSON Schema.\n"
+                "Return ONLY the JSON object, with no markdown and no extra text.\n"
+                f"Schema name: {schema_name}\n"
+                f"Strict: {strict_text}\n"
+                f"Schema:\n{self._output_schema_json}"
+            )
 
-        return f"{base}{policy_block}{summary_block}".strip()
+        return f"{base}{policy_block}{summary_block}{output_schema_block}".strip()
 
     def build_graph(self) -> None:
         checkpoint_mod = importlib.import_module("langgraph.checkpoint.memory")
@@ -707,6 +722,13 @@ def build_executor(
         ),
         _compaction_threshold_ratio=float(getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75),
         _max_context_tokens=int(config.model.max_context_tokens or 0),
+        _output_schema_json=(
+            json.dumps(getattr(config.agent, "output_schema_json", None), ensure_ascii=False, indent=2)
+            if getattr(config.agent, "output_schema_json", None)
+            else ""
+        ),
+        _output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
+        _output_schema_strict=bool(getattr(config.agent, "output_schema_strict", True)),
     )
     try:
         executor.build_graph()
