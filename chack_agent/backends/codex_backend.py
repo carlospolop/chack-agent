@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -125,15 +126,23 @@ class CodexExecutor:
         command = self._build_command()
         env = self._build_env()
         timeout_seconds = int(os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "900") or "900")
+        _LOGGER.info(
+            "Starting Codex CLI process: model=%s timeout_seconds=%s thread_id=%s ts=%s",
+            self._model_name,
+            timeout_seconds,
+            self._thread_id or "",
+            _log_timestamp(),
+        )
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 input=prompt,
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
                 env=env,
-                timeout=timeout_seconds,
-                check=False,
             )
         except FileNotFoundError:
             return (
@@ -152,22 +161,41 @@ class CodexExecutor:
                 [],
                 _RawResult(raw_responses=[]),
             )
-        if completed.returncode != 0:
-            stderr = (completed.stderr or "").strip()
-            stdout = (completed.stdout or "").strip()
-            details = stderr or stdout or "No error output captured."
-            return (
-                f"ERROR: Codex exec failed (exit={completed.returncode}).\n{details}",
-                [],
-                _RawResult(raw_responses=[]),
-            )
 
         steps: list[tuple[ToolAction, Any]] = []
         output = ""
         usage_payload: dict[str, Any] | None = None
+        combined_output_lines: list[str] = []
+        started_at = time.monotonic()
 
-        for line in (completed.stdout or "").splitlines():
-            event = self._parse_event_line(line)
+        if process.stdin is not None:
+            try:
+                process.stdin.write(prompt)
+                process.stdin.close()
+            except Exception:
+                pass
+
+        while True:
+            if (time.monotonic() - started_at) > timeout_seconds:
+                process.kill()
+                return (
+                    f"ERROR: Codex execution timed out after {timeout_seconds}s.",
+                    steps,
+                    _RawResult(raw_responses=[]),
+                )
+            if process.stdout is None:
+                break
+            line = process.stdout.readline()
+            if line == "" and process.poll() is not None:
+                break
+            if not line:
+                time.sleep(0.05)
+                continue
+
+            raw_line = str(line).rstrip("\n")
+            if raw_line:
+                combined_output_lines.append(raw_line)
+            event = self._parse_event_line(raw_line)
             if not event:
                 continue
 
@@ -226,6 +254,15 @@ class CodexExecutor:
                         "cache_write_tokens": 0,
                     },
                 }
+
+        return_code = process.wait()
+        if return_code != 0:
+            details = "\n".join(combined_output_lines).strip() or "No error output captured."
+            return (
+                f"ERROR: Codex exec failed (exit={return_code}).\n{details}",
+                steps,
+                _RawResult(raw_responses=[]),
+            )
 
         raw_responses: list[Any] = []
         if usage_payload is not None:
