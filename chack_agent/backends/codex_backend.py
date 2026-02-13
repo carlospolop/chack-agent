@@ -8,6 +8,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
 from chack_tools.telemetry import log_event
 
@@ -36,6 +37,8 @@ class CodexExecutor:
     _openai_api_key: str
     _tool_profile: str
     _tools_config_json: str
+    _allowed_tools_json: str
+    _model_provider: str
     _default_model: str
     _social_network_model: str
     _scientific_model: str
@@ -202,7 +205,9 @@ class CodexExecutor:
         if self._codex_home:
             env["CODEX_HOME"] = self._codex_home
         env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
+        env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
         env["CHACK_TOOL_PROFILE"] = self._tool_profile
+        env["CHACK_MODEL_PROVIDER"] = self._model_provider
         env["CHACK_DEFAULT_MODEL"] = self._default_model
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
         env["CHACK_SCIENTIFIC_MODEL"] = self._scientific_model
@@ -234,7 +239,9 @@ class CodexExecutor:
         python_cmd = sys.executable or "python3"
         env_vars = [
             "CHACK_TOOLS_CONFIG_JSON",
+            "CHACK_ALLOWED_TOOLS_JSON",
             "CHACK_TOOL_PROFILE",
+            "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",
             "CHACK_SCIENTIFIC_MODEL",
@@ -381,7 +388,40 @@ def build_executor(
     tools_append: Optional[list[Any]] = None,
 ) -> CodexExecutor:
     del max_turns
-    del tools_override, tools_append
+
+    def _extract_tool_names(items: list[Any] | None) -> list[str]:
+        names: list[str] = []
+        seen: set[str] = set()
+        for tool in items or []:
+            name = str(getattr(tool, "name", "") or getattr(tool, "__name__", "") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+        return names
+
+    allowed_tool_names: list[str] | None = None
+    model_provider = str(config.model.provider or "").strip()
+    if not model_provider:
+        raise ValueError("model.provider must be defined in config")
+    if tools_override is not None:
+        allowed_tool_names = _extract_tool_names(list(tools_override))
+    elif tools_append:
+        base_toolset = AgentsToolset(
+            config.tools,
+            tool_profile=tool_profile,
+            model_provider=model_provider,
+            default_model=config.model.primary,
+            social_network_model=config.model.social_network,
+            scientific_model=config.model.scientific,
+            websearcher_model=config.model.websearcher,
+            tester_model=config.model.tester,
+            social_network_max_turns=config.model.social_network_max_turns,
+            scientific_max_turns=config.model.scientific_max_turns,
+            websearcher_max_turns=config.model.websearcher_max_turns,
+            tester_max_turns=config.model.tester_max_turns,
+        )
+        allowed_tool_names = _extract_tool_names(list(base_toolset.tools) + list(tools_append))
 
     openai_api_key = (
         str(config.credentials.openai_api_key or "").strip()
@@ -409,6 +449,10 @@ def build_executor(
         _openai_api_key=openai_api_key,
         _tool_profile=str(tool_profile or "all"),
         _tools_config_json=json.dumps(getattr(config.tools, "__dict__", {}), ensure_ascii=False),
+        _allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False)
+        if allowed_tool_names is not None
+        else "",
+        _model_provider=model_provider,
         _default_model=str(config.model.primary or ""),
         _social_network_model=str(config.model.social_network or ""),
         _scientific_model=str(config.model.scientific or ""),

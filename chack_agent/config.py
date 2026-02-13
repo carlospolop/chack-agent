@@ -32,7 +32,7 @@ def _interpolate_env(value: Any) -> Any:
 @dataclass
 class ModelConfig:
     primary: str
-    provider: str = "openai"
+    provider: str = ""
     max_context_tokens: int = 0
     social_network: str = ""
     scientific: str = ""
@@ -116,7 +116,9 @@ class ChackConfig:
 
 
 def resolve_backend_type(config: ChackConfig) -> str:
-    provider = str(getattr(config.model, "provider", "") or "openai").strip().lower()
+    provider = str(getattr(config.model, "provider", "") or "").strip().lower()
+    if not provider:
+        raise ValueError("model.provider must be defined in config")
     if provider == "openrouter":
         return "openrouter"
     if provider == "codex":
@@ -154,6 +156,8 @@ def load_config(path: str) -> ChackConfig:
         raise ValueError("model.primary is required in config")
     if not str(raw.get("model", {}).get("primary", "")).strip():
         raise ValueError("model.primary is required in config")
+    if not str(raw.get("model", {}).get("provider", "")).strip():
+        raise ValueError("model.provider is required in config")
 
     base_dir = os.path.dirname(os.path.abspath(path))
     if "tools_prompt_file" in raw:

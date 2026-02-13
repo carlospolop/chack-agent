@@ -835,6 +835,8 @@ def build_executor(
             toolset_kwargs["tester_model"] = config.model.tester
         if "tester_max_turns" in init_params:
             toolset_kwargs["tester_max_turns"] = config.model.tester_max_turns
+        if "model_provider" in init_params:
+            toolset_kwargs["model_provider"] = str(config.model.provider or "")
         toolset = AgentsToolset(config.tools, **toolset_kwargs)
         tools = toolset.tools
         if tools_append:

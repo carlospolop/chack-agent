@@ -416,6 +416,7 @@ class Chack:
         tools_override: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
         context: Optional[Any] = None,
+        stop_requested: Optional[Callable[[], bool]] = None,
     ) -> RunResult:
         return await asyncio.to_thread(
             self.run,
@@ -430,6 +431,7 @@ class Chack:
             tools_override=tools_override,
             system_prompt_override=system_prompt_override,
             context=context,
+            stop_requested=stop_requested,
         )
 
     def run(
@@ -448,6 +450,7 @@ class Chack:
         usage_session_id: Optional[str] = None,
         tools_append: Optional[list[Any]] = None,
         context: Optional[Any] = None,
+        stop_requested: Optional[Callable[[], bool]] = None,
     ) -> RunResult:
         log_token = set_log_context(
             main_action=str(self.config.agent.main_action or ""),
@@ -531,6 +534,15 @@ class Chack:
             max_missing_tools_reminders = max(
                 0, int(self.config.tools.missing_tools_reminders_max or 0)
             )
+
+            def _should_stop() -> bool:
+                if stop_requested is None:
+                    return False
+                try:
+                    return bool(stop_requested())
+                except Exception:
+                    return False
+
             def _invoke_with_min_tools(
                 prompt_text: str,
                 run_label: str,
@@ -557,6 +569,21 @@ class Chack:
                 )
 
                 for attempt in range(1, max_attempts + 1):
+                    if _should_stop():
+                        self.logger.info(
+                            "%s: stop requested before attempt %s/%s ts=%s.",
+                            run_label,
+                            attempt,
+                            max_attempts,
+                            _log_timestamp(),
+                        )
+                        result = {
+                            "output": "Request stopped by user.",
+                            "intermediate_steps": [],
+                            "raw_result": None,
+                            "error": "stopped",
+                        }
+                        break
                     self.logger.info(
                         "%s: attempt %s/%s (min_tools_target=%s require_task_steps_manager_init=%s ts=%s).",
                         run_label,
@@ -596,6 +623,8 @@ class Chack:
                             reset_active_context(tokens)
 
                     result = _invoke()
+                    if result.get("error") == "stopped":
+                        break
 
                     (
                         attempt_prompt,
@@ -685,6 +714,8 @@ class Chack:
             ) = _invoke_with_min_tools(text, "Run 1")
             output = result.get("output", "")
             run1_output = output
+            if result.get("error") == "stopped":
+                enable_self_critique = False
             rounds_used = len(run1_all_steps) + (1 if run1_output else 0)
             tools_used = self._non_task_tool_count(run1_all_steps)
             self.logger.info(
@@ -699,7 +730,7 @@ class Chack:
 
             run2_all_steps: list = []
             run2_output = ""
-            if enable_self_critique:
+            if enable_self_critique and not _should_stop():
                 self.logger.info("Run 2 (self-critique) starting. ts=%s", _log_timestamp())
                 critique_prompt = self._require_self_critique_prompt()
                 critique_input = (

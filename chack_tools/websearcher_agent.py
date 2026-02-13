@@ -44,11 +44,15 @@ class WebSearcherAgentTool:
         config: ToolsConfig,
         model_name: str = "",
         fallback_model: str = "",
+        model_provider: str = "",
         max_turns: int = 30,
     ):
         self.config = config
         self.model_name = model_name
         self.fallback_model = fallback_model
+        self.model_provider = str(model_provider or "").strip()
+        if not self.model_provider:
+            raise ValueError("model_provider must be defined")
         self.max_turns = max(2, int(max_turns or 30))
         self.brave = BraveSearchTool(config)
         self.web = SerpApiWebSearchTool(config)
@@ -123,6 +127,7 @@ class WebSearcherAgentTool:
         config = build_subagent_config(
             self.config,
             model_name=model_name,
+            model_provider=self.model_provider,
             max_turns=self.max_turns,
             system_prompt=_WEBSEARCHER_AGENT_SYSTEM_PROMPT,
             overrides=overrides,

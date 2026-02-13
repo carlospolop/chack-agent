@@ -17,6 +17,7 @@ def build_subagent_config(
     base_tools: BaseToolsConfig,
     *,
     model_name: str,
+    model_provider: str,
     max_turns: int,
     system_prompt: str,
     overrides: Mapping[str, Any] | None = None,
@@ -35,15 +36,21 @@ def build_subagent_config(
 
     model_overrides = overrides.get("model") or {}
     model_primary = str(model_overrides.get("primary") or model_name or "").strip()
+    provider = str(model_overrides.get("provider") or model_provider or "").strip()
+    if not provider:
+        raise ValueError("model_provider must be defined for sub-agent config")
     model = ModelConfig(
         primary=model_primary,
+        provider=provider,
         max_context_tokens=int(model_overrides.get("max_context_tokens") or 0),
         social_network=str(model_overrides.get("social_network") or ""),
         scientific=str(model_overrides.get("scientific") or ""),
         websearcher=str(model_overrides.get("websearcher") or ""),
+        tester=str(model_overrides.get("tester") or ""),
         social_network_max_turns=int(model_overrides.get("social_network_max_turns") or 30),
         scientific_max_turns=int(model_overrides.get("scientific_max_turns") or 30),
         websearcher_max_turns=int(model_overrides.get("websearcher_max_turns") or 30),
+        tester_max_turns=int(model_overrides.get("tester_max_turns") or 30),
     )
 
     agent_overrides = overrides.get("agent") or {}

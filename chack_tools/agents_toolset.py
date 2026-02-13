@@ -22,6 +22,7 @@ class AgentsToolset:
         self,
         config: ToolsConfig,
         tool_profile: str = "all",
+        model_provider: str = "",
         default_model: str = "",
         social_network_model: str = "",
         scientific_model: str = "",
@@ -34,6 +35,9 @@ class AgentsToolset:
     ):
         self.config = config
         self.tool_profile = tool_profile
+        self.model_provider = str(model_provider or "").strip()
+        if not self.model_provider:
+            raise ValueError("model_provider must be defined")
         self.default_model = default_model
         self.social_network_model = social_network_model
         self.scientific_model = scientific_model
@@ -73,6 +77,7 @@ class AgentsToolset:
                 self.config,
                 model_name=self.websearcher_model,
                 fallback_model=self.default_model,
+                model_provider=self.model_provider,
                 max_turns=self.websearcher_max_turns,
             )
             tools.append(get_websearcher_research_tool(websearcher_helper))
@@ -82,6 +87,7 @@ class AgentsToolset:
                 self.config,
                 model_name=self.tester_model,
                 fallback_model=self.default_model,
+                model_provider=self.model_provider,
                 max_turns=self.tester_max_turns,
             )
             tools.append(get_tester_agent_tool(tester_helper))
@@ -92,6 +98,7 @@ class AgentsToolset:
                 self.config,
                 model_name=self.social_network_model,
                 fallback_model=self.default_model,
+                model_provider=self.model_provider,
                 max_turns=self.social_network_max_turns,
             )
             tools.append(get_social_network_research_tool(social_helper))
@@ -102,6 +109,7 @@ class AgentsToolset:
                 self.config,
                 model_name=self.scientific_model,
                 fallback_model=self.default_model,
+                model_provider=self.model_provider,
                 max_turns=self.scientific_max_turns,
             )
             tools.append(get_scientific_research_tool(scientific_helper))

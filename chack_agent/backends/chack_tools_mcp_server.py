@@ -126,6 +126,9 @@ def _load_toolset() -> list[Any]:
         tools_cfg_data = {}
 
     tool_profile = os.environ.get("CHACK_TOOL_PROFILE", "all") or "all"
+    model_provider = str(os.environ.get("CHACK_MODEL_PROVIDER", "") or "").strip()
+    if not model_provider:
+        raise RuntimeError("CHACK_MODEL_PROVIDER must be defined")
     default_model = os.environ.get("CHACK_DEFAULT_MODEL", "")
     social_network_model = os.environ.get("CHACK_SOCIAL_NETWORK_MODEL", "")
     scientific_model = os.environ.get("CHACK_SCIENTIFIC_MODEL", "")
@@ -142,6 +145,7 @@ def _load_toolset() -> list[Any]:
     toolset = AgentsToolset(
         ToolsConfig(**tools_cfg_data),
         tool_profile=tool_profile,
+        model_provider=model_provider,
         default_model=default_model,
         social_network_model=social_network_model,
         scientific_model=scientific_model,
@@ -152,11 +156,26 @@ def _load_toolset() -> list[Any]:
         websearcher_max_turns=_to_int("CHACK_WEBSEARCHER_MAX_TURNS", 30),
         tester_max_turns=_to_int("CHACK_TESTER_MAX_TURNS", 30),
     )
+    allowed_tools_raw = os.environ.get("CHACK_ALLOWED_TOOLS_JSON", "").strip()
+    allowed_tools: set[str] | None = None
+    if allowed_tools_raw:
+        try:
+            parsed_allowed = json.loads(allowed_tools_raw)
+        except json.JSONDecodeError:
+            parsed_allowed = None
+        if isinstance(parsed_allowed, list):
+            allowed_tools = {
+                str(item).strip().lower()
+                for item in parsed_allowed
+                if str(item).strip()
+            }
     tools = list(getattr(toolset, "tools", []) or [])
     filtered_tools: list[Any] = []
     for tool in tools:
         name = str(getattr(tool, "name", "") or "").strip().lower()
         if name in _MCP_DENYLIST_TOOL_NAMES:
+            continue
+        if allowed_tools is not None and name not in allowed_tools:
             continue
         filtered_tools.append(tool)
     return filtered_tools
