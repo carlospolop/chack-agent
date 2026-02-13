@@ -8,14 +8,14 @@ from typing import Any, Callable, Dict, List, Optional
 
 
 _ACTIVE_SESSION_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "chack_tasklist_session_id",
+    "chack_task_steps_manager_session_id",
     default=None,
 )
 _ACTIVE_RUN_LABEL: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "chack_tasklist_run_label",
+    "chack_task_steps_manager_run_label",
     default="Run 1",
 )
-_LOGGER = logging.getLogger("chack.task_list")
+_LOGGER = logging.getLogger("chack.task_steps_manager")
 
 
 @dataclass
@@ -38,17 +38,17 @@ class TaskRun:
 @dataclass
 class TaskSession:
     session_id: str
-    title: str = "Task List"
+    title: str = "Task Steps Manager"
     runs: Dict[str, TaskRun] = field(default_factory=dict)
 
 
-class TaskListStore:
+class TaskStepsManagerStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._sessions: Dict[str, TaskSession] = {}
         self._listeners: Dict[str, List[Callable[[str], None]]] = {}
 
-    def create_session(self, session_id: str, title: str = "Task List") -> TaskSession:
+    def create_session(self, session_id: str, title: str = "Task Steps Manager") -> TaskSession:
         with self._lock:
             session = TaskSession(session_id=session_id, title=title)
             self._sessions[session_id] = session
@@ -175,6 +175,11 @@ class TaskListStore:
                     "Use action=replace or action=update instead."
                 )
             items = _parse_tasks(tasks_text)
+            if len(items) < 2:
+                return (
+                    "ERROR: action=init requires at least 2 tasks. "
+                    "Provide `tasks` as newline-separated items with at least two lines."
+                )
             run.tasks = []
             run.next_id = 1
             run.completed_emitted = False
@@ -303,23 +308,6 @@ class TaskListStore:
             self._maybe_emit_completion(session_id, run)
             return f"SUCCESS: updated task {task_id}"
 
-        if action == "clear":
-            run.tasks = []
-            run.next_id = 1
-            run.initialized = True
-            self._notify(session_id, reason=f"{run_label}:clear")
-            self._log_event(
-                "tasklist_defined",
-                payload={
-                    "tasks_total": 0,
-                    "tasks": self._snapshot(run),
-                },
-                session_id=session_id,
-                run_label=run.label,
-            )
-            self._maybe_emit_completion(session_id, run)
-            return f"SUCCESS: cleared tasks for {run_label}"
-
         if action == "replace":
             items = _parse_tasks(tasks_text)
             run.tasks = []
@@ -344,7 +332,7 @@ class TaskListStore:
 
         return (
             "ERROR: unsupported action. Use one of: init, list, add, update, "
-            "complete, delete, clear, replace"
+            "complete, delete, replace"
         )
 
     def render(self, session_id: str) -> str:
@@ -371,7 +359,7 @@ class TaskListStore:
             return "\n".join(lines)
 
 
-STORE = TaskListStore()
+STORE = TaskStepsManagerStore()
 
 
 def set_active_context(session_id: Optional[str], run_label: str):

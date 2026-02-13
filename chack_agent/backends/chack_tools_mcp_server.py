@@ -18,6 +18,14 @@ from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
 
 
+_MCP_DENYLIST_TOOL_NAMES = {
+    "exec",
+    "shell_command",
+    "run_terminal_cmd",
+    "command_execution",
+}
+
+
 def _safe_identifier(name: str, used: set[str]) -> str:
     base = "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in name)
     if not base or base[0].isdigit() or keyword.iskeyword(base):
@@ -74,9 +82,9 @@ async def _invoke_function_tool(tool: Any, args: dict[str, Any]) -> str:
 
 @dataclass
 class _ServerPolicyState:
-    require_task_list_init_first: bool
+    require_task_steps_manager_init_first: bool
     max_non_task_tools: int
-    has_task_list_init: bool = False
+    has_task_steps_manager_init: bool = False
     non_task_tool_calls: int = 0
 
 
@@ -92,6 +100,20 @@ def _as_int(raw: str, default: int = 0) -> int:
         return int(str(raw or "").strip())
     except Exception:
         return default
+
+
+def _truncate_tool_output(value: str) -> str:
+    token_budget = max(1, _as_int(os.environ.get("CHACK_MCP_TOOL_MAX_TOKENS", "10000"), 10000))
+    max_bytes = token_budget * 4
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return value
+
+    marker = "\n... truncated by MCP tool response limit ...\n"
+    half = max(0, (max_bytes - len(marker.encode("utf-8"))) // 2)
+    prefix = encoded[:half].decode("utf-8", errors="ignore")
+    suffix = encoded[-half:].decode("utf-8", errors="ignore")
+    return f"{prefix}{marker}{suffix}"
 
 
 def _load_toolset() -> list[Any]:
@@ -130,7 +152,14 @@ def _load_toolset() -> list[Any]:
         websearcher_max_turns=_to_int("CHACK_WEBSEARCHER_MAX_TURNS", 30),
         tester_max_turns=_to_int("CHACK_TESTER_MAX_TURNS", 30),
     )
-    return list(getattr(toolset, "tools", []) or [])
+    tools = list(getattr(toolset, "tools", []) or [])
+    filtered_tools: list[Any] = []
+    for tool in tools:
+        name = str(getattr(tool, "name", "") or "").strip().lower()
+        if name in _MCP_DENYLIST_TOOL_NAMES:
+            continue
+        filtered_tools.append(tool)
+    return filtered_tools
 
 
 def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -> None:
@@ -175,23 +204,27 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                     continue
                 payload[_mapping.get(py_name, py_name)] = value
 
-            if state.require_task_list_init_first and not state.has_task_list_init:
-                if _name != "task_list" or str(payload.get("action", "")).strip().lower() != "init":
+            if state.require_task_steps_manager_init_first and not state.has_task_steps_manager_init:
+                if _name != "task_steps_manager" or str(payload.get("action", "")).strip().lower() != "init":
                     raise RuntimeError(
-                        "You must call task_list with action=init before using any other tool."
+                        "You must call task_steps_manager with action=init before using any other tool."
                     )
 
-            if _name == "task_list":
-                if str(payload.get("action", "")).strip().lower() == "init":
-                    state.has_task_list_init = True
-            else:
+            is_task_steps_manager_init = (
+                _name == "task_steps_manager"
+                and str(payload.get("action", "")).strip().lower() == "init"
+            )
+            if not is_task_steps_manager_init and _name != "task_steps_manager":
                 if state.max_non_task_tools > 0 and state.non_task_tool_calls >= state.max_non_task_tools:
                     raise RuntimeError(
                         f"Tool budget reached ({state.max_non_task_tools}). Finish using gathered context."
                     )
                 state.non_task_tool_calls += 1
 
-            return await _invoke_function_tool(_tool, payload)
+            result = await _invoke_function_tool(_tool, payload)
+            if is_task_steps_manager_init and str(result).startswith("SUCCESS:"):
+                state.has_task_steps_manager_init = True
+            return _truncate_tool_output(result)
 
         _proxy.__name__ = f"tool_{name}".replace("-", "_")
         _proxy.__doc__ = description
@@ -206,8 +239,8 @@ def main() -> None:
     mcp = FastMCP("Chack Tools MCP")
     tools = _load_toolset()
     state = _ServerPolicyState(
-        require_task_list_init_first=_as_bool(
-            os.environ.get("CHACK_REQUIRE_TASK_LIST_INIT_FIRST", "1"),
+        require_task_steps_manager_init_first=_as_bool(
+            os.environ.get("CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST", "1"),
             default=True,
         ),
         max_non_task_tools=max(0, _as_int(os.environ.get("CHACK_MAX_TOOLS_USED", "0"), 0)),

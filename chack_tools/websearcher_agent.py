@@ -11,9 +11,9 @@ from .serpapi_web_search import (
     get_google_ai_mode_tool
 )
 from .serpapi_keys import has_serpapi_keys
-from .task_list_tool import TaskListTool, get_task_list_tool
+from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
 from .subagent_config import build_subagent_config
-from .task_list_state import current_session_id
+from .task_steps_manager_state import current_session_id
 from .tool_usage_state import STORE as TOOL_USAGE_STORE
 from .telemetry import current_log_context, run_with_tool_logging
 
@@ -64,9 +64,9 @@ class WebSearcherAgentTool:
         if function_tool is None:
             raise RuntimeError("OpenAI Agents SDK is not available in this runtime.")
         
-        task_helper = TaskListTool(self.config)
+        task_helper = TaskStepsManagerTool(self.config)
         
-        tools = [get_task_list_tool(task_helper)]
+        tools = [get_task_steps_manager_tool(task_helper)]
         tools.append(get_brave_search_tool(self.brave))
 
         has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
@@ -136,7 +136,7 @@ class WebSearcherAgentTool:
             min_tools_used_override=0,
             max_tools_used_override=self.config.websearcher_max_tools_used,
             enable_self_critique=None,
-            require_task_list_init_first=True,
+            require_task_steps_manager_init_first=True,
             tools_override=tools,
             system_prompt_override=config.system_prompt,
             usage_session_id=parent_session_id,

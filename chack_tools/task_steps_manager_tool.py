@@ -11,10 +11,10 @@ except ImportError:
 from .config import ToolsConfig
 from .telemetry import log_tool_started, log_tool_executed, log_tool_error
 
-from .task_list_state import STORE, current_run_label, current_session_id
+from .task_steps_manager_state import STORE, current_run_label, current_session_id
 
 
-class TaskListTool:
+class TaskStepsManagerTool:
     def __init__(self, config: ToolsConfig):
         self.config = config
 
@@ -57,12 +57,12 @@ class TaskListTool:
         return f"{result}\n\n{board}"
 
 
-def get_task_list_tool(helper: TaskListTool):
+def get_task_steps_manager_tool(helper: TaskStepsManagerTool):
     if function_tool is None:
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
-    @function_tool(name_override="task_list")
-    def task_list(
+    @function_tool(name_override="task_steps_manager")
+    def task_steps_manager(
         action: str,
         task_id: Optional[int] = None,
         text: str = "",
@@ -80,13 +80,12 @@ def get_task_list_tool(helper: TaskListTool):
         - Every mutating action updates the live board message in chat/thread.
 
         Actions and arguments:
-        - `init`: initialize the current run list. Provide `tasks` as newline-separated items.
+        - `init`: initialize the current run list. Provide `tasks` as newline-separated items; the initial plan must contain at least 2 steps.
         - `list`: return the current full board.
         - `add`: add one task with `text` (optional `status`, `notes`).
         - `update`: update task `task_id` fields (`text`, `status`, `notes`).
         - `complete`: mark `task_id` as done (optional `notes`).
         - `delete`: remove `task_id`.
-        - `clear`: clear all tasks in the current run.
         - `replace`: replace the current run list with newline-separated `tasks`.
 
         Status values:
@@ -100,7 +99,7 @@ def get_task_list_tool(helper: TaskListTool):
             "tasks": tasks,
             "notes": notes,
         }
-        start_ts = log_tool_started("task_list", tool_input)
+        start_ts = log_tool_started("task_steps_manager", tool_input)
         start_time = time.time()
         error = None
         try:
@@ -116,7 +115,7 @@ def get_task_list_tool(helper: TaskListTool):
             error = f"{type(exc).__name__}: {exc}"
             try:
                 log_tool_error(
-                    "task_list",
+                    "task_steps_manager",
                     tool_input,
                     error=error,
                     trace=traceback.format_exc(),
@@ -128,7 +127,7 @@ def get_task_list_tool(helper: TaskListTool):
             end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
             duration_ms = int((time.time() - start_time) * 1000)
             log_tool_executed(
-                "task_list",
+                "task_steps_manager",
                 tool_input,
                 start_ts=start_ts,
                 end_ts=end_ts,
@@ -136,4 +135,4 @@ def get_task_list_tool(helper: TaskListTool):
                 error=error,
             )
 
-    return task_list
+    return task_steps_manager

@@ -113,7 +113,7 @@ def non_task_tool_count(counter: Counter[str]) -> int:
     total = 0
     for tool_name, count in counter.items():
         name = (tool_name or "").lower()
-        if name.startswith("task_list"):
+        if name.startswith("task_steps_manager"):
             continue
         total += int(count or 0)
     return total

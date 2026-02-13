@@ -179,7 +179,7 @@ def main() -> None:
     result = agent.run(
         session_id="github-action",
         text=prompt,
-        require_task_list_init_first=bool(agent_cfg.require_task_list_init_first),
+        require_task_steps_manager_init_first=bool(agent_cfg.require_task_steps_manager_init_first),
     )
     output = result.output or ""
 

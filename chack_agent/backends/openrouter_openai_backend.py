@@ -29,7 +29,7 @@ from agents.exceptions import ModelBehaviorError
 from ..config import ChackConfig
 from ..output_schema import JsonSchemaOutput
 from chack_tools.agents_toolset import AgentsToolset
-from chack_tools.task_list_state import current_run_label, current_session_id
+from chack_tools.task_steps_manager_state import current_run_label, current_session_id
 from chack_tools.telemetry import log_event, log_tool_started, log_tool_executed, log_tool_error
 from chack_tools.tool_usage_state import (
     STORE as TOOL_USAGE_STORE,
@@ -424,8 +424,8 @@ def _open_first_tool_gate() -> None:
             _FIRST_TOOL_INIT_DONE.clear()
 
 
-@tool_input_guardrail(name="require_task_list_init_first")
-def _require_task_list_init_first(data) -> ToolGuardrailFunctionOutput:
+@tool_input_guardrail(name="require_task_steps_manager_init_first")
+def _require_task_steps_manager_init_first(data) -> ToolGuardrailFunctionOutput:
     run_label = (current_run_label() or "").strip().lower()
     if "self-critique" in run_label or "self critique" in run_label:
         return ToolGuardrailFunctionOutput.allow()
@@ -434,22 +434,22 @@ def _require_task_list_init_first(data) -> ToolGuardrailFunctionOutput:
         return ToolGuardrailFunctionOutput.allow()
 
     reminder = (
-        "First tool call of this run must be task_list with action=init. "
-        "Call task_list init first before any other tool indicating the initial task plan for this run, "
+        "First tool call of this run must be task_steps_manager with action=init. "
+        "Call task_steps_manager init first before any other tool indicating the initial task plan for this run, "
         "so that you can keep track of your progress and next steps effectively. "
         "Note that if in the future you need to modify/update the task list based on new knowledge, you can "
-        "do so by calling the task_list tool with the appropriate action and providing any relevant notes about the update. "
+        "do so by calling the task_steps_manager tool with the appropriate action and providing any relevant notes about the update. "
     )
     tool_name = str(getattr(data.context, "tool_name", "") or "").strip().lower()
     raw_args = getattr(data.context, "tool_arguments", "") or ""
-    if tool_name != "task_list":
+    if tool_name != "task_steps_manager":
         try:
             log_event(
                 "tool_disallowed",
                 payload={
                     "tool": tool_name or "unknown",
                     "tool_input": raw_args,
-                    "reason": "first_tool_must_be_task_list_init",
+                    "reason": "first_tool_must_be_task_steps_manager_init",
                 },
                 task_session_id=current_session_id() or "",
                 run_label=current_run_label() or "",
@@ -470,9 +470,9 @@ def _require_task_list_init_first(data) -> ToolGuardrailFunctionOutput:
             log_event(
                 "tool_disallowed",
                 payload={
-                    "tool": tool_name or "task_list",
+                    "tool": tool_name or "task_steps_manager",
                     "tool_input": raw_args,
-                    "reason": "task_list_init_required",
+                    "reason": "task_steps_manager_init_required",
                 },
                 task_session_id=current_session_id() or "",
                 run_label=current_run_label() or "",
@@ -488,7 +488,7 @@ def _require_task_list_init_first(data) -> ToolGuardrailFunctionOutput:
 @tool_input_guardrail(name="respect_max_tools_used")
 def _respect_max_tools_used(data) -> ToolGuardrailFunctionOutput:
     tool_name = str(getattr(data.context, "tool_name", "") or "").strip().lower()
-    if tool_name.startswith("task_list"):
+    if tool_name.startswith("task_steps_manager"):
         return ToolGuardrailFunctionOutput.allow()
 
     max_tools_used = current_max_tools_used()
@@ -707,11 +707,11 @@ def _apply_guardrails(tools: list[Any]) -> list[Any]:
             setattr(
                 tool,
                 "tool_input_guardrails",
-                [_require_task_list_init_first, _respect_max_tools_used],
+                [_require_task_steps_manager_init_first, _respect_max_tools_used],
             )
             continue
-        if _require_task_list_init_first not in guards:
-            guards.append(_require_task_list_init_first)
+        if _require_task_steps_manager_init_first not in guards:
+            guards.append(_require_task_steps_manager_init_first)
         if _respect_max_tools_used not in guards:
             guards.append(_respect_max_tools_used)
     return _wrap_tools_with_logging(tools)

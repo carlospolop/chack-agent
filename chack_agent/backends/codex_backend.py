@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from chack_tools.task_list_state import current_run_label, current_session_id
+from chack_tools.task_steps_manager_state import current_run_label, current_session_id
 from chack_tools.telemetry import log_event
 
 from ..config import ChackConfig
@@ -47,7 +47,7 @@ class CodexExecutor:
     _tester_max_turns: int
     _min_tools_used: int
     _max_tools_used: int
-    _require_task_list_init_first: bool
+    _require_task_steps_manager_init_first: bool
     _thread_id: Optional[str] = None
     _codex_home: Optional[str] = None
 
@@ -81,17 +81,17 @@ class CodexExecutor:
     def _compose_prompt(self, user_input: str) -> str:
         base = str(self._base_system_prompt or "").strip()
         policy_lines: list[str] = []
-        if self._require_task_list_init_first:
+        if self._require_task_steps_manager_init_first:
             policy_lines.append(
-                "- First, call task_list with action=init before any other tool call."
+                "- First, call task_steps_manager with action=init before any other tool call."
             )
         if self._min_tools_used > 0:
             policy_lines.append(
-                f"- Use at least {self._min_tools_used} non-task tool calls before finalizing."
+                f"- Use at least {self._min_tools_used} non-task tool calls before finalizing to ensure you gather enough information and context for your task."
             )
         if self._max_tools_used > 0:
             policy_lines.append(
-                f"- Do not exceed {self._max_tools_used} non-task tool calls."
+                f"- To complete your task you must not exceed {self._max_tools_used} non-task tool calls."
             )
         policy_block = ""
         if policy_lines:
@@ -214,8 +214,8 @@ class CodexExecutor:
         env["CHACK_TESTER_MAX_TURNS"] = str(self._tester_max_turns)
         env["CHACK_MIN_TOOLS_USED"] = str(self._min_tools_used)
         env["CHACK_MAX_TOOLS_USED"] = str(self._max_tools_used)
-        env["CHACK_REQUIRE_TASK_LIST_INIT_FIRST"] = (
-            "1" if self._require_task_list_init_first else "0"
+        env["CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST"] = (
+            "1" if self._require_task_steps_manager_init_first else "0"
         )
         return env
 
@@ -266,6 +266,7 @@ class CodexExecutor:
             "STRIPE_API_KEY",
             "CHACK_EXEC_TIMEOUT",
             "CHACK_EXEC_MAX_OUTPUT",
+            "CHACK_MCP_TOOL_MAX_TOKENS",
         ]
 
         def _toml_string(value: str) -> str:
@@ -287,7 +288,7 @@ class CodexExecutor:
                 f"env_vars = {env_vars_toml}",
                 "required = true",
                 "startup_timeout_sec = 30",
-                "tool_timeout_sec = 600",
+                "tool_timeout_sec = 120",
             ]
         )
         with open(config_path, "w", encoding="utf-8") as handle:
@@ -344,7 +345,7 @@ class CodexExecutor:
             )
         if item_type == "todo_list":
             return ToolAction(
-                tool="task_list",
+                tool="task_steps_manager",
                 tool_input={
                     "action": "update",
                     "items": item.get("items", []),
@@ -403,7 +404,7 @@ def build_executor(
         _memory_limit=max_messages,
         _memory_reset_to=reset_to,
         _base_system_prompt=system_prompt,
-        _model_name=str(config.model.primary or "gpt-5.2-codex"),
+        _model_name=str(config.model.primary),
         _codex_path=codex_path,
         _openai_api_key=openai_api_key,
         _tool_profile=str(tool_profile or "all"),
@@ -419,7 +420,7 @@ def build_executor(
         _tester_max_turns=int(config.model.tester_max_turns or 30),
         _min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
         _max_tools_used=max(0, int(config.tools.max_tools_used or 0)),
-        _require_task_list_init_first=bool(
-            getattr(config.agent, "require_task_list_init_first", True)
+        _require_task_steps_manager_init_first=bool(
+            getattr(config.agent, "require_task_steps_manager_init_first", True)
         ),
     )

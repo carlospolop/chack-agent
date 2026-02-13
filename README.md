@@ -106,7 +106,7 @@ The agent can delegate to specialized sub‑agents. Sub‑agents run with restri
 * **System Tools**:
   * `exec`: Execute local shell commands (timeout/output limits from config).
   * `pdf_text`: Extract text from PDFs.
-  * `task_list`: Maintain a dynamic task list.
+  * `task_steps_manager`: Maintain a dynamic task list.
 * **Web Tools**:
   * `brave_search`: Brave Search API.
   * `serpapi`: Google/Bing web and AI‑mode endpoints.

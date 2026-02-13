@@ -26,10 +26,10 @@ This folder contains 3 runtime backends:
   - Backend tool-input guardrail `respect_max_tools_used` (hard reject once reached).
   - `agent.py` orchestration logic (checks when deciding retries/finalization).
 
-### `task_list init first`
+### `task_steps_manager init first`
 
-- Enforced in backend tool-input guardrail `require_task_list_init_first`.
-- Codex backend also synthesizes a compatibility `task_list init` event if needed.
+- Enforced in backend tool-input guardrail `require_task_steps_manager_init_first`.
+- Codex backend also synthesizes a compatibility `task_steps_manager init` event if needed.
 
 ## `openai_compaction_backend.py`
 
@@ -59,6 +59,8 @@ This folder contains 3 runtime backends:
 
 - On sequence/tool-chain errors, backend drops `previous_response_id` and retries while preserving `conversation_id`.
 
+---
+
 ## `openrouter_openai_backend.py`
 
 ### Library/SDK
@@ -87,6 +89,8 @@ This folder contains 3 runtime backends:
 
 - On recoverable chain errors, clears server-side IDs and retries with full local history.
 
+---
+
 ## `codex_backend.py`
 
 ### Library/SDK
@@ -109,7 +113,8 @@ This folder contains 3 runtime backends:
 ### Guardrails
 
 - No backend tool-input guardrail hooks (since execution is external CLI-driven).
-- Compatibility handling includes emitting a synthetic initial `task_list init` tool step.
+- MCP server hard-enforces `task_steps_manager init first` and `max_tools_used` limits.
+- MCP does not expose command-execution tools (e.g. `exec`) to avoid duplication with Codex native command execution.
 
 ## Notes for future changes
 

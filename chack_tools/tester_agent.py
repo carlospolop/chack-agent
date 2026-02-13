@@ -9,9 +9,9 @@ from .serpapi_web_search import (
     get_google_web_search_tool,
 )
 from .exec_tool import ExecTool, get_exec_tool
-from .task_list_tool import TaskListTool, get_task_list_tool
+from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
 from .subagent_config import build_subagent_config
-from .task_list_state import current_session_id
+from .task_steps_manager_state import current_session_id
 from .telemetry import current_log_context, run_with_tool_logging
 
 try:
@@ -65,9 +65,9 @@ class TesterAgentTool:
         if function_tool is None:
             raise RuntimeError("OpenAI Agents SDK is not available in this runtime.")
         
-        task_helper = TaskListTool(self.config)
+        task_helper = TaskStepsManagerTool(self.config)
         
-        tools = [get_task_list_tool(task_helper)]
+        tools = [get_task_steps_manager_tool(task_helper)]
         # Tester sub-agent always has execution and web-search capabilities.
         tools.append(get_exec_tool(self.exec))
         tools.append(get_brave_search_tool(self.brave))
@@ -133,7 +133,7 @@ class TesterAgentTool:
             min_tools_used_override=0,
             max_tools_used_override=self.config.tester_max_tools_used,
             enable_self_critique=None,
-            require_task_list_init_first=True,
+            require_task_steps_manager_init_first=True,
             tools_override=tools,
             system_prompt_override=config.system_prompt,
             usage_session_id=parent_session_id,

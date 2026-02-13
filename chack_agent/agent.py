@@ -21,7 +21,7 @@ from .long_term_memory import (
     load_long_term_memory,
     save_long_term_memory,
 )
-from chack_tools.task_list_state import STORE, reset_active_context, set_active_context
+from chack_tools.task_steps_manager_state import STORE, reset_active_context, set_active_context
 from chack_tools.tool_usage_state import (
     STORE as TOOL_USAGE_STORE,
     reset_active_max_tools_used,
@@ -76,7 +76,7 @@ You are a fully autonomous agent, you can decide what to do and when to do it av
 ### MIN TOOL USAGE
 As your responses usually lack of enough context, use at least 10+ tool calls to gather all the needed context (download all the repos needed, read/search/grep all the files needed, check all the infra in the cloud needed, check the web for errors or info...) before answering or performing any task.
 You will be forced a minimum amount of tools to use, so just use as many tools as needed to be 10000% sure of your response.
-Note that task-list calls do NOT count toward the minimum non-task tool usage requirement; use the other tools normally for investigation/execution.
+Note that task-steps-manager calls do NOT count toward the minimum non-task tool usage requirement; use the other tools normally for investigation/execution.
 
 ### FINISH CRITERIA
 When you already have enough reliable information to provide an educated and actionable response, stop calling tools and provide the final answer immediately.
@@ -87,7 +87,7 @@ If a tool fails but available evidence is sufficient, give the best possible ans
 
 IMPORTANT: These must be your first steps:
     - Think and organize the requested task in small granular steps
-    - The first tool you must call is the task_list tool with action=init and a concise plan of the steps you will take to complete the task.
+    - The first tool you must call is the task_steps_manager tool with action=init and a concise plan of the steps you will take to complete the task.
     - Always remember to mark a step as completed once you have completed it.
     - You can always update/add new steps to the task list as you progress. It's super important to keep the task list updated with the current state of the task and update it as much as needed.
     - Use all the given tools to get 200% of the needed context to be able to complete the task in the best way possible. You don't have a time limit or a limit of tool calls, so use them as much as you need to gather as much context as possible. Always check every assumption (download repos, read code, check the web...)
@@ -161,7 +161,7 @@ class Chack:
     def _tool_emoji(tool_name: str) -> str:
         emojis = {
             "exec": "🖥️",
-            "task_list": "🗂️",
+            "task_steps_manager": "🗂️",
             "brave_search": "🦁",
             "search_google_web": "🔎",
             "search_bing_web": "🅱️",
@@ -204,8 +204,8 @@ class Chack:
         action = step[0] if isinstance(step, tuple) and step else step
         return getattr(action, "tool_input", None)
 
-    def _is_task_list_init_step(self, step) -> bool:
-        if self._tool_name(step) != "task_list":
+    def _is_task_steps_manager_init_step(self, step) -> bool:
+        if self._tool_name(step) != "task_steps_manager":
             return False
         raw = self._tool_input(step)
         payload = raw
@@ -219,13 +219,13 @@ class Chack:
         return False
 
     def _non_task_tool_count(self, steps) -> int:
-        return sum(1 for step in steps if self._tool_name(step) != "task_list")
+        return sum(1 for step in steps if self._tool_name(step) != "task_steps_manager")
 
     @staticmethod
     def _non_task_tool_count_from_counter(counter: Counter[str]) -> int:
         total = 0
         for name, count in counter.items():
-            if name == "task_list":
+            if name == "task_steps_manager":
                 continue
             total += count
         return total
@@ -410,8 +410,8 @@ class Chack:
         min_tools_used_override: Optional[int] = None,
         max_tools_used_override: Optional[int] = None,
         enable_self_critique: Optional[bool] = None,
-        require_task_list_init_first: bool = True,
-        on_task_list_update: Optional[Callable[[str], None]] = None,
+        require_task_steps_manager_init_first: bool = True,
+        on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
         tool_profile: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
@@ -424,8 +424,8 @@ class Chack:
             min_tools_used_override=min_tools_used_override,
             max_tools_used_override=max_tools_used_override,
             enable_self_critique=enable_self_critique,
-            require_task_list_init_first=require_task_list_init_first,
-            on_task_list_update=on_task_list_update,
+            require_task_steps_manager_init_first=require_task_steps_manager_init_first,
+            on_task_steps_manager_update=on_task_steps_manager_update,
             tool_profile=tool_profile,
             tools_override=tools_override,
             system_prompt_override=system_prompt_override,
@@ -440,8 +440,8 @@ class Chack:
         min_tools_used_override: Optional[int] = None,
         max_tools_used_override: Optional[int] = None,
         enable_self_critique: Optional[bool] = None,
-        require_task_list_init_first: bool = True,
-        on_task_list_update: Optional[Callable[[str], None]] = None,
+        require_task_steps_manager_init_first: bool = True,
+        on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
         tool_profile: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
@@ -479,7 +479,7 @@ class Chack:
 
             task_session_id = f"{session_id}:{int(time.time() * 1000)}"
             update_log_context(task_session_id=task_session_id)
-            STORE.create_session(task_session_id, title="Task List")
+            STORE.create_session(task_session_id, title="Task Steps Manager")
             TOOL_USAGE_STORE.reset_session(task_session_id)
             available_tool_names = self._available_tool_names(executor)
 
@@ -496,7 +496,7 @@ class Chack:
                     "max_tools": max_tools_used,
                     "max_turns": int(self.config.session.max_turns or 0),
                     "self_critique_enabled": bool(enable_self_critique),
-                    "require_task_list_init_first": bool(require_task_list_init_first),
+                    "require_task_steps_manager_init_first": bool(require_task_steps_manager_init_first),
                     "system_prompt_override": bool(system_prompt_override),
                     "tools_override": bool(tools_override),
                     "tools_append": bool(tools_append),
@@ -505,25 +505,25 @@ class Chack:
             )
 
             def _listener(board_text: str) -> None:
-                if on_task_list_update is None:
+                if on_task_steps_manager_update is None:
                     return
                 try:
-                    on_task_list_update(board_text)
+                    on_task_steps_manager_update(board_text)
                 except Exception:
                     pass
 
-            if on_task_list_update is not None:
+            if on_task_steps_manager_update is not None:
                 STORE.register_listener(task_session_id, _listener)
 
             self.logger.info(
-                "Run start: session=%s task_session=%s tool_profile=%s min_tools=%s max_tools=%s self_critique=%s require_task_list_init=%s ts=%s",
+                "Run start: session=%s task_session=%s tool_profile=%s min_tools=%s max_tools=%s self_critique=%s require_task_steps_manager_init=%s ts=%s",
                 session_id,
                 task_session_id,
                 tool_profile or self.tool_profile,
                 min_tools_used,
                 max_tools_used,
                 enable_self_critique,
-                require_task_list_init_first,
+                require_task_steps_manager_init_first,
                 _log_timestamp(),
             )
 
@@ -536,7 +536,7 @@ class Chack:
                 run_label: str,
                 *,
                 min_tools_target: Optional[int] = None,
-                require_task_list_init: Optional[bool] = None,
+                require_task_steps_manager_init: Optional[bool] = None,
             ):
                 result = {}
                 all_steps: list = []
@@ -551,14 +551,14 @@ class Chack:
                 )
                 effective_max_tools = max_tools_used
                 effective_require_init = (
-                    require_task_list_init_first
-                    if require_task_list_init is None
-                    else bool(require_task_list_init)
+                    require_task_steps_manager_init_first
+                    if require_task_steps_manager_init is None
+                    else bool(require_task_steps_manager_init)
                 )
 
                 for attempt in range(1, max_attempts + 1):
                     self.logger.info(
-                        "%s: attempt %s/%s (min_tools_target=%s require_task_list_init=%s ts=%s).",
+                        "%s: attempt %s/%s (min_tools_target=%s require_task_steps_manager_init=%s ts=%s).",
                         run_label,
                         attempt,
                         max_attempts,
@@ -620,7 +620,7 @@ class Chack:
 
                     current_steps = result.get("intermediate_steps", [])
                     all_steps.extend(current_steps)
-                    has_init = any(self._is_task_list_init_step(step) for step in all_steps)
+                    has_init = any(self._is_task_steps_manager_init_step(step) for step in all_steps)
                     non_task_tools = self._non_task_tool_count(all_steps)
                     missing_init = effective_require_init and not has_init
                     missing_tools = effective_min_tools > 0 and non_task_tools < effective_min_tools
@@ -649,7 +649,7 @@ class Chack:
                     reminders = []
                     if missing_init:
                         reminders.append(
-                            "Before continuing, call task_list with action=init and a concise plan."
+                            "Before continuing, call task_steps_manager with action=init and a concise plan."
                         )
                     if missing_tools:
                         remaining = max(0, effective_min_tools - non_task_tools)
@@ -716,7 +716,7 @@ class Chack:
                     critique_input,
                     "Run 2 (self-critique)",
                     min_tools_target=0,
-                    require_task_list_init=False,
+                    require_task_steps_manager_init=False,
                 )
                 prompt_tokens += run2_prompt_tokens
                 completion_tokens += run2_completion_tokens
@@ -809,7 +809,7 @@ class Chack:
                 f"{tool_counts_text}"
             )
 
-            if on_task_list_update is not None:
+            if on_task_steps_manager_update is not None:
                 STORE.unregister_listener(task_session_id, _listener)
             TOOL_USAGE_STORE.clear(task_session_id)
 
