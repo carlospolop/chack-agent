@@ -67,8 +67,7 @@ class CodexExecutor:
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
-    _output_schema_name: str
-    _output_schema_strict: bool
+    _output_schema_path: Optional[str] = None
     _thread_id: Optional[str] = None
     _codex_home: Optional[str] = None
 
@@ -118,24 +117,11 @@ class CodexExecutor:
         if policy_lines:
             policy_block = "\n\n### TOOL USAGE POLICY\n" + "\n".join(policy_lines)
 
-        output_schema_block = ""
-        if self._output_schema_json:
-            schema_name = str(self._output_schema_name or "output_schema").strip() or "output_schema"
-            strict_text = "true" if self._output_schema_strict else "false"
-            output_schema_block = (
-                "\n\n### OUTPUT FORMAT (REQUIRED)\n"
-                "Your final response must be valid JSON matching exactly this JSON Schema.\n"
-                "Return ONLY the JSON object, with no markdown and no extra text.\n"
-                f"Schema name: {schema_name}\n"
-                f"Strict: {strict_text}\n"
-                f"Schema:\n{self._output_schema_json}"
-            )
-
         if not base:
-            return f"{user_input}{policy_block}{output_schema_block}" if (policy_block or output_schema_block) else user_input
+            return f"{user_input}{policy_block}" if policy_block else user_input
         if not user_input:
-            return f"{base}{policy_block}{output_schema_block}" if (policy_block or output_schema_block) else base
-        return f"{base}{policy_block}{output_schema_block}\n\n### USER REQUEST\n{user_input}"
+            return f"{base}{policy_block}" if policy_block else base
+        return f"{base}{policy_block}\n\n### USER REQUEST\n{user_input}"
 
     def _run_codex(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_codex_home_and_config()
@@ -285,6 +271,9 @@ class CodexExecutor:
         return output, steps, _RawResult(raw_responses=raw_responses)
 
     def _build_command(self) -> list[str]:
+        output_schema_args: list[str] = []
+        if self._output_schema_path:
+            output_schema_args = ["--output-schema", self._output_schema_path]
         if self._thread_id:
             return [
                 self._codex_path,
@@ -295,6 +284,7 @@ class CodexExecutor:
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--model",
                 self._model_name,
+                *output_schema_args,
                 self._thread_id,
                 "-",
             ]
@@ -308,6 +298,7 @@ class CodexExecutor:
             os.getcwd(),
             "--model",
             self._model_name,
+            *output_schema_args,
             "-",
         ]
 
@@ -351,6 +342,7 @@ class CodexExecutor:
         os.makedirs(base, exist_ok=True)
         self._codex_home = base
         self._write_codex_config(base)
+        self._write_output_schema_file(base)
 
     def _write_codex_config(self, codex_home: str) -> None:
         os.makedirs(codex_home, exist_ok=True)
@@ -423,6 +415,26 @@ class CodexExecutor:
         )
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(config_body + "\n")
+
+    def _write_output_schema_file(self, codex_home: str) -> None:
+        self._output_schema_path = None
+        raw = str(self._output_schema_json or "").strip()
+        if not raw:
+            return
+        try:
+            schema_obj = json.loads(raw)
+        except Exception:
+            return
+        if not isinstance(schema_obj, dict):
+            return
+        path = os.path.join(codex_home, "output_schema.json")
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(schema_obj, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            self._output_schema_path = path
+        except Exception:
+            self._output_schema_path = None
 
     @staticmethod
     def _parse_event_line(line: str) -> Optional[dict[str, Any]]:
@@ -635,6 +647,4 @@ def build_executor(
             if getattr(config.agent, "output_schema_json", None)
             else ""
         ),
-        _output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
-        _output_schema_strict=bool(getattr(config.agent, "output_schema_strict", True)),
     )
