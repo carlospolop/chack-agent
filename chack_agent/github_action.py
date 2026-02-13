@@ -100,6 +100,13 @@ def main() -> None:
     tools_overrides = _load_json("INPUT_TOOLS_CONFIG_JSON")
     session_overrides = _load_json("INPUT_SESSION_CONFIG_JSON")
     agent_overrides = _load_json("INPUT_AGENT_CONFIG_JSON")
+    if (
+        "require_task_list_init_first" in agent_overrides
+        and "require_task_steps_manager_init_first" not in agent_overrides
+    ):
+        agent_overrides["require_task_steps_manager_init_first"] = agent_overrides.pop(
+            "require_task_list_init_first"
+        )
 
     output_schema, output_schema_name, output_schema_strict = _load_output_schema()
     if output_schema is not None:

@@ -380,7 +380,17 @@ class Chack:
         def _build():
             return build_long_term_memory(self.config, conversation, previous, max_chars)
 
-        updated = await asyncio.to_thread(_build)
+        try:
+            updated = await asyncio.to_thread(_build)
+        except Exception as exc:
+            self.logger.warning(
+                "Long-term memory finalization failed for session %s: %s: %s (ts=%s).",
+                session_id,
+                type(exc).__name__,
+                exc,
+                _log_timestamp(),
+            )
+            return
         if updated:
             self.logger.info(
                 "Long-term memory updated for session %s (chars=%s ts=%s).",
