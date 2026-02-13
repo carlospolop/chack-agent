@@ -119,6 +119,8 @@ def resolve_backend_type(config: ChackConfig) -> str:
     provider = str(getattr(config.model, "provider", "") or "openai").strip().lower()
     if provider == "openrouter":
         return "openrouter"
+    if provider == "codex":
+        return "codex"
     if provider == "openai":
         return "openai_compaction"
     raise ValueError(f"Unsupported model.provider value: {provider!r}")

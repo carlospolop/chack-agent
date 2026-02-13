@@ -91,7 +91,7 @@ def _adapt_alias_for_runtime(name: str, *, provider: str = "") -> str:
     if not key:
         return name
     model_provider = str(provider or "").strip().lower()
-    if model_provider == "openai":
+    if model_provider in {"openai", "codex"}:
         return _OPENAI_ALIAS_EQUIVALENTS.get(key, key)
     return key
 

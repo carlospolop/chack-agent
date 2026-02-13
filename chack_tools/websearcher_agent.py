@@ -86,7 +86,7 @@ class WebSearcherAgentTool:
         if not prompt.strip():
             return "ERROR: prompt cannot be empty"
 
-        prompt = f"{prompt.rstrip()}\n\nNow start the research"
+        prompt = f"{prompt.rstrip()}\n\nNow start the research navigating through the web using the tools given!"
         tools = self._build_subagent_tools()
         model_name = self._resolved_model() or ""
         overrides = {

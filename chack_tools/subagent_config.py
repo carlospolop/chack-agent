@@ -5,12 +5,12 @@ from typing import Any, Mapping
 from .config import ToolsConfig as BaseToolsConfig
 
 
-def _build_tools_config(base: BaseToolsConfig, overrides: Mapping[str, Any] | None) -> AgentToolsConfig:
+def _build_tools_config(base: BaseToolsConfig, overrides: Mapping[str, Any] | None) -> BaseToolsConfig:
     data = dict(base.__dict__)
     for key, value in (overrides or {}).items():
         if key in data:
             data[key] = value
-    return AgentToolsConfig(**data)
+    return BaseToolsConfig(**data)
 
 
 def build_subagent_config(

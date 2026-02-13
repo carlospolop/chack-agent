@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from openai import OpenAI, AsyncOpenAI, BadRequestError, RateLimitError
+from openai import AsyncOpenAI, BadRequestError, RateLimitError
 from agents import (
     Agent,
     ModelSettings,
@@ -42,7 +42,7 @@ from chack_tools.tool_usage_state import (
 _FIRST_TOOL_LOCK = threading.Lock()
 _FIRST_TOOL_INIT_DONE: dict[str, bool] = {}
 _FIRST_TOOL_STATE_MAX = 5000
-_LOGGER = logging.getLogger("chack.openai_agents_backend")
+_LOGGER = logging.getLogger("chack.openrouter_openai_backend")
 
 _OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -109,37 +109,6 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
                 )
                 await asyncio.sleep(delay_seconds)
                 delay_seconds = min(delay_seconds * 2, 20)
-
-    @staticmethod
-    def _has_function_outputs(items: Any) -> bool:
-        if not isinstance(items, list):
-            return False
-        for item in items:
-            if isinstance(item, dict) and item.get("type") == "function_call_output":
-                return True
-            if getattr(item, "type", None) == "function_call_output":
-                return True
-        return False
-
-    @staticmethod
-    def _message_only_items(items: Any) -> Any:
-        if not isinstance(items, list):
-            return items
-        filtered = []
-        for item in items:
-            if isinstance(item, dict):
-                item_type = item.get("type")
-                role = item.get("role")
-                if item_type == "message" or (
-                    role in {"user", "assistant", "system", "developer"}
-                    and "content" in item
-                ):
-                    filtered.append(item)
-                continue
-            role = getattr(item, "role", None)
-            if role in {"user", "assistant", "system", "developer"}:
-                filtered.append(item)
-        return filtered or items
 
     def _normalize_tool_name(self, name: str, tool_names: set[str]) -> str:
         if not name or not tool_names:
@@ -301,73 +270,57 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
 
 def _select_provider(config: ChackConfig) -> str:
     provider = str(getattr(config.model, "provider", "") or "openai").strip().lower()
-    if provider not in {"openai", "openrouter"}:
-        raise ValueError(f"Unsupported model.provider: {provider}")
+    if provider != "openrouter":
+        raise ValueError(
+            f"openrouter_openai_backend requires model.provider='openrouter' (got {provider!r})"
+        )
     return provider
 
 
 def _configure_openai_client(config: ChackConfig) -> tuple[str, Optional[AsyncOpenAI]]:
     provider = _select_provider(config)
-    if provider == "openrouter":
-        api_key = (
-            str(config.credentials.openrouter_api_key or "").strip()
-            or os.environ.get("OPENROUTER_API_KEY", "").strip()
-        )
-        if not api_key:
-            raise ValueError("OPENROUTER_API_KEY is required when model.provider=openrouter")
-        base_url = (
-            str(config.credentials.openrouter_base_url or "").strip()
-            or os.environ.get("OPENROUTER_BASE_URL", "").strip()
-            or _OPENROUTER_DEFAULT_BASE_URL
-        )
-        headers: dict[str, str] = {}
-        referer = (
-            str(config.credentials.openrouter_http_referer or "").strip()
-            or os.environ.get("OPENROUTER_HTTP_REFERER", "").strip()
-        )
-        title = (
-            str(config.credentials.openrouter_app_name or "").strip()
-            or os.environ.get("OPENROUTER_APP_NAME", "").strip()
-        )
-        if not title:
-            main_action = str(config.agent.main_action or "").strip()
-            sub_action = str(config.agent.sub_action or "").strip()
-            if main_action and sub_action:
-                title = f"{main_action}-{sub_action}"
-            elif main_action:
-                title = main_action
-            elif sub_action:
-                title = sub_action
-        if referer:
-            headers["HTTP-Referer"] = referer
-        if title:
-            headers["X-Title"] = title
-
-        client = AsyncOpenAI(
-            base_url=base_url,
-            api_key=api_key,
-            default_headers=headers or None,
-        )
-        set_default_openai_client(client, use_for_tracing=False)
-        # OpenRouter doesn't support OpenAI tracing endpoints.
-        set_tracing_disabled(True)
-        return provider, client
-
-    # OpenAI (default)
     api_key = (
-        str(config.credentials.openai_api_key or "").strip()
-        or os.environ.get("OPENAI_API_KEY", "").strip()
+        str(config.credentials.openrouter_api_key or "").strip()
+        or os.environ.get("OPENROUTER_API_KEY", "").strip()
     )
-    base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or None
-    organization = str(config.credentials.openai_org_id or "").strip() or None
-    client: Optional[AsyncOpenAI] = None
-    if api_key or base_url or organization:
-        client = AsyncOpenAI(
-            api_key=api_key or None,
-            base_url=base_url,
-            organization=organization,
-        )
-        set_default_openai_client(client)
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY is required when model.provider=openrouter")
+    base_url = (
+        str(config.credentials.openrouter_base_url or "").strip()
+        or os.environ.get("OPENROUTER_BASE_URL", "").strip()
+        or _OPENROUTER_DEFAULT_BASE_URL
+    )
+    headers: dict[str, str] = {}
+    referer = (
+        str(config.credentials.openrouter_http_referer or "").strip()
+        or os.environ.get("OPENROUTER_HTTP_REFERER", "").strip()
+    )
+    title = (
+        str(config.credentials.openrouter_app_name or "").strip()
+        or os.environ.get("OPENROUTER_APP_NAME", "").strip()
+    )
+    if not title:
+        main_action = str(config.agent.main_action or "").strip()
+        sub_action = str(config.agent.sub_action or "").strip()
+        if main_action and sub_action:
+            title = f"{main_action}-{sub_action}"
+        elif main_action:
+            title = main_action
+        elif sub_action:
+            title = sub_action
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if title:
+        headers["X-Title"] = title
+
+    client = AsyncOpenAI(
+        base_url=base_url,
+        api_key=api_key,
+        default_headers=headers or None,
+    )
+    set_default_openai_client(client, use_for_tracing=False)
+    # OpenRouter doesn't support OpenAI tracing endpoints.
+    set_tracing_disabled(True)
     return provider, client
 
 
@@ -454,21 +407,6 @@ def _sanitize_input_items(items: list[Any]) -> list[Any]:
                 continue
         sanitized.append(item)
     return sanitized
-
-
-def _is_message_item(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return False
-    if item.get("type") == "message":
-        return True
-    role = item.get("role")
-    if role in {"user", "assistant", "system", "developer"} and "content" in item:
-        return True
-    return False
-
-
-def _filter_message_items(items: list[Any]) -> list[Any]:
-    return [item for item in items if _is_message_item(item)]
 
 
 def _is_first_tool_gate_open() -> bool:
@@ -593,7 +531,6 @@ class ToolAction:
 
 @dataclass
 class AgentsExecutor:
-    _config: ChackConfig
     agent: Agent
     max_turns: int
     _conversation: list[dict[str, Any]]
@@ -601,9 +538,7 @@ class AgentsExecutor:
     _memory_reset_to: int
     _base_system_prompt: str
     _previous_response_id: Optional[str]
-    _compaction_threshold_ratio: float
-    _max_context_tokens: int
-    _compaction_model: str
+    _conversation_id: Optional[str]
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         user_input = payload.get("input", "")
@@ -632,7 +567,9 @@ class AgentsExecutor:
             self._conversation = self._conversation[-reset_to:]
         if result.last_response_id:
             self._previous_response_id = result.last_response_id
-        self._maybe_compact(result)
+        conversation_id = getattr(result, "_conversation_id", None)
+        if isinstance(conversation_id, str) and conversation_id.strip():
+            self._conversation_id = conversation_id.strip()
         steps = _extract_tool_steps(result.new_items)
         return {
             "output": output,
@@ -649,7 +586,7 @@ class AgentsExecutor:
         return _sanitize_input_items(input_items)
 
     def _invoke_runner_with_recovery(self, user_input: str, context: Any) -> Any:
-        include_history = not bool(self._previous_response_id)
+        include_history = not bool(self._previous_response_id or self._conversation_id)
         input_items = self._build_runner_input(user_input, include_history=include_history)
         try:
             return Runner.run_sync(
@@ -657,6 +594,7 @@ class AgentsExecutor:
                 input_items,
                 max_turns=self.max_turns,
                 previous_response_id=self._previous_response_id,
+                conversation_id=self._conversation_id,
                 context=context,
             )
         except (BadRequestError, ModelBehaviorError) as exc:
@@ -676,82 +614,21 @@ class AgentsExecutor:
                 "Runner rejected response chain with previous_response_id; retrying with fresh chain."
             )
             self._previous_response_id = None
+            self._conversation_id = None
+            retry_previous_response_id = None
+            retry_conversation_id = None
             retry_input = self._build_runner_input(user_input, include_history=True)
             return Runner.run_sync(
                 self.agent,
                 retry_input,
                 max_turns=self.max_turns,
-                previous_response_id=None,
+                previous_response_id=retry_previous_response_id,
+                conversation_id=retry_conversation_id,
                 context=context,
             )
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
-
-    def _maybe_compact(self, result: Any) -> None:
-        if not self._previous_response_id:
-            return
-        if self._max_context_tokens <= 0:
-            return
-        if self._compaction_threshold_ratio <= 0:
-            return
-
-        input_tokens = 0
-        raw_responses = getattr(result, "raw_responses", None)
-        if raw_responses:
-            last_response = raw_responses[-1]
-            usage = getattr(last_response, "usage", None)
-            input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-
-        if not input_tokens:
-            return
-        if input_tokens < int(self._compaction_threshold_ratio * self._max_context_tokens):
-            return
-
-        _LOGGER.info(
-            "Triggering response compaction: input_tokens=%s max_context=%s threshold_ratio=%s ts=%s.",
-            input_tokens,
-            self._max_context_tokens,
-            self._compaction_threshold_ratio,
-            _log_timestamp(),
-        )
-        new_response_id = self._run_compaction(self._previous_response_id)
-        if new_response_id:
-            _LOGGER.info(
-                "Responses compaction complete. New response id: %s ts=%s.",
-                new_response_id,
-                _log_timestamp(),
-            )
-            self._previous_response_id = new_response_id
-
-    def _run_compaction(self, response_id: str) -> Optional[str]:
-        try:
-            provider = _select_provider(self._config)
-            if provider != "openai":
-                _LOGGER.info("Skipping responses compaction for provider=%s.", provider)
-                return None
-            api_key = (
-                str(self._config.credentials.openai_api_key or "").strip()
-                or os.environ.get("OPENAI_API_KEY", "").strip()
-            )
-            base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or None
-            organization = str(self._config.credentials.openai_org_id or "").strip() or None
-            client = OpenAI(
-                api_key=api_key or None,
-                base_url=base_url,
-                organization=organization,
-            )
-            compacted = client.responses.compact(
-                model=self._compaction_model,
-                previous_response_id=response_id,
-            )
-            response_id = getattr(compacted, "id", None) or getattr(
-                compacted, "response_id", None
-            )
-            return response_id
-        except Exception:
-            _LOGGER.exception("Responses compaction failed.")
-            return None
 
 
 def _extract_tool_steps(items: list[Any]) -> list[tuple[ToolAction, Any]]:
@@ -827,9 +704,16 @@ def _apply_guardrails(tools: list[Any]) -> list[Any]:
     for tool in tools:
         guards = getattr(tool, "tool_input_guardrails", None)
         if guards is None:
-            setattr(tool, "tool_input_guardrails", [_require_task_list_init_first])
-        elif _require_task_list_init_first not in guards:
+            setattr(
+                tool,
+                "tool_input_guardrails",
+                [_require_task_list_init_first, _respect_max_tools_used],
+            )
+            continue
+        if _require_task_list_init_first not in guards:
             guards.append(_require_task_list_init_first)
+        if _respect_max_tools_used not in guards:
+            guards.append(_respect_max_tools_used)
     return _wrap_tools_with_logging(tools)
 
 
@@ -930,7 +814,7 @@ def build_executor(
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> AgentsExecutor:
-    provider, client = _configure_openai_client(config)
+    _, client = _configure_openai_client(config)
     model_name = config.model.primary
 
     if tools_override is None:
@@ -959,9 +843,7 @@ def build_executor(
         tools = list(tools_override)
 
     tools = _apply_guardrails(tools)
-    model: Any = model_name
-    if provider == "openrouter" and client is not None:
-        model = _OpenRouterResponsesModel(model=model_name, openai_client=client)
+    model: Any = _OpenRouterResponsesModel(model=model_name, openai_client=client)
 
     output_schema = None
     schema_json = getattr(config.agent, "output_schema_json", None)
@@ -988,7 +870,6 @@ def build_executor(
     if reset_to < 1 or reset_to > max_messages:
         reset_to = max_messages
     return AgentsExecutor(
-        _config=config,
         agent=agent,
         max_turns=max_turns,
         _conversation=[],
@@ -996,11 +877,5 @@ def build_executor(
         _memory_reset_to=reset_to,
         _base_system_prompt=system_prompt,
         _previous_response_id=None,
-        _compaction_threshold_ratio=float(
-            config.agent.compaction_threshold_ratio or 0.75
-        ),
-        _max_context_tokens=int(config.model.max_context_tokens or 0),
-        _compaction_model=(
-            str(config.agent.compaction_model).strip() or model_name
-        ),
+        _conversation_id=None,
     )

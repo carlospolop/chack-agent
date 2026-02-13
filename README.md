@@ -30,7 +30,7 @@ config = ChackConfig(
         social_network="gpt-4o",
         scientific="gpt-4o",
         websearcher="gpt-4o",
-    provider="openai",  # use "openrouter" to route via OpenRouter
+    provider="openai",  # use "openrouter" or "codex"
     ),
     agent=AgentConfig(
         self_critique_enabled=True,  # Agent critiques its own plan before acting
@@ -121,8 +121,9 @@ Most tools require API keys. Provide them via env vars (recommended) or your own
 
 | Environment Variable | Description | Required For |
 |----------------------|-------------|--------------|
-| `OPENAI_API_KEY` | OpenAI API Key | Core functionality (OpenAI) |
+| `OPENAI_API_KEY` | OpenAI API Key | Core functionality (OpenAI/Codex) |
 | `OPENROUTER_API_KEY` | OpenRouter API Key | Core functionality (OpenRouter) |
+| `CODEX_PATH` | Path to Codex CLI binary | Optional override for provider=`codex` |
 | `OPENROUTER_HTTP_REFERER` | App referer for OpenRouter attribution | Optional |
 | `OPENROUTER_APP_NAME` | App name for OpenRouter attribution | Optional |
 | `OPENROUTER_BASE_URL` | OpenRouter base URL | Optional override |

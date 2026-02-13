@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       provider:
-        description: "Model provider: openai or openrouter"
+        description: "Model provider: openai, openrouter or codex"
         required: true
         default: "openai"
       model_primary:
@@ -130,11 +130,13 @@ jobs:
                   raise SystemExit(f"Invalid JSON in {name}: {exc}")
 
           provider = os.environ.get("INPUT_PROVIDER", "openai").strip() or "openai"
-          if provider not in {"openai", "openrouter"}:
-              raise SystemExit("provider must be 'openai' or 'openrouter'")
+            if provider not in {"openai", "openrouter", "codex"}:
+              raise SystemExit("provider must be 'openai', 'openrouter' or 'codex'")
 
           if provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
               raise SystemExit("OPENAI_API_KEY is required for provider=openai")
+            if provider == "codex" and not os.environ.get("OPENAI_API_KEY"):
+              raise SystemExit("OPENAI_API_KEY is required for provider=codex")
           if provider == "openrouter" and not os.environ.get("OPENROUTER_API_KEY"):
               raise SystemExit("OPENROUTER_API_KEY is required for provider=openrouter")
 

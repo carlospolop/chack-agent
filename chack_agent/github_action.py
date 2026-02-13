@@ -79,8 +79,8 @@ def _write_github_output(message: str) -> None:
 
 def main() -> None:
     provider = os.environ.get("INPUT_PROVIDER", "openai").strip() or "openai"
-    if provider not in {"openai", "openrouter"}:
-        raise SystemExit("provider must be 'openai' or 'openrouter'")
+    if provider not in {"openai", "openrouter", "codex"}:
+        raise SystemExit("provider must be 'openai', 'openrouter' or 'codex'")
 
     openai_api_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get(
         "INPUT_OPENAI_API_KEY", ""
@@ -90,6 +90,8 @@ def main() -> None:
     )
     if provider == "openai" and not openai_api_key:
         raise SystemExit("OPENAI_API_KEY is required for provider=openai")
+    if provider == "codex" and not openai_api_key:
+        raise SystemExit("OPENAI_API_KEY is required for provider=codex")
     if provider == "openrouter" and not openrouter_api_key:
         raise SystemExit("OPENROUTER_API_KEY is required for provider=openrouter")
 
