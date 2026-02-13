@@ -34,10 +34,10 @@ class ModelConfig:
     primary: str
     provider: str = ""
     max_context_tokens: int = 0
-    social_network: str = ""
-    scientific: str = ""
-    websearcher: str = ""
-    tester: str = ""
+    social_network: str = "CHEAP_BUT_QUALITY"
+    scientific: str = "CHEAP_BUT_QUALITY"
+    websearcher: str = "CHEAP_BUT_QUALITY"
+    tester: str = "CHEAP_BUT_QUALITY"
     social_network_max_turns: int = 30
     scientific_max_turns: int = 30
     websearcher_max_turns: int = 30
@@ -61,8 +61,10 @@ class AgentConfig:
 @dataclass
 class SessionConfig:
     max_turns: int = 50
+    memory_max_messages: int = 50
+    memory_reset_to_messages: int = 20
     long_term_memory_enabled: bool = True
-    long_term_memory_max_chars: int = 1500
+    long_term_memory_max_chars: int = 3000
     long_term_memory_dir: str = "longterm"
     system_prompt: str = ""  # Optional override for this session
 

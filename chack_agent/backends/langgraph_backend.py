@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import os
 from operator import add
 import threading
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Annotated, Any, Optional
 from typing_extensions import TypedDict
@@ -21,6 +23,13 @@ from chack_tools.telemetry import log_event
 from chack_tools.tool_usage_state import current_max_tools_used
 
 from ..config import ChackConfig
+
+
+_LOGGER = logging.getLogger("chack.langgraph_backend")
+
+
+def _log_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 @dataclass
@@ -93,6 +102,8 @@ class LangGraphExecutor:
     _summary_trigger_messages: int
     _summary_keep_messages: int
     _summary_max_chars: int
+    _compaction_threshold_ratio: float
+    _max_context_tokens: int
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
@@ -231,7 +242,18 @@ class LangGraphExecutor:
             pass
         return str(result)
 
-    def _summarize_messages(self, previous_summary: str, messages: list[AnyMessage]) -> str:
+    def _summarize_messages(
+        self,
+        previous_summary: str,
+        messages: list[AnyMessage],
+        *,
+        trigger_input_tokens: int = 0,
+        threshold_tokens: int = 0,
+        messages_before: int = 0,
+        messages_after_keep: int = 0,
+        triggered_by_messages: bool = False,
+        triggered_by_tokens: bool = False,
+    ) -> str:
         if not messages:
             return previous_summary
 
@@ -245,6 +267,10 @@ class LangGraphExecutor:
             content = getattr(message, "content", "")
             rendered.append(f"[{role}] {content}")
         chunk = "\n".join(rendered)
+        previous_summary_chars = len(previous_summary or "")
+        source_messages_count = len(messages)
+        source_chars = len(chunk)
+        did_truncate = False
 
         if previous_summary:
             prompt = (
@@ -271,6 +297,50 @@ class LangGraphExecutor:
             summary = str(content or previous_summary).strip() or previous_summary
         if self._summary_max_chars > 0 and len(summary) > self._summary_max_chars:
             summary = summary[-self._summary_max_chars :]
+            did_truncate = True
+
+        _LOGGER.info(
+            "LangGraph summary compaction performed: messages_before=%s messages_summarized=%s messages_after_keep=%s trigger_input_tokens=%s threshold_tokens=%s source_chars=%s prev_summary_chars=%s new_summary_chars=%s truncated=%s keep_messages=%s trigger_messages=%s by_messages=%s by_tokens=%s ts=%s",
+            messages_before,
+            source_messages_count,
+            messages_after_keep,
+            trigger_input_tokens,
+            threshold_tokens,
+            source_chars,
+            previous_summary_chars,
+            len(summary),
+            did_truncate,
+            self._summary_keep_messages,
+            self._summary_trigger_messages,
+            triggered_by_messages,
+            triggered_by_tokens,
+            _log_timestamp(),
+        )
+        log_event(
+            "agent_summary_compaction",
+            payload={
+                "backend": "langgraph",
+                "provider": "langgraph",
+                "messages_summarized": int(source_messages_count),
+                "source_chars": int(source_chars),
+                "previous_summary_chars": int(previous_summary_chars),
+                "new_summary_chars": int(len(summary)),
+                "summary_max_chars": int(self._summary_max_chars),
+                "summary_truncated": bool(did_truncate),
+                "summary_keep_messages": int(self._summary_keep_messages),
+                "summary_trigger_messages": int(self._summary_trigger_messages),
+                "messages_before": int(messages_before),
+                "messages_after_keep": int(messages_after_keep),
+                "trigger_input_tokens": int(trigger_input_tokens),
+                "threshold_tokens": int(threshold_tokens),
+                "max_context_tokens": int(self._max_context_tokens),
+                "threshold_ratio": float(self._compaction_threshold_ratio),
+                "triggered_by_messages": bool(triggered_by_messages),
+                "triggered_by_tokens": bool(triggered_by_tokens),
+            },
+            task_session_id=current_session_id() or "",
+            run_label=current_run_label() or "",
+        )
         return summary
 
     def _system_prompt(self, summary: str) -> str:
@@ -309,10 +379,36 @@ class LangGraphExecutor:
             messages = list(state.get("messages", []) or [])
             summary = str(state.get("summary", "") or "")
             maybe_new_summary = summary
+            usage_events = list(state.get("usage_events", []) or [])
+            latest_input_tokens = 0
+            if usage_events:
+                last_usage = usage_events[-1] if isinstance(usage_events[-1], dict) else {}
+                latest_input_tokens = int(last_usage.get("input_tokens", 0) or 0)
 
-            if len(messages) > max(self._summary_trigger_messages, self._summary_keep_messages + 2):
-                older = messages[:-self._summary_keep_messages]
-                maybe_new_summary = self._summarize_messages(summary, older)
+            threshold_tokens = 0
+            if self._max_context_tokens > 0 and self._compaction_threshold_ratio > 0:
+                threshold_tokens = int(self._compaction_threshold_ratio * self._max_context_tokens)
+
+            should_summarize_by_messages = (
+                len(messages) > max(self._summary_trigger_messages, self._summary_keep_messages + 2)
+            )
+            should_summarize_by_tokens = bool(
+                threshold_tokens > 0 and latest_input_tokens >= threshold_tokens
+            )
+
+            if should_summarize_by_messages or should_summarize_by_tokens:
+                keep = self._summary_keep_messages if self._summary_keep_messages > 0 else 0
+                older = messages[:-keep] if keep else list(messages)
+                maybe_new_summary = self._summarize_messages(
+                    summary,
+                    older,
+                    trigger_input_tokens=latest_input_tokens,
+                    threshold_tokens=threshold_tokens,
+                    messages_before=len(messages),
+                    messages_after_keep=min(len(messages), keep),
+                    triggered_by_messages=should_summarize_by_messages,
+                    triggered_by_tokens=should_summarize_by_tokens,
+                )
 
             prompt_messages: list[AnyMessage] = [
                 SystemMessage(content=self._system_prompt(maybe_new_summary))
@@ -586,20 +682,7 @@ def build_executor(
     )
     model_with_tools = model.bind_tools(tool_schemas) if tool_schemas else model
 
-    max_messages = max(1, int(memory_max_messages or 1))
-    reset_to = int(memory_reset_to_messages or max_messages)
-    if reset_to < 1 or reset_to > max_messages:
-        reset_to = max_messages
-
     thread_id = str(current_session_id() or f"langgraph-{uuid.uuid4()}")
-    recursion_limit = max(8, _to_int(os.environ.get("CHACK_LANGGRAPH_RECURSION_LIMIT", "0"), 0))
-    if recursion_limit <= 8:
-        recursion_limit = max(16, int(max_turns or 8) * 4)
-
-    summary_trigger_messages = max(8, int(memory_max_messages or 0))
-    summary_keep_messages = max(4, int(memory_reset_to_messages or 0))
-    if summary_keep_messages > summary_trigger_messages:
-        summary_keep_messages = summary_trigger_messages
 
     executor = LangGraphExecutor(
         _graph=None,
@@ -607,21 +690,23 @@ def build_executor(
         _summary_model=model,
         _function_tools_by_name=function_tools,
         _conversation=[],
-        _memory_limit=max_messages,
-        _memory_reset_to=reset_to,
+        _memory_limit=memory_max_messages,
+        _memory_reset_to=memory_reset_to_messages,
         _base_system_prompt=system_prompt,
         _thread_id=thread_id,
         _max_non_task_tools=max(0, int(config.tools.max_tools_used or 0)),
         _require_task_steps_manager_init_first=bool(
             getattr(config.agent, "require_task_steps_manager_init_first", True)
         ),
-        _recursion_limit=recursion_limit,
-        _summary_trigger_messages=summary_trigger_messages,
-        _summary_keep_messages=summary_keep_messages,
+        _recursion_limit=max_turns,
+        _summary_trigger_messages=memory_max_messages,
+        _summary_keep_messages=memory_reset_to_messages,
         _summary_max_chars=max(
             0,
             _to_int(os.environ.get("CHACK_LANGGRAPH_SUMMARY_MAX_CHARS", "6000"), 6000),
         ),
+        _compaction_threshold_ratio=float(getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75),
+        _max_context_tokens=int(config.model.max_context_tokens or 0),
     )
     try:
         executor.build_graph()

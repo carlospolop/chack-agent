@@ -120,19 +120,19 @@ def main() -> None:
         ),
         provider=provider,
         social_network=resolve_model_alias(
-            os.environ.get("INPUT_MODEL_SOCIAL", ""),
+            os.environ.get("INPUT_MODEL_SOCIAL", "CHEAP_BUT_QUALITY"),
             provider=provider,
         ),
         scientific=resolve_model_alias(
-            os.environ.get("INPUT_MODEL_SCIENTIFIC", ""),
+            os.environ.get("INPUT_MODEL_SCIENTIFIC", "CHEAP_BUT_QUALITY"),
             provider=provider,
         ),
         websearcher=resolve_model_alias(
-            os.environ.get("INPUT_MODEL_WEBSEARCHER", ""),
+            os.environ.get("INPUT_MODEL_WEBSEARCHER", "CHEAP_BUT_QUALITY"),
             provider=provider,
         ),
         tester=resolve_model_alias(
-            os.environ.get("INPUT_MODEL_TESTER", ""),
+            os.environ.get("INPUT_MODEL_TESTER", "CHEAP_BUT_QUALITY"),
             provider=provider,
         ),
     )

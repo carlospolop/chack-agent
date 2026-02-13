@@ -1,18 +1,32 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
+import shutil
 import subprocess
-import tempfile
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from chack_tools.agents_toolset import AgentsToolset
-from chack_tools.task_steps_manager_state import current_run_label, current_session_id
+from chack_tools.task_steps_manager_state import (
+    STORE as TASK_STEPS_STORE,
+    current_run_label,
+    current_session_id,
+)
 from chack_tools.telemetry import log_event
 
 from ..config import ChackConfig
+
+
+_LOGGER = logging.getLogger("chack.codex_backend")
+
+
+def _log_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 @dataclass
@@ -111,19 +125,42 @@ class CodexExecutor:
         command = self._build_command()
         env = self._build_env()
         timeout_seconds = int(os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "900") or "900")
-
-        completed = subprocess.run(
-            command,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=timeout_seconds,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except FileNotFoundError:
+            return (
+                (
+                    "ERROR: Codex CLI executable was not found.\n"
+                    f"Configured path: {self._codex_path!r}.\n"
+                    "Install Codex CLI (e.g. `npm i -g @openai/codex`) or set CODEX_PATH "
+                    "to the absolute executable path."
+                ),
+                [],
+                _RawResult(raw_responses=[]),
+            )
+        except Exception as exc:
+            return (
+                f"ERROR: Failed to launch Codex CLI: {type(exc).__name__}: {exc}",
+                [],
+                _RawResult(raw_responses=[]),
+            )
         if completed.returncode != 0:
             stderr = (completed.stderr or "").strip()
-            raise RuntimeError(f"Codex exec failed (exit={completed.returncode}): {stderr}")
+            stdout = (completed.stdout or "").strip()
+            details = stderr or stdout or "No error output captured."
+            return (
+                f"ERROR: Codex exec failed (exit={completed.returncode}).\n{details}",
+                [],
+                _RawResult(raw_responses=[]),
+            )
 
         steps: list[tuple[ToolAction, Any]] = []
         output = ""
@@ -145,6 +182,29 @@ class CodexExecutor:
                 item = event.get("item") if isinstance(event.get("item"), dict) else {}
                 item_type = str(item.get("type", "") or "")
 
+                if item_type == "reasoning":
+                    reasoning_text = str(item.get("text", "") or "")
+                    _LOGGER.info(
+                        "Codex reasoning summary observed: chars=%s thread_id=%s ts=%s",
+                        len(reasoning_text),
+                        self._thread_id or "",
+                        _log_timestamp(),
+                    )
+                    log_event(
+                        "agent_reasoning_summary",
+                        payload={
+                            "backend": "codex",
+                            "provider": str(self._model_provider or "codex"),
+                            "model": str(self._model_name or ""),
+                            "thread_id": str(self._thread_id or ""),
+                            "summary_chars": int(len(reasoning_text)),
+                            "summary_preview": reasoning_text[:500],
+                        },
+                        task_session_id=current_session_id() or "",
+                        run_label=current_run_label() or "",
+                    )
+                    continue
+
                 if item_type == "agent_message":
                     output = str(item.get("text", "") or "")
                     continue
@@ -153,6 +213,7 @@ class CodexExecutor:
                 if step is not None:
                     steps.append((step, None))
                     self._log_tool_called(step.tool, step.tool_input)
+                    self._sync_task_steps_manager(item)
                 continue
 
             if event_type == "turn.completed":
@@ -222,13 +283,19 @@ class CodexExecutor:
         env["CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST"] = (
             "1" if self._require_task_steps_manager_init_first else "0"
         )
+        env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
+        env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
+        env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
         return env
 
     def _ensure_codex_home_and_config(self) -> None:
         if self._codex_home:
             return
-        safe_session = str(current_session_id() or "default").replace(os.sep, "_")
-        base = os.path.join(tempfile.gettempdir(), "chack-codex", safe_session)
+        safe_session = re.sub(r"[^A-Za-z0-9._-]", "_", str(current_session_id() or "default"))
+        home_base = str(
+            os.environ.get("CHACK_CODEX_HOME_BASE", os.path.expanduser("~/.codex/chack")) or ""
+        ).strip() or os.path.expanduser("~/.codex/chack")
+        base = os.path.join(home_base, safe_session)
         os.makedirs(base, exist_ok=True)
         self._codex_home = base
         self._write_codex_config(base)
@@ -251,6 +318,10 @@ class CodexExecutor:
             "CHACK_SCIENTIFIC_MAX_TURNS",
             "CHACK_WEBSEARCHER_MAX_TURNS",
             "CHACK_TESTER_MAX_TURNS",
+            "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
+            "CHACK_TASK_SESSION_ID",
+            "CHACK_RUN_LABEL",
+            "CHACK_DISABLE_STDOUT_EVENTS",
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
             "BRAVE_API_KEY",
@@ -342,13 +413,18 @@ class CodexExecutor:
             )
         if item_type == "mcp_tool_call":
             tool_name = str(item.get("tool", "") or "mcp_tool_call")
+            tool_input = {
+                "server": str(item.get("server", "") or ""),
+                "arguments": item.get("arguments"),
+                "status": str(item.get("status", "") or ""),
+            }
+            if "error" in item:
+                tool_input["error"] = item.get("error")
+            if "result" in item:
+                tool_input["result"] = item.get("result")
             return ToolAction(
                 tool=tool_name,
-                tool_input={
-                    "server": str(item.get("server", "") or ""),
-                    "arguments": item.get("arguments"),
-                    "status": str(item.get("status", "") or ""),
-                },
+                tool_input=tool_input,
             )
         if item_type == "todo_list":
             return ToolAction(
@@ -371,6 +447,46 @@ class CodexExecutor:
                 },
                 task_session_id=current_session_id() or "",
                 run_label=current_run_label() or "",
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _sync_task_steps_manager(item: dict[str, Any]) -> None:
+        try:
+            if str(item.get("type", "") or "") != "mcp_tool_call":
+                return
+            if str(item.get("tool", "") or "").strip() != "task_steps_manager":
+                return
+            if str(item.get("status", "") or "").strip().lower() != "completed":
+                return
+
+            arguments = item.get("arguments")
+            if not isinstance(arguments, dict):
+                return
+
+            session_id = str(current_session_id() or "").strip()
+            if not session_id:
+                return
+            run_label = str(current_run_label() or "Run 1")
+
+            raw_task_id = arguments.get("task_id")
+            task_id: int | None = None
+            if raw_task_id not in (None, ""):
+                try:
+                    task_id = int(raw_task_id)
+                except Exception:
+                    task_id = None
+
+            TASK_STEPS_STORE.apply(
+                session_id=session_id,
+                run_label=run_label,
+                action=str(arguments.get("action", "") or ""),
+                task_id=task_id,
+                text=str(arguments.get("text", "") or ""),
+                status=str(arguments.get("status", "") or ""),
+                tasks_text=str(arguments.get("tasks", "") or ""),
+                notes=str(arguments.get("notes", "") or ""),
             )
         except Exception:
             pass
@@ -430,19 +546,14 @@ def build_executor(
     if not openai_api_key:
         raise ValueError("OPENAI_API_KEY is required when model.provider=codex")
 
-    codex_path = os.environ.get("CODEX_PATH", "").strip() or "codex"
+    configured_codex_path = os.environ.get("CODEX_PATH", "").strip() or "codex"
+    codex_path = shutil.which(configured_codex_path) or configured_codex_path
 
-    max_messages = memory_max_messages
-    if max_messages < 1:
-        max_messages = 1
-    reset_to = memory_reset_to_messages
-    if reset_to < 1 or reset_to > max_messages:
-        reset_to = max_messages
 
     return CodexExecutor(
         _conversation=[],
-        _memory_limit=max_messages,
-        _memory_reset_to=reset_to,
+        _memory_limit=memory_max_messages,
+        _memory_reset_to=memory_reset_to_messages,
         _base_system_prompt=system_prompt,
         _model_name=str(config.model.primary),
         _codex_path=codex_path,

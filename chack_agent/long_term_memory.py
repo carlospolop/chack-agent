@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from typing import Iterable
 
 from agents import Agent, ModelSettings, Runner
 from agents.models.openai_responses import OpenAIResponsesModel
 from openai import AsyncOpenAI
+from chack_tools.telemetry import log_event
 
 from .config import ChackConfig, resolve_backend_type
+
+
+_LOGGER = logging.getLogger("chack.long_term_memory")
 
 
 def _resolve_dir(config_path: str, rel_dir: str) -> str:
@@ -141,6 +146,32 @@ def build_long_term_memory(
     result = Runner.run_sync(agent, human)
     content = getattr(result, "final_output", "") or ""
     content = content.strip()
+    was_truncated = False
     if max_chars > 0 and len(content) > max_chars:
         content = content[:max_chars].rstrip()
+        was_truncated = True
+
+    _LOGGER.info(
+        "Long-term memory summarization performed: backend=%s provider=%s model=%s conversation_chars=%s previous_memory_chars=%s output_chars=%s truncated=%s",
+        backend_type,
+        str(getattr(config.model, "provider", "") or ""),
+        str(model_name or ""),
+        len(conversation_text or ""),
+        len(previous_memory or ""),
+        len(content or ""),
+        was_truncated,
+    )
+    log_event(
+        "long_term_memory_summarized",
+        payload={
+            "backend": backend_type,
+            "provider": str(getattr(config.model, "provider", "") or ""),
+            "model": str(model_name or ""),
+            "conversation_chars": int(len(conversation_text or "")),
+            "previous_memory_chars": int(len(previous_memory or "")),
+            "output_chars": int(len(content or "")),
+            "max_chars": int(max_chars or 0),
+            "truncated": bool(was_truncated),
+        },
+    )
     return content

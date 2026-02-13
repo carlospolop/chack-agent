@@ -404,12 +404,33 @@ class AgentsExecutor:
         if input_tokens < int(self._compaction_threshold_ratio * self._max_context_tokens):
             return
 
+        threshold_tokens = int(self._compaction_threshold_ratio * self._max_context_tokens)
+        conversation_messages_before = len(self._conversation or [])
+
         _LOGGER.info(
-            "Triggering response compaction: input_tokens=%s max_context=%s threshold_ratio=%s ts=%s.",
+            "Triggering response compaction: input_tokens=%s threshold_tokens=%s max_context=%s threshold_ratio=%s conversation_messages_before=%s ts=%s.",
             input_tokens,
+            threshold_tokens,
             self._max_context_tokens,
             self._compaction_threshold_ratio,
+            conversation_messages_before,
             _log_timestamp(),
+        )
+        log_event(
+            "agent_compaction_triggered",
+            payload={
+                "backend": "openai_compaction",
+                "provider": str(getattr(self._config.model, "provider", "") or "openai"),
+                "model": str(getattr(self._config.model, "primary", "") or ""),
+                "compaction_model": str(self._compaction_model or ""),
+                "input_tokens": int(input_tokens),
+                "max_context_tokens": int(self._max_context_tokens),
+                "threshold_ratio": float(self._compaction_threshold_ratio),
+                "threshold_tokens": int(threshold_tokens),
+                "conversation_messages_before": int(conversation_messages_before),
+            },
+            task_session_id=current_session_id() or "",
+            run_label=current_run_label() or "",
         )
         new_response_id = self._run_compaction(self._previous_response_id)
         if new_response_id:
@@ -417,6 +438,22 @@ class AgentsExecutor:
                 "Responses compaction complete. New response id: %s ts=%s.",
                 new_response_id,
                 _log_timestamp(),
+            )
+            log_event(
+                "agent_compaction_completed",
+                payload={
+                    "backend": "openai_compaction",
+                    "provider": str(getattr(self._config.model, "provider", "") or "openai"),
+                    "model": str(getattr(self._config.model, "primary", "") or ""),
+                    "compaction_model": str(self._compaction_model or ""),
+                    "input_tokens": int(input_tokens),
+                    "threshold_tokens": int(threshold_tokens),
+                    "conversation_messages_before": int(conversation_messages_before),
+                    "previous_response_id": str(self._previous_response_id or ""),
+                    "new_response_id": str(new_response_id or ""),
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
             )
             self._previous_response_id = new_response_id
 
@@ -441,8 +478,21 @@ class AgentsExecutor:
                 compacted, "response_id", None
             )
             return response_id
-        except Exception:
+        except Exception as exc:
             _LOGGER.exception("Responses compaction failed.")
+            log_event(
+                "agent_compaction_failed",
+                payload={
+                    "backend": "openai_compaction",
+                    "provider": str(getattr(self._config.model, "provider", "") or "openai"),
+                    "model": str(getattr(self._config.model, "primary", "") or ""),
+                    "compaction_model": str(self._compaction_model or ""),
+                    "previous_response_id": str(response_id or ""),
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
             return None
 
 
@@ -681,19 +731,13 @@ def build_executor(
         output_type=output_schema,
     )
 
-    max_messages = memory_max_messages
-    if max_messages < 1:
-        max_messages = 1
-    reset_to = memory_reset_to_messages
-    if reset_to < 1 or reset_to > max_messages:
-        reset_to = max_messages
     return AgentsExecutor(
         _config=config,
         agent=agent,
         max_turns=max_turns,
         _conversation=[],
-        _memory_limit=max_messages,
-        _memory_reset_to=reset_to,
+        _memory_limit=memory_max_messages,
+        _memory_reset_to=memory_reset_to_messages,
         _base_system_prompt=system_prompt,
         _previous_response_id=None,
         _conversation_id=None,

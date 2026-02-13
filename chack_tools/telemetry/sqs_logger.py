@@ -33,6 +33,13 @@ _REGION: Optional[str] = None
 
 def _emit_stdout_event(event: Dict[str, Any]) -> None:
     """Mirror telemetry events to stdout so they are visible in CI logs."""
+    if (os.environ.get("CHACK_DISABLE_STDOUT_EVENTS", "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
     try:
         print(
             f"CHACK_EVENT {json.dumps(event, ensure_ascii=False, separators=(',', ':'))}",

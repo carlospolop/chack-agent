@@ -334,6 +334,13 @@ def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _to_int(raw: str, default: int) -> int:
+    try:
+        return int(str(raw or "").strip())
+    except Exception:
+        return default
+
+
 def _item_type(item: Any) -> str:
     if isinstance(item, dict):
         # 'function' logic from some older/wrapper libs
@@ -532,6 +539,7 @@ class ToolAction:
 @dataclass
 class AgentsExecutor:
     agent: Agent
+    _summary_agent: Agent
     max_turns: int
     _conversation: list[dict[str, Any]]
     _memory_limit: int
@@ -539,10 +547,17 @@ class AgentsExecutor:
     _base_system_prompt: str
     _previous_response_id: Optional[str]
     _conversation_id: Optional[str]
+    _summary: str
+    _summary_trigger_messages: int
+    _summary_keep_messages: int
+    _summary_max_chars: int
+    _compaction_threshold_ratio: float
+    _max_context_tokens: int
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         user_input = payload.get("input", "")
-        self.agent.instructions = self._base_system_prompt
+        self._maybe_summarize_for_next_turn(input_tokens=0)
+        self.agent.instructions = self._system_prompt()
         result = self._invoke_runner_with_recovery(user_input=user_input, context=context)
         output = result.final_output or ""
         updated_transcript = result.to_input_list()
@@ -559,17 +574,44 @@ class AgentsExecutor:
             if output:
                 self._conversation.append({"role": "assistant", "content": output})
         if self._memory_limit and len(self._conversation) > self._memory_limit:
+            before_len = len(self._conversation)
             reset_to = self._memory_reset_to or self._memory_limit
             if reset_to > self._memory_limit:
                 reset_to = self._memory_limit
             if reset_to < 1:
                 reset_to = 1
             self._conversation = self._conversation[-reset_to:]
+            after_len = len(self._conversation)
+            trimmed = max(0, before_len - after_len)
+            _LOGGER.info(
+                "OpenRouter memory trim applied: before=%s after=%s trimmed=%s memory_limit=%s memory_reset_to=%s ts=%s",
+                before_len,
+                after_len,
+                trimmed,
+                self._memory_limit,
+                self._memory_reset_to,
+                _log_timestamp(),
+            )
+            log_event(
+                "agent_memory_trimmed",
+                payload={
+                    "backend": "openrouter_openai",
+                    "provider": "openrouter",
+                    "before_messages": int(before_len),
+                    "after_messages": int(after_len),
+                    "trimmed_messages": int(trimmed),
+                    "memory_limit": int(self._memory_limit or 0),
+                    "memory_reset_to": int(self._memory_reset_to or 0),
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
         if result.last_response_id:
             self._previous_response_id = result.last_response_id
         conversation_id = getattr(result, "_conversation_id", None)
         if isinstance(conversation_id, str) and conversation_id.strip():
             self._conversation_id = conversation_id.strip()
+        self._maybe_summarize_for_next_turn(input_tokens=self._extract_input_tokens(result))
         steps = _extract_tool_steps(result.new_items)
         return {
             "output": output,
@@ -577,10 +619,186 @@ class AgentsExecutor:
             "raw_result": result,
         }
 
+    def _extract_input_tokens(self, result: Any) -> int:
+        try:
+            raw_responses = getattr(result, "raw_responses", None)
+            if not raw_responses:
+                return 0
+            last_response = raw_responses[-1]
+            usage = getattr(last_response, "usage", None)
+            return int(getattr(usage, "input_tokens", 0) or 0)
+        except Exception:
+            return 0
+
+    def _system_prompt(self) -> str:
+        base = str(self._base_system_prompt or "").strip()
+        if not self._summary:
+            return base
+        summary_block = f"\n\n### MEMORY SUMMARY\n{self._summary}"
+        return f"{base}{summary_block}".strip()
+
+    def _conversation_to_summary_lines(self, items: list[Any]) -> str:
+        rendered: list[str] = []
+        for item in items:
+            role = "assistant"
+            content = ""
+            if isinstance(item, dict):
+                item_type = str(item.get("type", "") or "")
+                role = str(item.get("role", "") or "").strip().lower() or "assistant"
+                if role == "tool" or item_type.endswith("_call") or item_type.endswith("_call_output"):
+                    role = "tool"
+                if isinstance(item.get("content"), str):
+                    content = str(item.get("content", "") or "")
+                elif "arguments" in item:
+                    content = json.dumps(item.get("arguments"), ensure_ascii=False)
+                elif "output" in item:
+                    content = str(item.get("output", "") or "")
+                else:
+                    content = json.dumps(item, ensure_ascii=False)
+            else:
+                content = str(item)
+            rendered.append(f"[{role}] {content}")
+        return "\n".join(rendered)
+
+    def _summarize_items(
+        self,
+        previous_summary: str,
+        items: list[Any],
+        *,
+        trigger_input_tokens: int = 0,
+        threshold_tokens: int = 0,
+        messages_before: int = 0,
+        messages_after_keep: int = 0,
+        triggered_by_messages: bool = False,
+        triggered_by_tokens: bool = False,
+    ) -> str:
+        if not items:
+            return previous_summary
+
+        chunk = self._conversation_to_summary_lines(items)
+        previous_summary_chars = len(previous_summary or "")
+        source_messages_count = len(items)
+        source_chars = len(chunk)
+        did_truncate = False
+
+        if previous_summary:
+            prompt = (
+                "You maintain compact conversation memory.\n"
+                "Existing summary:\n"
+                f"{previous_summary}\n\n"
+                "New messages:\n"
+                f"{chunk}\n\n"
+                "Return an updated concise summary preserving key facts, decisions, and constraints."
+            )
+        else:
+            prompt = (
+                "Summarize the following conversation history concisely, preserving key facts, decisions, and constraints:\n"
+                f"{chunk}"
+            )
+
+        result = Runner.run_sync(
+            self._summary_agent,
+            [{"role": "user", "content": prompt}],
+            max_turns=1,
+            previous_response_id=None,
+            conversation_id=None,
+            context=None,
+        )
+        summary = str(getattr(result, "final_output", "") or "").strip() or previous_summary
+        if self._summary_max_chars > 0 and len(summary) > self._summary_max_chars:
+            summary = summary[-self._summary_max_chars :]
+            did_truncate = True
+
+        _LOGGER.info(
+            "OpenRouter summary compaction performed: messages_before=%s messages_summarized=%s messages_after_keep=%s trigger_input_tokens=%s threshold_tokens=%s source_chars=%s prev_summary_chars=%s new_summary_chars=%s truncated=%s keep_messages=%s trigger_messages=%s by_messages=%s by_tokens=%s ts=%s",
+            messages_before,
+            source_messages_count,
+            messages_after_keep,
+            trigger_input_tokens,
+            threshold_tokens,
+            source_chars,
+            previous_summary_chars,
+            len(summary),
+            did_truncate,
+            self._summary_keep_messages,
+            self._summary_trigger_messages,
+            triggered_by_messages,
+            triggered_by_tokens,
+            _log_timestamp(),
+        )
+        log_event(
+            "agent_summary_compaction",
+            payload={
+                "backend": "openrouter_openai",
+                "provider": "openrouter",
+                "messages_summarized": int(source_messages_count),
+                "source_chars": int(source_chars),
+                "previous_summary_chars": int(previous_summary_chars),
+                "new_summary_chars": int(len(summary)),
+                "summary_max_chars": int(self._summary_max_chars),
+                "summary_truncated": bool(did_truncate),
+                "summary_keep_messages": int(self._summary_keep_messages),
+                "summary_trigger_messages": int(self._summary_trigger_messages),
+                "messages_before": int(messages_before),
+                "messages_after_keep": int(messages_after_keep),
+                "trigger_input_tokens": int(trigger_input_tokens),
+                "threshold_tokens": int(threshold_tokens),
+                "max_context_tokens": int(self._max_context_tokens),
+                "threshold_ratio": float(self._compaction_threshold_ratio),
+                "triggered_by_messages": bool(triggered_by_messages),
+                "triggered_by_tokens": bool(triggered_by_tokens),
+            },
+            task_session_id=current_session_id() or "",
+            run_label=current_run_label() or "",
+        )
+        return summary
+
+    def _maybe_summarize_for_next_turn(self, input_tokens: int) -> None:
+        if not self._conversation:
+            return
+
+        threshold_tokens = 0
+        if self._max_context_tokens > 0 and self._compaction_threshold_ratio > 0:
+            threshold_tokens = int(self._compaction_threshold_ratio * self._max_context_tokens)
+
+        should_summarize_by_messages = (
+            len(self._conversation) > max(self._summary_trigger_messages, self._summary_keep_messages + 2)
+        )
+        should_summarize_by_tokens = bool(
+            threshold_tokens > 0 and input_tokens >= threshold_tokens
+        )
+        if not should_summarize_by_messages and not should_summarize_by_tokens:
+            return
+
+        before_len = len(self._conversation)
+        keep = self._summary_keep_messages if self._summary_keep_messages > 0 else 0
+        older_items = self._conversation[:-keep] if keep else list(self._conversation)
+        if not older_items:
+            return
+
+        self._summary = self._summarize_items(
+            self._summary,
+            older_items,
+            trigger_input_tokens=input_tokens,
+            threshold_tokens=threshold_tokens,
+            messages_before=before_len,
+            messages_after_keep=min(before_len, keep),
+            triggered_by_messages=should_summarize_by_messages,
+            triggered_by_tokens=should_summarize_by_tokens,
+        )
+        if keep:
+            self._conversation = self._conversation[-keep:]
+        else:
+            self._conversation = []
+
     def _build_runner_input(self, user_input: str, include_history: bool) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []
         if include_history:
-            input_items = list(self._conversation)
+            keep = self._summary_keep_messages if self._summary and self._summary_keep_messages > 0 else 0
+            if keep:
+                input_items = list(self._conversation[-keep:])
+            else:
+                input_items = list(self._conversation)
         if user_input:
             input_items.append({"role": "user", "content": user_input})
         return _sanitize_input_items(input_items)
@@ -865,19 +1083,35 @@ def build_executor(
         output_type=output_schema,
     )
 
-    max_messages = memory_max_messages
-    if max_messages < 1:
-        max_messages = 1
-    reset_to = memory_reset_to_messages
-    if reset_to < 1 or reset_to > max_messages:
-        reset_to = max_messages
+    summary_agent = Agent(
+        name="ChackSummary",
+        instructions=(
+            "You maintain compact conversation memory. "
+            "Always return a concise factual summary preserving key facts, decisions, and constraints."
+        ),
+        tools=[],
+        model=model,
+        model_settings=ModelSettings(),
+        output_type=None,
+    )
+
     return AgentsExecutor(
         agent=agent,
+        _summary_agent=summary_agent,
         max_turns=max_turns,
         _conversation=[],
-        _memory_limit=max_messages,
-        _memory_reset_to=reset_to,
+        _memory_limit=memory_max_messages,
+        _memory_reset_to=memory_reset_to_messages,
         _base_system_prompt=system_prompt,
         _previous_response_id=None,
         _conversation_id=None,
+        _summary="",
+        _summary_trigger_messages=memory_max_messages,
+        _summary_keep_messages=memory_reset_to_messages,
+        _summary_max_chars=max(
+            0,
+            _to_int(os.environ.get("CHACK_OPENROUTER_SUMMARY_MAX_CHARS", "6000"), 6000),
+        ),
+        _compaction_threshold_ratio=float(getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75),
+        _max_context_tokens=int(config.model.max_context_tokens or 0),
     )

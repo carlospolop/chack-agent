@@ -6,6 +6,12 @@ This folder contains 4 runtime backends:
 - `codex_backend.py`
 - `langgraph_backend.py`
 
+## Current shared config defaults
+
+- `session.memory_max_messages`: `50`
+- `session.memory_reset_to_messages`: `20`
+- Specialized tool models (`social_network`, `scientific`, `websearcher`, `tester`) default to `CHEAP_BUT_QUALITY`.
+
 ## Shared Architecture
 
 - Entry point: `chack_agent/backends/__init__.py::build_executor(...)`
@@ -79,6 +85,7 @@ This folder contains 4 runtime backends:
 - Uses `previous_response_id`/`conversation_id` when available.
 - Maintains local `_conversation` transcript for fallback when a response chain is rejected.
 - Input is sanitized to keep tool-call / tool-output consistency.
+- Local memory is bounded by `memory_max_messages` / `memory_reset_to_messages`.
 
 ### OpenRouter-specific behavior
 
@@ -107,7 +114,8 @@ This folder contains 4 runtime backends:
 
 ### Memory model
 
-- Local `_conversation` stores user/assistant text history for Chack-level APIs/observability.
+- Codex manages active thread context internally (including its own context management/compaction behavior).
+- Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
 - Bounded by `memory_max_messages` / `memory_reset_to_messages`.
 - Tool events are parsed from Codex JSON output lines and mapped into intermediate steps.
 
@@ -123,18 +131,21 @@ This folder contains 4 runtime backends:
 
 ### Library/SDK
 
-- Uses LangGraph (`StateGraph`) + LangChain OpenAI-compatible client against OpenRouter.
+- Uses **LangChain** (`langchain-openai`) and **LangGraph** (`StateGraph`).
+- Model transport is OpenRouter via LangChain `ChatOpenAI` configured with OpenRouter base URL/headers.
+- Requires `OPENROUTER_API_KEY` for this backend.
 - Uses existing `AgentsToolset` so tool set and sub-agent behavior stay aligned with other backends.
 
 ### Loop execution
 
 - Native autonomous ReAct-style loop in graph form: `llm_call -> tool_node -> llm_call ...` until no tool calls.
-- Uses runtime recursion limit to avoid infinite loops.
+- Uses runtime `recursion_limit` to avoid infinite loops.
 
 ### Memory model
 
 - Uses LangGraph checkpointer thread memory (`thread_id`) for short-term continuity.
 - Adds summary-based context compaction in-model when message history grows.
+- Summary thresholds are sourced directly from `memory_max_messages` and `memory_reset_to_messages`.
 - Keeps local `_conversation` for Chack API compatibility.
 
 ### Guardrails

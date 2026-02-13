@@ -215,7 +215,12 @@ class Chack:
             except Exception:
                 payload = {}
         if isinstance(payload, dict):
-            return str(payload.get("action", "")).strip().lower() == "init"
+            action = str(payload.get("action", "")).strip().lower()
+            if not action:
+                args = payload.get("arguments")
+                if isinstance(args, dict):
+                    action = str(args.get("action", "")).strip().lower()
+            return action == "init"
         return False
 
     def _non_task_tool_count(self, steps) -> int:
@@ -308,8 +313,8 @@ class Chack:
         tools_override: Optional[list[Any]] = None,
         tools_append: Optional[list[Any]] = None,
     ):
-        memory_max_messages = max(1, int(self.config.session.max_turns or 50))
-        memory_reset_to_messages = memory_max_messages
+        memory_max_messages = int(self.config.session.memory_max_messages)
+        memory_reset_to_messages = int(self.config.session.memory_reset_to_messages)
         if tools_override is not None or tools_append is not None:
             return build_executor(
                 self.config,

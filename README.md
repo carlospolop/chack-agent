@@ -27,9 +27,11 @@ from chack_agent import (
 config = ChackConfig(
     model=ModelConfig(
         primary="gpt-4o",
-        social_network="gpt-4o",
-        scientific="gpt-4o",
-        websearcher="gpt-4o",
+    # Defaults for specialized tools are CHEAP_BUT_QUALITY.
+    social_network="CHEAP_BUT_QUALITY",
+    scientific="CHEAP_BUT_QUALITY",
+    websearcher="CHEAP_BUT_QUALITY",
+    tester="CHEAP_BUT_QUALITY",
     provider="openai",  # use "openrouter", "codex" or "langgraph"
     ),
     agent=AgentConfig(
@@ -38,6 +40,7 @@ config = ChackConfig(
     session=SessionConfig(
         max_turns=30,
         memory_max_messages=20,          # Short-term context window
+      memory_reset_to_messages=10,     # Messages kept after compaction/reset
         long_term_memory_enabled=True,   # Enable file-based long-term memory
         long_term_memory_dir="./memory", # Where to store session summaries
     ),

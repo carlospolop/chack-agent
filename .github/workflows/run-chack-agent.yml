@@ -14,19 +14,19 @@ on:
       model_social_network:
         description: "Social network model (optional)"
         required: false
-        default: ""
+        default: "CHEAP_BUT_QUALITY"
       model_scientific:
         description: "Scientific model (optional)"
         required: false
-        default: ""
+        default: "CHEAP_BUT_QUALITY"
       model_websearcher:
         description: "Websearcher model (optional)"
         required: false
-        default: ""
+        default: "CHEAP_BUT_QUALITY"
       model_tester:
         description: "Tester model (optional)"
         required: false
-        default: ""
+        default: "CHEAP_BUT_QUALITY"
       system_prompt:
         description: "System prompt"
         required: true

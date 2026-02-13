@@ -24,10 +24,10 @@ class AgentsToolset:
         tool_profile: str = "all",
         model_provider: str = "",
         default_model: str = "",
-        social_network_model: str = "",
-        scientific_model: str = "",
-        websearcher_model: str = "",
-        tester_model: str = "",
+        social_network_model: str = "CHEAP_BUT_QUALITY",
+        scientific_model: str = "CHEAP_BUT_QUALITY",
+        websearcher_model: str = "CHEAP_BUT_QUALITY",
+        tester_model: str = "CHEAP_BUT_QUALITY",
         social_network_max_turns: int = 30,
         scientific_max_turns: int = 30,
         websearcher_max_turns: int = 30,
@@ -39,10 +39,10 @@ class AgentsToolset:
         if not self.model_provider:
             raise ValueError("model_provider must be defined")
         self.default_model = default_model
-        self.social_network_model = social_network_model
-        self.scientific_model = scientific_model
-        self.websearcher_model = websearcher_model
-        self.tester_model = tester_model
+        self.social_network_model = social_network_model or "CHEAP_BUT_QUALITY"
+        self.scientific_model = scientific_model or "CHEAP_BUT_QUALITY"
+        self.websearcher_model = websearcher_model or "CHEAP_BUT_QUALITY"
+        self.tester_model = tester_model or "CHEAP_BUT_QUALITY"
         self.social_network_max_turns = social_network_max_turns
         self.scientific_max_turns = scientific_max_turns
         self.websearcher_max_turns = websearcher_max_turns

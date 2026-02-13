@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import keyword
 import os
-import time
+import sys
 import traceback
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -19,7 +17,7 @@ from agents.usage import Usage
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
-from chack_tools.telemetry import log_tool_started, log_tool_executed, log_tool_error
+from chack_tools.task_steps_manager_state import STORE, set_active_context
 
 
 _MCP_DENYLIST_TOOL_NAMES = {
@@ -59,16 +57,28 @@ def _py_type_from_schema(prop_schema: dict[str, Any]) -> Any:
     return mapping.get(str(raw_type or "string"), Any)
 
 
+def _schema_is_nullable(prop_schema: dict[str, Any]) -> bool:
+    raw_type = prop_schema.get("type")
+    if isinstance(raw_type, list):
+        return "null" in raw_type
+    any_of = prop_schema.get("anyOf")
+    if isinstance(any_of, list):
+        for entry in any_of:
+            if isinstance(entry, dict) and entry.get("type") == "null":
+                return True
+    return False
+
+
 async def _invoke_function_tool(tool: Any, args: dict[str, Any]) -> str:
     raw_args = json.dumps(args, ensure_ascii=False)
-    ctx = ToolContext(
-        context=None,
-        usage=Usage(),
-        tool_name=str(getattr(tool, "name", "tool") or "tool"),
-        tool_call_id=f"mcp-{uuid.uuid4()}",
-        tool_arguments=raw_args,
-        tool_input=args,
-    )
+    base_kwargs = {
+        "context": None,
+        "usage": Usage(),
+        "tool_name": str(getattr(tool, "name", "tool") or "tool"),
+        "tool_call_id": f"mcp-{uuid.uuid4()}",
+        "tool_arguments": raw_args,
+    }
+    ctx = ToolContext(**base_kwargs)
     result = await tool.on_invoke_tool(ctx, raw_args)
 
     if isinstance(result, str):
@@ -128,6 +138,8 @@ def _load_toolset() -> list[Any]:
         tools_cfg_data = {}
     if not isinstance(tools_cfg_data, dict):
         tools_cfg_data = {}
+    allowed_tool_cfg_keys = set(getattr(ToolsConfig, "__dataclass_fields__", {}).keys())
+    tools_cfg_data = {k: v for k, v in tools_cfg_data.items() if k in allowed_tool_cfg_keys}
 
     tool_profile = os.environ.get("CHACK_TOOL_PROFILE", "all") or "all"
     model_provider = str(os.environ.get("CHACK_MODEL_PROVIDER", "") or "").strip()
@@ -210,7 +222,17 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
             annotations[py_name] = _py_type_from_schema(
                 prop_schema if isinstance(prop_schema, dict) else {}
             )
-            default = inspect.Parameter.empty if json_key in required else None
+            schema_obj = prop_schema if isinstance(prop_schema, dict) else {}
+            has_schema_default = "default" in schema_obj
+            schema_default = schema_obj.get("default")
+            is_nullable = _schema_is_nullable(schema_obj)
+            is_required = bool(json_key in required and not has_schema_default and not is_nullable)
+            if is_required:
+                default = inspect.Parameter.empty
+            elif has_schema_default:
+                default = schema_default
+            else:
+                default = None
             parameters.append(
                 inspect.Parameter(
                     py_name,
@@ -226,9 +248,6 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                 if value is None:
                     continue
                 payload[_mapping.get(py_name, py_name)] = value
-            start_ts = log_tool_started(_name, payload)
-            start_time = time.time()
-            error = None
             try:
                 if state.require_task_steps_manager_init_first and not state.has_task_steps_manager_init:
                     if _name != "task_steps_manager" or str(payload.get("action", "")).strip().lower() != "init":
@@ -251,29 +270,8 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                 if is_task_steps_manager_init and str(result).startswith("SUCCESS:"):
                     state.has_task_steps_manager_init = True
                 return _truncate_tool_output(result)
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-                try:
-                    log_tool_error(
-                        _name,
-                        payload,
-                        error=error,
-                        trace=traceback.format_exc(),
-                    )
-                except Exception:
-                    pass
+            except Exception:
                 raise
-            finally:
-                end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                duration_ms = int((time.time() - start_time) * 1000)
-                log_tool_executed(
-                    _name,
-                    payload,
-                    start_ts=start_ts,
-                    end_ts=end_ts,
-                    duration_ms=duration_ms,
-                    error=error,
-                )
 
         _proxy.__name__ = f"tool_{name}".replace("-", "_")
         _proxy.__doc__ = description
@@ -285,17 +283,47 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
 
 
 def main() -> None:
-    mcp = FastMCP("Chack Tools MCP")
-    tools = _load_toolset()
-    state = _ServerPolicyState(
-        require_task_steps_manager_init_first=_as_bool(
-            os.environ.get("CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST", "1"),
-            default=True,
-        ),
-        max_non_task_tools=max(0, _as_int(os.environ.get("CHACK_MAX_TOOLS_USED", "0"), 0)),
-    )
-    _register_tools(mcp, tools, state)
-    mcp.run(transport="stdio")
+    try:
+        try:
+            from chack_tools.telemetry import sqs_logger as _sqs_logger  # type: ignore
+
+            def _noop_stdout_event(_event):
+                return None
+
+            _sqs_logger._emit_stdout_event = _noop_stdout_event  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        session_id = str(os.environ.get("CHACK_TASK_SESSION_ID", "") or "").strip()
+        run_label = str(os.environ.get("CHACK_RUN_LABEL", "") or "").strip() or "Run 1"
+        if session_id:
+            STORE.ensure_run(session_id, run_label)
+            set_active_context(session_id, run_label)
+
+        mcp = FastMCP("Chack Tools MCP")
+        tools = _load_toolset()
+        state = _ServerPolicyState(
+            require_task_steps_manager_init_first=_as_bool(
+                os.environ.get("CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST", "1"),
+                default=True,
+            ),
+            max_non_task_tools=max(0, _as_int(os.environ.get("CHACK_MAX_TOOLS_USED", "0"), 0)),
+        )
+        _register_tools(mcp, tools, state)
+        mcp.run(transport="stdio")
+    except Exception:
+        trace = traceback.format_exc()
+        try:
+            print(trace, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        try:
+            with open("/tmp/chack_mcp_crash.log", "a", encoding="utf-8") as handle:
+                handle.write(trace)
+                handle.write("\n")
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":
