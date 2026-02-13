@@ -8,7 +8,7 @@ from agents import Agent, ModelSettings, Runner
 from agents.models.openai_responses import OpenAIResponsesModel
 from openai import AsyncOpenAI
 
-from .config import ChackConfig
+from .config import ChackConfig, resolve_backend_type
 
 
 def _resolve_dir(config_path: str, rel_dir: str) -> str:
@@ -94,8 +94,8 @@ def build_long_term_memory(
     model_name = config.model.primary
     model: str | OpenAIResponsesModel = model_name
 
-    provider = str(getattr(config.model, "provider", "") or "openai").strip().lower()
-    if provider == "openrouter":
+    backend_type = resolve_backend_type(config)
+    if backend_type == "openrouter":
         api_key = (
             str(getattr(config.credentials, "openrouter_api_key", "") or "").strip()
             or os.environ.get("OPENROUTER_API_KEY", "").strip()

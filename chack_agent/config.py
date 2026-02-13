@@ -115,6 +115,15 @@ class ChackConfig:
     env: Dict[str, str]
 
 
+def resolve_backend_type(config: ChackConfig) -> str:
+    provider = str(getattr(config.model, "provider", "") or "openai").strip().lower()
+    if provider == "openrouter":
+        return "openrouter"
+    if provider == "openai":
+        return "openai_compaction"
+    raise ValueError(f"Unsupported model.provider value: {provider!r}")
+
+
 def _load_section(data: Dict[str, Any], key: str, cls):
     section = data.get(key, {})
     if section is None or not isinstance(section, dict):
@@ -207,7 +216,11 @@ def load_config(path: str) -> ChackConfig:
             agent.output_schema_json = yaml.safe_load(handle) or {}
 
     model_cfg = _load_section(raw, "model", ModelConfig)
-    model_cfg.primary = resolve_model_alias(model_cfg.primary)
+    provider = str(model_cfg.provider or "").strip().lower()
+    model_cfg.primary = resolve_model_alias(
+        model_cfg.primary,
+        provider=provider,
+    )
     if not str(model_cfg.social_network or "").strip():
         model_cfg.social_network = "CHEAP_BUT_QUALITY"
     if not str(model_cfg.scientific or "").strip():
@@ -216,10 +229,22 @@ def load_config(path: str) -> ChackConfig:
         model_cfg.websearcher = "CHEAP_BUT_QUALITY"
     if not str(model_cfg.tester or "").strip():
         model_cfg.tester = "CHEAP_BUT_QUALITY"
-    model_cfg.social_network = resolve_model_alias(model_cfg.social_network)
-    model_cfg.scientific = resolve_model_alias(model_cfg.scientific)
-    model_cfg.websearcher = resolve_model_alias(model_cfg.websearcher)
-    model_cfg.tester = resolve_model_alias(model_cfg.tester)
+    model_cfg.social_network = resolve_model_alias(
+        model_cfg.social_network,
+        provider=provider,
+    )
+    model_cfg.scientific = resolve_model_alias(
+        model_cfg.scientific,
+        provider=provider,
+    )
+    model_cfg.websearcher = resolve_model_alias(
+        model_cfg.websearcher,
+        provider=provider,
+    )
+    model_cfg.tester = resolve_model_alias(
+        model_cfg.tester,
+        provider=provider,
+    )
 
     config = ChackConfig(
         model=model_cfg,

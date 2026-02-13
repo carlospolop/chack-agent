@@ -10,12 +10,23 @@ import requests
 BEST_QUALITY = "google/gemini-3-pro-preview"
 CHEAP_BUT_QUALITY = "google/gemini-3-flash-preview"
 BEST_CHEAPEST = "xiaomi/mimo-v2-flash"
+OPENAI_BEST_QUALITY = "gpt-5.2-codex"
+OPENAI_CHEAP_BUT_QUALITY = "gpt-5-mini"
+OPENAI_BEST_CHEAPEST = "gpt-5-nano"
+_OPENAI_ALIAS_EQUIVALENTS: Dict[str, str] = {
+    "BEST_QUALITY": "OPENAI_BEST_QUALITY",
+    "CHEAP_BUT_QUALITY": "OPENAI_CHEAP_BUT_QUALITY",
+    "BEST_CHEAPEST": "OPENAI_BEST_CHEAPEST",
+}
 
 
 MODEL_ALIASES: Dict[str, str] = {
     "BEST_QUALITY": BEST_QUALITY,
     "CHEAP_BUT_QUALITY": CHEAP_BUT_QUALITY,
     "BEST_CHEAPEST": BEST_CHEAPEST,
+    "OPENAI_BEST_QUALITY": OPENAI_BEST_QUALITY,
+    "OPENAI_CHEAP_BUT_QUALITY": OPENAI_CHEAP_BUT_QUALITY,
+    "OPENAI_BEST_CHEAPEST": OPENAI_BEST_CHEAPEST,
 }
 
 _LOGGER = logging.getLogger("chack.model_aliases")
@@ -69,16 +80,44 @@ def _get_model_aliases() -> Dict[str, str]:
         if remote:
             _REMOTE_CACHE = remote
             _REMOTE_CACHE_LOADED_AT = now
-    return _REMOTE_CACHE or MODEL_ALIASES
+    merged = dict(MODEL_ALIASES)
+    if _REMOTE_CACHE:
+        merged.update(_REMOTE_CACHE)
+    return merged
 
 
-def resolve_model_alias(name: str) -> str:
-    if not name:
-        return name
-    key = str(name).strip()
+def _adapt_alias_for_runtime(name: str, *, provider: str = "") -> str:
+    key = str(name or "").strip()
     if not key:
         return name
-    return _get_model_aliases().get(key, name)
+    model_provider = str(provider or "").strip().lower()
+    if model_provider == "openai":
+        return _OPENAI_ALIAS_EQUIVALENTS.get(key, key)
+    return key
+
+
+def resolve_model_alias(
+    name: str,
+    *,
+    provider: str = "",
+) -> str:
+    if not name:
+        return name
+    key = _adapt_alias_for_runtime(name, provider=provider)
+    if not key:
+        return name
+    aliases = _get_model_aliases()
+    if key in aliases:
+        return aliases[key]
+    if key.startswith("OPENAI_"):
+        fallback = key[len("OPENAI_") :]
+        if fallback in aliases:
+            return aliases[fallback]
+    else:
+        fallback = f"OPENAI_{key}"
+        if fallback in aliases:
+            return aliases[fallback]
+    return name
 
 
 if _REMOTE_URL:

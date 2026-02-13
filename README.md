@@ -30,7 +30,7 @@ config = ChackConfig(
         social_network="gpt-4o",
         scientific="gpt-4o",
         websearcher="gpt-4o",
-        provider="openai",  # or "openrouter"
+    provider="openai",  # use "openrouter" to route via OpenRouter
     ),
     agent=AgentConfig(
         self_critique_enabled=True,  # Agent critiques its own plan before acting

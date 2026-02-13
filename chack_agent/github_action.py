@@ -110,12 +110,27 @@ def main() -> None:
         raise SystemExit("max_turns must be an integer")
 
     model = ModelConfig(
-        primary=resolve_model_alias(os.environ.get("INPUT_MODEL_PRIMARY", "gpt-4o")),
+        primary=resolve_model_alias(
+            os.environ.get("INPUT_MODEL_PRIMARY", "gpt-4o"),
+            provider=provider,
+        ),
         provider=provider,
-        social_network=resolve_model_alias(os.environ.get("INPUT_MODEL_SOCIAL", "")),
-        scientific=resolve_model_alias(os.environ.get("INPUT_MODEL_SCIENTIFIC", "")),
-        websearcher=resolve_model_alias(os.environ.get("INPUT_MODEL_WEBSEARCHER", "")),
-        tester=resolve_model_alias(os.environ.get("INPUT_MODEL_TESTER", "")),
+        social_network=resolve_model_alias(
+            os.environ.get("INPUT_MODEL_SOCIAL", ""),
+            provider=provider,
+        ),
+        scientific=resolve_model_alias(
+            os.environ.get("INPUT_MODEL_SCIENTIFIC", ""),
+            provider=provider,
+        ),
+        websearcher=resolve_model_alias(
+            os.environ.get("INPUT_MODEL_WEBSEARCHER", ""),
+            provider=provider,
+        ),
+        tester=resolve_model_alias(
+            os.environ.get("INPUT_MODEL_TESTER", ""),
+            provider=provider,
+        ),
     )
 
     agent_cfg = AgentConfig(

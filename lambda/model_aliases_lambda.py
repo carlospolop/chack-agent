@@ -7,6 +7,9 @@ DEFAULT_ALIASES: Dict[str, str] = {
     "BEST_QUALITY": "google/gemini-3-pro-preview",
     "CHEAP_BUT_QUALITY": "google/gemini-3-flash-preview",
     "BEST_CHEAPEST": "xiaomi/mimo-v2-flash",
+    "OPENAI_BEST_QUALITY": "gpt-5.2-codex",
+    "OPENAI_CHEAP_BUT_QUALITY": "gpt-5-mini",
+    "OPENAI_BEST_CHEAPEST": "gpt-5-nano",
 }
 
 
