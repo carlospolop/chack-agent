@@ -271,9 +271,6 @@ class CodexExecutor:
         return output, steps, _RawResult(raw_responses=raw_responses)
 
     def _build_command(self) -> list[str]:
-        output_schema_args: list[str] = []
-        if self._output_schema_path:
-            output_schema_args = ["--output-schema", self._output_schema_path]
         if self._thread_id:
             return [
                 self._codex_path,
@@ -284,10 +281,12 @@ class CodexExecutor:
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--model",
                 self._model_name,
-                *output_schema_args,
                 self._thread_id,
                 "-",
             ]
+        output_schema_args: list[str] = []
+        if self._output_schema_path:
+            output_schema_args = ["--output-schema", self._output_schema_path]
         return [
             self._codex_path,
             "exec",
