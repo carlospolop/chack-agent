@@ -464,6 +464,7 @@ class Chack:
             model=str(self.config.model.primary or ""),
         )
         task_session_id = ""
+        telemetry_task_session_id = ""
         try:
             if enable_self_critique is None:
                 enable_self_critique = bool(self.config.agent.self_critique_enabled)
@@ -483,8 +484,17 @@ class Chack:
             if max_tools_used_override is not None:
                 max_tools_used = max(0, int(max_tools_used_override))
 
+            # Internal bookkeeping/session key for TaskStepsManager state.
             task_session_id = f"{session_id}:{int(time.time() * 1000)}"
-            update_log_context(task_session_id=task_session_id)
+            # If this run was spawned by a tool (sub-agent), usage_session_id is the
+            # parent run id; reuse it for telemetry so tool executions show under the
+            # same run section in chacks.hacktricks.wiki.
+            telemetry_task_session_id = (str(usage_session_id or "").strip() or task_session_id)
+            update_log_context(
+                task_session_id=telemetry_task_session_id,
+                internal_task_session_id=task_session_id,
+                usage_session_id=str(usage_session_id or "").strip(),
+            )
             STORE.create_session(task_session_id, title="Task Steps Manager")
             TOOL_USAGE_STORE.reset_session(task_session_id)
             available_tool_names = self._available_tool_names(executor)
@@ -493,7 +503,9 @@ class Chack:
                 "agent_start",
                 payload={
                     "session_id": session_id,
-                    "task_session_id": task_session_id,
+                    "task_session_id": telemetry_task_session_id,
+                    "internal_task_session_id": task_session_id,
+                    "usage_session_id": str(usage_session_id or "").strip(),
                     "main_action": str(self.config.agent.main_action or ""),
                     "sub_action": str(self.config.agent.sub_action or ""),
                     "model": str(self.config.model.primary or ""),
@@ -524,7 +536,7 @@ class Chack:
             self.logger.info(
                 "Run start: session=%s task_session=%s min_tools=%s max_tools=%s self_critique=%s require_task_steps_manager_init=%s ts=%s",
                 session_id,
-                task_session_id,
+                telemetry_task_session_id or task_session_id,
                 min_tools_used,
                 max_tools_used,
                 enable_self_critique,
@@ -854,7 +866,7 @@ class Chack:
                     "agent_error",
                     payload={
                         "session_id": session_id,
-                        "task_session_id": task_session_id,
+                        "task_session_id": telemetry_task_session_id or task_session_id,
                         "error": result.get("error"),
                     },
                 )
@@ -863,7 +875,7 @@ class Chack:
                 "agent_end",
                 payload={
                     "session_id": session_id,
-                    "task_session_id": task_session_id,
+                    "task_session_id": telemetry_task_session_id or task_session_id,
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "cached_prompt_tokens": cached_prompt_tokens,
@@ -910,7 +922,7 @@ class Chack:
                 cache_write_prompt_tokens=cache_write_prompt_tokens,
                 rounds_used=rounds_used,
                 tools_used=tools_used,
-                task_session_id=task_session_id,
+                task_session_id=telemetry_task_session_id or task_session_id,
                 nested_usage_by_model=nested_usage_by_model,
                 run1_output=run1_output,
                 run2_output=run2_output,
@@ -927,14 +939,14 @@ class Chack:
             self.logger.exception(
                 "Run failed: session=%s task_session=%s ts=%s.",
                 session_id,
-                task_session_id,
+                telemetry_task_session_id or task_session_id,
                 _log_timestamp(),
             )
             log_event(
                 "agent_error",
                 payload={
                     "session_id": session_id,
-                    "task_session_id": task_session_id,
+                    "task_session_id": telemetry_task_session_id or task_session_id,
                     "error": f"{type(exc).__name__}: {exc}",
                     "traceback": traceback.format_exc(),
                 },
