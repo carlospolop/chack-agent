@@ -157,4 +157,4 @@ This folder contains 4 runtime backends:
 - If you add a new guardrail, attach it in both:
   - `openai_compaction_backend.py::_apply_guardrails`
   - `openrouter_openai_backend.py::_apply_guardrails`
-- If you add new tool profiles or tool limits, check both backend builders and `agent.py` orchestration.
+- If you add new tool limits, check both backend builders and `agent.py` orchestration.

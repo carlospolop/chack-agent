@@ -141,7 +141,6 @@ def _load_toolset() -> list[Any]:
     allowed_tool_cfg_keys = set(getattr(ToolsConfig, "__dataclass_fields__", {}).keys())
     tools_cfg_data = {k: v for k, v in tools_cfg_data.items() if k in allowed_tool_cfg_keys}
 
-    tool_profile = os.environ.get("CHACK_TOOL_PROFILE", "all") or "all"
     model_provider = str(os.environ.get("CHACK_MODEL_PROVIDER", "") or "").strip()
     if not model_provider:
         raise RuntimeError("CHACK_MODEL_PROVIDER must be defined")
@@ -160,7 +159,6 @@ def _load_toolset() -> list[Any]:
 
     toolset = AgentsToolset(
         ToolsConfig(**tools_cfg_data),
-        tool_profile=tool_profile,
         model_provider=model_provider,
         default_model=default_model,
         social_network_model=social_network_model,

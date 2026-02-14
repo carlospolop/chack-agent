@@ -125,10 +125,8 @@ class Chack:
         config: ChackConfig,
         *,
         config_path: Optional[str] = None,
-        tool_profile: str = "all",
     ) -> None:
         self.config = config
-        self.tool_profile = tool_profile
         self.config_path = config_path or os.path.join(os.getcwd(), "chack.yaml")
         self.logger = logging.getLogger("chack.agent")
         self._executors: Dict[str, Any] = {}
@@ -309,7 +307,6 @@ class Chack:
         session_id: str,
         *,
         system_prompt_override: Optional[str] = None,
-        tool_profile: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
         tools_append: Optional[list[Any]] = None,
     ):
@@ -322,18 +319,16 @@ class Chack:
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
-                tool_profile=tool_profile or self.tool_profile,
                 tools_override=tools_override,
                 tools_append=tools_append,
             )
 
-        cache_key = f"{session_id}:{tool_profile or self.tool_profile}:{system_prompt_override or ''}"
+        cache_key = f"{session_id}:{system_prompt_override or ''}"
         executor = self._executors.get(cache_key)
         if executor is None:
             self.logger.info(
-                "Building executor for session %s (tool_profile=%s, override=%s, append=%s, ts=%s).",
+                "Building executor for session %s (override=%s, append=%s, ts=%s).",
                 session_id,
-                tool_profile or self.tool_profile,
                 "yes" if tools_override is not None else "no",
                 "yes" if tools_append is not None else "no",
                 _log_timestamp(),
@@ -345,14 +340,12 @@ class Chack:
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
-                tool_profile=tool_profile or self.tool_profile,
             )
             self._executors[cache_key] = executor
         else:
             self.logger.debug(
-                "Reusing cached executor for session %s (tool_profile=%s, ts=%s).",
+                "Reusing cached executor for session %s (ts=%s).",
                 session_id,
-                tool_profile or self.tool_profile,
                 _log_timestamp(),
             )
         return executor
@@ -361,7 +354,7 @@ class Chack:
         if not self.config.session.long_term_memory_enabled:
             return
         system_prompt_override = self.config.session.system_prompt or None
-        cache_key = f"{session_id}:{self.tool_profile}:{system_prompt_override or ''}"
+        cache_key = f"{session_id}:{system_prompt_override or ''}"
         executor = self._executors.get(cache_key)
         if executor is None:
             return
@@ -427,7 +420,6 @@ class Chack:
         enable_self_critique: Optional[bool] = None,
         require_task_steps_manager_init_first: bool = True,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
-        tool_profile: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
         context: Optional[Any] = None,
@@ -442,7 +434,6 @@ class Chack:
             enable_self_critique=enable_self_critique,
             require_task_steps_manager_init_first=require_task_steps_manager_init_first,
             on_task_steps_manager_update=on_task_steps_manager_update,
-            tool_profile=tool_profile,
             tools_override=tools_override,
             system_prompt_override=system_prompt_override,
             context=context,
@@ -459,7 +450,6 @@ class Chack:
         enable_self_critique: Optional[bool] = None,
         require_task_steps_manager_init_first: bool = True,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
-        tool_profile: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
         usage_session_id: Optional[str] = None,
@@ -471,7 +461,6 @@ class Chack:
             main_action=str(self.config.agent.main_action or ""),
             sub_action=str(self.config.agent.sub_action or ""),
             session_id=session_id,
-            tool_profile=tool_profile or self.tool_profile,
             model=str(self.config.model.primary or ""),
         )
         task_session_id = ""
@@ -482,7 +471,6 @@ class Chack:
             executor = self._get_executor(
                 session_id,
                 system_prompt_override=system_prompt_override,
-                tool_profile=tool_profile,
                 tools_override=tools_override,
                 tools_append=tools_append,
             )
@@ -509,7 +497,6 @@ class Chack:
                     "main_action": str(self.config.agent.main_action or ""),
                     "sub_action": str(self.config.agent.sub_action or ""),
                     "model": str(self.config.model.primary or ""),
-                    "tool_profile": tool_profile or self.tool_profile,
                     "min_tools": min_tools_used,
                     "max_tools": max_tools_used,
                     "max_turns": int(self.config.session.max_turns or 0),
@@ -519,6 +506,7 @@ class Chack:
                     "tools_override": bool(tools_override),
                     "tools_append": bool(tools_append),
                     "available_tools": available_tool_names,
+                    "enabled_tools": available_tool_names,
                 },
             )
 
@@ -534,10 +522,9 @@ class Chack:
                 STORE.register_listener(task_session_id, _listener)
 
             self.logger.info(
-                "Run start: session=%s task_session=%s tool_profile=%s min_tools=%s max_tools=%s self_critique=%s require_task_steps_manager_init=%s ts=%s",
+                "Run start: session=%s task_session=%s min_tools=%s max_tools=%s self_critique=%s require_task_steps_manager_init=%s ts=%s",
                 session_id,
                 task_session_id,
-                tool_profile or self.tool_profile,
                 min_tools_used,
                 max_tools_used,
                 enable_self_critique,

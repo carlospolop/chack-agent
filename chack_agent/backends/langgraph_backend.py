@@ -616,7 +616,6 @@ def build_executor(
     max_turns: int,
     memory_max_messages: int,
     memory_reset_to_messages: int,
-    tool_profile: str = "all",
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> LangGraphExecutor:
@@ -637,7 +636,6 @@ def build_executor(
     if tools_override is None:
         toolset = AgentsToolset(
             config.tools,
-            tool_profile=tool_profile,
             model_provider=str(config.model.provider or ""),
             default_model=config.model.primary,
             social_network_model=config.model.social_network,

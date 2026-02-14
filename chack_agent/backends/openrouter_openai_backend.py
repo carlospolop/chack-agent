@@ -1028,7 +1028,6 @@ def build_executor(
     max_turns: int,
     memory_max_messages: int,
     memory_reset_to_messages: int,
-    tool_profile: str = "all",
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> AgentsExecutor:
@@ -1038,7 +1037,6 @@ def build_executor(
     if tools_override is None:
         init_params = inspect.signature(AgentsToolset.__init__).parameters
         toolset_kwargs = {
-            "tool_profile": tool_profile,
             "default_model": config.model.primary,
             "social_network_model": config.model.social_network,
             "scientific_model": config.model.scientific,
