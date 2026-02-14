@@ -61,6 +61,10 @@ inputs:
     description: "Agent sub_action"
     required: false
     default: "run"
+  session_id:
+    description: "Telemetry session_id override (optional). If empty, a unique GitHub run-based id is used."
+    required: false
+    default: ""
   tools_config_json:
     description: "JSON dict for ToolsConfig overrides"
     required: false
@@ -136,6 +140,7 @@ runs:
         INPUT_OUTPUT_SCHEMA_STRICT: ${{ inputs.output_schema_strict }}
         INPUT_MAIN_ACTION: ${{ inputs.main_action }}
         INPUT_SUB_ACTION: ${{ inputs.sub_action }}
+        INPUT_SESSION_ID: ${{ inputs.session_id }}
         INPUT_TOOLS_CONFIG_JSON: ${{ inputs.tools_config_json }}
         INPUT_SESSION_CONFIG_JSON: ${{ inputs.session_config_json }}
         INPUT_AGENT_CONFIG_JSON: ${{ inputs.agent_config_json }}

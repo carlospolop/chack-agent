@@ -126,14 +126,16 @@ class TesterAgentTool:
             system_prompt=_TESTER_AGENT_SYSTEM_PROMPT,
             overrides=overrides,
         )
-        parent_session_id = current_session_id()
+        parent_task_session_id = current_session_id()
+        parent_root_session_id = str(ctx.get("session_id") or "").strip()
+        subagent_session_id = parent_root_session_id or f"tester:{int(time.time() * 1000)}"
         
         # Avoid circular import at module level
         from chack_agent import Chack
         
         chack = Chack(config)
         result = chack.run(
-            session_id=f"tester:{int(time.time() * 1000)}",
+            session_id=subagent_session_id,
             text=prompt,
             min_tools_used_override=0,
             max_tools_used_override=self.config.tester_max_tools_used,
@@ -141,7 +143,7 @@ class TesterAgentTool:
             require_task_steps_manager_init_first=True,
             tools_override=tools,
             system_prompt_override=config.system_prompt,
-            usage_session_id=parent_session_id,
+            usage_session_id=parent_task_session_id,
         )
         return result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
 
