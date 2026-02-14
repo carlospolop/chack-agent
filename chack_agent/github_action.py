@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import time
 from pathlib import Path
 
 from chack_agent import (
@@ -75,6 +77,30 @@ def _write_github_output(message: str) -> None:
         if not message.endswith("\n"):
             handle.write("\n")
         handle.write("EOF\n")
+
+
+def _safe_token(value: str) -> str:
+    token = re.sub(r"[^a-zA-Z0-9._:-]+", "-", str(value or "").strip())
+    token = token.strip("-")
+    return token or "na"
+
+
+def _resolve_session_id(main_action: str, sub_action: str) -> str:
+    explicit = os.environ.get("INPUT_SESSION_ID", "").strip()
+    if explicit:
+        return explicit
+
+    run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
+    if run_id:
+        run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "").strip() or "1"
+        job = _safe_token(os.environ.get("GITHUB_JOB", "job"))
+        repo = _safe_token(os.environ.get("GITHUB_REPOSITORY", "repo"))
+        return (
+            f"gha:{repo}:{_safe_token(run_id)}:{_safe_token(run_attempt)}:"
+            f"{job}:{_safe_token(main_action)}:{_safe_token(sub_action)}"
+        )
+
+    return f"github-action:{int(time.time() * 1000)}"
 
 
 def main() -> None:
@@ -185,8 +211,9 @@ def main() -> None:
 
     prompt = _resolve_prompt()
     agent = Chack(config)
+    session_id = _resolve_session_id(agent_cfg.main_action, agent_cfg.sub_action)
     result = agent.run(
-        session_id="github-action",
+        session_id=session_id,
         text=prompt,
         require_task_steps_manager_init_first=bool(agent_cfg.require_task_steps_manager_init_first),
     )

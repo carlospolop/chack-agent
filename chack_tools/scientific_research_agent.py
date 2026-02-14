@@ -19,7 +19,6 @@ from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manage
 from .exec_tool import ExecTool, get_exec_tool
 from .subagent_config import build_subagent_config
 from .task_steps_manager_state import current_session_id
-from .tool_usage_state import STORE as TOOL_USAGE_STORE
 from .telemetry import current_log_context, run_with_tool_logging
 
 try:
@@ -147,11 +146,13 @@ class ScientificResearchAgentTool:
             system_prompt=_SCIENTIFIC_AGENT_SYSTEM_PROMPT,
             overrides=overrides,
         )
-        parent_session_id = current_session_id()
+        parent_task_session_id = current_session_id()
+        parent_root_session_id = str(ctx.get("session_id") or "").strip()
+        subagent_session_id = parent_root_session_id or f"scientific:{int(time.time() * 1000)}"
         from chack_agent import Chack
         chack = Chack(config)
         result = chack.run(
-            session_id=f"scientific:{int(time.time() * 1000)}",
+            session_id=subagent_session_id,
             text=prompt,
             min_tools_used_override=0,
             max_tools_used_override=self.config.scientific_max_tools_used,
@@ -159,12 +160,8 @@ class ScientificResearchAgentTool:
             require_task_steps_manager_init_first=True,
             tools_override=tools,
             system_prompt_override=config.system_prompt,
-            usage_session_id=parent_session_id,
+            usage_session_id=parent_task_session_id,
         )
-        if parent_session_id:
-            for tool_name, count in result.tool_counts.items():
-                if tool_name:
-                    TOOL_USAGE_STORE.add(tool_name, count=count, session_id=parent_session_id)
         return result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
 
 
