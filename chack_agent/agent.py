@@ -483,6 +483,7 @@ class Chack:
     ):
         memory_max_messages = int(self.config.session.memory_max_messages)
         memory_reset_to_messages = int(self.config.session.memory_reset_to_messages)
+        memory_summary_max_chars = int(self.config.session.memory_summary_max_chars)
         if tools_override is not None or tools_append is not None:
             return build_executor(
                 self.config,
@@ -490,6 +491,7 @@ class Chack:
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
+                memory_summary_max_chars=memory_summary_max_chars,
                 tools_override=tools_override,
                 tools_append=tools_append,
             )
@@ -511,6 +513,7 @@ class Chack:
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
+                memory_summary_max_chars=memory_summary_max_chars,
             )
             self._executors[cache_key] = executor
         else:
@@ -679,78 +682,6 @@ class Chack:
                 internal_task_session_id=task_session_id,
                 usage_session_id=str(usage_session_id or "").strip(),
             )
-            run_started_at = time.time()
-
-            def _to_float(value: Any, default: float) -> float:
-                try:
-                    return float(value)
-                except (TypeError, ValueError):
-                    return default
-
-            def _to_int(value: Any, default: int) -> int:
-                try:
-                    return int(value)
-                except (TypeError, ValueError):
-                    return default
-
-            max_cost_usd = max(0.0, _to_float(self.config.agent.max_cost_usd, 0.0))
-            max_time_seconds = max(0, _to_int(self.config.agent.max_time_seconds, 0))
-
-            def _append_limit_message(result_payload: dict, code: str, message: str) -> dict:
-                output = str(result_payload.get("output", "") or "").rstrip()
-                if output:
-                    result_payload["output"] = f"{output}\n\n{message}"
-                else:
-                    result_payload["output"] = message
-                result_payload["error"] = code
-                return result_payload
-
-            def _estimate_cost(
-                prompt_tokens: int,
-                completion_tokens: int,
-                cached_prompt_tokens: int,
-                cache_write_prompt_tokens: int,
-            ) -> Optional[float]:
-                try:
-                    model_name = self.config.model.primary
-                    main_cost = estimate_cost(
-                        self._pricing,
-                        model_name,
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        cached_prompt_tokens=cached_prompt_tokens,
-                        cache_write_tokens=cache_write_prompt_tokens,
-                    )
-                    nested_usage = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
-                    nested_cost, _ = estimate_costs_by_model(self._pricing, nested_usage)
-                    fallback_cost = None
-                    if (
-                        (main_cost is None or main_cost == 0.0)
-                        and (
-                            prompt_tokens
-                            or completion_tokens
-                            or cached_prompt_tokens
-                            or cache_write_prompt_tokens
-                        )
-                    ):
-                        fallback_cost = estimate_cost_with_defaults(
-                            model_name,
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            cached_prompt_tokens=cached_prompt_tokens,
-                            cache_write_tokens=cache_write_prompt_tokens,
-                        )
-                    if main_cost is None and nested_cost == 0:
-                        total_cost = None
-                    else:
-                        total_cost = (main_cost or 0.0) + nested_cost
-                    if (total_cost is None or total_cost == 0.0) and fallback_cost is not None:
-                        return fallback_cost
-                    return total_cost
-                except Exception:
-                    self.logger.exception("Failed to estimate running cost")
-                    return None
-
             STORE.create_session(task_session_id, title="Task Steps Manager")
             TOOL_USAGE_STORE.reset_session(task_session_id)
             available_tool_names = self._available_tool_names(executor)
@@ -1044,36 +975,6 @@ class Chack:
                         break
                     if max_tools_reached:
                         break
-                    elapsed = time.time() - run_started_at
-                    if max_time_seconds > 0 and elapsed >= max_time_seconds:
-                        result = _append_limit_message(
-                            result,
-                            "max_time_exceeded",
-                            "⏱️ Time budget exceeded. Increase agent.max_time_seconds if you want longer runs.",
-                        )
-                        break
-
-                    estimated_cost = _estimate_cost(
-                        prompt_total,
-                        completion_total,
-                        cached_total,
-                        cache_write_total,
-                    )
-                    if (
-                        max_cost_usd > 0.0
-                        and estimated_cost is not None
-                        and estimated_cost > max_cost_usd
-                    ):
-                        result = _append_limit_message(
-                            result,
-                            "max_cost_exceeded",
-                            (
-                                f"💸 Cost budget exceeded. Max configured budget: ${max_cost_usd:.2f}. "
-                                f"Current estimate: ${estimated_cost:.4f}."
-                            ),
-                        )
-                        break
-
                     if (
                         missing_tools
                         and not missing_init
@@ -1131,7 +1032,7 @@ class Chack:
             ) = _invoke_with_min_tools(request_text, "Run 1")
             output = result.get("output", "")
             run1_output = output
-            if result.get("error") in {"stopped", "max_cost_exceeded", "max_time_exceeded"}:
+            if result.get("error") == "stopped":
                 enable_self_critique = False
             rounds_used = len(run1_all_steps) + (1 if run1_output else 0)
             tools_used = self._non_task_tool_count(run1_all_steps)

@@ -58,8 +58,6 @@ class AgentConfig:
     output_schema_file: str = ""
     output_schema_name: str = ""
     output_schema_strict: bool = True
-    max_cost_usd: float = 0.0
-    max_time_seconds: int = 0
 
 
 @dataclass
@@ -67,8 +65,8 @@ class SessionConfig:
     max_turns: int = 50
     memory_max_messages: int = 50
     memory_reset_to_messages: int = 20
-    memory_summary_max_chars: int = 1500
     long_term_memory_enabled: bool = True
+    memory_summary_max_chars: int = 0
     long_term_memory_max_chars: int = 3000
     long_term_memory_dir: str = "longterm"
     system_prompt: str = ""  # Optional override for this session
@@ -157,17 +155,27 @@ def load_config(path: str) -> ChackConfig:
     with open(path, "r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
     raw = _interpolate_env(raw)
-    if not isinstance(raw, dict):
-        raw = {}
 
     if "system_prompt" not in raw or not str(raw.get("system_prompt", "")).strip():
         raise ValueError("system_prompt is required in config")
+    if "agent" not in raw or not isinstance(raw.get("agent"), dict):
+        raise ValueError("agent is required in config")
+    agent_raw = raw.get("agent")
 
-    agent_payload = {}
-    if "agent" in raw and raw["agent"] is not None:
-        if not isinstance(raw["agent"], dict):
-            raise ValueError("agent must be a mapping")
-        agent_payload = dict(raw["agent"])
+    if "model" in raw or "session" in raw:
+        raise ValueError(
+            "Legacy top-level config sections are no longer supported. "
+            "Move model/session settings into the top-level agent: section."
+        )
+    if "model" in agent_raw or "session" in agent_raw:
+        raise ValueError(
+            "Legacy agent sub-sections are no longer supported. "
+            "Use one flat agent section (model/session keys inside agent)."
+        )
+    if not str(agent_raw.get("primary", "")).strip():
+        raise ValueError("agent.primary is required in config")
+    if not str(agent_raw.get("provider", "")).strip():
+        raise ValueError("agent.provider is required in config")
 
     model_fields = set(getattr(ModelConfig, "__dataclass_fields__", {}).keys())
     session_fields = set(getattr(SessionConfig, "__dataclass_fields__", {}).keys())
@@ -217,15 +225,16 @@ def load_config(path: str) -> ChackConfig:
             item.strip() for item in credentials.openai_org_ids.split(",") if item.strip()
         ]
 
-    session_payload = {k: v for k, v in agent_payload.items() if k in session_fields}
+    model_payload = {k: v for k, v in agent_raw.items() if k in model_fields}
+    session_payload = {k: v for k, v in agent_raw.items() if k in session_fields}
+    agent_payload = {k: v for k, v in agent_raw.items() if k in agent_fields}
+
+    model_cfg = _load_section({"model": model_payload}, "model", ModelConfig)
     session = _load_section({"session": session_payload}, "session", SessionConfig)
     if session.system_prompt:
         session.system_prompt = _inject_tools(session.system_prompt)
 
-    agent_payload_for_agent = {k: v for k, v in agent_payload.items() if k in agent_fields}
-    agent = _load_section({"agent": agent_payload_for_agent}, "agent", AgentConfig)
-    model_payload = {k: v for k, v in agent_payload.items() if k in model_fields}
-    model_cfg = _load_section({"model": model_payload}, "model", ModelConfig)
+    agent = _load_section({"agent": agent_payload}, "agent", AgentConfig)
     # self_critique_prompt is hardcoded in chack_agent.agent
     if not str(agent.main_action or "").strip():
         raise ValueError("agent.main_action is required in config")
@@ -240,10 +249,6 @@ def load_config(path: str) -> ChackConfig:
         with open(schema_path, "r", encoding="utf-8") as handle:
             agent.output_schema_json = yaml.safe_load(handle) or {}
 
-    if not str(model_cfg.primary or "").strip():
-        raise ValueError("agent.primary is required in config")
-    if not str(model_cfg.provider or "").strip():
-        raise ValueError("agent.provider is required in config")
     provider = str(model_cfg.provider or "").strip().lower()
     model_cfg.primary = resolve_model_alias(
         model_cfg.primary,

@@ -1028,6 +1028,7 @@ def build_executor(
     max_turns: int,
     memory_max_messages: int,
     memory_reset_to_messages: int,
+    memory_summary_max_chars: int = 0,
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> AgentsExecutor:
@@ -1108,7 +1109,9 @@ def build_executor(
         _summary_keep_messages=memory_reset_to_messages,
         _summary_max_chars=max(
             0,
-            _to_int(os.environ.get("CHACK_OPENROUTER_SUMMARY_MAX_CHARS", "6000"), 6000),
+            int(memory_summary_max_chars)
+            if int(memory_summary_max_chars) > 0
+            else _to_int(os.environ.get("CHACK_OPENROUTER_SUMMARY_MAX_CHARS", "6000"), 6000),
         ),
         _compaction_threshold_ratio=float(getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75),
         _max_context_tokens=int(config.model.max_context_tokens or 0),

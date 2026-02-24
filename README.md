@@ -35,8 +35,6 @@ config = ChackConfig(
         provider="openai",  # use "openrouter", "codex", "gemini", "claude", or "langgraph"
     ),
     agent=AgentConfig(
-        max_cost_usd=2.0,  # Maximum estimated cost per run (USD), 0 disables.
-        max_time_seconds=1800,  # Maximum wall-clock time per run, in seconds.
         self_critique_enabled=True,  # Agent critiques its own plan before acting
         max_runtime_minutes=120,  # Optional runtime limit (minutes), 0 means unlimited
         max_cost_usd=12.50,  # Optional spend limit (USD), 0 means unlimited
@@ -79,7 +77,25 @@ print(result.output)
 ## Quick Start From YAML
 
 You can initialize directly from a YAML path. The library will load and apply
-all `agent` (models/session/runtime), tools, credentials, and logging values from that file.
+all agent/tool/credential/logging values from that file.
+
+For YAML files, keep all agent settings inside a single top-level `agent` section:
+
+```yaml
+agent:
+  primary: gpt-5
+  provider: openai
+  social_network: CHEAP_BUT_QUALITY
+  scientific: CHEAP_BUT_QUALITY
+  websearcher: CHEAP_BUT_QUALITY
+  tester: CHEAP_BUT_QUALITY
+  max_turns: 50
+  memory_max_messages: 20
+  memory_reset_to_messages: 10
+  memory_summary_max_chars: 4000
+  long_term_memory_enabled: true
+  long_term_memory_dir: ./memory
+```
 
 ```python
 from chack_agent import Chack
@@ -147,6 +163,7 @@ The agent can delegate to specialized sub‑agents. Sub‑agents run with restri
 
 ### 3. Memory Architecture
 * **Short‑Term Memory**: Compaction is driven by `max_context_tokens` and `compaction_threshold_ratio`.
+  - `memory_summary_max_chars` controls how long the running memory summary can be.
 * **Long‑Term Memory**: File-based persistence. The agent reads/writes summaries to a `long_term_memory_dir`.
 
 ## Configuration & Environment Variables
@@ -175,13 +192,10 @@ Most tools require API keys. Provide them via env vars (recommended) or your own
 
 ### Detailed Config Structure
 
-* **`AgentConfig`**:
-  * `max_cost_usd`: Hard cap for estimated total cost per run (USD). `0` disables.
-  * `max_time_seconds`: Hard cap for wall-clock run duration (seconds). `0` disables.
-* **`ModelConfig`**:
-  * `primary`: Main model for the coordinator agent.
-  * `social_network`, `scientific`, `websearcher`: Sub‑agent models (fallback to `primary`).
-* **`AgentConfig`**:
+* **`agent`** (`ModelConfig` + `SessionConfig` + `AgentConfig`):
+  * `primary`, `provider`: Main agent model settings.
+  * `social_network`, `scientific`, `websearcher`, `tester`: Sub‑agent models (fallback to `primary`).
+  * `max_turns`, `memory_max_messages`, `memory_reset_to_messages`, `memory_summary_max_chars`: Session behavior.
   * `max_runtime_minutes`: Maximum runtime in minutes for the run. Set to `0` to disable.
   * If the budget is reached, the run raises `TimeoutError` and stops.
   * `max_cost_usd`: Maximum estimated spend in USD for the run. Set to `0` to disable.
