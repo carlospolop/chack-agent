@@ -32,7 +32,7 @@ config = ChackConfig(
         scientific="CHEAP_BUT_QUALITY",
         websearcher="CHEAP_BUT_QUALITY",
         tester="CHEAP_BUT_QUALITY",
-        provider="openai",  # use "openrouter", "codex", "gemini" or "langgraph"
+        provider="openai",  # use "openrouter", "codex", "gemini", "claude", or "langgraph"
     ),
     agent=AgentConfig(
         self_critique_enabled=True,  # Agent critiques its own plan before acting
@@ -128,11 +128,14 @@ Most tools require API keys. Provide them via env vars (recommended) or your own
 | `OPENROUTER_API_KEY` | OpenRouter API Key | Core functionality (OpenRouter/LangGraph) |
 | `CODEX_PATH` | Path to Codex CLI binary | Optional override for provider=`codex` |
 | `GEMINI_CLI_PATH` | Path to Gemini CLI binary | Optional override for provider=`gemini` |
+| `CLAUDE_CLI_PATH` | Path to Claude CLI binary | Optional override for provider=`claude` |
 | `OPENROUTER_HTTP_REFERER` | App referer for OpenRouter attribution | Optional |
 | `OPENROUTER_APP_NAME` | App name for OpenRouter attribution | Optional |
 | `OPENROUTER_BASE_URL` | OpenRouter base URL | Optional override |
 | `GEMINI_API_KEY` | Gemini API key | Optional, required for provider=`gemini` unless `GOOGLE_API_KEY` used |
 | `GOOGLE_API_KEY` | Google API key for Gemini auth | Optional, required for provider=`gemini` unless `GEMINI_API_KEY` used |
+| `ANTHROPIC_API_KEY` | Anthropic API key | Optional, required for provider=`claude` unless `CLAUDE_API_KEY` is set |
+| `CLAUDE_API_KEY` | Anthropic API key alias | Optional, required for provider=`claude` unless `ANTHROPIC_API_KEY` is set |
 | `BRAVE_API_KEY` | Brave Search API Key | `brave_search` |
 | `SERPAPI_API_KEY` | SerpAPI Key | Google/Bing web + AI mode |
 | `FORUMSCOUT_API_KEY` | ForumScout API Key | Social network tools |

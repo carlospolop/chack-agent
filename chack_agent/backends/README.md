@@ -1,11 +1,12 @@
 # Backends Overview
 
-This folder contains 5 runtime backends:
+This folder contains 6 runtime backends:
 - `openai_compaction_backend.py`
 - `openrouter_openai_backend.py`
 - `codex_backend.py`
 - `langgraph_backend.py`
 - `gemini_cli_backend.py`
+- `claude_code_backend.py`
 
 ## Current shared config defaults
 
@@ -125,6 +126,32 @@ This folder contains 5 runtime backends:
 - No backend tool-input guardrail hooks (since execution is external CLI-driven).
 - MCP server hard-enforces `task_steps_manager init first` and `max_tools_used` limits.
 - MCP does not expose command-execution tools (e.g. `exec`) to avoid duplication with Codex native command execution.
+
+## `claude_code_backend.py`
+
+### Library/SDK
+
+- Does not use `openai-agents`.
+- Uses local Claude Code CLI (`claude`) via subprocess (`-p` + `--output-format stream-json`).
+- MCP tool server is launched from `chack_tools_mcp_server.py` via generated `~/.claude/chack/<session>/settings.json`.
+
+### Loop execution
+
+- One CLI invocation per `invoke()` call.
+- Conversation continuity uses Claude Code resume (`--resume <session_id>`) via stored `_claude_session_id`.
+
+### Memory model
+
+- Claude maintains active session context internally (`--resume`).
+- Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
+- Bounded by `memory_max_messages` / `memory_reset_to_messages`.
+- Tool events are parsed from Claude JSON stream events and mapped into intermediate steps.
+
+### Guardrails
+
+- Prompt-level policy for min/max tool usage and `task_steps_manager init first` is injected in the prompt.
+- MCP server enforces `task_steps_manager init first` and `max_tools_used` limits.
+- `--tools ""` disables Claude Code native built-ins to avoid duplicate native tool execution paths.
 
 ---
 

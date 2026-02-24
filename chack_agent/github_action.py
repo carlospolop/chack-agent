@@ -105,9 +105,9 @@ def _resolve_session_id(main_action: str, sub_action: str) -> str:
 
 def main() -> None:
     provider = os.environ.get("INPUT_PROVIDER", "openai").strip() or "openai"
-    if provider not in {"openai", "openrouter", "codex", "langgraph", "gemini"}:
+    if provider not in {"openai", "openrouter", "codex", "langgraph", "gemini", "claude", "claude-code", "claude_code"}:
         raise SystemExit(
-            "provider must be 'openai', 'openrouter', 'codex', 'gemini' or 'langgraph'"
+            "provider must be 'openai', 'openrouter', 'codex', 'gemini', 'langgraph', or 'claude'"
         )
 
     openai_api_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get(
@@ -122,6 +122,12 @@ def main() -> None:
     google_api_key = os.environ.get("GOOGLE_API_KEY", "") or os.environ.get(
         "INPUT_GOOGLE_API_KEY", ""
     )
+    anthropic_api_key = (
+        os.environ.get("ANTHROPIC_API_KEY", "")
+        or os.environ.get("CLAUDE_API_KEY", "")
+        or os.environ.get("INPUT_ANTHROPIC_API_KEY", "")
+        or os.environ.get("INPUT_CLAUDE_API_KEY", "")
+    )
     if provider == "openai" and not openai_api_key:
         raise SystemExit("OPENAI_API_KEY is required for provider=openai")
     if provider == "codex" and not openai_api_key:
@@ -133,6 +139,16 @@ def main() -> None:
     if provider == "gemini" and not gemini_api_key and not google_api_key:
         raise SystemExit(
             "GEMINI_API_KEY or GOOGLE_API_KEY is required for provider=gemini"
+        )
+    if provider in {"claude", "claude-code", "claude_code"} and not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("CLAUDE_API_KEY"):
+        if os.environ.get("INPUT_ANTHROPIC_API_KEY"):
+            os.environ["ANTHROPIC_API_KEY"] = os.environ.get("INPUT_ANTHROPIC_API_KEY", "")
+        elif os.environ.get("INPUT_CLAUDE_API_KEY"):
+            os.environ["ANTHROPIC_API_KEY"] = os.environ.get("INPUT_CLAUDE_API_KEY", "")
+
+    if provider in {"claude", "claude-code", "claude_code"} and not anthropic_api_key:
+        raise SystemExit(
+            "ANTHROPIC_API_KEY or CLAUDE_API_KEY is required for provider=claude"
         )
 
     tools_overrides = _load_json("INPUT_TOOLS_CONFIG_JSON")
