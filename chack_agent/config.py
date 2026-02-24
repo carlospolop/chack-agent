@@ -132,6 +132,8 @@ def resolve_backend_type(config: ChackConfig) -> str:
         return "openai_compaction"
     if provider == "gemini":
         return "gemini"
+    if provider in {"claude", "claude-code", "claude_code"}:
+        return "claude"
     raise ValueError(f"Unsupported model.provider value: {provider!r}")
 
 
