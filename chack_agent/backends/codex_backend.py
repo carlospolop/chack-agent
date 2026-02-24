@@ -280,8 +280,6 @@ class CodexExecutor:
                 "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
-            if self._max_turns > 0:
-                args.extend(["--max-turns", str(self._max_turns)])
             args.extend(
                 [
                 "--model",
@@ -303,8 +301,6 @@ class CodexExecutor:
             "--cd",
             os.getcwd(),
         ]
-        if self._max_turns > 0:
-            args.extend(["--max-turns", str(self._max_turns)])
         args.extend(
             [
                 "--model",
