@@ -58,6 +58,8 @@ class AgentConfig:
     output_schema_file: str = ""
     output_schema_name: str = ""
     output_schema_strict: bool = True
+    max_cost_usd: float = 0.0
+    max_time_seconds: int = 0
 
 
 @dataclass
@@ -65,6 +67,7 @@ class SessionConfig:
     max_turns: int = 50
     memory_max_messages: int = 50
     memory_reset_to_messages: int = 20
+    memory_summary_max_chars: int = 1500
     long_term_memory_enabled: bool = True
     long_term_memory_max_chars: int = 3000
     long_term_memory_dir: str = "longterm"
@@ -150,27 +153,25 @@ def _load_section(data: Dict[str, Any], key: str, cls):
     return cls(**filtered)
 
 
-def _extract_session_section(raw: Dict[str, Any]) -> Dict[str, Any]:
-    for key in ("session", "runtime", "telegram", "discord"):
-        section = raw.get(key)
-        if isinstance(section, dict):
-            return section
-    return {}
-
-
 def load_config(path: str) -> ChackConfig:
     with open(path, "r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
     raw = _interpolate_env(raw)
+    if not isinstance(raw, dict):
+        raw = {}
 
     if "system_prompt" not in raw or not str(raw.get("system_prompt", "")).strip():
         raise ValueError("system_prompt is required in config")
-    if "model" not in raw or not isinstance(raw.get("model"), dict):
-        raise ValueError("model.primary is required in config")
-    if not str(raw.get("model", {}).get("primary", "")).strip():
-        raise ValueError("model.primary is required in config")
-    if not str(raw.get("model", {}).get("provider", "")).strip():
-        raise ValueError("model.provider is required in config")
+
+    agent_payload = {}
+    if "agent" in raw and raw["agent"] is not None:
+        if not isinstance(raw["agent"], dict):
+            raise ValueError("agent must be a mapping")
+        agent_payload = dict(raw["agent"])
+
+    model_fields = set(getattr(ModelConfig, "__dataclass_fields__", {}).keys())
+    session_fields = set(getattr(SessionConfig, "__dataclass_fields__", {}).keys())
+    agent_fields = set(getattr(AgentConfig, "__dataclass_fields__", {}).keys())
 
     base_dir = os.path.dirname(os.path.abspath(path))
     if "tools_prompt_file" in raw:
@@ -216,12 +217,15 @@ def load_config(path: str) -> ChackConfig:
             item.strip() for item in credentials.openai_org_ids.split(",") if item.strip()
         ]
 
-    session_raw = _extract_session_section(raw)
-    session = _load_section({"session": session_raw}, "session", SessionConfig)
+    session_payload = {k: v for k, v in agent_payload.items() if k in session_fields}
+    session = _load_section({"session": session_payload}, "session", SessionConfig)
     if session.system_prompt:
         session.system_prompt = _inject_tools(session.system_prompt)
 
-    agent = _load_section(raw, "agent", AgentConfig)
+    agent_payload_for_agent = {k: v for k, v in agent_payload.items() if k in agent_fields}
+    agent = _load_section({"agent": agent_payload_for_agent}, "agent", AgentConfig)
+    model_payload = {k: v for k, v in agent_payload.items() if k in model_fields}
+    model_cfg = _load_section({"model": model_payload}, "model", ModelConfig)
     # self_critique_prompt is hardcoded in chack_agent.agent
     if not str(agent.main_action or "").strip():
         raise ValueError("agent.main_action is required in config")
@@ -236,7 +240,10 @@ def load_config(path: str) -> ChackConfig:
         with open(schema_path, "r", encoding="utf-8") as handle:
             agent.output_schema_json = yaml.safe_load(handle) or {}
 
-    model_cfg = _load_section(raw, "model", ModelConfig)
+    if not str(model_cfg.primary or "").strip():
+        raise ValueError("agent.primary is required in config")
+    if not str(model_cfg.provider or "").strip():
+        raise ValueError("agent.provider is required in config")
     provider = str(model_cfg.provider or "").strip().lower()
     model_cfg.primary = resolve_model_alias(
         model_cfg.primary,

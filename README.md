@@ -35,6 +35,8 @@ config = ChackConfig(
         provider="openai",  # use "openrouter", "codex", "gemini", "claude", or "langgraph"
     ),
     agent=AgentConfig(
+        max_cost_usd=2.0,  # Maximum estimated cost per run (USD), 0 disables.
+        max_time_seconds=1800,  # Maximum wall-clock time per run, in seconds.
         self_critique_enabled=True,  # Agent critiques its own plan before acting
         max_runtime_minutes=120,  # Optional runtime limit (minutes), 0 means unlimited
         max_cost_usd=12.50,  # Optional spend limit (USD), 0 means unlimited
@@ -77,7 +79,7 @@ print(result.output)
 ## Quick Start From YAML
 
 You can initialize directly from a YAML path. The library will load and apply
-all model/agent/session/tools/credentials/logging values from that file.
+all `agent` (models/session/runtime), tools, credentials, and logging values from that file.
 
 ```python
 from chack_agent import Chack
@@ -173,6 +175,9 @@ Most tools require API keys. Provide them via env vars (recommended) or your own
 
 ### Detailed Config Structure
 
+* **`AgentConfig`**:
+  * `max_cost_usd`: Hard cap for estimated total cost per run (USD). `0` disables.
+  * `max_time_seconds`: Hard cap for wall-clock run duration (seconds). `0` disables.
 * **`ModelConfig`**:
   * `primary`: Main model for the coordinator agent.
   * `social_network`, `scientific`, `websearcher`: Sub‑agent models (fallback to `primary`).
