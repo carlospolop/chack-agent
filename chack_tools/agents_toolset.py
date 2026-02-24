@@ -31,11 +31,15 @@ class AgentsToolset:
         scientific_max_turns: int = 30,
         websearcher_max_turns: int = 30,
         tester_max_turns: int = 30,
+        # Backward-compatibility shim for older integrations that still pass a
+        # `tool_profile` kwarg (e.g. CLI smoke tests).
+        tool_profile: str = "",
     ):
         self.config = config
         self.model_provider = str(model_provider or "").strip()
         if not self.model_provider:
             raise ValueError("model_provider must be defined")
+        self.tool_profile = str(tool_profile or "").strip()
         self.default_model = self._resolve_alias(default_model, fallback="")
         self.social_network_model = self._resolve_alias(
             social_network_model,

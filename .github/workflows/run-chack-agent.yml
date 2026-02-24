@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       provider:
-        description: "Model provider: openai, openrouter, codex or langgraph"
+        description: "Model provider: openai, openrouter, codex, gemini or langgraph"
         required: true
         default: "openai"
       model_primary:
@@ -72,6 +72,8 @@ jobs:
       OPENROUTER_HTTP_REFERER: ${{ secrets.OPENROUTER_HTTP_REFERER }}
       OPENROUTER_APP_NAME: ${{ secrets.OPENROUTER_APP_NAME }}
       OPENROUTER_BASE_URL: ${{ secrets.OPENROUTER_BASE_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout
@@ -110,6 +112,8 @@ jobs:
           INPUT_OPENROUTER_HTTP_REFERER: ${{ secrets.OPENROUTER_HTTP_REFERER }}
           INPUT_OPENROUTER_APP_NAME: ${{ secrets.OPENROUTER_APP_NAME }}
           INPUT_OPENROUTER_BASE_URL: ${{ secrets.OPENROUTER_BASE_URL }}
+          INPUT_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          INPUT_GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: |
           python -m chack_agent.github_action
 

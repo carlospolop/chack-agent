@@ -96,6 +96,7 @@ class CredentialsConfig:
     openrouter_http_referer: str = ""
     openrouter_app_name: str = ""
     openrouter_base_url: str = ""
+    gemini_api_key: str = ""
     aws_profile: str = ""
     aws_credentials_file: str = ""
 
@@ -129,6 +130,8 @@ def resolve_backend_type(config: ChackConfig) -> str:
         return "codex"
     if provider == "openai":
         return "openai_compaction"
+    if provider == "gemini":
+        return "gemini"
     raise ValueError(f"Unsupported model.provider value: {provider!r}")
 
 

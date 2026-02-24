@@ -1,10 +1,11 @@
 # Backends Overview
 
-This folder contains 4 runtime backends:
+This folder contains 5 runtime backends:
 - `openai_compaction_backend.py`
 - `openrouter_openai_backend.py`
 - `codex_backend.py`
 - `langgraph_backend.py`
+- `gemini_cli_backend.py`
 
 ## Current shared config defaults
 
@@ -36,7 +37,7 @@ This folder contains 4 runtime backends:
 ### `task_steps_manager init first`
 
 - Enforced in backend tool-input guardrail `require_task_steps_manager_init_first`.
-- Codex and LangGraph backends enforce this in their tool execution layers.
+- Codex, Gemini CLI and LangGraph backends enforce this in their tool execution layers.
 
 ## `openai_compaction_backend.py`
 
@@ -151,6 +152,34 @@ This folder contains 4 runtime backends:
 ### Guardrails
 
 - Enforces `task_steps_manager init first` and `max_tools_used` in the graph tool node.
+
+---
+
+## `gemini_cli_backend.py`
+
+### Library/SDK
+
+- Does not use `openai-agents`.
+- Uses local Gemini CLI (`gemini ...`) via subprocess.
+- MCP tool server is configured from generated `~/.gemini/chack/<session>/settings.json`.
+
+### Loop execution
+
+- One CLI invocation per `invoke()` call.
+- Conversation continuity uses Gemini session resume (`-r <session_id>`) via stored `_gemini_session_id`.
+
+### Memory model
+
+- Gemini manages active session context internally.
+- Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
+- Bounded by `memory_max_messages` / `memory_reset_to_messages`.
+- Tool events are parsed from Gemini `stream-json` events and mapped into intermediate steps.
+
+### Guardrails
+
+- Prompt-level policy for min/max tool usage and `task_steps_manager init first` is injected in the instructions.
+- MCP server hard-enforces `task_steps_manager init first` and `max_tools_used` limits.
+- `tools.core` is set to an empty allowlist to disable Gemini native built-ins, and the backend denylist removes duplicates from Chack tool names before exposing MCP tools.
 
 ## Notes for future changes
 
