@@ -733,7 +733,11 @@ class Chack:
 
             max_attempts = 6
             max_missing_tools_reminders = max(
-                0, int(self.config.tools.missing_tools_reminders_max or 0)
+                0,
+                int(
+                    getattr(self.config.tools, "missing_tools_reminders_max", 0)
+                    or 0
+                ),
             )
 
             def _should_stop() -> bool:
