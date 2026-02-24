@@ -167,6 +167,12 @@ def main() -> None:
             agent_overrides["max_runtime_minutes"] = int(agent_runtime_raw)
         except ValueError:
             raise SystemExit("agent_max_runtime_minutes must be an integer")
+    agent_cost_raw = os.environ.get("INPUT_AGENT_MAX_COST_USD", "").strip()
+    if agent_cost_raw:
+        try:
+            agent_overrides["max_cost_usd"] = float(agent_cost_raw)
+        except ValueError:
+            raise SystemExit("agent_max_cost_usd must be a number")
 
     output_schema, output_schema_name, output_schema_strict = _load_output_schema()
     if output_schema is not None:

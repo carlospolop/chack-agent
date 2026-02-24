@@ -81,6 +81,10 @@ inputs:
     description: "Maximum runtime (minutes) for the agent run (0 = unlimited)"
     required: false
     default: "0"
+  agent_max_cost_usd:
+    description: "Maximum estimated spend for the agent run in USD (0 = unlimited)"
+    required: false
+    default: "0"
   logging_level:
     description: "Logging level"
     required: false
@@ -165,6 +169,7 @@ runs:
         INPUT_SESSION_CONFIG_JSON: ${{ inputs.session_config_json }}
         INPUT_AGENT_CONFIG_JSON: ${{ inputs.agent_config_json }}
         INPUT_AGENT_MAX_RUNTIME_MINUTES: ${{ inputs.agent_max_runtime_minutes }}
+        INPUT_AGENT_MAX_COST_USD: ${{ inputs.agent_max_cost_usd }}
         INPUT_LOGGING_LEVEL: ${{ inputs.logging_level }}
         INPUT_MAX_TURNS: ${{ inputs.max_turns }}
         INPUT_OPENAI_API_KEY: ${{ inputs.openai_api_key }}

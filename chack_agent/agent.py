@@ -336,6 +336,67 @@ class Chack:
         )
 
     @staticmethod
+    def _append_admin_cost_warning(output: str, spent_usd: float, max_cost_usd: float) -> str:
+        if output is None:
+            return ""
+        base_output = str(output)
+        remaining_usd = max(0.0, max_cost_usd - spent_usd)
+        return (
+            f"{base_output}\n\n======\n[Admin Notice] Cost budget is approaching limit. "
+            f"You have spent ${spent_usd:.4f} of ${max_cost_usd:.4f} "
+            f"(${remaining_usd:.4f} remaining). "
+            "Please prioritize completion and organize output to finish before the configured limit is reached."
+        )
+
+    @staticmethod
+    def _token_usage_delta(
+        before: dict[str, tuple[int, int, int, int]],
+        after: dict[str, tuple[int, int, int, int]],
+    ) -> dict[str, tuple[int, int, int, int]]:
+        delta: dict[str, tuple[int, int, int, int]] = {}
+        for model_name, usage_after in after.items():
+            usage_before = before.get(model_name, (0, 0, 0, 0))
+            prompt_delta = max(0, int(usage_after[0]) - int(usage_before[0]))
+            completion_delta = max(0, int(usage_after[1]) - int(usage_before[1]))
+            cached_delta = max(0, int(usage_after[2]) - int(usage_before[2]))
+            cache_write_delta = max(0, int(usage_after[3]) - int(usage_before[3]))
+            if prompt_delta or completion_delta or cached_delta or cache_write_delta:
+                delta[model_name] = (
+                    prompt_delta,
+                    completion_delta,
+                    cached_delta,
+                    cache_write_delta,
+                )
+        return delta
+
+    @staticmethod
+    def _estimate_model_cost(
+        pricing,
+        model_name: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cached_prompt_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> Optional[float]:
+        estimated = estimate_cost(
+            pricing,
+            model_name,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
+        if estimated is not None:
+            return estimated
+        return estimate_cost_with_defaults(
+            model_name,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
+
+    @staticmethod
     def _stop_thread(thread_obj: threading.Thread) -> None:
         if not thread_obj.is_alive() or thread_obj.ident is None:
             return
@@ -593,6 +654,12 @@ class Chack:
             max_runtime_minutes = max(0, int(self.config.agent.max_runtime_minutes or 0))
             warning_threshold_seconds = max_runtime_minutes * 60.0 * 0.8
             max_runtime_seconds = max_runtime_minutes * 60.0
+            try:
+                max_cost_usd = max(0.0, float(self.config.agent.max_cost_usd or 0.0))
+            except (TypeError, ValueError):
+                max_cost_usd = 0.0
+            cost_warning_threshold = max_cost_usd * 0.8
+            estimated_cost_spent = 0.0
 
             min_tools_used = max(0, int(self.config.tools.min_tools_used or 0))
             if min_tools_used_override is not None:
@@ -804,6 +871,62 @@ class Chack:
                     result = _invoke_with_budget()
                     if result.get("error") == "stopped":
                         break
+
+                    token_usage_before = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
+                    (
+                        attempt_prompt,
+                        attempt_completion,
+                        attempt_cached,
+                        attempt_cache_write,
+                    ) = self._usage_from_raw_result(result.get("raw_result"))
+
+                    if max_cost_usd > 0:
+                        attempt_cost = 0.0
+                        model_cost = self._estimate_model_cost(
+                            self._pricing,
+                            str(self.config.model.primary or ""),
+                            prompt_tokens=attempt_prompt,
+                            completion_tokens=attempt_completion,
+                            cached_prompt_tokens=attempt_cached,
+                            cache_write_tokens=attempt_cache_write,
+                        )
+                        if model_cost is not None:
+                            attempt_cost += model_cost
+
+                        token_usage_after = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
+                        token_usage_delta = self._token_usage_delta(
+                            token_usage_before,
+                            token_usage_after,
+                        )
+                        for model_name, model_usage in token_usage_delta.items():
+                            nested_cost = self._estimate_model_cost(
+                                self._pricing,
+                                model_name,
+                                prompt_tokens=model_usage[0],
+                                completion_tokens=model_usage[1],
+                                cached_prompt_tokens=model_usage[2],
+                                cache_write_tokens=model_usage[3],
+                            )
+                            if nested_cost is not None:
+                                attempt_cost += nested_cost
+                        if attempt_cost > 0.0:
+                            estimated_cost_spent += attempt_cost
+                        if estimated_cost_spent >= max_cost_usd:
+                            raise TimeoutError(
+                                f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
+                            )
+                        if (
+                            cost_warning_threshold > 0
+                            and estimated_cost_spent >= cost_warning_threshold
+                        ):
+                            output = result.get("output", "")
+                            if output is not None:
+                                result["output"] = self._append_admin_cost_warning(
+                                    str(output),
+                                    estimated_cost_spent,
+                                    max_cost_usd,
+                                )
+
                     if warning_threshold_seconds > 0 and (time.time() - run_started_at) >= warning_threshold_seconds:
                         output = result.get("output", "")
                         if output is not None:
@@ -813,12 +936,6 @@ class Chack:
                                 max_runtime_minutes,
                             )
 
-                    (
-                        attempt_prompt,
-                        attempt_completion,
-                        attempt_cached,
-                        attempt_cache_write,
-                    ) = self._usage_from_raw_result(result.get("raw_result"))
                     prompt_total += attempt_prompt
                     completion_total += attempt_completion
                     cached_total += attempt_cached
