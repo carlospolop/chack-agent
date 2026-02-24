@@ -6,6 +6,9 @@ import os
 import time
 import json
 import traceback
+import threading
+import ctypes
+import queue
 from datetime import datetime, timezone
 from collections import Counter
 from dataclasses import dataclass
@@ -55,7 +58,6 @@ Your response to this improvement request will be the final one you give to the 
 
 def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
 
 
 CHACK_INITIAL_SYSTEM_PROMPT = """ ### PERSONALITY
@@ -142,8 +144,12 @@ class Chack:
 
     @staticmethod
     def _tool_name(step) -> str:
+        if isinstance(step, dict):
+            return str(step.get("tool", "") or step.get("name", "") or "")
         action = step[0] if isinstance(step, tuple) and step else step
-        return str(getattr(action, "tool", "") or "")
+        if isinstance(action, dict):
+            return str(action.get("tool", "") or action.get("name", "") or "")
+        return str(getattr(action, "tool", "") or getattr(action, "name", "") or "")
 
     @staticmethod
     def _available_tool_names(executor: Any) -> list[str]:
@@ -201,6 +207,8 @@ class Chack:
 
     @staticmethod
     def _tool_input(step):
+        if isinstance(step, dict):
+            return step.get("tool_input")
         action = step[0] if isinstance(step, tuple) and step else step
         return getattr(action, "tool_input", None)
 
@@ -303,6 +311,34 @@ class Chack:
         if not memory_text:
             return base
         return f"{base}\n\n### LONG TERM MEMORY\n{memory_text}"
+
+    @staticmethod
+    def _append_admin_runtime_warning(output: str, elapsed_seconds: float, max_runtime_minutes: int) -> str:
+        if output is None:
+            return ""
+        base_output = str(output)
+        elapsed_minutes = elapsed_seconds / 60.0
+        remaining_minutes = max(0.0, (max_runtime_minutes * 60.0 - elapsed_seconds) / 60.0)
+        return (
+            f"{base_output}\n\n======\n[Admin Notice] Runtime budget is approaching limit. "
+            f"You have used {elapsed_minutes:.1f} of {max_runtime_minutes:.1f} minutes "
+            f"({remaining_minutes:.1f} minutes remaining). "
+            "Please prioritize completion and organize output to finish before the configured limit is reached."
+        )
+
+    @staticmethod
+    def _stop_thread(thread_obj: threading.Thread) -> None:
+        if not thread_obj.is_alive() or thread_obj.ident is None:
+            return
+        async_exc = ctypes.py_object(TimeoutError)
+        result = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(thread_obj.ident), async_exc
+        )
+        if result <= 0:
+            return
+        if result > 1:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread_obj.ident), None)
+            return
 
     def _get_executor(
         self,
@@ -487,6 +523,10 @@ class Chack:
                 tools_append=tools_append,
             )
             self._last_activity_at[session_id] = time.time()
+            run_started_at = self._last_activity_at[session_id]
+            max_runtime_minutes = max(0, int(self.config.agent.max_runtime_minutes or 0))
+            warning_threshold_seconds = max_runtime_minutes * 60.0 * 0.8
+            max_runtime_seconds = max_runtime_minutes * 60.0
 
             min_tools_used = max(0, int(self.config.tools.min_tools_used or 0))
             if min_tools_used_override is not None:
@@ -584,6 +624,12 @@ class Chack:
                 )
 
                 for attempt in range(1, max_attempts + 1):
+                    elapsed = time.time() - run_started_at
+                    if max_runtime_seconds > 0 and elapsed >= max_runtime_seconds:
+                        raise TimeoutError(
+                            f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
+                        )
+
                     if _should_stop():
                         self.logger.info(
                             "%s: stop requested before attempt %s/%s ts=%s.",
@@ -637,9 +683,59 @@ class Chack:
                             reset_active_usage_session(usage_token)
                             reset_active_context(tokens)
 
-                    result = _invoke()
+                    def _invoke_with_budget():
+                        if max_runtime_seconds <= 0:
+                            return _invoke()
+                        remaining = max_runtime_seconds - (time.time() - run_started_at)
+                        if remaining <= 0:
+                            raise TimeoutError(
+                                f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
+                            )
+                        result_queue = queue.Queue()
+
+                        def _runner():
+                            try:
+                                result_queue.put(("ok", _invoke()))
+                            except Exception as exc:
+                                result_queue.put(("error", exc))
+
+                        worker = threading.Thread(target=_runner, daemon=True)
+                        worker.start()
+                        worker.join(timeout=remaining)
+                        if worker.is_alive():
+                            for _ in range(20):
+                                if not worker.is_alive():
+                                    break
+                                self._stop_thread(worker)
+                                worker.join(timeout=0.05)
+                            if worker.is_alive():
+                                raise TimeoutError(
+                                    "Agent run exceeded max runtime and the execution thread did not stop in time."
+                                )
+                            raise TimeoutError(
+                                f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
+                            )
+                        try:
+                            status, payload = result_queue.get_nowait()
+                        except queue.Empty:
+                            raise TimeoutError(
+                                "Agent run worker thread ended without returning a result."
+                            )
+                        if status == "error":
+                            raise payload
+                        return payload
+
+                    result = _invoke_with_budget()
                     if result.get("error") == "stopped":
                         break
+                    if warning_threshold_seconds > 0 and (time.time() - run_started_at) >= warning_threshold_seconds:
+                        output = result.get("output", "")
+                        if output is not None:
+                            result["output"] = self._append_admin_runtime_warning(
+                                str(output),
+                                time.time() - run_started_at,
+                                max_runtime_minutes,
+                            )
 
                     (
                         attempt_prompt,

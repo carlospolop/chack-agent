@@ -36,6 +36,7 @@ config = ChackConfig(
     ),
     agent=AgentConfig(
         self_critique_enabled=True,  # Agent critiques its own plan before acting
+        max_runtime_minutes=120,  # Optional runtime limit (minutes), 0 means unlimited
     ),
     session=SessionConfig(
         max_turns=30,
@@ -141,6 +142,9 @@ Most tools require API keys. Provide them via env vars (recommended) or your own
 * **`ModelConfig`**:
   * `primary`: Main model for the coordinator agent.
   * `social_network`, `scientific`, `websearcher`: Sub‑agent models (fallback to `primary`).
+* **`AgentConfig`**:
+  * `max_runtime_minutes`: Maximum runtime in minutes for the run. Set to `0` to disable.
+  * If the budget is reached, the run raises `TimeoutError` and stops.
 * **`ToolsConfig`**:
   * All tools are disabled by default. Enable only what you need.
   * `exec_timeout_seconds` defaults to **60** and is configurable via YAML/config (not via env).

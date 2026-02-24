@@ -133,6 +133,12 @@ def main() -> None:
         agent_overrides["require_task_steps_manager_init_first"] = agent_overrides.pop(
             "require_task_list_init_first"
         )
+    agent_runtime_raw = os.environ.get("INPUT_AGENT_MAX_RUNTIME_MINUTES", "").strip()
+    if agent_runtime_raw:
+        try:
+            agent_overrides["max_runtime_minutes"] = int(agent_runtime_raw)
+        except ValueError:
+            raise SystemExit("agent_max_runtime_minutes must be an integer")
 
     output_schema, output_schema_name, output_schema_strict = _load_output_schema()
     if output_schema is not None:

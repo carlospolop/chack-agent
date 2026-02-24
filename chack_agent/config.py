@@ -47,6 +47,7 @@ class ModelConfig:
 @dataclass
 class AgentConfig:
     self_critique_enabled: bool = True
+    max_runtime_minutes: int = 0
     require_task_steps_manager_init_first: bool = True
     compaction_threshold_ratio: float = 0.75
     compaction_model: str = ""
