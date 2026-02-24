@@ -14,7 +14,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from .config import ChackConfig
+from .config import ChackConfig, load_config
 from .env_utils import export_env
 from .backends import build_executor
 from .long_term_memory import (
@@ -124,20 +124,29 @@ class RunResult:
 class Chack:
     def __init__(
         self,
-        config: ChackConfig,
+        config: ChackConfig | str,
         *,
         config_path: Optional[str] = None,
-        tool_profile: str = "all",
     ) -> None:
-        self.config = config
-        self.tool_profile = tool_profile
-        self.config_path = config_path or os.path.join(os.getcwd(), "chack.yaml")
+        resolved_config: ChackConfig
+        resolved_path: Optional[str] = config_path
+        if isinstance(config, str):
+            resolved_path = os.path.abspath(config)
+            resolved_config = load_config(resolved_path)
+        else:
+            resolved_config = config
+        self.config = resolved_config
+        self.config_path = resolved_path or os.path.join(os.getcwd(), "chack.yaml")
         self.logger = logging.getLogger("chack.agent")
         self._executors: Dict[str, Any] = {}
         self._last_activity_at: Dict[str, float] = {}
         self._pricing = load_pricing(resolve_pricing_path())
         self._self_critique_prompt = _SELF_CRITIQUE_PROMPT
-        export_env(config, self.config_path)
+        export_env(self.config, self.config_path)
+
+    @classmethod
+    def from_config_path(cls, config_path: str) -> "Chack":
+        return cls(config_path)
 
     def _require_self_critique_prompt(self) -> str:
         return self._self_critique_prompt
@@ -340,12 +349,74 @@ class Chack:
             ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread_obj.ident), None)
             return
 
+    def _resolve_prompt_tag_source(
+        source: Any,
+        *,
+        context: Optional[Any],
+    ) -> Any:
+        if not isinstance(source, str):
+            return source
+        value = source.strip()
+        if value.startswith("context."):
+            key = value[len("context.") :]
+            if isinstance(context, dict):
+                return context.get(key, "")
+            return getattr(context, key, "") if context is not None else ""
+        if value.startswith("env."):
+            key = value[len("env.") :]
+            return os.environ.get(key, "")
+        return source
+
+    def _render_user_prompt(
+        self,
+        *,
+        context: Optional[Any],
+        prompt_variables_override: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        template = str(getattr(self.config, "user_prompt", "") or "").strip()
+        if not template:
+            return ""
+
+        class _SafePromptVars(dict):
+            def __missing__(self, key: str) -> str:
+                return "{" + key + "}"
+
+        values: Dict[str, Any] = {}
+        if context is not None:
+            if isinstance(context, dict):
+                values.update(context)
+            else:
+                try:
+                    values.update(vars(context))
+                except Exception:
+                    pass
+        values["context"] = context
+        values["env"] = os.environ
+
+        config_vars = getattr(self.config, "user_prompt_variables", {}) or {}
+        if isinstance(config_vars, dict):
+            for key, source in config_vars.items():
+                if not key:
+                    continue
+                values[str(key)] = self._resolve_prompt_tag_source(
+                    source,
+                    context=context,
+                )
+
+        if prompt_variables_override:
+            values.update(prompt_variables_override)
+
+        try:
+            return template.format_map(_SafePromptVars(values))
+        except Exception:
+            self.logger.warning("Failed to format user_prompt template; using raw template")
+            return template
+
     def _get_executor(
         self,
         session_id: str,
         *,
         system_prompt_override: Optional[str] = None,
-        tool_profile: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
         tools_append: Optional[list[Any]] = None,
     ):
@@ -358,18 +429,16 @@ class Chack:
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
-                tool_profile=tool_profile or self.tool_profile,
                 tools_override=tools_override,
                 tools_append=tools_append,
             )
 
-        cache_key = f"{session_id}:{tool_profile or self.tool_profile}:{system_prompt_override or ''}"
+        cache_key = f"{session_id}:{system_prompt_override or ''}"
         executor = self._executors.get(cache_key)
         if executor is None:
             self.logger.info(
-                "Building executor for session %s (tool_profile=%s, override=%s, append=%s, ts=%s).",
+                "Building executor for session %s (override=%s, append=%s, ts=%s).",
                 session_id,
-                tool_profile or self.tool_profile,
                 "yes" if tools_override is not None else "no",
                 "yes" if tools_append is not None else "no",
                 _log_timestamp(),
@@ -381,14 +450,12 @@ class Chack:
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
-                tool_profile=tool_profile or self.tool_profile,
             )
             self._executors[cache_key] = executor
         else:
             self.logger.debug(
-                "Reusing cached executor for session %s (tool_profile=%s, ts=%s).",
+                "Reusing cached executor for session %s (ts=%s).",
                 session_id,
-                tool_profile or self.tool_profile,
                 _log_timestamp(),
             )
         return executor
@@ -397,7 +464,7 @@ class Chack:
         if not self.config.session.long_term_memory_enabled:
             return
         system_prompt_override = self.config.session.system_prompt or None
-        cache_key = f"{session_id}:{self.tool_profile}:{system_prompt_override or ''}"
+        cache_key = f"{session_id}:{system_prompt_override or ''}"
         executor = self._executors.get(cache_key)
         if executor is None:
             return
@@ -456,17 +523,17 @@ class Chack:
     async def arun(
         self,
         session_id: str,
-        text: str,
+        text: str = "",
         *,
         min_tools_used_override: Optional[int] = None,
         max_tools_used_override: Optional[int] = None,
         enable_self_critique: Optional[bool] = None,
         require_task_steps_manager_init_first: bool = True,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
-        tool_profile: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
         context: Optional[Any] = None,
+        prompt_variables_override: Optional[Dict[str, Any]] = None,
         stop_requested: Optional[Callable[[], bool]] = None,
     ) -> RunResult:
         return await asyncio.to_thread(
@@ -478,39 +545,39 @@ class Chack:
             enable_self_critique=enable_self_critique,
             require_task_steps_manager_init_first=require_task_steps_manager_init_first,
             on_task_steps_manager_update=on_task_steps_manager_update,
-            tool_profile=tool_profile,
             tools_override=tools_override,
             system_prompt_override=system_prompt_override,
             context=context,
+            prompt_variables_override=prompt_variables_override,
             stop_requested=stop_requested,
         )
 
     def run(
         self,
         session_id: str,
-        text: str,
+        text: str = "",
         *,
         min_tools_used_override: Optional[int] = None,
         max_tools_used_override: Optional[int] = None,
         enable_self_critique: Optional[bool] = None,
         require_task_steps_manager_init_first: bool = True,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
-        tool_profile: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
         usage_session_id: Optional[str] = None,
         tools_append: Optional[list[Any]] = None,
         context: Optional[Any] = None,
+        prompt_variables_override: Optional[Dict[str, Any]] = None,
         stop_requested: Optional[Callable[[], bool]] = None,
     ) -> RunResult:
         log_token = set_log_context(
             main_action=str(self.config.agent.main_action or ""),
             sub_action=str(self.config.agent.sub_action or ""),
             session_id=session_id,
-            tool_profile=tool_profile or self.tool_profile,
             model=str(self.config.model.primary or ""),
         )
         task_session_id = ""
+        telemetry_task_session_id = ""
         try:
             if enable_self_critique is None:
                 enable_self_critique = bool(self.config.agent.self_critique_enabled)
@@ -518,7 +585,6 @@ class Chack:
             executor = self._get_executor(
                 session_id,
                 system_prompt_override=system_prompt_override,
-                tool_profile=tool_profile,
                 tools_override=tools_override,
                 tools_append=tools_append,
             )
@@ -535,8 +601,17 @@ class Chack:
             if max_tools_used_override is not None:
                 max_tools_used = max(0, int(max_tools_used_override))
 
+            # Internal bookkeeping/session key for TaskStepsManager state.
             task_session_id = f"{session_id}:{int(time.time() * 1000)}"
-            update_log_context(task_session_id=task_session_id)
+            # If this run was spawned by a tool (sub-agent), usage_session_id is the
+            # parent run id; reuse it for telemetry so tool executions show under the
+            # same run section in chacks.hacktricks.wiki.
+            telemetry_task_session_id = (str(usage_session_id or "").strip() or task_session_id)
+            update_log_context(
+                task_session_id=telemetry_task_session_id,
+                internal_task_session_id=task_session_id,
+                usage_session_id=str(usage_session_id or "").strip(),
+            )
             STORE.create_session(task_session_id, title="Task Steps Manager")
             TOOL_USAGE_STORE.reset_session(task_session_id)
             available_tool_names = self._available_tool_names(executor)
@@ -545,11 +620,12 @@ class Chack:
                 "agent_start",
                 payload={
                     "session_id": session_id,
-                    "task_session_id": task_session_id,
+                    "task_session_id": telemetry_task_session_id,
+                    "internal_task_session_id": task_session_id,
+                    "usage_session_id": str(usage_session_id or "").strip(),
                     "main_action": str(self.config.agent.main_action or ""),
                     "sub_action": str(self.config.agent.sub_action or ""),
                     "model": str(self.config.model.primary or ""),
-                    "tool_profile": tool_profile or self.tool_profile,
                     "min_tools": min_tools_used,
                     "max_tools": max_tools_used,
                     "max_turns": int(self.config.session.max_turns or 0),
@@ -559,6 +635,7 @@ class Chack:
                     "tools_override": bool(tools_override),
                     "tools_append": bool(tools_append),
                     "available_tools": available_tool_names,
+                    "enabled_tools": available_tool_names,
                 },
             )
 
@@ -574,10 +651,9 @@ class Chack:
                 STORE.register_listener(task_session_id, _listener)
 
             self.logger.info(
-                "Run start: session=%s task_session=%s tool_profile=%s min_tools=%s max_tools=%s self_critique=%s require_task_steps_manager_init=%s ts=%s",
+                "Run start: session=%s task_session=%s min_tools=%s max_tools=%s self_critique=%s require_task_steps_manager_init=%s ts=%s",
                 session_id,
-                task_session_id,
-                tool_profile or self.tool_profile,
+                telemetry_task_session_id or task_session_id,
                 min_tools_used,
                 max_tools_used,
                 enable_self_critique,
@@ -815,6 +891,17 @@ class Chack:
                     cache_write_total,
                 )
 
+            request_text = str(text or "").strip()
+            if not request_text:
+                request_text = self._render_user_prompt(
+                    context=context,
+                    prompt_variables_override=prompt_variables_override,
+                )
+            if not request_text:
+                raise ValueError(
+                    "No user input text provided and config.user_prompt is empty."
+                )
+
             (
                 result,
                 run1_all_steps,
@@ -822,7 +909,7 @@ class Chack:
                 completion_tokens,
                 cached_prompt_tokens,
                 cache_write_prompt_tokens,
-            ) = _invoke_with_min_tools(text, "Run 1")
+            ) = _invoke_with_min_tools(request_text, "Run 1")
             output = result.get("output", "")
             run1_output = output
             if result.get("error") == "stopped":
@@ -845,7 +932,7 @@ class Chack:
                 self.logger.info("Run 2 (self-critique) starting. ts=%s", _log_timestamp())
                 critique_prompt = self._require_self_critique_prompt()
                 critique_input = (
-                    f"{text}\n\nPrevious answer:\n{output}\n\n{critique_prompt}"
+                    f"{request_text}\n\nPrevious answer:\n{output}\n\n{critique_prompt}"
                 )
                 (
                     critique_result,
@@ -963,7 +1050,7 @@ class Chack:
                     "agent_error",
                     payload={
                         "session_id": session_id,
-                        "task_session_id": task_session_id,
+                        "task_session_id": telemetry_task_session_id or task_session_id,
                         "error": result.get("error"),
                     },
                 )
@@ -972,7 +1059,7 @@ class Chack:
                 "agent_end",
                 payload={
                     "session_id": session_id,
-                    "task_session_id": task_session_id,
+                    "task_session_id": telemetry_task_session_id or task_session_id,
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "cached_prompt_tokens": cached_prompt_tokens,
@@ -1019,7 +1106,7 @@ class Chack:
                 cache_write_prompt_tokens=cache_write_prompt_tokens,
                 rounds_used=rounds_used,
                 tools_used=tools_used,
-                task_session_id=task_session_id,
+                task_session_id=telemetry_task_session_id or task_session_id,
                 nested_usage_by_model=nested_usage_by_model,
                 run1_output=run1_output,
                 run2_output=run2_output,
@@ -1036,14 +1123,14 @@ class Chack:
             self.logger.exception(
                 "Run failed: session=%s task_session=%s ts=%s.",
                 session_id,
-                task_session_id,
+                telemetry_task_session_id or task_session_id,
                 _log_timestamp(),
             )
             log_event(
                 "agent_error",
                 payload={
                     "session_id": session_id,
-                    "task_session_id": task_session_id,
+                    "task_session_id": telemetry_task_session_id or task_session_id,
                     "error": f"{type(exc).__name__}: {exc}",
                     "traceback": traceback.format_exc(),
                 },

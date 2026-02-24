@@ -33,6 +33,6 @@ jobs:
           pip install dist/*.whl
           python - <<'PY'
           from chack_tools import Toolset, ToolsConfig
-          tools = Toolset(ToolsConfig(), tool_profile="discord").tools
+          tools = Toolset(ToolsConfig(), model_provider="openai").tools
           print(f"Loaded {len(tools)} tools")
           PY

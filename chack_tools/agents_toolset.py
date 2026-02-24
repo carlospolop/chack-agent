@@ -21,7 +21,6 @@ class AgentsToolset:
     def __init__(
         self,
         config: ToolsConfig,
-        tool_profile: str = "all",
         model_provider: str = "",
         default_model: str = "",
         social_network_model: str = "CHEAP_BUT_QUALITY",
@@ -32,12 +31,15 @@ class AgentsToolset:
         scientific_max_turns: int = 30,
         websearcher_max_turns: int = 30,
         tester_max_turns: int = 30,
+        # Backward-compatibility shim for older integrations that still pass a
+        # `tool_profile` kwarg (e.g. CLI smoke tests).
+        tool_profile: str = "",
     ):
         self.config = config
-        self.tool_profile = tool_profile
         self.model_provider = str(model_provider or "").strip()
         if not self.model_provider:
             raise ValueError("model_provider must be defined")
+        self.tool_profile = str(tool_profile or "").strip()
         self.default_model = self._resolve_alias(default_model, fallback="")
         self.social_network_model = self._resolve_alias(
             social_network_model,
@@ -90,8 +92,7 @@ class AgentsToolset:
             web_helper = SerpApiWebSearchTool(self.config)
             tools.append(get_google_web_search_tool(web_helper))
 
-        include_bing_web = self.tool_profile in {"all", "telegram"}
-        if has_serpapi and self.config.serpapi_bing_web_enabled and include_bing_web:
+        if has_serpapi and self.config.serpapi_bing_web_enabled:
             web_helper = SerpApiWebSearchTool(self.config)
             tools.append(get_bing_web_search_tool(web_helper))
 
@@ -115,8 +116,7 @@ class AgentsToolset:
             )
             tools.append(get_tester_agent_tool(tester_helper))
 
-        include_forumscout = self.tool_profile in {"all", "telegram"}
-        if self.config.social_network_enabled and include_forumscout:
+        if self.config.social_network_enabled:
             social_helper = SocialNetworkAgentTool(
                 self.config,
                 model_name=self.social_network_model,
@@ -126,8 +126,7 @@ class AgentsToolset:
             )
             tools.append(get_social_network_research_tool(social_helper))
 
-        include_scientific = self.tool_profile in {"all", "telegram"}
-        if self.config.scientific_enabled and include_scientific:
+        if self.config.scientific_enabled:
             scientific_helper = ScientificResearchAgentTool(
                 self.config,
                 model_name=self.scientific_model,
@@ -137,8 +136,7 @@ class AgentsToolset:
             )
             tools.append(get_scientific_research_tool(scientific_helper))
 
-        include_pdf = self.tool_profile in {"all", "telegram"}
-        if self.config.pdf_text_enabled and include_pdf:
+        if self.config.pdf_text_enabled:
             pdf_helper = PdfTextTool(self.config)
             tools.append(get_pdf_text_tool(pdf_helper))
 

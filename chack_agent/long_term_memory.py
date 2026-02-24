@@ -101,7 +101,7 @@ def build_long_term_memory(
 
     backend_type = resolve_backend_type(config)
     uses_openrouter_routed_model = (
-        backend_type in {"openrouter", "langgraph"} or "/" in str(model_name or "")
+        backend_type in {"openrouter", "langgraph"}
     )
     if uses_openrouter_routed_model:
         api_key = (

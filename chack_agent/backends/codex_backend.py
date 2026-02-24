@@ -48,9 +48,9 @@ class CodexExecutor:
     _memory_reset_to: int
     _base_system_prompt: str
     _model_name: str
+    _max_turns: int
     _codex_path: str
     _openai_api_key: str
-    _tool_profile: str
     _tools_config_json: str
     _allowed_tools_json: str
     _model_provider: str
@@ -272,22 +272,27 @@ class CodexExecutor:
 
     def _build_command(self) -> list[str]:
         if self._thread_id:
-            return [
+            args = [
                 self._codex_path,
                 "exec",
                 "resume",
                 "--json",
                 "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox",
+            ]
+            args.extend(
+                [
                 "--model",
                 self._model_name,
                 self._thread_id,
                 "-",
-            ]
+                ]
+            )
+            return args
         output_schema_args: list[str] = []
         if self._output_schema_path:
             output_schema_args = ["--output-schema", self._output_schema_path]
-        return [
+        args = [
             self._codex_path,
             "exec",
             "--json",
@@ -295,11 +300,17 @@ class CodexExecutor:
             "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
             os.getcwd(),
-            "--model",
-            self._model_name,
-            *output_schema_args,
-            "-",
         ]
+        args.extend(
+            [
+                "--model",
+                self._model_name,
+            ]
+        )
+        if output_schema_args:
+            args.extend(output_schema_args)
+        args.append("-")
+        return args
 
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
@@ -309,7 +320,6 @@ class CodexExecutor:
             env["CODEX_HOME"] = self._codex_home
         env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
         env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
-        env["CHACK_TOOL_PROFILE"] = self._tool_profile
         env["CHACK_MODEL_PROVIDER"] = self._model_provider
         env["CHACK_DEFAULT_MODEL"] = self._default_model
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
@@ -350,7 +360,6 @@ class CodexExecutor:
         env_vars = [
             "CHACK_TOOLS_CONFIG_JSON",
             "CHACK_ALLOWED_TOOLS_JSON",
-            "CHACK_TOOL_PROFILE",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",
@@ -562,12 +571,9 @@ def build_executor(
     max_turns: int,
     memory_max_messages: int,
     memory_reset_to_messages: int,
-    tool_profile: str = "all",
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> CodexExecutor:
-    del max_turns
-
     def _extract_tool_names(items: list[Any] | None) -> list[str]:
         names: list[str] = []
         seen: set[str] = set()
@@ -588,7 +594,6 @@ def build_executor(
     elif tools_append:
         base_toolset = AgentsToolset(
             config.tools,
-            tool_profile=tool_profile,
             model_provider=model_provider,
             default_model=config.model.primary,
             social_network_model=config.model.social_network,
@@ -619,9 +624,9 @@ def build_executor(
         _memory_reset_to=memory_reset_to_messages,
         _base_system_prompt=system_prompt,
         _model_name=str(config.model.primary),
+        _max_turns=int(max_turns or 0),
         _codex_path=codex_path,
         _openai_api_key=openai_api_key,
-        _tool_profile=str(tool_profile or "all"),
         _tools_config_json=json.dumps(getattr(config.tools, "__dict__", {}), ensure_ascii=False),
         _allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False)
         if allowed_tool_names is not None
