@@ -57,6 +57,7 @@ config = ChackConfig(
     ),
     logging=LoggingConfig(level="INFO"),
     system_prompt="You are an advanced researcher agent.",
+    user_prompt="Investigate {topic} with recent sources and summarize findings.",
     env={},
 )
 
@@ -64,11 +65,37 @@ config = ChackConfig(
 agent = Chack(config)
 result = agent.run(
     session_id="investigation-001",
-    text="Find recent research on plastic-eating bacteria and what people are saying about it on Reddit."
+    text="",  # empty => uses user_prompt from config (with template replacement)
+    prompt_variables_override={"topic": "plastic-eating bacteria"},
 )
 
 print(result.output)
 ```
+
+## Quick Start From YAML
+
+You can initialize directly from a YAML path. The library will load and apply
+all model/agent/session/tools/credentials/logging values from that file.
+
+```python
+from chack_agent import Chack
+
+agent = Chack("./config/chack.yaml")
+# equivalent explicit form:
+# agent = Chack.from_config_path("./config/chack.yaml")
+
+result = agent.run(
+    session_id="investigation-001",
+    text="Investigate this issue end-to-end."
+)
+print(result.output)
+```
+
+Optional: include `user_prompt` in YAML and let `agent.run(text="")` render it automatically.
+Template values can come from:
+- context object fields (e.g., `{repo_path}`, `{target_service}`)
+- `prompt_variables_override` in `run(...)`
+- optional `user_prompt_variables` in YAML (`context.<field>` / `env.<VAR>` sources)
 
 ## GitHub Action
 

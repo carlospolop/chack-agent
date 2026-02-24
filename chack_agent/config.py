@@ -115,6 +115,8 @@ class ChackConfig:
     logging: LoggingConfig
     system_prompt: str
     env: Dict[str, str]
+    user_prompt: str = ""
+    user_prompt_variables: Dict[str, Any] = field(default_factory=dict)
 
 
 def resolve_backend_type(config: ChackConfig) -> str:
@@ -191,6 +193,8 @@ def load_config(path: str) -> ChackConfig:
 
     system_prompt_template = str(raw.get("system_prompt")).strip()
     system_prompt = _inject_tools(system_prompt_template)
+    user_prompt_template = str(raw.get("user_prompt", "") or "").strip()
+    user_prompt = _inject_tools(user_prompt_template) if user_prompt_template else ""
 
     credentials = _load_section(raw, "credentials", CredentialsConfig)
     if isinstance(credentials.aws_profiles, str) and credentials.aws_profiles.strip():
@@ -264,6 +268,8 @@ def load_config(path: str) -> ChackConfig:
         credentials=credentials,
         logging=_load_section(raw, "logging", LoggingConfig),
         system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        user_prompt_variables=raw.get("user_prompt_variables", {}) or {},
         env=raw.get("env", {}) or {},
     )
 
