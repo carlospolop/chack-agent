@@ -48,6 +48,7 @@ class CodexExecutor:
     _memory_reset_to: int
     _base_system_prompt: str
     _model_name: str
+    _max_turns: int
     _codex_path: str
     _openai_api_key: str
     _tools_config_json: str
@@ -271,22 +272,29 @@ class CodexExecutor:
 
     def _build_command(self) -> list[str]:
         if self._thread_id:
-            return [
+            args = [
                 self._codex_path,
                 "exec",
                 "resume",
                 "--json",
                 "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox",
+            ]
+            if self._max_turns > 0:
+                args.extend(["--max-turns", str(self._max_turns)])
+            args.extend(
+                [
                 "--model",
                 self._model_name,
                 self._thread_id,
                 "-",
-            ]
+                ]
+            )
+            return args
         output_schema_args: list[str] = []
         if self._output_schema_path:
             output_schema_args = ["--output-schema", self._output_schema_path]
-        return [
+        args = [
             self._codex_path,
             "exec",
             "--json",
@@ -294,11 +302,19 @@ class CodexExecutor:
             "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
             os.getcwd(),
-            "--model",
-            self._model_name,
-            *output_schema_args,
-            "-",
         ]
+        if self._max_turns > 0:
+            args.extend(["--max-turns", str(self._max_turns)])
+        args.extend(
+            [
+                "--model",
+                self._model_name,
+            ]
+        )
+        if output_schema_args:
+            args.extend(output_schema_args)
+        args.append("-")
+        return args
 
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
@@ -562,8 +578,6 @@ def build_executor(
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> CodexExecutor:
-    del max_turns
-
     def _extract_tool_names(items: list[Any] | None) -> list[str]:
         names: list[str] = []
         seen: set[str] = set()
@@ -614,6 +628,7 @@ def build_executor(
         _memory_reset_to=memory_reset_to_messages,
         _base_system_prompt=system_prompt,
         _model_name=str(config.model.primary),
+        _max_turns=int(max_turns or 0),
         _codex_path=codex_path,
         _openai_api_key=openai_api_key,
         _tools_config_json=json.dumps(getattr(config.tools, "__dict__", {}), ensure_ascii=False),

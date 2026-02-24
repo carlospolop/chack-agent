@@ -2,7 +2,7 @@ name: "chack-agent"
 description: "Run the chack agent with a prompt and parameters."
 inputs:
   provider:
-    description: "Model provider: openai, openrouter, codex or langgraph"
+    description: "Model provider: openai, openrouter, codex, gemini, claude, or langgraph"
     required: false
     default: "openrouter"
   model_primary:
@@ -105,6 +105,22 @@ inputs:
     description: "OpenRouter base URL (optional)"
     required: false
     default: ""
+  gemini_api_key:
+    description: "Gemini API key (optional, prefer env GEMINI_API_KEY)"
+    required: false
+    default: ""
+  google_api_key:
+    description: "Google API key for Gemini (optional, prefer env GOOGLE_API_KEY)"
+    required: false
+    default: ""
+  anthropic_api_key:
+    description: "Anthropic API key (optional, prefer env ANTHROPIC_API_KEY)"
+    required: false
+    default: ""
+  claude_api_key:
+    description: "Anthropic API key alias (optional, prefer env CLAUDE_API_KEY)"
+    required: false
+    default: ""
 outputs:
   final-message:
     description: "Agent output"
@@ -151,6 +167,10 @@ runs:
         INPUT_OPENROUTER_HTTP_REFERER: ${{ inputs.openrouter_http_referer }}
         INPUT_OPENROUTER_APP_NAME: ${{ inputs.openrouter_app_name }}
         INPUT_OPENROUTER_BASE_URL: ${{ inputs.openrouter_base_url }}
+        INPUT_GEMINI_API_KEY: ${{ inputs.gemini_api_key }}
+        INPUT_GOOGLE_API_KEY: ${{ inputs.google_api_key }}
+        INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        INPUT_CLAUDE_API_KEY: ${{ inputs.claude_api_key }}
       working-directory: ${{ github.workspace }}
       run: |
         python -m chack_agent.github_action
