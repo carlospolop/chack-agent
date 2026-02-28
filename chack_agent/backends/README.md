@@ -10,9 +10,9 @@ This folder contains 6 runtime backends:
 
 ## Current shared config defaults
 
-- `session.memory_max_messages`: `50`
-- `session.memory_reset_to_messages`: `20`
-- Specialized tool models (`social_network`, `scientific`, `websearcher`, `tester`) default to `CHEAP_BUT_QUALITY`.
+- `agent.memory_max_messages`: `50`
+- `agent.memory_reset_to_messages`: `20`
+- Specialized tool models (`agent.social_network`, `agent.scientific`, `agent.websearcher`, `agent.tester`) default to `CHEAP_BUT_QUALITY`.
 
 ## Shared Architecture
 
@@ -56,7 +56,7 @@ This folder contains 6 runtime backends:
 
 - Primary memory continuity: `previous_response_id` + `conversation_id` (server-side chain).
 - Local `_conversation` transcript is kept for fallback/recovery and telemetry compatibility.
-- Local memory is bounded by `memory_max_messages` / `memory_reset_to_messages`.
+- Local memory is bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 
 ### Compaction
 
@@ -87,7 +87,7 @@ This folder contains 6 runtime backends:
 - Uses `previous_response_id`/`conversation_id` when available.
 - Maintains local `_conversation` transcript for fallback when a response chain is rejected.
 - Input is sanitized to keep tool-call / tool-output consistency.
-- Local memory is bounded by `memory_max_messages` / `memory_reset_to_messages`.
+- Local memory is bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 
 ### OpenRouter-specific behavior
 
@@ -118,7 +118,7 @@ This folder contains 6 runtime backends:
 
 - Codex manages active thread context internally (including its own context management/compaction behavior).
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
-- Bounded by `memory_max_messages` / `memory_reset_to_messages`.
+- Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Codex JSON output lines and mapped into intermediate steps.
 
 ### Guardrails
@@ -144,7 +144,7 @@ This folder contains 6 runtime backends:
 
 - Claude maintains active session context internally (`--resume`).
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
-- Bounded by `memory_max_messages` / `memory_reset_to_messages`.
+- Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Claude JSON stream events and mapped into intermediate steps.
 
 ### Guardrails
@@ -173,7 +173,7 @@ This folder contains 6 runtime backends:
 
 - Uses LangGraph checkpointer thread memory (`thread_id`) for short-term continuity.
 - Adds summary-based context compaction in-model when message history grows.
-- Summary thresholds are sourced directly from `memory_max_messages` and `memory_reset_to_messages`.
+- Summary thresholds are sourced directly from `agent.memory_max_messages` and `agent.memory_reset_to_messages`.
 - Keeps local `_conversation` for Chack API compatibility.
 
 ### Guardrails
@@ -199,7 +199,7 @@ This folder contains 6 runtime backends:
 
 - Gemini manages active session context internally.
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
-- Bounded by `memory_max_messages` / `memory_reset_to_messages`.
+- Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Gemini `stream-json` events and mapped into intermediate steps.
 
 ### Guardrails

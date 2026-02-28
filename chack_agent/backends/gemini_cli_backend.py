@@ -591,10 +591,20 @@ def build_executor(
     max_turns: int,
     memory_max_messages: int,
     memory_reset_to_messages: int,
+    memory_summary_max_chars: int = 0,
     tools_override: list[Any] | None = None,
     tools_append: list[Any] | None = None,
 ) -> GeminiCliExecutor:
     del max_turns
+    try:
+        _LOGGER.debug(
+            "gemini build_executor: memory_summary_max_chars=%s (not used in this backend)",
+            int(memory_summary_max_chars),
+        )
+    except Exception:
+        _LOGGER.debug(
+            "gemini build_executor: memory_summary_max_chars provided (unable to coerce to int in debug log)"
+        )
 
     def _extract_tool_names(items: list[Any] | None) -> list[str]:
         names: list[str] = []

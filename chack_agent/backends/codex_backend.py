@@ -575,6 +575,15 @@ def build_executor(
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> CodexExecutor:
+    try:
+        _LOGGER.debug(
+            "codex build_executor: memory_summary_max_chars=%s (not used in this backend)",
+            int(memory_summary_max_chars),
+        )
+    except Exception:
+        _LOGGER.debug(
+            "codex build_executor: memory_summary_max_chars provided (unable to coerce to int in debug log)"
+        )
     def _extract_tool_names(items: list[Any] | None) -> list[str]:
         names: list[str] = []
         seen: set[str] = set()
