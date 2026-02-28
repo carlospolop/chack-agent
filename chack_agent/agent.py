@@ -767,6 +767,16 @@ class Chack:
                 _log_timestamp(),
             )
             save_long_term_memory(path, updated, max_chars)
+            log_event(
+                "long_term_memory_updated",
+                payload={
+                    "session_id": session_id,
+                    "long_term_memory_path": path,
+                    "long_term_memory_max_chars": int(max_chars or 0),
+                    "long_term_memory_chars": len(updated),
+                    "long_term_memory": updated,
+                },
+            )
 
     async def afinalize_long_term_memory(self, session_id: str) -> None:
         await self._finalize_long_term_memory(session_id)
