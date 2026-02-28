@@ -451,6 +451,33 @@ class Chack:
         return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
 
     @staticmethod
+    def _detect_container_runtime() -> Optional[str]:
+        # Best-effort container detection when Docker CLI/socket are unavailable.
+        try:
+            if os.path.exists("/.dockerenv"):
+                return "docker"
+        except Exception:
+            pass
+
+        for path in ("/proc/1/cgroup", "/proc/self/cgroup", "/proc/self/mountinfo"):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    data = handle.read().lower()
+                if "docker" in data:
+                    return "docker"
+                if "containerd" in data:
+                    return "containerd"
+                if "kubepods" in data or "kubernetes" in data:
+                    return "kubernetes"
+                if "podman" in data:
+                    return "podman"
+                if "lxc" in data:
+                    return "lxc"
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
     def _collect_system_snapshot() -> Dict[str, Any]:
         cpu_usage: Optional[float] = None
         ram_percent: Optional[float] = None
@@ -552,6 +579,21 @@ class Chack:
                 "running_containers": len(containers),
                 "containers": containers,
             }
+        else:
+            runtime = Chack._detect_container_runtime()
+            if runtime:
+                # We can still report containerization context even without Docker daemon access.
+                docker_status = {
+                    "running_containers": 1,
+                    "containers": [
+                        {
+                            "name": socket.gethostname(),
+                            "status": "current container only (docker daemon unavailable)",
+                        }
+                    ],
+                    "runtime": runtime,
+                    "inside_container": True,
+                }
 
         snapshot: Dict[str, Any] = {
             "host": socket.gethostname(),
