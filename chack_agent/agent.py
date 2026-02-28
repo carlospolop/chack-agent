@@ -9,6 +9,8 @@ import traceback
 import threading
 import ctypes
 import queue
+import socket
+import subprocess
 from datetime import datetime, timezone
 from collections import Counter
 from dataclasses import dataclass
@@ -410,6 +412,205 @@ class Chack:
             ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread_obj.ident), None)
             return
 
+    @staticmethod
+    def _safe_run_json(cmd: list[str], *, timeout: float = 2.0) -> Any:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception:
+            return None
+        if proc.returncode != 0:
+            return None
+        raw = (proc.stdout or "").strip()
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_run_lines(cmd: list[str], *, timeout: float = 2.0) -> list[str]:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception:
+            return []
+        if proc.returncode != 0:
+            return []
+        return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+
+    @staticmethod
+    def _collect_system_snapshot() -> Dict[str, Any]:
+        cpu_usage: Optional[float] = None
+        ram_percent: Optional[float] = None
+        disk_percent: Optional[float] = None
+        net_rx_mb: Optional[float] = None
+        net_tx_mb: Optional[float] = None
+
+        # Prefer psutil when available; otherwise use best-effort fallbacks.
+        try:
+            import psutil  # type: ignore
+
+            try:
+                cpu_usage = float(psutil.cpu_percent(interval=0.0))
+            except Exception:
+                cpu_usage = None
+            try:
+                ram_percent = float(psutil.virtual_memory().percent)
+            except Exception:
+                ram_percent = None
+            try:
+                disk_percent = float(psutil.disk_usage("/").percent)
+            except Exception:
+                disk_percent = None
+            try:
+                net = psutil.net_io_counters()
+                net_rx_mb = float(net.bytes_recv) / (1024.0 * 1024.0)
+                net_tx_mb = float(net.bytes_sent) / (1024.0 * 1024.0)
+            except Exception:
+                net_rx_mb = None
+                net_tx_mb = None
+        except Exception:
+            # Approximate CPU with load average when psutil is unavailable.
+            try:
+                load1, _load5, _load15 = os.getloadavg()
+                cpu_count = max(1, int(os.cpu_count() or 1))
+                cpu_usage = max(0.0, min(100.0, (float(load1) / float(cpu_count)) * 100.0))
+            except Exception:
+                cpu_usage = None
+
+            # Linux-only RAM fallback from /proc/meminfo.
+            try:
+                mem_total_kb = None
+                mem_avail_kb = None
+                with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.startswith("MemTotal:"):
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                mem_total_kb = float(parts[1])
+                        elif line.startswith("MemAvailable:"):
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                mem_avail_kb = float(parts[1])
+                if mem_total_kb and mem_avail_kb is not None and mem_total_kb > 0:
+                    ram_percent = ((mem_total_kb - mem_avail_kb) / mem_total_kb) * 100.0
+            except Exception:
+                ram_percent = None
+
+            try:
+                statvfs = os.statvfs("/")
+                total = float(statvfs.f_frsize) * float(statvfs.f_blocks)
+                free = float(statvfs.f_frsize) * float(statvfs.f_bavail)
+                if total > 0:
+                    disk_percent = ((total - free) / total) * 100.0
+            except Exception:
+                disk_percent = None
+
+        pm2_status: Any = None
+        pm2_data = Chack._safe_run_json(["pm2", "jlist"], timeout=2.0)
+        if isinstance(pm2_data, list):
+            counts = Counter()
+            for proc in pm2_data:
+                if not isinstance(proc, dict):
+                    continue
+                env = proc.get("pm2_env") if isinstance(proc.get("pm2_env"), dict) else {}
+                status = str(env.get("status", "")).strip().lower() or "unknown"
+                counts[status] += 1
+            pm2_status = {
+                "total": int(sum(counts.values())),
+                "by_status": {str(k): int(v) for k, v in counts.items()},
+            }
+
+        docker_status: Any = None
+        docker_lines = Chack._safe_run_lines(
+            ["docker", "ps", "--format", "{{.Names}}|{{.Status}}"],
+            timeout=2.0,
+        )
+        if docker_lines:
+            containers = []
+            for row in docker_lines[:30]:
+                name, _sep, status = row.partition("|")
+                containers.append(
+                    {
+                        "name": name.strip(),
+                        "status": status.strip(),
+                    }
+                )
+            docker_status = {
+                "running_containers": len(containers),
+                "containers": containers,
+            }
+
+        snapshot: Dict[str, Any] = {
+            "host": socket.gethostname(),
+            "cpu": {"usage": cpu_usage} if cpu_usage is not None else {},
+            "ram": {"percent": ram_percent} if ram_percent is not None else {},
+            "disk": {"percent": disk_percent} if disk_percent is not None else {},
+            "network": {
+                "rx": net_rx_mb,
+                "tx": net_tx_mb,
+            },
+            "pm2_status": pm2_status,
+            "docker_status": docker_status,
+        }
+        return snapshot
+
+    @staticmethod
+    def _emit_system_metrics(
+        *,
+        session_id: str,
+        task_session_id: str,
+        trigger: str,
+    ) -> None:
+        try:
+            snapshot = Chack._collect_system_snapshot()
+            payload = {
+                "session_id": session_id,
+                "task_session_id": task_session_id,
+                "trigger": trigger,
+                **snapshot,
+            }
+            log_event("system_metrics", payload=payload)
+        except Exception:
+            # Metrics collection should never break the agent flow.
+            return
+
+    def _start_system_metrics_publisher(
+        self,
+        *,
+        session_id: str,
+        task_session_id: str,
+        stop_event: threading.Event,
+        interval_seconds: float = 30.0,
+    ) -> threading.Thread:
+        def _runner() -> None:
+            while not stop_event.wait(interval_seconds):
+                self._emit_system_metrics(
+                    session_id=session_id,
+                    task_session_id=task_session_id,
+                    trigger="interval",
+                )
+
+        thread = threading.Thread(
+            target=_runner,
+            name=f"chack-system-metrics-{session_id}",
+            daemon=True,
+        )
+        thread.start()
+        return thread
+
     def _resolve_prompt_tag_source(
         source: Any,
         *,
@@ -642,6 +843,8 @@ class Chack:
         )
         task_session_id = ""
         telemetry_task_session_id = ""
+        metrics_stop_event = threading.Event()
+        metrics_thread: Optional[threading.Thread] = None
         try:
             if enable_self_critique is None:
                 enable_self_critique = bool(self.config.agent.self_critique_enabled)
@@ -707,6 +910,17 @@ class Chack:
                     "available_tools": available_tool_names,
                     "enabled_tools": available_tool_names,
                 },
+            )
+            self._emit_system_metrics(
+                session_id=session_id,
+                task_session_id=telemetry_task_session_id or task_session_id,
+                trigger="agent_start",
+            )
+            metrics_thread = self._start_system_metrics_publisher(
+                session_id=session_id,
+                task_session_id=telemetry_task_session_id or task_session_id,
+                stop_event=metrics_stop_event,
+                interval_seconds=30.0,
             )
 
             def _listener(board_text: str) -> None:
@@ -1179,6 +1393,11 @@ class Chack:
                     },
                 )
 
+            self._emit_system_metrics(
+                session_id=session_id,
+                task_session_id=telemetry_task_session_id or task_session_id,
+                trigger="agent_end",
+            )
             log_event(
                 "agent_end",
                 payload={
@@ -1261,4 +1480,10 @@ class Chack:
             )
             raise
         finally:
+            metrics_stop_event.set()
+            if metrics_thread is not None:
+                try:
+                    metrics_thread.join(timeout=1.0)
+                except Exception:
+                    pass
             reset_log_context(log_token)
