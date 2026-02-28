@@ -1050,6 +1050,7 @@ class Chack:
                                     "intermediate_steps": [],
                                     "raw_result": None,
                                     "error": "max_turns_exceeded",
+                                    "traceback": traceback.format_exc(),
                                 }
                             raise
                         finally:
@@ -1394,13 +1395,28 @@ class Chack:
                 asyncio.run(self._finalize_long_term_memory(session_id))
 
             if result.get("error"):
+                error_text = str(result.get("error") or "unknown_error")
+                trace_text = str(result.get("traceback") or "").strip()
+                if not trace_text:
+                    trace_text = (
+                        "No Python traceback captured. "
+                        f"Error reported by agent flow: {error_text}"
+                    )
                 log_event(
                     "agent_error",
                     payload={
                         "session_id": session_id,
                         "task_session_id": telemetry_task_session_id or task_session_id,
-                        "error": result.get("error"),
+                        "main_action": str(self.config.agent.main_action or ""),
+                        "sub_action": str(self.config.agent.sub_action or ""),
+                        "error": error_text,
+                        "traceback": trace_text,
                     },
+                    main_action=str(self.config.agent.main_action or ""),
+                    sub_action=str(self.config.agent.sub_action or ""),
+                    session_id=session_id,
+                    task_session_id=telemetry_task_session_id or task_session_id,
+                    model=str(self.config.model.primary or ""),
                 )
 
             self._emit_system_metrics(
@@ -1484,9 +1500,16 @@ class Chack:
                 payload={
                     "session_id": session_id,
                     "task_session_id": telemetry_task_session_id or task_session_id,
+                    "main_action": str(self.config.agent.main_action or ""),
+                    "sub_action": str(self.config.agent.sub_action or ""),
                     "error": f"{type(exc).__name__}: {exc}",
                     "traceback": traceback.format_exc(),
                 },
+                main_action=str(self.config.agent.main_action or ""),
+                sub_action=str(self.config.agent.sub_action or ""),
+                session_id=session_id,
+                task_session_id=telemetry_task_session_id or task_session_id,
+                model=str(self.config.model.primary or ""),
             )
             raise
         finally:
