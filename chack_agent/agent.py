@@ -483,6 +483,7 @@ class Chack:
     ):
         memory_max_messages = int(self.config.session.memory_max_messages)
         memory_reset_to_messages = int(self.config.session.memory_reset_to_messages)
+        memory_summary_max_chars = int(self.config.session.memory_summary_max_chars)
         if tools_override is not None or tools_append is not None:
             return build_executor(
                 self.config,
@@ -490,6 +491,7 @@ class Chack:
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
+                memory_summary_max_chars=memory_summary_max_chars,
                 tools_override=tools_override,
                 tools_append=tools_append,
             )
@@ -511,6 +513,7 @@ class Chack:
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
+                memory_summary_max_chars=memory_summary_max_chars,
             )
             self._executors[cache_key] = executor
         else:

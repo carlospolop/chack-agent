@@ -571,6 +571,7 @@ def build_executor(
     max_turns: int,
     memory_max_messages: int,
     memory_reset_to_messages: int,
+    memory_summary_max_chars: int = 0,
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> CodexExecutor:
