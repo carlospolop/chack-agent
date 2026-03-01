@@ -2,8 +2,6 @@ import json
 import os
 import time
 from typing import Any, Optional
-from .agents_toolset import AgentsToolset
-from chack_agent import Chack
 
 from .config import ToolsConfig
 from .subagent_config import (
@@ -101,6 +99,8 @@ class SubChackResearchAgentTool:
             raise RuntimeError("OpenAI Agents SDK is not available in this runtime.")
 
         # Local import to avoid circular import from agents_toolset -> this module.
+        from .agents_toolset import AgentsToolset
+
         toolset = AgentsToolset(
             self.config,
             model_provider=self.model_provider,
@@ -183,7 +183,8 @@ class SubChackResearchAgentTool:
         parent_task_session_id = current_session_id()
         parent_root_session_id = str(ctx.get("session_id") or "").strip()
         subagent_session_id = parent_root_session_id or f"subchack:{int(time.time() * 1000)}"
-        
+
+        from chack_agent import Chack
         chack = Chack(config)
         result = chack.run(
             session_id=subagent_session_id,
