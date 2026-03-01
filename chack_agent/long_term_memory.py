@@ -49,6 +49,24 @@ def save_long_term_memory(path: str, content: str, max_chars: int) -> None:
         handle.write(content)
 
 
+_NONE_LIKE_MEMORY_VALUES = {
+    "",
+    "none",
+    "n/a",
+    "na",
+    "null",
+    "nil",
+    "no memory",
+    "no long-term memory",
+    "no long term memory",
+}
+
+
+def is_none_like_memory(content: str) -> bool:
+    text = str(content or "").strip().lower()
+    return text in _NONE_LIKE_MEMORY_VALUES
+
+
 def format_messages(messages: Iterable) -> str:
     lines = []
     for msg in messages:

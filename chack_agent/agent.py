@@ -23,6 +23,7 @@ from .long_term_memory import (
     build_long_term_memory,
     format_messages,
     get_long_term_memory_path,
+    is_none_like_memory,
     load_long_term_memory,
     save_long_term_memory,
 )
@@ -802,6 +803,16 @@ class Chack:
                 _log_timestamp(),
             )
             return
+        if updated and is_none_like_memory(updated):
+            self.logger.info(
+                "Long-term memory summarizer returned a none-like value for session %s; keeping previous memory (ts=%s).",
+                session_id,
+                _log_timestamp(),
+            )
+            if previous:
+                updated = previous
+            else:
+                updated = ""
         if updated:
             self.logger.info(
                 "Long-term memory updated for session %s (chars=%s ts=%s).",
