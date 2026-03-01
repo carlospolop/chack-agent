@@ -643,10 +643,12 @@ def build_executor(
             scientific_model=config.model.scientific,
             websearcher_model=config.model.websearcher,
             tester_model=config.model.tester,
+            subchack_model=config.model.subchack,
             social_network_max_turns=config.model.social_network_max_turns,
             scientific_max_turns=config.model.scientific_max_turns,
             websearcher_max_turns=config.model.websearcher_max_turns,
             tester_max_turns=config.model.tester_max_turns,
+            subchack_max_turns=config.model.subchack_max_turns,
         )
         tools = list(toolset.tools)
         if tools_append:

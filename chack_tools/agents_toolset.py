@@ -14,6 +14,7 @@ from .social_network_agent import SocialNetworkAgentTool, get_social_network_res
 from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
 from .websearcher_agent import WebSearcherAgentTool, get_websearcher_research_tool
 from .tester_agent import TesterAgentTool, get_tester_agent_tool
+from .subchack_research_agent import SubChackResearchAgentTool, get_subchack_research_tool
 from .serpapi_keys import has_serpapi_keys
 
 
@@ -27,10 +28,12 @@ class AgentsToolset:
         scientific_model: str = "CHEAP_BUT_QUALITY",
         websearcher_model: str = "CHEAP_BUT_QUALITY",
         tester_model: str = "CHEAP_BUT_QUALITY",
+        subchack_model: str = "",
         social_network_max_turns: int = 30,
         scientific_max_turns: int = 30,
         websearcher_max_turns: int = 30,
         tester_max_turns: int = 30,
+        subchack_max_turns: int = 30,
         # Backward-compatibility shim for older integrations that still pass a
         # `tool_profile` kwarg (e.g. CLI smoke tests).
         tool_profile: str = "",
@@ -57,10 +60,15 @@ class AgentsToolset:
             tester_model,
             fallback="CHEAP_BUT_QUALITY",
         )
+        self.subchack_model = self._resolve_alias(
+            subchack_model,
+            fallback="",
+        )
         self.social_network_max_turns = social_network_max_turns
         self.scientific_max_turns = scientific_max_turns
         self.websearcher_max_turns = websearcher_max_turns
         self.tester_max_turns = tester_max_turns
+        self.subchack_max_turns = subchack_max_turns
         self.tools = self._build_tools()
 
     def _resolve_alias(self, value: str, *, fallback: str) -> str:
@@ -115,6 +123,24 @@ class AgentsToolset:
                 max_turns=self.tester_max_turns,
             )
             tools.append(get_tester_agent_tool(tester_helper))
+
+        if self.config.subchack_enabled:
+            subchack_helper = SubChackResearchAgentTool(
+                self.config,
+                model_name=self.subchack_model,
+                fallback_model=self.default_model,
+                model_provider=self.model_provider,
+                max_turns=self.subchack_max_turns,
+                social_network_model=self.social_network_model,
+                scientific_model=self.scientific_model,
+                websearcher_model=self.websearcher_model,
+                tester_model=self.tester_model,
+                social_network_max_turns=self.social_network_max_turns,
+                scientific_max_turns=self.scientific_max_turns,
+                websearcher_max_turns=self.websearcher_max_turns,
+                tester_max_turns=self.tester_max_turns,
+            )
+            tools.append(get_subchack_research_tool(subchack_helper))
 
         if self.config.social_network_enabled:
             social_helper = SocialNetworkAgentTool(

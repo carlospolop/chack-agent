@@ -187,6 +187,7 @@ class Chack:
             "websearcher_research": "🌍",
             "social_network_research": "🌐",
             "scientific_research": "🔬",
+            "subchack_researcher": "🧩",
             "forum_search": "💬",
             "linkedin_search": "💼",
             "instagram_search": "📸",
@@ -936,10 +937,16 @@ class Chack:
                 task_session_id=telemetry_task_session_id,
                 internal_task_session_id=task_session_id,
                 usage_session_id=str(usage_session_id or "").strip(),
+                max_turns=int(self.config.session.max_turns or 0),
+                max_runtime_minutes=max_runtime_minutes,
+                max_cost_usd=max_cost_usd,
+                memory_max_messages=int(self.config.session.memory_max_messages or 0),
+                memory_reset_to_messages=int(self.config.session.memory_reset_to_messages or 0),
             )
             STORE.create_session(task_session_id, title="Task Steps Manager")
             TOOL_USAGE_STORE.reset_session(task_session_id)
             available_tool_names = self._available_tool_names(executor)
+            update_log_context(available_tool_names=available_tool_names)
 
             log_event(
                 "agent_start",
@@ -1045,6 +1052,24 @@ class Chack:
                         raise TimeoutError(
                             f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
                         )
+                    remaining_runtime_minutes = 0.0
+                    if max_runtime_seconds > 0:
+                        remaining_runtime_minutes = max(
+                            0.0,
+                            (max_runtime_seconds - elapsed) / 60.0,
+                        )
+                    remaining_cost_usd = 0.0
+                    if max_cost_usd > 0.0:
+                        remaining_cost_usd = max(0.0, max_cost_usd - estimated_cost_spent)
+                    update_log_context(
+                        max_turns=int(self.config.session.max_turns or 0),
+                        max_runtime_minutes=max_runtime_minutes,
+                        max_cost_usd=max_cost_usd,
+                        memory_max_messages=int(self.config.session.memory_max_messages or 0),
+                        memory_reset_to_messages=int(self.config.session.memory_reset_to_messages or 0),
+                        remaining_runtime_minutes=remaining_runtime_minutes,
+                        remaining_cost_usd=remaining_cost_usd,
+                    )
 
                     if _should_stop():
                         self.logger.info(

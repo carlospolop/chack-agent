@@ -38,10 +38,12 @@ class ModelConfig:
     scientific: str = "CHEAP_BUT_QUALITY"
     websearcher: str = "CHEAP_BUT_QUALITY"
     tester: str = "CHEAP_BUT_QUALITY"
-    social_network_max_turns: int = 30
-    scientific_max_turns: int = 30
-    websearcher_max_turns: int = 30
-    tester_max_turns: int = 30
+    subchack: str = ""
+    social_network_max_turns: int = 50
+    scientific_max_turns: int = 50
+    websearcher_max_turns: int = 50
+    tester_max_turns: int = 50
+    subchack_max_turns: int = 100
 
 
 @dataclass
@@ -278,6 +280,11 @@ def load_config(path: str) -> ChackConfig:
         model_cfg.tester,
         provider=provider,
     )
+    if str(model_cfg.subchack or "").strip():
+        model_cfg.subchack = resolve_model_alias(
+            model_cfg.subchack,
+            provider=provider,
+        )
 
     config = ChackConfig(
         model=model_cfg,

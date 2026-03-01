@@ -59,10 +59,12 @@ class CodexExecutor:
     _scientific_model: str
     _websearcher_model: str
     _tester_model: str
+    _subchack_model: str
     _social_network_max_turns: int
     _scientific_max_turns: int
     _websearcher_max_turns: int
     _tester_max_turns: int
+    _subchack_max_turns: int
     _min_tools_used: int
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
@@ -326,10 +328,12 @@ class CodexExecutor:
         env["CHACK_SCIENTIFIC_MODEL"] = self._scientific_model
         env["CHACK_WEBSEARCHER_MODEL"] = self._websearcher_model
         env["CHACK_TESTER_MODEL"] = self._tester_model
+        env["CHACK_SUBCHACK_MODEL"] = self._subchack_model
         env["CHACK_SOCIAL_NETWORK_MAX_TURNS"] = str(self._social_network_max_turns)
         env["CHACK_SCIENTIFIC_MAX_TURNS"] = str(self._scientific_max_turns)
         env["CHACK_WEBSEARCHER_MAX_TURNS"] = str(self._websearcher_max_turns)
         env["CHACK_TESTER_MAX_TURNS"] = str(self._tester_max_turns)
+        env["CHACK_SUBCHACK_MAX_TURNS"] = str(self._subchack_max_turns)
         env["CHACK_MIN_TOOLS_USED"] = str(self._min_tools_used)
         env["CHACK_MAX_TOOLS_USED"] = str(self._max_tools_used)
         env["CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST"] = (
@@ -366,10 +370,12 @@ class CodexExecutor:
             "CHACK_SCIENTIFIC_MODEL",
             "CHACK_WEBSEARCHER_MODEL",
             "CHACK_TESTER_MODEL",
+            "CHACK_SUBCHACK_MODEL",
             "CHACK_SOCIAL_NETWORK_MAX_TURNS",
             "CHACK_SCIENTIFIC_MAX_TURNS",
             "CHACK_WEBSEARCHER_MAX_TURNS",
             "CHACK_TESTER_MAX_TURNS",
+            "CHACK_SUBCHACK_MAX_TURNS",
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
@@ -610,10 +616,12 @@ def build_executor(
             scientific_model=config.model.scientific,
             websearcher_model=config.model.websearcher,
             tester_model=config.model.tester,
+            subchack_model=config.model.subchack,
             social_network_max_turns=config.model.social_network_max_turns,
             scientific_max_turns=config.model.scientific_max_turns,
             websearcher_max_turns=config.model.websearcher_max_turns,
             tester_max_turns=config.model.tester_max_turns,
+            subchack_max_turns=config.model.subchack_max_turns,
         )
         allowed_tool_names = _extract_tool_names(list(base_toolset.tools) + list(tools_append))
 
@@ -647,10 +655,12 @@ def build_executor(
         _scientific_model=str(config.model.scientific or ""),
         _websearcher_model=str(config.model.websearcher or ""),
         _tester_model=str(config.model.tester or ""),
+        _subchack_model=str(config.model.subchack or ""),
         _social_network_max_turns=int(config.model.social_network_max_turns or 30),
         _scientific_max_turns=int(config.model.scientific_max_turns or 30),
         _websearcher_max_turns=int(config.model.websearcher_max_turns or 30),
         _tester_max_turns=int(config.model.tester_max_turns or 30),
+        _subchack_max_turns=int(config.model.subchack_max_turns or 30),
         _min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
         _max_tools_used=max(0, int(config.tools.max_tools_used or 0)),
         _require_task_steps_manager_init_first=bool(

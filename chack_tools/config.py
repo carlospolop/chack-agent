@@ -49,6 +49,9 @@ class ToolsConfig:
     tester_google_web_enabled: bool = False
     tester_agent: dict = field(default_factory=dict)
 
+    subchack_enabled: bool = False
+    subchack_agent: dict = field(default_factory=dict)
+
     social_network_forum_search_enabled: bool = False
     social_network_linkedin_enabled: bool = False
     social_network_instagram_enabled: bool = False
@@ -69,3 +72,4 @@ class ToolsConfig:
     scientific_max_tools_used: int = 0
     websearcher_max_tools_used: int = 0
     tester_max_tools_used: int = 0
+    subchack_max_tools_used: int = 0

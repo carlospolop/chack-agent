@@ -89,10 +89,12 @@ class GeminiCliExecutor:
         scientific_model: str,
         websearcher_model: str,
         tester_model: str,
+        subchack_model: str,
         social_network_max_turns: int,
         scientific_max_turns: int,
         websearcher_max_turns: int,
         tester_max_turns: int,
+        subchack_max_turns: int,
         min_tools_used: int,
         max_tools_used: int,
         require_task_steps_manager_init_first: bool,
@@ -116,10 +118,12 @@ class GeminiCliExecutor:
         self._scientific_model = scientific_model
         self._websearcher_model = websearcher_model
         self._tester_model = tester_model
+        self._subchack_model = subchack_model
         self._social_network_max_turns = social_network_max_turns
         self._scientific_max_turns = scientific_max_turns
         self._websearcher_max_turns = websearcher_max_turns
         self._tester_max_turns = tester_max_turns
+        self._subchack_max_turns = subchack_max_turns
         self._min_tools_used = max(0, int(min_tools_used or 0))
         self._max_tools_used = max(0, int(max_tools_used or 0))
         self._require_task_steps_manager_init_first = bool(
@@ -399,10 +403,12 @@ class GeminiCliExecutor:
         env["CHACK_SCIENTIFIC_MODEL"] = self._scientific_model
         env["CHACK_WEBSEARCHER_MODEL"] = self._websearcher_model
         env["CHACK_TESTER_MODEL"] = self._tester_model
+        env["CHACK_SUBCHACK_MODEL"] = self._subchack_model
         env["CHACK_SOCIAL_NETWORK_MAX_TURNS"] = str(self._social_network_max_turns)
         env["CHACK_SCIENTIFIC_MAX_TURNS"] = str(self._scientific_max_turns)
         env["CHACK_WEBSEARCHER_MAX_TURNS"] = str(self._websearcher_max_turns)
         env["CHACK_TESTER_MAX_TURNS"] = str(self._tester_max_turns)
+        env["CHACK_SUBCHACK_MAX_TURNS"] = str(self._subchack_max_turns)
         env["CHACK_MIN_TOOLS_USED"] = str(self._min_tools_used)
         env["CHACK_MAX_TOOLS_USED"] = str(self._max_tools_used)
         env["CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST"] = (
@@ -457,10 +463,12 @@ class GeminiCliExecutor:
             "CHACK_SCIENTIFIC_MODEL",
             "CHACK_WEBSEARCHER_MODEL",
             "CHACK_TESTER_MODEL",
+            "CHACK_SUBCHACK_MODEL",
             "CHACK_SOCIAL_NETWORK_MAX_TURNS",
             "CHACK_SCIENTIFIC_MAX_TURNS",
             "CHACK_WEBSEARCHER_MAX_TURNS",
             "CHACK_TESTER_MAX_TURNS",
+            "CHACK_SUBCHACK_MAX_TURNS",
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
@@ -644,6 +652,10 @@ def build_executor(
             toolset_kwargs["tester_model"] = config.model.tester
         if "tester_max_turns" in init_params:
             toolset_kwargs["tester_max_turns"] = config.model.tester_max_turns
+        if "subchack_model" in init_params:
+            toolset_kwargs["subchack_model"] = config.model.subchack
+        if "subchack_max_turns" in init_params:
+            toolset_kwargs["subchack_max_turns"] = config.model.subchack_max_turns
         if "model_provider" in init_params:
             toolset_kwargs["model_provider"] = model_provider
         return toolset_kwargs
@@ -695,10 +707,12 @@ def build_executor(
         scientific_model=str(config.model.scientific or ""),
         websearcher_model=str(config.model.websearcher or ""),
         tester_model=str(config.model.tester or ""),
+        subchack_model=str(config.model.subchack or ""),
         social_network_max_turns=int(config.model.social_network_max_turns or 30),
         scientific_max_turns=int(config.model.scientific_max_turns or 30),
         websearcher_max_turns=int(config.model.websearcher_max_turns or 30),
         tester_max_turns=int(config.model.tester_max_turns or 30),
+        subchack_max_turns=int(config.model.subchack_max_turns or 30),
         min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
         max_tools_used=max(0, int(config.tools.max_tools_used or 0)),
         require_task_steps_manager_init_first=bool(

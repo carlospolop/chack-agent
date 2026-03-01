@@ -149,6 +149,7 @@ def _load_toolset() -> list[Any]:
     scientific_model = os.environ.get("CHACK_SCIENTIFIC_MODEL", "")
     websearcher_model = os.environ.get("CHACK_WEBSEARCHER_MODEL", "")
     tester_model = os.environ.get("CHACK_TESTER_MODEL", "")
+    subchack_model = os.environ.get("CHACK_SUBCHACK_MODEL", "")
 
     def _to_int(name: str, default: int) -> int:
         raw = os.environ.get(name, str(default)).strip()
@@ -165,10 +166,12 @@ def _load_toolset() -> list[Any]:
         scientific_model=scientific_model,
         websearcher_model=websearcher_model,
         tester_model=tester_model,
-        social_network_max_turns=_to_int("CHACK_SOCIAL_NETWORK_MAX_TURNS", 30),
-        scientific_max_turns=_to_int("CHACK_SCIENTIFIC_MAX_TURNS", 30),
-        websearcher_max_turns=_to_int("CHACK_WEBSEARCHER_MAX_TURNS", 30),
-        tester_max_turns=_to_int("CHACK_TESTER_MAX_TURNS", 30),
+        subchack_model=subchack_model,
+        social_network_max_turns=_to_int("CHACK_SOCIAL_NETWORK_MAX_TURNS", 50),
+        scientific_max_turns=_to_int("CHACK_SCIENTIFIC_MAX_TURNS", 50),
+        websearcher_max_turns=_to_int("CHACK_WEBSEARCHER_MAX_TURNS", 50),
+        tester_max_turns=_to_int("CHACK_TESTER_MAX_TURNS", 50),
+        subchack_max_turns=_to_int("CHACK_SUBCHACK_MAX_TURNS", 100),
     )
     allowed_tools_raw = os.environ.get("CHACK_ALLOWED_TOOLS_JSON", "").strip()
     allowed_tools: set[str] | None = None
