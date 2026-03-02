@@ -6,6 +6,7 @@ from typing import Any, Optional
 from .config import ToolsConfig
 from .subagent_config import (
     build_subagent_config,
+    enforce_prompt_str_or_list_schema,
     inherit_subagent_limits,
     normalize_subagent_prompts,
     run_parallel_subagent_prompts,
@@ -199,7 +200,7 @@ class SubChackResearchAgentTool:
         )
         return result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
 
-    def run(self, prompt: Any) -> str:
+    def run(self, prompt: str | list[str]) -> str:
         prompts, error = normalize_subagent_prompts(prompt, min_chars=500, max_prompts=3)
         if error:
             return error
@@ -217,7 +218,7 @@ def get_subchack_research_tool(
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
     @function_tool(name_override="subchack_researcher")
-    def subchack_researcher(prompt: Any) -> str:
+    def subchack_researcher(prompt: str | list[str]) -> str:
         """Run a delegated sub-agent with the parent's tool access.
         If you have access to this tool it means that you are a master agent.
         Use this tool to call subagents to perform specific complex operations or researches giving you back the responses so you don't lose the focus from the biggest task.
@@ -241,4 +242,4 @@ def get_subchack_research_tool(
         except Exception as exc:
             return f"ERROR: subchack_researcher failed ({exc})"
 
-    return subchack_researcher
+    return enforce_prompt_str_or_list_schema(subchack_researcher)

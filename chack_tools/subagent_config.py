@@ -6,6 +6,23 @@ from typing import Any, Callable, List, Mapping
 from .config import ToolsConfig as BaseToolsConfig
 
 
+def enforce_prompt_str_or_list_schema(tool: Any) -> Any:
+    """Make prompt schema OpenAI-compatible while allowing string or list input."""
+    schema = getattr(tool, "params_json_schema", None)
+    if not isinstance(schema, dict):
+        return tool
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return tool
+    prompt_schema = properties.get("prompt")
+    if not isinstance(prompt_schema, dict):
+        return tool
+    prompt_schema.pop("anyOf", None)
+    prompt_schema["type"] = ["string", "array"]
+    prompt_schema["items"] = {"type": "string"}
+    return tool
+
+
 def _build_tools_config(base: BaseToolsConfig, overrides: Mapping[str, Any] | None) -> BaseToolsConfig:
     allowed = set(getattr(BaseToolsConfig, "__dataclass_fields__", {}).keys())
     data = {k: v for k, v in dict(base.__dict__).items() if k in allowed}

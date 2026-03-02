@@ -12,6 +12,7 @@ from .exec_tool import ExecTool, get_exec_tool
 from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
 from .subagent_config import (
     build_subagent_config,
+    enforce_prompt_str_or_list_schema,
     inherit_subagent_limits,
     normalize_subagent_prompts,
     run_parallel_subagent_prompts,
@@ -167,7 +168,7 @@ class TesterAgentTool:
         )
         return result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
 
-    def run(self, prompt: Any) -> str:
+    def run(self, prompt: str | list[str]) -> str:
         prompts, error = normalize_subagent_prompts(prompt, min_chars=500, max_prompts=3)
         if error:
             return error
@@ -185,7 +186,7 @@ def get_tester_agent_tool(
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
     @function_tool(name_override="tester_agent")
-    def tester_agent(prompt: Any) -> str:
+    def tester_agent(prompt: str | list[str]) -> str:
         """Run a specialized testing agent to verify assumptions, run scripts, or check math.
 
         Use this agent when you need to:
@@ -212,4 +213,4 @@ def get_tester_agent_tool(
         except Exception as exc:
             return f"ERROR: tester_agent failed ({exc})"
 
-    return tester_agent
+    return enforce_prompt_str_or_list_schema(tester_agent)

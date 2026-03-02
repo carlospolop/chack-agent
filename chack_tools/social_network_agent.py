@@ -21,6 +21,7 @@ from .scientific_search import (
 from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
 from .subagent_config import (
     build_subagent_config,
+    enforce_prompt_str_or_list_schema,
     inherit_subagent_limits,
     normalize_subagent_prompts,
     run_parallel_subagent_prompts,
@@ -175,7 +176,7 @@ class SocialNetworkAgentTool:
         )
         return result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
 
-    def run(self, prompt: Any) -> str:
+    def run(self, prompt: str | list[str]) -> str:
         if not self.forum._api_key() and not self.forum._serpapi_key():
             return "ERROR: ForumScout and SerpAPI keys are not configured."
         prompts, error = normalize_subagent_prompts(prompt, min_chars=500, max_prompts=3)
@@ -195,7 +196,7 @@ def get_social_network_research_tool(
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
     @function_tool(name_override="social_network_research")
-    def social_network_research(prompt: Any) -> str:
+    def social_network_research(prompt: str | list[str]) -> str:
         """Run a dedicated social-network sub-agent using ForumScout sources.
 
         Use this tool to launch an autonomous social research agent to do specific complex researches for you.
@@ -220,4 +221,4 @@ def get_social_network_research_tool(
         except Exception as exc:
             return f"ERROR: social_network_research failed ({exc})"
 
-    return social_network_research
+    return enforce_prompt_str_or_list_schema(social_network_research)
