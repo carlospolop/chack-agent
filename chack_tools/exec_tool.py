@@ -40,7 +40,7 @@ def get_exec_tool(helper: ExecTool):
     def exec_tool(command: str) -> str:
         """Execute a shell command locally and return combined output.
 
-        Use this to access local CLIs, curl/wget endpoints, and inspect files.
+        Use this to access local CLIs, curl/wget endpoints, and inspect files using tools like rg, find, ls, cat, head...
         If the output is large or truncated, re-run with grep/jq/sed to narrow it.
         Ideal for gathering evidence or checking system state; avoid destructive commands unless asked.
 
