@@ -27,6 +27,7 @@ from agents.items import ToolCallItem
 from agents.exceptions import ModelBehaviorError
 
 from ..config import ChackConfig
+from ..live_cost_state import report_live_usage
 from ..output_schema import JsonSchemaOutput
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
@@ -611,6 +612,32 @@ class AgentsExecutor:
         conversation_id = getattr(result, "_conversation_id", None)
         if isinstance(conversation_id, str) and conversation_id.strip():
             self._conversation_id = conversation_id.strip()
+        raw_responses = getattr(result, "raw_responses", None) or []
+        for response in raw_responses:
+            usage = getattr(response, "usage", None)
+            if usage is None and isinstance(response, dict):
+                usage = response.get("usage")
+            if usage is None:
+                continue
+            if isinstance(usage, dict):
+                input_tokens = int(usage.get("input_tokens", 0) or 0)
+                output_tokens = int(usage.get("output_tokens", 0) or 0)
+                input_details = usage.get("input_tokens_details") or {}
+                cached_tokens = int(input_details.get("cached_tokens", 0) or 0)
+                cache_write_tokens = int(input_details.get("cache_write_tokens", 0) or 0)
+            else:
+                input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+                output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+                input_details = getattr(usage, "input_tokens_details", None)
+                cached_tokens = int(getattr(input_details, "cached_tokens", 0) or 0) if input_details else 0
+                cache_write_tokens = int(getattr(input_details, "cache_write_tokens", 0) or 0) if input_details else 0
+            report_live_usage(
+                str(self._config.model.primary or ""),
+                prompt_tokens=input_tokens,
+                completion_tokens=output_tokens,
+                cached_prompt_tokens=cached_tokens,
+                cache_write_tokens=cache_write_tokens,
+            )
         self._maybe_summarize_for_next_turn(input_tokens=self._extract_input_tokens(result))
         steps = _extract_tool_steps(result.new_items)
         return {

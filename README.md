@@ -25,6 +25,18 @@ from chack_agent import (
 
 # 1. Configure the agent
 config = ChackConfig(
+
+You can also replace the default toolset entirely:
+
+```python
+result = agent.run(
+  session_id="demo",
+  text="Use only my custom tool.",
+  tools_override=[my_tool],
+)
+```
+
+`tools_append` and `tools_override` work with both in-process backends and CLI backends such as `codex`, `claude`, and `gemini`.
     model=ModelConfig(
         primary="gpt-4o",
         # Defaults for specialized tools are CHEAP_BUT_QUALITY.

@@ -21,6 +21,12 @@ from chack_tools.task_steps_manager_state import (
 from chack_tools.telemetry import log_event
 
 from ..config import ChackConfig
+from ..live_cost_state import report_live_usage
+from .tool_payloads import (
+    CHACK_TOOLS_APPEND_B64_ENV,
+    CHACK_TOOLS_OVERRIDE_B64_ENV,
+    serialize_tools_payload,
+)
 
 
 _LOGGER = logging.getLogger("chack.gemini_cli_backend")
@@ -83,6 +89,8 @@ class GeminiCliExecutor:
         gemini_api_key: str,
         tools_config_json: str,
         allowed_tools_json: str,
+        serialized_tools_override_b64: str,
+        serialized_tools_append_b64: str,
         model_provider: str,
         default_model: str,
         social_network_model: str,
@@ -112,6 +120,8 @@ class GeminiCliExecutor:
         self._gemini_api_key = gemini_api_key
         self._tools_config_json = tools_config_json
         self._allowed_tools_json = allowed_tools_json
+        self._serialized_tools_override_b64 = str(serialized_tools_override_b64 or "")
+        self._serialized_tools_append_b64 = str(serialized_tools_append_b64 or "")
         self._model_provider = model_provider
         self._default_model = default_model
         self._social_network_model = social_network_model
@@ -340,6 +350,15 @@ class GeminiCliExecutor:
                                 "cache_write_tokens": 0,
                             },
                         }
+                        report_live_usage(
+                            self._model_name,
+                            prompt_tokens=int(usage.get("input_tokens", 0) or 0),
+                            completion_tokens=int(usage.get("output_tokens", 0) or 0),
+                            cached_prompt_tokens=int(
+                                usage.get("input_tokens_details", {}).get("cached_tokens", 0) or 0
+                            ),
+                            cache_write_tokens=0,
+                        )
                         raw_responses.append({"usage": usage})
                     if str(event.get("status") or "").strip().lower() == "error":
                         error_obj = event.get("error")
@@ -397,6 +416,10 @@ class GeminiCliExecutor:
 
         env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
         env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
+        if self._serialized_tools_override_b64:
+            env[CHACK_TOOLS_OVERRIDE_B64_ENV] = self._serialized_tools_override_b64
+        if self._serialized_tools_append_b64:
+            env[CHACK_TOOLS_APPEND_B64_ENV] = self._serialized_tools_append_b64
         env["CHACK_MODEL_PROVIDER"] = self._model_provider
         env["CHACK_DEFAULT_MODEL"] = self._default_model
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
@@ -457,6 +480,8 @@ class GeminiCliExecutor:
         env_keys = [
             "CHACK_TOOLS_CONFIG_JSON",
             "CHACK_ALLOWED_TOOLS_JSON",
+            "CHACK_TOOLS_OVERRIDE_B64",
+            "CHACK_TOOLS_APPEND_B64",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",
@@ -689,6 +714,8 @@ def build_executor(
 
     configured_gemini_path = os.environ.get("GEMINI_CLI_PATH", "").strip() or "gemini"
     gemini_cli_path = shutil.which(configured_gemini_path) or configured_gemini_path
+    serialized_tools_override_b64 = serialize_tools_payload(tools_override)
+    serialized_tools_append_b64 = serialize_tools_payload(tools_append)
 
     return GeminiCliExecutor(
         conversation=[],
@@ -701,6 +728,8 @@ def build_executor(
         gemini_api_key=gemini_api_key,
         tools_config_json=json.dumps(getattr(config.tools, "__dict__", {}), ensure_ascii=False),
         allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False),
+        serialized_tools_override_b64=serialized_tools_override_b64,
+        serialized_tools_append_b64=serialized_tools_append_b64,
         model_provider=model_provider,
         default_model=str(config.model.primary or ""),
         social_network_model=str(config.model.social_network or ""),

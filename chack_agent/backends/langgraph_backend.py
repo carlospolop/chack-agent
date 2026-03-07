@@ -23,6 +23,7 @@ from chack_tools.telemetry import log_event
 from chack_tools.tool_usage_state import current_max_tools_used
 
 from ..config import ChackConfig
+from ..live_cost_state import report_live_usage
 
 
 _LOGGER = logging.getLogger("chack.langgraph_backend")
@@ -438,6 +439,13 @@ class LangGraphExecutor:
                 "cached_input_tokens": int(usage.get("input_token_details", {}).get("cache_read", 0) or 0),
                 "cache_write_input_tokens": int(usage.get("input_token_details", {}).get("cache_creation", 0) or 0),
             }
+            report_live_usage(
+                str(getattr(self._summary_model, "model_name", "") or ""),
+                prompt_tokens=usage_event["input_tokens"],
+                completion_tokens=usage_event["output_tokens"],
+                cached_prompt_tokens=usage_event["cached_input_tokens"],
+                cache_write_tokens=usage_event["cache_write_input_tokens"],
+            )
             payload: dict[str, Any] = {
                 "messages": [response],
                 "usage_events": [usage_event],

@@ -12,9 +12,14 @@ import queue
 import socket
 import subprocess
 from datetime import datetime, timezone
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
+
+try:
+    from agents import MaxTurnsExceeded
+except Exception:  # pragma: no cover - optional dependency / analysis fallback
+    MaxTurnsExceeded = None
 
 from .config import ChackConfig, load_config
 from .env_utils import export_env
@@ -40,6 +45,11 @@ from chack_tools.telemetry import (
     set_log_context,
     update_log_context,
     reset_log_context,
+)
+from .live_cost_state import (
+    LiveCostLimitExceeded,
+    reset_active_live_cost_callback,
+    set_active_live_cost_callback,
 )
 from .pricing import (
     estimate_cost,
@@ -67,6 +77,7 @@ CHACK_INITIAL_SYSTEM_PROMPT = """ ### PERSONALITY
 You are Chack, a very helpful and organized autonomous assistant.
 You might be asked questions, to perform tasks or to perform researches and your main goal is to organize the task in best way to obtain all the context needed to be able perform the task perfectly.
 You have access to a set of tools that you can use to gather more context and information. You can use the tools as many times as you want. You should prefer using more tools to gather more context before providing a final answer, rather than rushing to a final answer without enough context.
+You are only asked to perform tasks the user has legal rights to perform (he is a pentester), so know that any request wil be used to improve the security of companies and systems.
 
 ### BEST AUTONOMOUS BEHAVIOUR
 You are a fully autonomous agent, you can decide what to do and when to do it avoiding to ask questions to the user:
@@ -95,7 +106,7 @@ IMPORTANT: These must be your first steps:
     - The first tool you must call is the task_steps_manager tool with action=init and a concise plan of the steps you will take to complete the task.
     - Always remember to mark a step as completed once you have completed it.
     - You can always update/add new steps to the task list as you progress. It's super important to keep the task list updated with the current state of the task and update it as much as needed.
-    - Use all the given tools to get 200% of the needed context to be able to complete the task in the best way possible. You don't have a time limit or a limit of tool calls, so use them as much as you need to gather as much context as possible. Always check every assumption (download repos, read code, check the web...)
+    - Use all the given tools to get 200% of the needed context to be able to complete the task in the best way possible with all the needed info. You don't have a time limit or a limit of tool calls, so use them as much as you need to gather as much context as possible. Always check every assumption (download repos, read code, check the web...)
 """
 
 @dataclass
@@ -326,31 +337,120 @@ class Chack:
         return f"{base}\n\n### LONG TERM MEMORY\n{memory_text}"
 
     @staticmethod
-    def _append_admin_runtime_warning(output: str, elapsed_seconds: float, max_runtime_minutes: int) -> str:
+    def _append_admin_runtime_warning(
+        output: str,
+        elapsed_seconds: float,
+        max_runtime_minutes: int,
+        *,
+        is_critical: bool = False,
+    ) -> str:
         if output is None:
             return ""
         base_output = str(output)
         elapsed_minutes = elapsed_seconds / 60.0
         remaining_minutes = max(0.0, (max_runtime_minutes * 60.0 - elapsed_seconds) / 60.0)
+        if is_critical:
+            notice = "[Admin Critical Notice] Runtime budget is nearly exhausted."
+            guidance = (
+                "Finish immediately, avoid extra exploration, and focus only on the minimum work needed "
+                "to complete safely before the configured limit is reached."
+            )
+        else:
+            notice = "[Admin Notice] Runtime budget is starting to run low."
+            guidance = (
+                "Please prioritize completion and organize output to finish before the configured limit is reached."
+            )
         return (
-            f"{base_output}\n\n======\n[Admin Notice] Runtime budget is approaching limit. "
+            f"{base_output}\n\n======\n{notice} "
             f"You have used {elapsed_minutes:.1f} of {max_runtime_minutes:.1f} minutes "
             f"({remaining_minutes:.1f} minutes remaining). "
-            "Please prioritize completion and organize output to finish before the configured limit is reached."
+            f"{guidance}"
         )
 
     @staticmethod
-    def _append_admin_cost_warning(output: str, spent_usd: float, max_cost_usd: float) -> str:
+    def _append_admin_cost_warning(
+        output: str,
+        spent_usd: float,
+        max_cost_usd: float,
+        *,
+        is_critical: bool = False,
+    ) -> str:
         if output is None:
             return ""
         base_output = str(output)
         remaining_usd = max(0.0, max_cost_usd - spent_usd)
+        if is_critical:
+            notice = "[Admin Critical Notice] Cost budget is nearly exhausted."
+            guidance = (
+                "Finish immediately, avoid extra tool usage where possible, and focus only on the minimum work "
+                "needed to complete before the configured limit is reached."
+            )
+        else:
+            notice = "[Admin Notice] Cost budget is starting to run low."
+            guidance = (
+                "Please prioritize completion and organize output to finish before the configured limit is reached."
+            )
         return (
-            f"{base_output}\n\n======\n[Admin Notice] Cost budget is approaching limit. "
+            f"{base_output}\n\n======\n{notice} "
             f"You have spent ${spent_usd:.4f} of ${max_cost_usd:.4f} "
             f"(${remaining_usd:.4f} remaining). "
-            "Please prioritize completion and organize output to finish before the configured limit is reached."
+            f"{guidance}"
         )
+
+    @staticmethod
+    def _milestone_percent(consumed: float, limit: float) -> int:
+        if limit <= 0:
+            return 0
+        ratio = max(0.0, float(consumed) / float(limit))
+        bucket = int(ratio * 10.0)
+        if bucket < 1:
+            return 0
+        if bucket > 10:
+            bucket = 10
+        return bucket * 10
+
+    def _emit_progress_milestones(
+        self,
+        *,
+        session_id: str,
+        task_session_id: str,
+        progress_state: dict[str, int],
+        runtime_elapsed_seconds: float,
+        max_runtime_seconds: float,
+        spent_usd: float,
+        max_cost_usd: float,
+    ) -> None:
+        runtime_percent = self._milestone_percent(runtime_elapsed_seconds, max_runtime_seconds)
+        if runtime_percent > progress_state.get("runtime_percent", 0):
+            progress_state["runtime_percent"] = runtime_percent
+            log_event(
+                "agent_progress",
+                payload={
+                    "session_id": session_id,
+                    "task_session_id": task_session_id,
+                    "progress_type": "runtime",
+                    "progress_percent": runtime_percent,
+                    "elapsed_seconds": runtime_elapsed_seconds,
+                    "max_runtime_seconds": max_runtime_seconds,
+                    "remaining_seconds": max(0.0, max_runtime_seconds - runtime_elapsed_seconds),
+                },
+            )
+
+        cost_percent = self._milestone_percent(spent_usd, max_cost_usd)
+        if cost_percent > progress_state.get("cost_percent", 0):
+            progress_state["cost_percent"] = cost_percent
+            log_event(
+                "agent_progress",
+                payload={
+                    "session_id": session_id,
+                    "task_session_id": task_session_id,
+                    "progress_type": "cost",
+                    "progress_percent": cost_percent,
+                    "spent_usd": spent_usd,
+                    "max_cost_usd": max_cost_usd,
+                    "remaining_usd": max(0.0, max_cost_usd - spent_usd),
+                },
+            )
 
     @staticmethod
     def _token_usage_delta(
@@ -860,6 +960,7 @@ class Chack:
         require_task_steps_manager_init_first: bool = True,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
         tools_override: Optional[list[Any]] = None,
+        tools_append: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
         context: Optional[Any] = None,
         prompt_variables_override: Optional[Dict[str, Any]] = None,
@@ -875,6 +976,7 @@ class Chack:
             require_task_steps_manager_init_first=require_task_steps_manager_init_first,
             on_task_steps_manager_update=on_task_steps_manager_update,
             tools_override=tools_override,
+            tools_append=tools_append,
             system_prompt_override=system_prompt_override,
             context=context,
             prompt_variables_override=prompt_variables_override,
@@ -922,14 +1024,17 @@ class Chack:
             self._last_activity_at[session_id] = time.time()
             run_started_at = self._last_activity_at[session_id]
             max_runtime_minutes = max(0, int(self.config.agent.max_runtime_minutes or 0))
-            warning_threshold_seconds = max_runtime_minutes * 60.0 * 0.8
             max_runtime_seconds = max_runtime_minutes * 60.0
+            runtime_warning_threshold_seconds = max_runtime_seconds * 0.6
+            runtime_critical_threshold_seconds = max_runtime_seconds * 0.9
             try:
                 max_cost_usd = max(0.0, float(self.config.agent.max_cost_usd or 0.0))
             except (TypeError, ValueError):
                 max_cost_usd = 0.0
-            cost_warning_threshold = max_cost_usd * 0.8
+            cost_warning_threshold = max_cost_usd * 0.6
+            cost_critical_threshold = max_cost_usd * 0.9
             estimated_cost_spent = 0.0
+            progress_state = {"runtime_percent": 0, "cost_percent": 0}
 
             min_tools_used = max(0, int(self.config.tools.min_tools_used or 0))
             if min_tools_used_override is not None:
@@ -991,6 +1096,15 @@ class Chack:
                 task_session_id=telemetry_task_session_id or task_session_id,
                 stop_event=metrics_stop_event,
                 interval_seconds=30.0,
+            )
+            self._emit_progress_milestones(
+                session_id=session_id,
+                task_session_id=telemetry_task_session_id or task_session_id,
+                progress_state=progress_state,
+                runtime_elapsed_seconds=0.0,
+                max_runtime_seconds=max_runtime_seconds,
+                spent_usd=0.0,
+                max_cost_usd=max_cost_usd,
             )
 
             def _listener(board_text: str) -> None:
@@ -1106,19 +1220,20 @@ class Chack:
                         effective_require_init,
                         _log_timestamp(),
                     )
+                    attempt_token_usage_before = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
+                    live_cost_callback_holder: dict[str, Any] = {"callback": None}
 
                     def _invoke():
                         tokens = set_active_context(task_session_id, run_label)
                         effective_usage_session = usage_session_id or task_session_id
                         usage_token = set_active_usage_session(effective_usage_session)
                         max_tools_token = set_active_max_tools_used(max_tools_used)
+                        live_cost_token = set_active_live_cost_callback(
+                            live_cost_callback_holder.get("callback")
+                        )
                         try:
                             return executor.invoke({"input": current_prompt}, context=context)
                         except Exception as exc:
-                            try:
-                                from agents.exceptions import MaxTurnsExceeded
-                            except Exception:
-                                MaxTurnsExceeded = None
                             if MaxTurnsExceeded is not None and isinstance(exc, MaxTurnsExceeded):
                                 return {
                                     "output": (
@@ -1132,19 +1247,78 @@ class Chack:
                                 }
                             raise
                         finally:
+                            reset_active_live_cost_callback(live_cost_token)
                             reset_active_max_tools_used(max_tools_token)
                             reset_active_usage_session(usage_token)
                             reset_active_context(tokens)
 
                     def _invoke_with_budget():
-                        if max_runtime_seconds <= 0:
+                        if max_runtime_seconds <= 0 and max_cost_usd <= 0:
                             return _invoke()
-                        remaining = max_runtime_seconds - (time.time() - run_started_at)
-                        if remaining <= 0:
-                            raise TimeoutError(
-                                f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
-                            )
                         result_queue = queue.Queue()
+                        live_main_usage: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0])
+                        live_cost_lock = threading.Lock()
+
+                        def _estimate_usage_cost(
+                            usage_by_model: dict[str, tuple[int, int, int, int]]
+                        ) -> float:
+                            total = 0.0
+                            for model_name, model_usage in usage_by_model.items():
+                                estimated = self._estimate_model_cost(
+                                    self._pricing,
+                                    model_name,
+                                    prompt_tokens=model_usage[0],
+                                    completion_tokens=model_usage[1],
+                                    cached_prompt_tokens=model_usage[2],
+                                    cache_write_tokens=model_usage[3],
+                                )
+                                if estimated is not None:
+                                    total += estimated
+                            return total
+
+                        def _live_nested_cost() -> float:
+                            token_usage_now = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
+                            token_usage_delta = self._token_usage_delta(
+                                attempt_token_usage_before,
+                                token_usage_now,
+                            )
+                            return _estimate_usage_cost(token_usage_delta)
+
+                        def _live_total_cost() -> float:
+                            with live_cost_lock:
+                                live_main_snapshot = {
+                                    model_name: (
+                                        usage[0],
+                                        usage[1],
+                                        usage[2],
+                                        usage[3],
+                                    )
+                                    for model_name, usage in live_main_usage.items()
+                                }
+                            return (
+                                estimated_cost_spent
+                                + _estimate_usage_cost(live_main_snapshot)
+                                + _live_nested_cost()
+                            )
+
+                        def live_cost_callback(
+                            model_name: str,
+                            prompt_tokens: int,
+                            completion_tokens: int,
+                            cached_prompt_tokens: int,
+                            cache_write_tokens: int,
+                        ) -> None:
+                            with live_cost_lock:
+                                usage = live_main_usage[model_name]
+                                usage[0] += max(0, int(prompt_tokens or 0))
+                                usage[1] += max(0, int(completion_tokens or 0))
+                                usage[2] += max(0, int(cached_prompt_tokens or 0))
+                                usage[3] += max(0, int(cache_write_tokens or 0))
+                            if max_cost_usd > 0 and _live_total_cost() >= max_cost_usd:
+                                raise LiveCostLimitExceeded(
+                                    f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
+                                )
+                        live_cost_callback_holder["callback"] = live_cost_callback
 
                         def _runner():
                             try:
@@ -1154,19 +1328,49 @@ class Chack:
 
                         worker = threading.Thread(target=_runner, daemon=True)
                         worker.start()
-                        worker.join(timeout=remaining)
-                        if worker.is_alive():
+                        runtime_exceeded = False
+                        cost_exceeded = False
+                        while worker.is_alive():
+                            current_elapsed = time.time() - run_started_at
+                            live_total_cost = _live_total_cost()
+                            self._emit_progress_milestones(
+                                session_id=session_id,
+                                task_session_id=telemetry_task_session_id or task_session_id,
+                                progress_state=progress_state,
+                                runtime_elapsed_seconds=current_elapsed,
+                                max_runtime_seconds=max_runtime_seconds,
+                                spent_usd=live_total_cost,
+                                max_cost_usd=max_cost_usd,
+                            )
+                            if max_runtime_seconds > 0:
+                                remaining = max_runtime_seconds - current_elapsed
+                                if remaining <= 0:
+                                    runtime_exceeded = True
+                                    break
+                            if max_cost_usd > 0 and live_total_cost >= max_cost_usd:
+                                cost_exceeded = True
+                                break
+                            worker.join(timeout=0.1)
+                        if runtime_exceeded or cost_exceeded:
                             for _ in range(20):
                                 if not worker.is_alive():
                                     break
                                 self._stop_thread(worker)
                                 worker.join(timeout=0.05)
                             if worker.is_alive():
+                                if runtime_exceeded:
+                                    raise TimeoutError(
+                                        "Agent run exceeded max runtime and the execution thread did not stop in time."
+                                    )
                                 raise TimeoutError(
-                                    "Agent run exceeded max runtime and the execution thread did not stop in time."
+                                    "Agent run exceeded max cost budget and the execution thread did not stop in time."
+                                )
+                            if runtime_exceeded:
+                                raise TimeoutError(
+                                    f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
                                 )
                             raise TimeoutError(
-                                f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
+                                f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
                             )
                         try:
                             status, payload = result_queue.get_nowait()
@@ -1175,6 +1379,8 @@ class Chack:
                                 "Agent run worker thread ended without returning a result."
                             )
                         if status == "error":
+                            if isinstance(payload, LiveCostLimitExceeded):
+                                raise TimeoutError(str(payload))
                             raise payload
                         return payload
 
@@ -1182,7 +1388,6 @@ class Chack:
                     if result.get("error") == "stopped":
                         break
 
-                    token_usage_before = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
                     (
                         attempt_prompt,
                         attempt_completion,
@@ -1205,7 +1410,7 @@ class Chack:
 
                         token_usage_after = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
                         token_usage_delta = self._token_usage_delta(
-                            token_usage_before,
+                            attempt_token_usage_before,
                             token_usage_after,
                         )
                         for model_name, model_usage in token_usage_delta.items():
@@ -1221,11 +1426,29 @@ class Chack:
                                 attempt_cost += nested_cost
                         if attempt_cost > 0.0:
                             estimated_cost_spent += attempt_cost
+                        self._emit_progress_milestones(
+                            session_id=session_id,
+                            task_session_id=telemetry_task_session_id or task_session_id,
+                            progress_state=progress_state,
+                            runtime_elapsed_seconds=time.time() - run_started_at,
+                            max_runtime_seconds=max_runtime_seconds,
+                            spent_usd=estimated_cost_spent,
+                            max_cost_usd=max_cost_usd,
+                        )
                         if estimated_cost_spent >= max_cost_usd:
                             raise TimeoutError(
                                 f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
                             )
-                        if (
+                        if cost_critical_threshold > 0 and estimated_cost_spent >= cost_critical_threshold:
+                            output = result.get("output", "")
+                            if output is not None:
+                                result["output"] = self._append_admin_cost_warning(
+                                    str(output),
+                                    estimated_cost_spent,
+                                    max_cost_usd,
+                                    is_critical=True,
+                                )
+                        elif (
                             cost_warning_threshold > 0
                             and estimated_cost_spent >= cost_warning_threshold
                         ):
@@ -1237,12 +1460,37 @@ class Chack:
                                     max_cost_usd,
                                 )
 
-                    if warning_threshold_seconds > 0 and (time.time() - run_started_at) >= warning_threshold_seconds:
+                    elapsed_runtime_seconds = time.time() - run_started_at
+                    self._emit_progress_milestones(
+                        session_id=session_id,
+                        task_session_id=telemetry_task_session_id or task_session_id,
+                        progress_state=progress_state,
+                        runtime_elapsed_seconds=elapsed_runtime_seconds,
+                        max_runtime_seconds=max_runtime_seconds,
+                        spent_usd=estimated_cost_spent,
+                        max_cost_usd=max_cost_usd,
+                    )
+                    if (
+                        runtime_critical_threshold_seconds > 0
+                        and elapsed_runtime_seconds >= runtime_critical_threshold_seconds
+                    ):
                         output = result.get("output", "")
                         if output is not None:
                             result["output"] = self._append_admin_runtime_warning(
                                 str(output),
-                                time.time() - run_started_at,
+                                elapsed_runtime_seconds,
+                                max_runtime_minutes,
+                                is_critical=True,
+                            )
+                    elif (
+                        runtime_warning_threshold_seconds > 0
+                        and elapsed_runtime_seconds >= runtime_warning_threshold_seconds
+                    ):
+                        output = result.get("output", "")
+                        if output is not None:
+                            result["output"] = self._append_admin_runtime_warning(
+                                str(output),
+                                elapsed_runtime_seconds,
                                 max_runtime_minutes,
                             )
 

@@ -18,6 +18,7 @@ setup(
     python_requires='>=3.9',
     install_requires=[
         'boto3>=1.28.0',
+        'cloudpickle>=3.0.0',
         'requests>=2.31.0',
         'PyYAML>=6.0.1',
         'pypdf>=4.0.0',

@@ -21,6 +21,12 @@ from chack_tools.task_steps_manager_state import (
 from chack_tools.telemetry import log_event
 
 from ..config import ChackConfig
+from ..live_cost_state import report_live_usage
+from .tool_payloads import (
+    CHACK_TOOLS_APPEND_B64_ENV,
+    CHACK_TOOLS_OVERRIDE_B64_ENV,
+    serialize_tools_payload,
+)
 
 
 _LOGGER = logging.getLogger("chack.claude_code_backend")
@@ -48,6 +54,8 @@ class ClaudeCodeExecutor:
     _claude_cli_path: str
     _tools_config_json: str
     _allowed_tools_json: str
+    _serialized_tools_override_b64: str
+    _serialized_tools_append_b64: str
     _model_provider: str
     _default_model: str
     _social_network_model: str
@@ -273,6 +281,17 @@ class ClaudeCodeExecutor:
                             },
                         }
                     if usage:
+                        report_live_usage(
+                            self._model_name,
+                            prompt_tokens=int(usage.get("input_tokens", 0) or 0),
+                            completion_tokens=int(usage.get("output_tokens", 0) or 0),
+                            cached_prompt_tokens=int(
+                                usage.get("input_tokens_details", {}).get("cached_tokens", 0) or 0
+                            ),
+                            cache_write_tokens=int(
+                                usage.get("input_tokens_details", {}).get("cache_write_tokens", 0) or 0
+                            ),
+                        )
                         raw_responses.append({"usage": usage})
 
                     if str(event.get("subtype") or "").strip().lower() == "error":
@@ -470,6 +489,10 @@ class ClaudeCodeExecutor:
 
         env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
         env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
+        if self._serialized_tools_override_b64:
+            env[CHACK_TOOLS_OVERRIDE_B64_ENV] = self._serialized_tools_override_b64
+        if self._serialized_tools_append_b64:
+            env[CHACK_TOOLS_APPEND_B64_ENV] = self._serialized_tools_append_b64
         env["CHACK_MODEL_PROVIDER"] = self._model_provider
         env["CHACK_DEFAULT_MODEL"] = self._default_model
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
@@ -547,6 +570,8 @@ class ClaudeCodeExecutor:
         env_keys = [
             "CHACK_TOOLS_CONFIG_JSON",
             "CHACK_ALLOWED_TOOLS_JSON",
+            "CHACK_TOOLS_OVERRIDE_B64",
+            "CHACK_TOOLS_APPEND_B64",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",
@@ -743,6 +768,8 @@ def build_executor(
 
     configured_claude_path = os.environ.get("CLAUDE_CLI_PATH", "").strip() or "claude"
     claude_cli_path = shutil.which(configured_claude_path) or configured_claude_path
+    serialized_tools_override_b64 = serialize_tools_payload(tools_override)
+    serialized_tools_append_b64 = serialize_tools_payload(tools_append)
 
     return ClaudeCodeExecutor(
         _conversation=[],
@@ -754,6 +781,8 @@ def build_executor(
         _claude_cli_path=claude_cli_path,
         _tools_config_json=json.dumps(getattr(config.tools, "__dict__", {}), ensure_ascii=False),
         _allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False),
+        _serialized_tools_override_b64=serialized_tools_override_b64,
+        _serialized_tools_append_b64=serialized_tools_append_b64,
         _model_provider=model_provider,
         _default_model=str(config.model.primary or ""),
         _social_network_model=str(config.model.social_network or ""),

@@ -18,6 +18,11 @@ from agents.usage import Usage
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
 from chack_tools.task_steps_manager_state import STORE, set_active_context
+from .tool_payloads import (
+    CHACK_TOOLS_APPEND_B64_ENV,
+    CHACK_TOOLS_OVERRIDE_B64_ENV,
+    deserialize_tools_payload,
+)
 
 
 _MCP_DENYLIST_TOOL_NAMES = {
@@ -158,6 +163,11 @@ def _load_toolset() -> list[Any]:
         except Exception:
             return default
 
+    serialized_tools_override_b64 = os.environ.get(CHACK_TOOLS_OVERRIDE_B64_ENV, "")
+    serialized_tools_append_b64 = os.environ.get(CHACK_TOOLS_APPEND_B64_ENV, "")
+    override_tools = deserialize_tools_payload(serialized_tools_override_b64)
+    append_tools = deserialize_tools_payload(serialized_tools_append_b64)
+
     toolset = AgentsToolset(
         ToolsConfig(**tools_cfg_data),
         model_provider=model_provider,
@@ -186,7 +196,12 @@ def _load_toolset() -> list[Any]:
                 for item in parsed_allowed
                 if str(item).strip()
             }
-    tools = list(getattr(toolset, "tools", []) or [])
+    if str(serialized_tools_override_b64 or "").strip():
+        tools = list(override_tools)
+    else:
+        tools = list(getattr(toolset, "tools", []) or [])
+        if append_tools:
+            tools.extend(list(append_tools))
     filtered_tools: list[Any] = []
     for tool in tools:
         name = str(getattr(tool, "name", "") or "").strip().lower()

@@ -21,6 +21,12 @@ from chack_tools.task_steps_manager_state import (
 from chack_tools.telemetry import log_event
 
 from ..config import ChackConfig
+from ..live_cost_state import report_live_usage
+from .tool_payloads import (
+    CHACK_TOOLS_APPEND_B64_ENV,
+    CHACK_TOOLS_OVERRIDE_B64_ENV,
+    serialize_tools_payload,
+)
 
 
 _LOGGER = logging.getLogger("chack.codex_backend")
@@ -53,6 +59,8 @@ class CodexExecutor:
     _openai_api_key: str
     _tools_config_json: str
     _allowed_tools_json: str
+    _serialized_tools_override_b64: str
+    _serialized_tools_append_b64: str
     _model_provider: str
     _default_model: str
     _social_network_model: str
@@ -257,6 +265,13 @@ class CodexExecutor:
                         "cache_write_tokens": 0,
                     },
                 }
+                report_live_usage(
+                    self._model_name,
+                    prompt_tokens=usage_payload["input_tokens"],
+                    completion_tokens=usage_payload["output_tokens"],
+                    cached_prompt_tokens=usage_payload["input_tokens_details"]["cached_tokens"],
+                    cache_write_tokens=0,
+                )
 
         return_code = process.wait()
         if return_code != 0:
@@ -322,6 +337,10 @@ class CodexExecutor:
             env["CODEX_HOME"] = self._codex_home
         env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
         env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
+        if self._serialized_tools_override_b64:
+            env[CHACK_TOOLS_OVERRIDE_B64_ENV] = self._serialized_tools_override_b64
+        if self._serialized_tools_append_b64:
+            env[CHACK_TOOLS_APPEND_B64_ENV] = self._serialized_tools_append_b64
         env["CHACK_MODEL_PROVIDER"] = self._model_provider
         env["CHACK_DEFAULT_MODEL"] = self._default_model
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
@@ -364,6 +383,8 @@ class CodexExecutor:
         env_vars = [
             "CHACK_TOOLS_CONFIG_JSON",
             "CHACK_ALLOWED_TOOLS_JSON",
+            "CHACK_TOOLS_OVERRIDE_B64",
+            "CHACK_TOOLS_APPEND_B64",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",
@@ -602,6 +623,8 @@ def build_executor(
         return names
 
     allowed_tool_names: list[str] | None = None
+    serialized_tools_override_b64 = serialize_tools_payload(tools_override)
+    serialized_tools_append_b64 = serialize_tools_payload(tools_append)
     model_provider = str(config.model.provider or "").strip()
     if not model_provider:
         raise ValueError("model.provider must be defined in config")
@@ -649,6 +672,8 @@ def build_executor(
         _allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False)
         if allowed_tool_names is not None
         else "",
+        _serialized_tools_override_b64=serialized_tools_override_b64,
+        _serialized_tools_append_b64=serialized_tools_append_b64,
         _model_provider=model_provider,
         _default_model=str(config.model.primary or ""),
         _social_network_model=str(config.model.social_network or ""),
