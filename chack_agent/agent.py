@@ -1153,6 +1153,7 @@ class Chack:
                 min_tools_target: Optional[int] = None,
                 require_task_steps_manager_init: Optional[bool] = None,
             ):
+                nonlocal estimated_cost_spent
                 result = {}
                 all_steps: list = []
                 prompt_total = 0
