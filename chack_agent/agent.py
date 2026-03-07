@@ -51,6 +51,11 @@ from .live_cost_state import (
     reset_active_live_cost_callback,
     set_active_live_cost_callback,
 )
+from .limit_event_state import (
+    emit_limit_reached,
+    reset_active_limit_event_callback,
+    set_active_limit_event_callback,
+)
 from .pricing import (
     estimate_cost,
     estimate_costs_by_model,
@@ -451,6 +456,29 @@ class Chack:
                     "remaining_usd": max(0.0, max_cost_usd - spent_usd),
                 },
             )
+
+    def _emit_limit_reached_once(
+        self,
+        *,
+        session_id: str,
+        task_session_id: str,
+        limit_state: dict[str, bool],
+        limit_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        normalized = str(limit_type or "").strip().lower()
+        if not normalized or limit_state.get(normalized, False):
+            return
+        limit_state[normalized] = True
+        log_event(
+            "agent_limit_reached",
+            payload={
+                "session_id": session_id,
+                "task_session_id": task_session_id,
+                "limit_type": normalized,
+                **payload,
+            },
+        )
 
     @staticmethod
     def _token_usage_delta(
@@ -1035,6 +1063,7 @@ class Chack:
             cost_critical_threshold = max_cost_usd * 0.9
             estimated_cost_spent = 0.0
             progress_state = {"runtime_percent": 0, "cost_percent": 0}
+            limit_event_state = {"runtime": False, "cost": False, "tools": False}
 
             min_tools_used = max(0, int(self.config.tools.min_tools_used or 0))
             if min_tools_used_override is not None:
@@ -1175,6 +1204,16 @@ class Chack:
                 for attempt in range(1, max_attempts + 1):
                     elapsed = time.time() - run_started_at
                     if max_runtime_seconds > 0 and elapsed >= max_runtime_seconds:
+                        self._emit_limit_reached_once(
+                            session_id=session_id,
+                            task_session_id=telemetry_task_session_id or task_session_id,
+                            limit_state=limit_event_state,
+                            limit_type="runtime",
+                            payload={
+                                "max_runtime_minutes": max_runtime_minutes,
+                                "elapsed_seconds": elapsed,
+                            },
+                        )
                         raise TimeoutError(
                             f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
                         )
@@ -1223,6 +1262,7 @@ class Chack:
                     )
                     attempt_token_usage_before = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
                     live_cost_callback_holder: dict[str, Any] = {"callback": None}
+                    limit_event_callback_holder: dict[str, Any] = {"callback": None}
 
                     def _invoke():
                         tokens = set_active_context(task_session_id, run_label)
@@ -1231,6 +1271,9 @@ class Chack:
                         max_tools_token = set_active_max_tools_used(max_tools_used)
                         live_cost_token = set_active_live_cost_callback(
                             live_cost_callback_holder.get("callback")
+                        )
+                        limit_event_token = set_active_limit_event_callback(
+                            limit_event_callback_holder.get("callback")
                         )
                         try:
                             return executor.invoke({"input": current_prompt}, context=context)
@@ -1248,6 +1291,7 @@ class Chack:
                                 }
                             raise
                         finally:
+                            reset_active_limit_event_callback(limit_event_token)
                             reset_active_live_cost_callback(live_cost_token)
                             reset_active_max_tools_used(max_tools_token)
                             reset_active_usage_session(usage_token)
@@ -1316,10 +1360,29 @@ class Chack:
                                 usage[2] += max(0, int(cached_prompt_tokens or 0))
                                 usage[3] += max(0, int(cache_write_tokens or 0))
                             if max_cost_usd > 0 and _live_total_cost() >= max_cost_usd:
+                                self._emit_limit_reached_once(
+                                    session_id=session_id,
+                                    task_session_id=telemetry_task_session_id or task_session_id,
+                                    limit_state=limit_event_state,
+                                    limit_type="cost",
+                                    payload={
+                                        "max_cost_usd": max_cost_usd,
+                                        "spent_usd": _live_total_cost(),
+                                    },
+                                )
                                 raise LiveCostLimitExceeded(
                                     f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
                                 )
                         live_cost_callback_holder["callback"] = live_cost_callback
+                        limit_event_callback_holder["callback"] = (
+                            lambda limit_type, payload: self._emit_limit_reached_once(
+                                session_id=session_id,
+                                task_session_id=telemetry_task_session_id or task_session_id,
+                                limit_state=limit_event_state,
+                                limit_type=limit_type,
+                                payload=payload,
+                            )
+                        )
 
                         def _runner():
                             try:
@@ -1367,9 +1430,29 @@ class Chack:
                                     "Agent run exceeded max cost budget and the execution thread did not stop in time."
                                 )
                             if runtime_exceeded:
+                                self._emit_limit_reached_once(
+                                    session_id=session_id,
+                                    task_session_id=telemetry_task_session_id or task_session_id,
+                                    limit_state=limit_event_state,
+                                    limit_type="runtime",
+                                    payload={
+                                        "max_runtime_minutes": max_runtime_minutes,
+                                        "elapsed_seconds": time.time() - run_started_at,
+                                    },
+                                )
                                 raise TimeoutError(
                                     f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
                                 )
+                            self._emit_limit_reached_once(
+                                session_id=session_id,
+                                task_session_id=telemetry_task_session_id or task_session_id,
+                                limit_state=limit_event_state,
+                                limit_type="cost",
+                                payload={
+                                    "max_cost_usd": max_cost_usd,
+                                    "spent_usd": _live_total_cost(),
+                                },
+                            )
                             raise TimeoutError(
                                 f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
                             )
@@ -1437,6 +1520,16 @@ class Chack:
                             max_cost_usd=max_cost_usd,
                         )
                         if estimated_cost_spent >= max_cost_usd:
+                            self._emit_limit_reached_once(
+                                session_id=session_id,
+                                task_session_id=telemetry_task_session_id or task_session_id,
+                                limit_state=limit_event_state,
+                                limit_type="cost",
+                                payload={
+                                    "max_cost_usd": max_cost_usd,
+                                    "spent_usd": estimated_cost_spent,
+                                },
+                            )
                             raise TimeoutError(
                                 f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
                             )
@@ -1530,6 +1623,16 @@ class Chack:
                     if not missing_init and not missing_tools:
                         break
                     if max_tools_reached:
+                        self._emit_limit_reached_once(
+                            session_id=session_id,
+                            task_session_id=telemetry_task_session_id or task_session_id,
+                            limit_state=limit_event_state,
+                            limit_type="tools",
+                            payload={
+                                "max_tools_used": effective_max_tools,
+                                "used": non_task_tools,
+                            },
+                        )
                         break
                     if (
                         missing_tools

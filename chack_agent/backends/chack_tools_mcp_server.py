@@ -18,6 +18,7 @@ from agents.usage import Usage
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
 from chack_tools.task_steps_manager_state import STORE, set_active_context
+from chack_agent.limit_event_state import emit_limit_reached
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
@@ -277,6 +278,14 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                 )
                 if not is_task_steps_manager_init and _name != "task_steps_manager":
                     if state.max_non_task_tools > 0 and state.non_task_tool_calls >= state.max_non_task_tools:
+                        emit_limit_reached(
+                            "tools",
+                            {
+                                "max_tools_used": state.max_non_task_tools,
+                                "used": state.non_task_tool_calls,
+                                "tool": _name,
+                            },
+                        )
                         raise RuntimeError(
                             f"Tool budget reached ({state.max_non_task_tools}). Finish using gathered context."
                         )

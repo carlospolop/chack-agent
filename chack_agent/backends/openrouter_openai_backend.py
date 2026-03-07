@@ -27,6 +27,7 @@ from agents.items import ToolCallItem
 from agents.exceptions import ModelBehaviorError
 
 from ..config import ChackConfig
+from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
 from ..output_schema import JsonSchemaOutput
 from chack_tools.agents_toolset import AgentsToolset
@@ -510,6 +511,14 @@ def _respect_max_tools_used(data) -> ToolGuardrailFunctionOutput:
     used = non_task_tool_count(TOOL_USAGE_STORE.snapshot(session_id))
     if used >= max_tools_used:
         _LOGGER.warning(f"Tool usage limit reached: used {used} tools, max is {max_tools_used}. Rejecting tool call to {tool_name}.")
+        emit_limit_reached(
+            "tools",
+            {
+                "max_tools_used": max_tools_used,
+                "used": used,
+                "tool": tool_name or "unknown",
+            },
+        )
         try:
             log_event(
                 "tool_disallowed",

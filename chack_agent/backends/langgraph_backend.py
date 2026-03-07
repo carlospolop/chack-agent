@@ -23,6 +23,7 @@ from chack_tools.telemetry import log_event
 from chack_tools.tool_usage_state import current_max_tools_used
 
 from ..config import ChackConfig
+from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
 
 
@@ -501,6 +502,14 @@ class LangGraphExecutor:
                     and configured_max_non_task_tools > 0
                     and non_task_count >= configured_max_non_task_tools
                 ):
+                    emit_limit_reached(
+                        "tools",
+                        {
+                            "max_tools_used": configured_max_non_task_tools,
+                            "used": non_task_count,
+                            "tool": call_name,
+                        },
+                    )
                     outputs.append(
                         ToolMessage(
                             content=(
