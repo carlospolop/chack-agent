@@ -320,19 +320,13 @@ class AgentsExecutor:
                 self._conversation.append({"role": "user", "content": user_input})
             if output:
                 self._conversation.append({"role": "assistant", "content": output})
-        if self._memory_limit and len(self._conversation) > self._memory_limit:
-            reset_to = self._memory_reset_to or self._memory_limit
-            if reset_to > self._memory_limit:
-                reset_to = self._memory_limit
-            if reset_to < 1:
-                reset_to = 1
-            self._conversation = self._conversation[-reset_to:]
         if result.last_response_id:
             self._previous_response_id = result.last_response_id
         conversation_id = getattr(result, "_conversation_id", None)
         if isinstance(conversation_id, str) and conversation_id.strip():
             self._conversation_id = conversation_id.strip()
         raw_responses = getattr(result, "raw_responses", None) or []
+        latest_input_tokens = 0
         for response in raw_responses:
             usage = getattr(response, "usage", None)
             if usage is None and isinstance(response, dict):
@@ -358,7 +352,8 @@ class AgentsExecutor:
                 cached_prompt_tokens=cached_tokens,
                 cache_write_tokens=cache_write_tokens,
             )
-        self._maybe_compact(result)
+            latest_input_tokens = input_tokens
+        self._maybe_compact(latest_input_tokens)
         steps = _extract_tool_steps(result.new_items)
         return {
             "output": output,
@@ -420,36 +415,46 @@ class AgentsExecutor:
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
 
-    def _maybe_compact(self, result: Any) -> None:
+    def _normalized_memory_reset_to(self) -> int:
+        if self._memory_limit <= 0:
+            return len(self._conversation or [])
+        reset_to = self._memory_reset_to or self._memory_limit
+        if self._memory_limit and reset_to > self._memory_limit:
+            reset_to = self._memory_limit
+        if reset_to < 1:
+            reset_to = 1
+        return reset_to
+
+    def _maybe_compact(self, input_tokens: int) -> None:
         if not self._previous_response_id:
             return
-        if self._max_context_tokens <= 0:
-            return
-        if self._compaction_threshold_ratio <= 0:
+
+        threshold_tokens = 0
+        if self._max_context_tokens > 0 and self._compaction_threshold_ratio > 0:
+            threshold_tokens = int(self._compaction_threshold_ratio * self._max_context_tokens)
+        should_compact_by_tokens = bool(
+            threshold_tokens > 0 and input_tokens >= threshold_tokens
+        )
+        should_compact_by_messages = bool(
+            self._memory_limit and len(self._conversation) > self._memory_limit
+        )
+        if not should_compact_by_messages and not should_compact_by_tokens:
             return
 
-        input_tokens = 0
-        raw_responses = getattr(result, "raw_responses", None)
-        if raw_responses:
-            last_response = raw_responses[-1]
-            usage = getattr(last_response, "usage", None)
-            input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-
-        if not input_tokens:
-            return
-        if input_tokens < int(self._compaction_threshold_ratio * self._max_context_tokens):
-            return
-
-        threshold_tokens = int(self._compaction_threshold_ratio * self._max_context_tokens)
         conversation_messages_before = len(self._conversation or [])
+        reset_to = self._normalized_memory_reset_to()
 
         _LOGGER.info(
-            "Triggering response compaction: input_tokens=%s threshold_tokens=%s max_context=%s threshold_ratio=%s conversation_messages_before=%s ts=%s.",
+            "Triggering response compaction: input_tokens=%s threshold_tokens=%s max_context=%s threshold_ratio=%s conversation_messages_before=%s memory_limit=%s memory_reset_to=%s by_messages=%s by_tokens=%s ts=%s.",
             input_tokens,
             threshold_tokens,
             self._max_context_tokens,
             self._compaction_threshold_ratio,
             conversation_messages_before,
+            self._memory_limit,
+            reset_to,
+            should_compact_by_messages,
+            should_compact_by_tokens,
             _log_timestamp(),
         )
         log_event(
@@ -464,6 +469,10 @@ class AgentsExecutor:
                 "threshold_ratio": float(self._compaction_threshold_ratio),
                 "threshold_tokens": int(threshold_tokens),
                 "conversation_messages_before": int(conversation_messages_before),
+                "memory_limit": int(self._memory_limit or 0),
+                "memory_reset_to": int(reset_to),
+                "triggered_by_messages": bool(should_compact_by_messages),
+                "triggered_by_tokens": bool(should_compact_by_tokens),
             },
             task_session_id=current_session_id() or "",
             run_label=current_run_label() or "",
@@ -485,6 +494,10 @@ class AgentsExecutor:
                     "input_tokens": int(input_tokens),
                     "threshold_tokens": int(threshold_tokens),
                     "conversation_messages_before": int(conversation_messages_before),
+                    "memory_limit": int(self._memory_limit or 0),
+                    "memory_reset_to": int(reset_to),
+                    "triggered_by_messages": bool(should_compact_by_messages),
+                    "triggered_by_tokens": bool(should_compact_by_tokens),
                     "previous_response_id": str(self._previous_response_id or ""),
                     "new_response_id": str(new_response_id or ""),
                 },
@@ -492,6 +505,10 @@ class AgentsExecutor:
                 run_label=current_run_label() or "",
             )
             self._previous_response_id = new_response_id
+            if self._conversation:
+                self._conversation = self._conversation[-reset_to:]
+        elif should_compact_by_messages and self._conversation:
+            self._conversation = self._conversation[-reset_to:]
 
     def _run_compaction(self, response_id: str) -> Optional[str]:
         try:
