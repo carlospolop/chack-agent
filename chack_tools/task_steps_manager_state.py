@@ -148,6 +148,86 @@ class TaskStepsManagerStore:
             for task in run.tasks
         ]
 
+    @staticmethod
+    def _run_counts(run: TaskRun) -> Dict[str, int]:
+        tasks_total = len(run.tasks)
+        tasks_done = len([task for task in run.tasks if task.status == "done"])
+        tasks_doing = len([task for task in run.tasks if task.status == "doing"])
+        tasks_todo = max(0, tasks_total - tasks_done - tasks_doing)
+        return {
+            "tasks_total": tasks_total,
+            "tasks_done": tasks_done,
+            "tasks_doing": tasks_doing,
+            "tasks_todo": tasks_todo,
+        }
+
+    @classmethod
+    def _progress_percent(cls, run: TaskRun) -> float:
+        counts = cls._run_counts(run)
+        tasks_total = counts["tasks_total"]
+        if tasks_total <= 0:
+            return 0.0
+        return round((counts["tasks_done"] / tasks_total) * 100.0, 2)
+
+    @classmethod
+    def _current_task(cls, run: TaskRun) -> str:
+        for task in run.tasks:
+            if task.status == "doing":
+                return task.text
+        for task in run.tasks:
+            if task.status != "done":
+                return task.text
+        return ""
+
+    @classmethod
+    def _run_snapshot(cls, run: TaskRun) -> Dict[str, Any]:
+        counts = cls._run_counts(run)
+        return {
+            "label": run.label,
+            "initialized": run.initialized,
+            "completed": cls._is_completed(run),
+            "progress_percent": cls._progress_percent(run),
+            "current_task": cls._current_task(run),
+            **counts,
+            "tasks": cls._snapshot(run),
+        }
+
+    def snapshot(self, session_id: str) -> Dict[str, Any]:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return {
+                    "session_id": session_id,
+                    "title": "Task Steps Manager",
+                    "runs": [],
+                    "tasks_total": 0,
+                    "tasks_done": 0,
+                    "tasks_doing": 0,
+                    "tasks_todo": 0,
+                    "progress_percent": 0.0,
+                }
+
+            runs = [self._run_snapshot(run) for run in session.runs.values()]
+            tasks_total = sum(int(run["tasks_total"]) for run in runs)
+            tasks_done = sum(int(run["tasks_done"]) for run in runs)
+            tasks_doing = sum(int(run["tasks_doing"]) for run in runs)
+            tasks_todo = sum(int(run["tasks_todo"]) for run in runs)
+            progress_percent = round((tasks_done / tasks_total) * 100.0, 2) if tasks_total > 0 else 0.0
+            active_run = next((run for run in reversed(runs) if not bool(run["completed"])), runs[-1] if runs else None)
+            return {
+                "session_id": session.session_id,
+                "title": session.title,
+                "runs": runs,
+                "tasks_total": tasks_total,
+                "tasks_done": tasks_done,
+                "tasks_doing": tasks_doing,
+                "tasks_todo": tasks_todo,
+                "progress_percent": progress_percent,
+                "active_run_label": active_run["label"] if active_run else "",
+                "current_task": active_run["current_task"] if active_run else "",
+                "completed": bool(runs) and all(bool(run["completed"]) for run in runs),
+            }
+
     def apply(
         self,
         session_id: str,
@@ -192,6 +272,10 @@ class TaskStepsManagerStore:
                 "tasklist_defined",
                 payload={
                     "tasks_total": len(run.tasks),
+                    "tasks_done": 0,
+                    "tasks_doing": 0,
+                    "tasks_todo": len(run.tasks),
+                    "progress_percent": 0.0,
                     "tasks": self._snapshot(run),
                 },
                 session_id=session_id,
@@ -220,7 +304,9 @@ class TaskStepsManagerStore:
                     "text": run.tasks[-1].text,
                     "status": run.tasks[-1].status,
                     "notes": run.tasks[-1].notes,
-                    "tasks_total": len(run.tasks),
+                    **self._run_counts(run),
+                    "progress_percent": self._progress_percent(run),
+                    "current_task": self._current_task(run),
                     "tasks": self._snapshot(run),
                 },
                 session_id=session_id,
@@ -243,7 +329,9 @@ class TaskStepsManagerStore:
                     payload={
                         "action": "delete",
                         "task_id": int(task_id),
-                        "tasks_total": len(run.tasks),
+                        **self._run_counts(run),
+                        "progress_percent": self._progress_percent(run),
+                        "current_task": self._current_task(run),
                         "tasks": self._snapshot(run),
                     },
                     session_id=session_id,
@@ -262,7 +350,9 @@ class TaskStepsManagerStore:
                         "task_id": task.id,
                         "text": task.text,
                         "notes": task.notes,
-                        "tasks_total": len(run.tasks),
+                        **self._run_counts(run),
+                        "progress_percent": self._progress_percent(run),
+                        "current_task": self._current_task(run),
                         "tasks": self._snapshot(run),
                     },
                     session_id=session_id,
@@ -276,7 +366,9 @@ class TaskStepsManagerStore:
                         "text": task.text,
                         "status": task.status,
                         "notes": task.notes,
-                        "tasks_total": len(run.tasks),
+                        **self._run_counts(run),
+                        "progress_percent": self._progress_percent(run),
+                        "current_task": self._current_task(run),
                         "tasks": self._snapshot(run),
                     },
                     session_id=session_id,
@@ -299,7 +391,9 @@ class TaskStepsManagerStore:
                     "text": task.text,
                     "status": task.status,
                     "notes": task.notes,
-                    "tasks_total": len(run.tasks),
+                    **self._run_counts(run),
+                    "progress_percent": self._progress_percent(run),
+                    "current_task": self._current_task(run),
                     "tasks": self._snapshot(run),
                 },
                 session_id=session_id,
@@ -322,6 +416,10 @@ class TaskStepsManagerStore:
                 "tasklist_defined",
                 payload={
                     "tasks_total": len(run.tasks),
+                    "tasks_done": 0,
+                    "tasks_doing": 0,
+                    "tasks_todo": len(run.tasks),
+                    "progress_percent": 0.0,
                     "tasks": self._snapshot(run),
                 },
                 session_id=session_id,

@@ -139,6 +139,9 @@ class RunResult:
     tool_counts_text: str = ""
     suffix: str = ""
 
+
+TaskStepsSnapshotCallback = Callable[[Dict[str, Any]], None]
+
 class Chack:
     def __init__(
         self,
@@ -977,6 +980,7 @@ class Chack:
         enable_self_critique: Optional[bool] = None,
         require_task_steps_manager_init_first: bool = True,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
+        on_task_steps_manager_snapshot_update: Optional[TaskStepsSnapshotCallback] = None,
         tools_override: Optional[list[Any]] = None,
         tools_append: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
@@ -993,6 +997,7 @@ class Chack:
             enable_self_critique=enable_self_critique,
             require_task_steps_manager_init_first=require_task_steps_manager_init_first,
             on_task_steps_manager_update=on_task_steps_manager_update,
+            on_task_steps_manager_snapshot_update=on_task_steps_manager_snapshot_update,
             tools_override=tools_override,
             tools_append=tools_append,
             system_prompt_override=system_prompt_override,
@@ -1011,6 +1016,7 @@ class Chack:
         enable_self_critique: Optional[bool] = None,
         require_task_steps_manager_init_first: bool = True,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
+        on_task_steps_manager_snapshot_update: Optional[TaskStepsSnapshotCallback] = None,
         tools_override: Optional[list[Any]] = None,
         system_prompt_override: Optional[str] = None,
         usage_session_id: Optional[str] = None,
@@ -1128,13 +1134,24 @@ class Chack:
 
             def _listener(board_text: str) -> None:
                 if on_task_steps_manager_update is None:
+                    pass
+                else:
+                    try:
+                        on_task_steps_manager_update(board_text)
+                    except Exception:
+                        pass
+                if on_task_steps_manager_snapshot_update is None:
                     return
                 try:
-                    on_task_steps_manager_update(board_text)
+                    snapshot = STORE.snapshot(task_session_id)
+                    on_task_steps_manager_snapshot_update(snapshot)
                 except Exception:
                     pass
 
-            if on_task_steps_manager_update is not None:
+            if (
+                on_task_steps_manager_update is not None
+                or on_task_steps_manager_snapshot_update is not None
+            ):
                 STORE.register_listener(task_session_id, _listener)
 
             self.logger.info(
@@ -1788,7 +1805,10 @@ class Chack:
                 f"{tool_counts_text}"
             )
 
-            if on_task_steps_manager_update is not None:
+            if (
+                on_task_steps_manager_update is not None
+                or on_task_steps_manager_snapshot_update is not None
+            ):
                 STORE.unregister_listener(task_session_id, _listener)
             TOOL_USAGE_STORE.clear(task_session_id)
 
