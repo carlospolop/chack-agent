@@ -59,7 +59,6 @@ from .limit_event_state import (
 from .pricing import (
     estimate_cost,
     estimate_costs_by_model,
-    estimate_cost_with_defaults,
     load_pricing,
     resolve_pricing_path,
 )
@@ -510,17 +509,8 @@ class Chack:
         cached_prompt_tokens: int = 0,
         cache_write_tokens: int = 0,
     ) -> Optional[float]:
-        estimated = estimate_cost(
+        return estimate_cost(
             pricing,
-            model_name,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cached_prompt_tokens=cached_prompt_tokens,
-            cache_write_tokens=cache_write_tokens,
-        )
-        if estimated is not None:
-            return estimated
-        return estimate_cost_with_defaults(
             model_name,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -1780,29 +1770,10 @@ class Chack:
                 self._pricing,
                 nested_usage_by_model,
             )
-            fallback_cost = None
-            if (
-                (main_cost is None or main_cost == 0.0)
-                and (
-                    prompt_tokens
-                    or completion_tokens
-                    or cached_prompt_tokens
-                    or cache_write_prompt_tokens
-                )
-            ):
-                fallback_cost = estimate_cost_with_defaults(
-                    model_name,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    cached_prompt_tokens=cached_prompt_tokens,
-                    cache_write_tokens=cache_write_prompt_tokens,
-                )
             if main_cost is None and nested_cost == 0:
                 total_cost = None
             else:
                 total_cost = (main_cost or 0.0) + nested_cost
-            if (total_cost is None or total_cost == 0.0) and fallback_cost:
-                total_cost = fallback_cost
             if total_cost is None:
                 cost_text = "unknown"
             else:
@@ -1868,11 +1839,7 @@ class Chack:
                     "nested_cost": nested_cost,
                     "pricing_model": model_name,
                     "missing_pricing_models": _missing_nested_models,
-                    "cost_source": (
-                        "fallback_default"
-                        if fallback_cost and (main_cost is None or main_cost == 0.0)
-                        else "pricing_table"
-                    ),
+                    "cost_source": "pricing_table",
                     "rounds_used": rounds_used,
                     "tools_used": tools_used,
                     "run1_steps": run1_steps,

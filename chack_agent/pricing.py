@@ -6,21 +6,6 @@ from typing import Dict, Optional, Tuple, List
 
 import yaml
 
-
-DEFAULT_PRICING: Dict[str, Dict[str, float]] = {
-    "gpt-5.2": {"input": 1.75, "cached_input": 0.175, "output": 14.00},
-    "gpt-5.1": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
-    "gpt-5": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
-    "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.00},
-    "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.40},
-    "gpt-5.2-chat-latest": {"input": 1.75, "cached_input": 0.175, "output": 14.00},
-    "gpt-5.1-chat-latest": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
-    "gpt-5-chat-latest": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
-    "gpt-5.2-codex": {"input": 1.75, "cached_input": 0.175, "output": 14.00},
-    "gpt-5.1-codex-max": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
-}
-
-
 @dataclass
 class ModelPricing:
     input: float
@@ -32,6 +17,27 @@ class ModelPricing:
 @dataclass
 class PricingTable:
     models: Dict[str, ModelPricing]
+
+
+def _strip_provider_prefix(model_name: str) -> str:
+    raw = str(model_name or "").strip()
+    return raw.split("/", 1)[1] if "/" in raw else raw
+
+
+def _resolve_model_lookup(pricing: PricingTable, model: str) -> Optional[str]:
+    lookup = str(model or "").strip()
+    if not lookup:
+        return None
+    if lookup in pricing.models:
+        return lookup
+
+    bare_lookup = _strip_provider_prefix(lookup)
+    stripped_matches = [
+        key for key in pricing.models.keys() if _strip_provider_prefix(key) == bare_lookup
+    ]
+    if len(stripped_matches) == 1:
+        return stripped_matches[0]
+    return None
 
 
 def _build_pricing_table(raw_models: Dict[str, Dict[str, float]]) -> PricingTable:
@@ -59,22 +65,6 @@ def _build_pricing_table(raw_models: Dict[str, Dict[str, float]]) -> PricingTabl
     return PricingTable(models=models)
 
 
-def _merge_with_defaults(table: PricingTable) -> PricingTable:
-    merged = dict(table.models)
-    for name, defaults in DEFAULT_PRICING.items():
-        current = merged.get(name)
-        if current is None:
-            merged[name] = ModelPricing(**defaults)
-            continue
-        if (
-            current.input == 0.0
-            and current.cached_input == 0.0
-            and current.output == 0.0
-        ):
-            merged[name] = ModelPricing(**defaults)
-    return PricingTable(models=merged)
-
-
 def load_pricing(path: str) -> PricingTable:
     raw_models: Dict[str, Dict[str, float]] = {}
     try:
@@ -84,11 +74,7 @@ def load_pricing(path: str) -> PricingTable:
     except OSError:
         raw_models = {}
 
-    table = _build_pricing_table(raw_models)
-    if not table.models:
-        table = _build_pricing_table(DEFAULT_PRICING)
-        return table
-    return _merge_with_defaults(table)
+    return _build_pricing_table(raw_models)
 
 
 def resolve_pricing_path() -> str:
@@ -107,23 +93,9 @@ def estimate_cost(
     cached_prompt_tokens: int = 0,
     cache_write_tokens: int = 0,
 ) -> Optional[float]:
-    lookup = str(model or "").strip()
+    lookup = _resolve_model_lookup(pricing, model)
     if not lookup:
         return None
-
-    if lookup not in pricing.models:
-        # Provider-agnostic fallback: strip "<provider>/" from pricing keys and
-        # compare against the model name. Use only unique matches.
-        lookup_stripped = lookup.split("/", 1)[1] if "/" in lookup else lookup
-        stripped_matches = [
-            key
-            for key in pricing.models.keys()
-            if (key.split("/", 1)[1] if "/" in key else key) == lookup_stripped
-        ]
-        if len(stripped_matches) == 1:
-            lookup = stripped_matches[0]
-        else:
-            return None
 
     rates = pricing.models[lookup]
     billable_prompt = max(prompt_tokens - cached_prompt_tokens, 0)
@@ -161,23 +133,3 @@ def estimate_costs_by_model(
             continue
         total += model_cost
     return total, missing_models
-
-
-def estimate_cost_with_defaults(
-    model: str,
-    prompt_tokens: int,
-    completion_tokens: int,
-    cached_prompt_tokens: int = 0,
-    cache_write_tokens: int = 0,
-) -> Optional[float]:
-    if model not in DEFAULT_PRICING:
-        return None
-    rates = DEFAULT_PRICING[model]
-    billable_prompt = max(prompt_tokens - cached_prompt_tokens, 0)
-    total = (
-        billable_prompt * rates["input"]
-        + cached_prompt_tokens * rates["cached_input"]
-        + cache_write_tokens * rates.get("cache_write", 0.0)
-        + completion_tokens * rates["output"]
-    )
-    return total / 1_000_000.0
