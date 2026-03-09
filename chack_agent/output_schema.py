@@ -5,6 +5,20 @@ from agents.agent_output import AgentOutputSchemaBase, ensure_strict_json_schema
 from agents.exceptions import ModelBehaviorError
 
 
+def _normalize_root_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    if "type" in schema:
+        return schema
+
+    # OpenAI Responses requires response_format JSON schemas to have an object root.
+    # Older configs may use a top-level composition of object refs instead.
+    if any(key in schema for key in ("anyOf", "oneOf", "allOf")):
+        normalized = dict(schema)
+        normalized["type"] = "object"
+        return normalized
+
+    return schema
+
+
 class JsonSchemaOutput(AgentOutputSchemaBase):
     def __init__(
         self,
@@ -15,6 +29,7 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
     ) -> None:
         if not isinstance(schema, dict):
             raise ValueError("output schema must be a JSON object")
+        schema = _normalize_root_object_schema(schema)
         self._schema = ensure_strict_json_schema(schema) if strict else schema
         self._name = name or "output_schema"
         self._strict = bool(strict)
