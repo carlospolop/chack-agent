@@ -224,7 +224,6 @@ The built-in `exec` tool also accepts an optional `cwd` argument per call, and f
 1. tool call `cwd`
 2. `tools.exec_cwd`
 3. `CHACK_EXEC_CWD`
-4. `REPO_FOLDER_PATH`
 
 ## Development
 

@@ -27,9 +27,6 @@ class ExecTool:
         candidate = os.environ.get("CHACK_EXEC_CWD", "").strip()
         if candidate:
             return candidate
-        candidate = os.environ.get("REPO_FOLDER_PATH", "").strip()
-        if candidate:
-            return candidate
         return None
 
     def run(self, command: str, cwd: str = "") -> str:
@@ -65,7 +62,7 @@ def get_exec_tool(helper: ExecTool):
         Args:
             command: The shell command to execute.
             cwd: Optional working directory for this command. If omitted, the tool falls back to
-                `tools.exec_cwd`, then `CHACK_EXEC_CWD`, then `REPO_FOLDER_PATH`.
+                `tools.exec_cwd`, then `CHACK_EXEC_CWD`.
         """
         tool_input = {"command": command, "cwd": cwd}
         start_ts = log_tool_started("exec", tool_input)
