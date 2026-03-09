@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from openai import OpenAI, AsyncOpenAI, BadRequestError
+from openai import OpenAI, AsyncOpenAI, BadRequestError, APIConnectionError
 from agents import (
     Agent,
     ModelSettings,
@@ -43,6 +43,8 @@ _FIRST_TOOL_LOCK = threading.Lock()
 _FIRST_TOOL_INIT_DONE: dict[str, bool] = {}
 _FIRST_TOOL_STATE_MAX = 5000
 _LOGGER = logging.getLogger("chack.openai_compaction_backend")
+_OPENAI_RUNNER_MAX_RETRIES = 2
+_OPENAI_RUNNER_RETRY_DELAY_SECONDS = 2
 
 
 def _select_provider(config: ChackConfig) -> str:
@@ -373,44 +375,62 @@ class AgentsExecutor:
         # For OpenAI, rely on server-side conversation state only.
         include_history = False
         input_items = self._build_runner_input(user_input, include_history=include_history)
-        try:
-            return Runner.run_sync(
-                self.agent,
-                input_items,
-                max_turns=self.max_turns,
-                previous_response_id=self._previous_response_id,
-                conversation_id=self._conversation_id,
-                context=context,
-            )
-        except (BadRequestError, ModelBehaviorError) as exc:
-            err = str(exc).lower()
-            recoverable = (
-                self._previous_response_id is not None
-                and (
-                    "function response turn comes immediately after a function call turn" in err
-                    or ("invalid_argument" in err and "function call" in err and "function response" in err)
-                    or "not found in agent chack" in err
-                    or ("tool " in err and " not found in agent " in err)
+        last_connection_error: Optional[APIConnectionError] = None
+        for attempt in range(1, _OPENAI_RUNNER_MAX_RETRIES + 1):
+            try:
+                return Runner.run_sync(
+                    self.agent,
+                    input_items,
+                    max_turns=self.max_turns,
+                    previous_response_id=self._previous_response_id,
+                    conversation_id=self._conversation_id,
+                    context=context,
                 )
-            )
-            if not recoverable:
-                raise
-            _LOGGER.warning(
-                "Runner rejected response chain with previous_response_id; retrying with fresh chain."
-            )
-            # Keep OpenAI-managed conversation when available; only drop previous_response_id.
-            self._previous_response_id = None
-            retry_previous_response_id = None
-            retry_conversation_id = self._conversation_id
-            retry_input = self._build_runner_input(user_input, include_history=False)
-            return Runner.run_sync(
-                self.agent,
-                retry_input,
-                max_turns=self.max_turns,
-                previous_response_id=retry_previous_response_id,
-                conversation_id=retry_conversation_id,
-                context=context,
-            )
+            except APIConnectionError as exc:
+                last_connection_error = exc
+                if attempt >= _OPENAI_RUNNER_MAX_RETRIES:
+                    raise
+                _LOGGER.warning(
+                    "OpenAI runner connection failed on attempt %s/%s; rebuilding client and retrying. Error: %s",
+                    attempt,
+                    _OPENAI_RUNNER_MAX_RETRIES,
+                    exc,
+                )
+                _configure_openai_client(self._config)
+                time.sleep(_OPENAI_RUNNER_RETRY_DELAY_SECONDS * attempt)
+                continue
+            except (BadRequestError, ModelBehaviorError) as exc:
+                err = str(exc).lower()
+                recoverable = (
+                    self._previous_response_id is not None
+                    and (
+                        "function response turn comes immediately after a function call turn" in err
+                        or ("invalid_argument" in err and "function call" in err and "function response" in err)
+                        or "not found in agent chack" in err
+                        or ("tool " in err and " not found in agent " in err)
+                    )
+                )
+                if not recoverable:
+                    raise
+                _LOGGER.warning(
+                    "Runner rejected response chain with previous_response_id; retrying with fresh chain."
+                )
+                # Keep OpenAI-managed conversation when available; only drop previous_response_id.
+                self._previous_response_id = None
+                retry_previous_response_id = None
+                retry_conversation_id = self._conversation_id
+                retry_input = self._build_runner_input(user_input, include_history=False)
+                return Runner.run_sync(
+                    self.agent,
+                    retry_input,
+                    max_turns=self.max_turns,
+                    previous_response_id=retry_previous_response_id,
+                    conversation_id=retry_conversation_id,
+                    context=context,
+                )
+        if last_connection_error is not None:
+            raise last_connection_error
+        raise RuntimeError("OpenAI runner retry loop exited unexpectedly")
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
