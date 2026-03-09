@@ -5,6 +5,7 @@ from typing import Any
 @dataclass
 class ToolsConfig:
     exec_enabled: bool = False
+    exec_cwd: str = ""
     exec_timeout_seconds: int = 60
     exec_max_output_chars: int = 5000
 

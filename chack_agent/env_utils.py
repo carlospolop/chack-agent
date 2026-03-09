@@ -92,3 +92,6 @@ def export_env(config, config_path: str) -> None:
 
     os.environ["CHACK_EXEC_TIMEOUT"] = str(config.tools.exec_timeout_seconds)
     os.environ["CHACK_EXEC_MAX_OUTPUT"] = str(config.tools.exec_max_output_chars)
+    exec_cwd = str(getattr(config.tools, "exec_cwd", "") or "").strip()
+    if exec_cwd:
+        os.environ["CHACK_EXEC_CWD"] = _resolve_path(base_dir, exec_cwd)

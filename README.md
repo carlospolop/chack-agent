@@ -60,6 +60,7 @@ result = agent.run(
     ),
     tools=ToolsConfig(
         exec_enabled=True,
+        exec_cwd="/path/to/repo",
         brave_enabled=True,
         websearcher_enabled=True,
         scientific_enabled=True,
@@ -81,6 +82,7 @@ result = agent.run(
     session_id="investigation-001",
     text="",  # empty => uses user_prompt from config (with template replacement)
     prompt_variables_override={"topic": "plastic-eating bacteria"},
+    exec_cwd="/path/to/repo",
 )
 
 print(result.output)
@@ -214,8 +216,15 @@ Most tools require API keys. Provide them via env vars (recommended) or your own
   * If the spend budget is reached, the run raises `TimeoutError` and stops.
 * **`ToolsConfig`**:
   * All tools are disabled by default. Enable only what you need.
+  * `exec_cwd` binds the built-in `exec` tool to a default working directory.
   * `exec_timeout_seconds` defaults to **60** and is configurable via YAML/config (not via env).
   * Subtool flags exist for scientific, social, and websearcher toolsets.
+
+The built-in `exec` tool also accepts an optional `cwd` argument per call, and falls back in this order:
+1. tool call `cwd`
+2. `tools.exec_cwd`
+3. `CHACK_EXEC_CWD`
+4. `REPO_FOLDER_PATH`
 
 ## Development
 

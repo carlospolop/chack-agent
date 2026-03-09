@@ -13,7 +13,7 @@ import socket
 import subprocess
 from datetime import datetime, timezone
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Optional
 
 try:
@@ -846,13 +846,22 @@ class Chack:
         system_prompt_override: Optional[str] = None,
         tools_override: Optional[list[Any]] = None,
         tools_append: Optional[list[Any]] = None,
+        exec_cwd: Optional[str] = None,
     ):
+        config = self.config
+        exec_cwd_value = str(exec_cwd or "").strip()
+        if exec_cwd_value:
+            config = replace(
+                self.config,
+                tools=replace(self.config.tools, exec_cwd=exec_cwd_value),
+            )
+
         memory_max_messages = int(self.config.session.memory_max_messages)
         memory_reset_to_messages = int(self.config.session.memory_reset_to_messages)
         memory_summary_max_chars = int(self.config.session.memory_summary_max_chars)
         if tools_override is not None or tools_append is not None:
             return build_executor(
-                self.config,
+                config,
                 system_prompt=system_prompt_override or self.config.system_prompt,
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
@@ -862,7 +871,7 @@ class Chack:
                 tools_append=tools_append,
             )
 
-        cache_key = f"{session_id}:{system_prompt_override or ''}"
+        cache_key = f"{session_id}:{system_prompt_override or ''}:{exec_cwd_value}"
         executor = self._executors.get(cache_key)
         if executor is None:
             self.logger.info(
@@ -874,7 +883,7 @@ class Chack:
             )
             system_prompt = self._system_prompt_for_session(session_id, system_prompt_override)
             executor = build_executor(
-                self.config,
+                config,
                 system_prompt=system_prompt,
                 max_turns=self.config.session.max_turns,
                 memory_max_messages=memory_max_messages,
@@ -986,6 +995,7 @@ class Chack:
         system_prompt_override: Optional[str] = None,
         context: Optional[Any] = None,
         prompt_variables_override: Optional[Dict[str, Any]] = None,
+        exec_cwd: Optional[str] = None,
         stop_requested: Optional[Callable[[], bool]] = None,
     ) -> RunResult:
         return await asyncio.to_thread(
@@ -1003,6 +1013,7 @@ class Chack:
             system_prompt_override=system_prompt_override,
             context=context,
             prompt_variables_override=prompt_variables_override,
+            exec_cwd=exec_cwd,
             stop_requested=stop_requested,
         )
 
@@ -1023,6 +1034,7 @@ class Chack:
         tools_append: Optional[list[Any]] = None,
         context: Optional[Any] = None,
         prompt_variables_override: Optional[Dict[str, Any]] = None,
+        exec_cwd: Optional[str] = None,
         stop_requested: Optional[Callable[[], bool]] = None,
     ) -> RunResult:
         log_token = set_log_context(
@@ -1044,6 +1056,7 @@ class Chack:
                 system_prompt_override=system_prompt_override,
                 tools_override=tools_override,
                 tools_append=tools_append,
+                exec_cwd=exec_cwd,
             )
             self._last_activity_at[session_id] = time.time()
             run_started_at = self._last_activity_at[session_id]

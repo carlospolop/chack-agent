@@ -1,6 +1,7 @@
 import subprocess
 import time
 import traceback
+import os
 from datetime import datetime, timezone
 
 try:
@@ -16,9 +17,25 @@ class ExecTool:
     def __init__(self, config: ToolsConfig):
         self.config = config
 
-    def run(self, command: str) -> str:
+    def _resolve_cwd(self, cwd: str = "") -> str | None:
+        candidate = str(cwd or "").strip()
+        if candidate:
+            return candidate
+        candidate = str(getattr(self.config, "exec_cwd", "") or "").strip()
+        if candidate:
+            return candidate
+        candidate = os.environ.get("CHACK_EXEC_CWD", "").strip()
+        if candidate:
+            return candidate
+        candidate = os.environ.get("REPO_FOLDER_PATH", "").strip()
+        if candidate:
+            return candidate
+        return None
+
+    def run(self, command: str, cwd: str = "") -> str:
         timeout = max(1, int(self.config.exec_timeout_seconds or 60))
         max_chars = max(1, int(self.config.exec_max_output_chars or 5000))
+        resolved_cwd = self._resolve_cwd(cwd)
         result = subprocess.run(
             command,
             shell=True,
@@ -26,6 +43,7 @@ class ExecTool:
             text=True,
             timeout=timeout,
             env=None,
+            cwd=resolved_cwd,
         )
         output = (result.stdout or "") + (result.stderr or "")
         output = output.strip() or "(no output)"
@@ -37,7 +55,7 @@ def get_exec_tool(helper: ExecTool):
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
     @function_tool(name_override="exec")
-    def exec_tool(command: str) -> str:
+    def exec_tool(command: str, cwd: str = "") -> str:
         """Execute a shell command locally and return combined output.
 
         Use this to access local CLIs, curl/wget endpoints, and inspect files using tools like rg, find, ls, cat, head...
@@ -46,13 +64,15 @@ def get_exec_tool(helper: ExecTool):
 
         Args:
             command: The shell command to execute.
+            cwd: Optional working directory for this command. If omitted, the tool falls back to
+                `tools.exec_cwd`, then `CHACK_EXEC_CWD`, then `REPO_FOLDER_PATH`.
         """
-        tool_input = {"command": command}
+        tool_input = {"command": command, "cwd": cwd}
         start_ts = log_tool_started("exec", tool_input)
         start_time = time.time()
         error = None
         try:
-            return helper.run(command)
+            return helper.run(command, cwd=cwd)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             try:
