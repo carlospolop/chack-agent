@@ -22,6 +22,7 @@ from chack_tools.telemetry import log_event
 
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
+from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
@@ -72,6 +73,11 @@ class ClaudeCodeExecutor:
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
+    _uses_openrouter_route: bool = False
+    _anthropic_api_key: str = ""
+    _anthropic_base_url: str = ""
+    _openrouter_http_referer: str = ""
+    _openrouter_app_name: str = ""
     _claude_home: str | None = None
     _claude_session_id: str | None = None
     _output_schema: str | None = None
@@ -463,6 +469,7 @@ class ClaudeCodeExecutor:
             "-p",
             prompt,
             "--print",
+            "--verbose",
             "--output-format",
             "stream-json",
             "--tools",
@@ -514,9 +521,21 @@ class ClaudeCodeExecutor:
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
 
-        env["ANTHROPIC_API_KEY"] = str(
-            os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("CLAUDE_API_KEY", "")
-        )
+        if self._uses_openrouter_route:
+            env["ANTHROPIC_API_KEY"] = self._anthropic_api_key
+            env["CLAUDE_API_KEY"] = self._anthropic_api_key
+            env["ANTHROPIC_AUTH_TOKEN"] = self._anthropic_api_key
+            env["ANTHROPIC_BASE_URL"] = self._anthropic_base_url
+            env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
+            env["OPENROUTER_API_KEY"] = self._anthropic_api_key
+            if self._openrouter_http_referer:
+                env["OPENROUTER_HTTP_REFERER"] = self._openrouter_http_referer
+            if self._openrouter_app_name:
+                env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
+        else:
+            env["ANTHROPIC_API_KEY"] = str(
+                os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("CLAUDE_API_KEY", "")
+            )
 
         env.setdefault("AWS_SHARED_CREDENTIALS_FILE", os.environ.get("AWS_SHARED_CREDENTIALS_FILE", ""))
         env.setdefault("AWS_CONFIG_FILE", os.environ.get("AWS_CONFIG_FILE", ""))
@@ -615,6 +634,12 @@ class ClaudeCodeExecutor:
             "CHACK_MCP_TOOL_MAX_TOKENS",
             "ANTHROPIC_API_KEY",
             "CLAUDE_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "OPENROUTER_API_KEY",
+            "OPENROUTER_HTTP_REFERER",
+            "OPENROUTER_APP_NAME",
         ]
 
         src_env = self._build_env()
@@ -702,6 +727,19 @@ def build_executor(
     tools_override: list[Any] | None = None,
     tools_append: list[Any] | None = None,
 ) -> ClaudeCodeExecutor:
+    if get_openrouter_route(config) is not None:
+        from .openrouter_openai_backend import build_executor as build_openrouter_executor
+
+        return build_openrouter_executor(
+            clone_config_for_openrouter(config),
+            system_prompt=system_prompt,
+            max_turns=max_turns,
+            memory_max_messages=memory_max_messages,
+            memory_reset_to_messages=memory_reset_to_messages,
+            memory_summary_max_chars=memory_summary_max_chars,
+            tools_override=tools_override,
+            tools_append=tools_append,
+        )
     del max_turns
     try:
         _LOGGER.debug(
@@ -771,12 +809,14 @@ def build_executor(
     serialized_tools_override_b64 = serialize_tools_payload(tools_override)
     serialized_tools_append_b64 = serialize_tools_payload(tools_append)
 
+    route = get_openrouter_route(config)
+
     return ClaudeCodeExecutor(
         _conversation=[],
         _memory_limit=memory_max_messages,
         _memory_reset_to=memory_reset_to_messages,
         _base_system_prompt=system_prompt,
-        _model_name=str(config.model.primary),
+        _model_name=str(route.model_name if route is not None else config.model.primary),
         _max_turns=int(config.session.max_turns or 100),
         _claude_cli_path=claude_cli_path,
         _tools_config_json=json.dumps(getattr(config.tools, "__dict__", {}), ensure_ascii=False),
@@ -805,4 +845,15 @@ def build_executor(
             if getattr(config.agent, "output_schema_json", None)
             else ""
         ),
+        _uses_openrouter_route=route is not None,
+        _anthropic_api_key=str(
+            route.api_key
+            if route is not None
+            else (
+                os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("CLAUDE_API_KEY", "")
+            )
+        ),
+        _anthropic_base_url=str(route.anthropic_base_url if route is not None else ""),
+        _openrouter_http_referer=str((route.headers.get("HTTP-Referer", "") if route else "")),
+        _openrouter_app_name=str((route.headers.get("X-Title", "") if route else "")),
     )

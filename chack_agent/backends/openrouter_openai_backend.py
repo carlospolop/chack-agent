@@ -548,6 +548,7 @@ class ToolAction:
 
 @dataclass
 class AgentsExecutor:
+    _config: ChackConfig
     agent: Agent
     _summary_agent: Agent
     max_turns: int
@@ -1135,6 +1136,7 @@ def build_executor(
     )
 
     return AgentsExecutor(
+        _config=config,
         agent=agent,
         _summary_agent=summary_agent,
         max_turns=max_turns,

@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from chack_tools.telemetry import log_event
 
 from .config import ChackConfig, resolve_backend_type
+from .openrouter_routing import get_openrouter_route
 
 
 _LOGGER = logging.getLogger("chack.long_term_memory")
@@ -118,38 +119,16 @@ def build_long_term_memory(
     model: str | OpenAIResponsesModel = model_name
 
     backend_type = resolve_backend_type(config)
-    uses_openrouter_routed_model = (
-        backend_type in {"openrouter", "langgraph"}
-    )
-    if uses_openrouter_routed_model:
-        api_key = (
-            str(getattr(config.credentials, "openrouter_api_key", "") or "").strip()
-            or os.environ.get("OPENROUTER_API_KEY", "").strip()
+    route = get_openrouter_route(config, model_name=model_name)
+    if backend_type == "langgraph" and route is None:
+        route = get_openrouter_route(config)
+    if route is not None:
+        client = AsyncOpenAI(
+            base_url=route.base_url,
+            api_key=route.api_key,
+            default_headers=route.headers or None,
         )
-        if not api_key:
-            raise ValueError(
-                "OPENROUTER_API_KEY is required when long-term memory uses a routed model"
-            )
-        base_url = (
-            str(getattr(config.credentials, "openrouter_base_url", "") or "").strip()
-            or os.environ.get("OPENROUTER_BASE_URL", "").strip()
-            or "https://openrouter.ai/api/v1"
-        )
-        headers: dict[str, str] = {}
-        referer = (
-            str(getattr(config.credentials, "openrouter_http_referer", "") or "").strip()
-            or os.environ.get("OPENROUTER_HTTP_REFERER", "").strip()
-        )
-        title = (
-            str(getattr(config.credentials, "openrouter_app_name", "") or "").strip()
-            or os.environ.get("OPENROUTER_APP_NAME", "").strip()
-        )
-        if referer:
-            headers["HTTP-Referer"] = referer
-        if title:
-            headers["X-Title"] = title
-        client = AsyncOpenAI(base_url=base_url, api_key=api_key, default_headers=headers or None)
-        model = OpenAIResponsesModel(model=model_name, openai_client=client)
+        model = OpenAIResponsesModel(model=route.model_name, openai_client=client)
 
     system = _LONG_TERM_MEMORY_SUMMARY_PROMPT.replace("{max_chars}", str(max_chars))
 

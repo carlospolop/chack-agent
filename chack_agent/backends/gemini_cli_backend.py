@@ -22,6 +22,7 @@ from chack_tools.telemetry import log_event
 
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
+from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
@@ -628,6 +629,19 @@ def build_executor(
     tools_override: list[Any] | None = None,
     tools_append: list[Any] | None = None,
 ) -> GeminiCliExecutor:
+    if get_openrouter_route(config) is not None:
+        from .openrouter_openai_backend import build_executor as build_openrouter_executor
+
+        return build_openrouter_executor(
+            clone_config_for_openrouter(config),
+            system_prompt=system_prompt,
+            max_turns=max_turns,
+            memory_max_messages=memory_max_messages,
+            memory_reset_to_messages=memory_reset_to_messages,
+            memory_summary_max_chars=memory_summary_max_chars,
+            tools_override=tools_override,
+            tools_append=tools_append,
+        )
     del max_turns
     try:
         _LOGGER.debug(

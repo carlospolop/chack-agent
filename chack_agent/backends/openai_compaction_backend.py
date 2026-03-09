@@ -27,6 +27,7 @@ from agents.exceptions import ModelBehaviorError
 from ..config import ChackConfig
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
+from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from ..output_schema import JsonSchemaOutput
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
@@ -752,6 +753,19 @@ def build_executor(
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> AgentsExecutor:
+    if get_openrouter_route(config) is not None:
+        from .openrouter_openai_backend import build_executor as build_openrouter_executor
+
+        return build_openrouter_executor(
+            clone_config_for_openrouter(config),
+            system_prompt=system_prompt,
+            max_turns=max_turns,
+            memory_max_messages=memory_max_messages,
+            memory_reset_to_messages=memory_reset_to_messages,
+            memory_summary_max_chars=memory_summary_max_chars,
+            tools_override=tools_override,
+            tools_append=tools_append,
+        )
     try:
         _LOGGER.debug(
             "openai_compaction build_executor: memory_summary_max_chars=%s (not used in this backend)",

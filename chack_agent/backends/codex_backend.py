@@ -22,6 +22,7 @@ from chack_tools.telemetry import log_event
 
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
+from ..openrouter_routing import get_openrouter_route
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
@@ -77,6 +78,10 @@ class CodexExecutor:
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
+    _uses_openrouter_route: bool = False
+    _openrouter_base_url: str = ""
+    _openrouter_http_referer: str = ""
+    _openrouter_app_name: str = ""
     _output_schema_path: Optional[str] = None
     _thread_id: Optional[str] = None
     _codex_home: Optional[str] = None
@@ -331,8 +336,16 @@ class CodexExecutor:
 
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
-        env.setdefault("OPENAI_API_KEY", self._openai_api_key)
-        env.setdefault("CODEX_API_KEY", self._openai_api_key)
+        if self._uses_openrouter_route:
+            env["OPENROUTER_API_KEY"] = self._openai_api_key
+            env["OPENROUTER_BASE_URL"] = self._openrouter_base_url
+            if self._openrouter_http_referer:
+                env["OPENROUTER_HTTP_REFERER"] = self._openrouter_http_referer
+            if self._openrouter_app_name:
+                env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
+        else:
+            env.setdefault("OPENAI_API_KEY", self._openai_api_key)
+            env.setdefault("CODEX_API_KEY", self._openai_api_key)
         if self._codex_home:
             env["CODEX_HOME"] = self._codex_home
         env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
@@ -424,6 +437,10 @@ class CodexExecutor:
             "CHACK_EXEC_TIMEOUT",
             "CHACK_EXEC_MAX_OUTPUT",
             "CHACK_MCP_TOOL_MAX_TOKENS",
+            "OPENROUTER_API_KEY",
+            "OPENROUTER_BASE_URL",
+            "OPENROUTER_HTTP_REFERER",
+            "OPENROUTER_APP_NAME",
         ]
 
         def _toml_string(value: str) -> str:
@@ -435,9 +452,31 @@ class CodexExecutor:
             for v in ["-m", "chack_agent.backends.chack_tools_mcp_server"]
         ) + "]"
 
-        config_body = "\n".join(
+        config_lines = [f"model = {_toml_string(self._model_name)}"]
+        if self._uses_openrouter_route:
+            config_lines.extend(
+                [
+                    'model_provider = "openrouter"',
+                    "",
+                    "[model_providers.openrouter]",
+                    'name = "OpenRouter"',
+                    f'base_url = {_toml_string(self._openrouter_base_url)}',
+                    'env_key = "OPENROUTER_API_KEY"',
+                    'wire_api = "responses"',
+                    "requires_openai_auth = false",
+                    "supports_websockets = false",
+                ]
+            )
+            header_entries: list[str] = []
+            if self._openrouter_http_referer:
+                header_entries.append('"HTTP-Referer" = "OPENROUTER_HTTP_REFERER"')
+            if self._openrouter_app_name:
+                header_entries.append('"X-Title" = "OPENROUTER_APP_NAME"')
+            if header_entries:
+                config_lines.extend(["[model_providers.openrouter.env_http_headers]"])
+                config_lines.extend(header_entries)
+        config_lines.extend(
             [
-                f"model = {_toml_string(self._model_name)}",
                 "",
                 "[mcp_servers.chack_tools]",
                 f"command = {_toml_string(python_cmd)}",
@@ -448,6 +487,7 @@ class CodexExecutor:
                 "tool_timeout_sec = 120",
             ]
         )
+        config_body = "\n".join(config_lines)
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(config_body + "\n")
 
@@ -648,12 +688,22 @@ def build_executor(
         )
         allowed_tool_names = _extract_tool_names(list(base_toolset.tools) + list(tools_append))
 
+    route = get_openrouter_route(config)
+    uses_openrouter_route = route is not None
     openai_api_key = (
-        str(config.credentials.openai_api_key or "").strip()
-        or os.environ.get("OPENAI_API_KEY", "").strip()
+        route.api_key
+        if route is not None
+        else (
+            str(config.credentials.openai_api_key or "").strip()
+            or os.environ.get("OPENAI_API_KEY", "").strip()
+        )
     )
     if not openai_api_key:
-        raise ValueError("OPENAI_API_KEY is required when model.provider=codex")
+        raise ValueError(
+            "OPENROUTER_API_KEY is required for OpenRouter-routed Codex models"
+            if uses_openrouter_route
+            else "OPENAI_API_KEY is required when model.provider=codex"
+        )
 
     configured_codex_path = os.environ.get("CODEX_PATH", "").strip() or "codex"
     codex_path = shutil.which(configured_codex_path) or configured_codex_path
@@ -664,7 +714,7 @@ def build_executor(
         _memory_limit=memory_max_messages,
         _memory_reset_to=memory_reset_to_messages,
         _base_system_prompt=system_prompt,
-        _model_name=str(config.model.primary),
+        _model_name=str(route.model_name if route is not None else config.model.primary),
         _max_turns=int(max_turns or 0),
         _codex_path=codex_path,
         _openai_api_key=openai_api_key,
@@ -696,4 +746,8 @@ def build_executor(
             if getattr(config.agent, "output_schema_json", None)
             else ""
         ),
+        _uses_openrouter_route=uses_openrouter_route,
+        _openrouter_base_url=str(route.base_url if route is not None else ""),
+        _openrouter_http_referer=str((route.headers.get("HTTP-Referer", "") if route else "")),
+        _openrouter_app_name=str((route.headers.get("X-Title", "") if route else "")),
     )
