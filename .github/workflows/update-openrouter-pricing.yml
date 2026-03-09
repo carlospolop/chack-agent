@@ -1,0 +1,40 @@
+name: Update OpenRouter Pricing
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-pricing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Update pricing file
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python scripts/update_openrouter_pricing.py
+
+      - name: Commit updated pricing
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add chack_agent/config/pricing.yaml
+          if git diff --cached --quiet; then
+            echo "No pricing changes detected"
+            exit 0
+          fi
+          git commit -m "chore: update OpenRouter pricing"
+          git push origin HEAD:master

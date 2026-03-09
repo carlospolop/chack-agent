@@ -9,6 +9,12 @@ from .config import (
     ToolsConfig,
     load_config,
 )
+from .pricing import refresh_pricing_from_github_if_newer
+
+try:
+    refresh_pricing_from_github_if_newer()
+except Exception:
+    pass
 
 __all__ = [
     "AgentConfig",
