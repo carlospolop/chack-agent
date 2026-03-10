@@ -10,6 +10,7 @@ from .openai_compaction_backend import build_executor as build_openai_compaction
 from .openrouter_openai_backend import build_executor as build_openrouter_executor
 from .gemini_cli_backend import build_executor as build_gemini_executor
 from .claude_code_backend import build_executor as build_claude_executor
+from ..openrouter_routing import get_openrouter_route
 
 
 def _call_executor_with_supported_kwargs(builder: Any, config: ChackConfig, **kwargs: Any):
@@ -33,6 +34,10 @@ def _call_executor_with_supported_kwargs(builder: Any, config: ChackConfig, **kw
 def build_executor(config: ChackConfig, **kwargs: Any):
     backend_type = resolve_backend_type(config)
     if backend_type == "codex":
+        if get_openrouter_route(config) is not None:
+            return _call_executor_with_supported_kwargs(
+                build_openai_compaction_executor, config, **kwargs
+            )
         return _call_executor_with_supported_kwargs(build_codex_executor, config, **kwargs)
     if backend_type == "langgraph":
         return _call_executor_with_supported_kwargs(build_langgraph_executor, config, **kwargs)
