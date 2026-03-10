@@ -68,7 +68,12 @@ def _build_yaml(models: list[dict[str, Any]]) -> str:
             pricing = {}
 
         input_price = _decimal_million(pricing.get("prompt"))
-        cache_read_price = _decimal_million(pricing.get("input_cache_read"))
+        raw_cache_read = pricing.get("input_cache_read")
+        cache_read_price = (
+            _decimal_million(raw_cache_read)
+            if raw_cache_read is not None
+            else input_price
+        )
         cache_write_price = _decimal_million(pricing.get("input_cache_write"))
         output_price = _decimal_million(pricing.get("completion"))
 

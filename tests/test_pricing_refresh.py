@@ -6,6 +6,7 @@ from unittest.mock import patch
 os.environ.setdefault("CHACK_PRICING_AUTO_REFRESH", "0")
 
 from chack_agent import pricing
+from scripts.update_openrouter_pricing import _build_yaml
 
 
 class _FakeResponse:
@@ -24,6 +25,23 @@ class _FakeResponse:
 
 
 class PricingRefreshTests(unittest.TestCase):
+    def test_build_yaml_defaults_cache_read_to_input_price(self) -> None:
+        body = _build_yaml(
+            [
+                {
+                    "id": "provider/model",
+                    "pricing": {
+                        "prompt": "0.000002",
+                        "completion": "0.000004",
+                    },
+                }
+            ]
+        )
+
+        self.assertIn("input: 2", body)
+        self.assertIn("cache_read: 2", body)
+        self.assertIn("output: 4", body)
+
     def test_refresh_downloads_remote_yaml_into_cache_and_prefers_it(self) -> None:
         remote_yaml = b"models:\n  provider/model:\n    input: 1\n    cache_read: 0.1\n    output: 2\n"
         with tempfile.TemporaryDirectory() as tmpdir:
