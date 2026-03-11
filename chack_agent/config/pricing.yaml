@@ -204,6 +204,10 @@ models:
     input: 0.075
     cache_read: 0.075
     output: 0.3
+  bytedance-seed/seed-2.0-lite:
+    input: 0.25
+    cache_read: 0.25
+    output: 2
   bytedance-seed/seed-2.0-mini:
     input: 0.1
     cache_read: 0.1
@@ -242,7 +246,7 @@ models:
     output: 0.89
   deepseek/deepseek-chat-v3-0324:
     input: 0.2
-    cache_read: 0.13
+    cache_read: 0.135
     output: 0.77
   deepseek/deepseek-chat-v3.1:
     input: 0.15
@@ -267,10 +271,6 @@ models:
   deepseek/deepseek-v3.1-terminus:
     input: 0.21
     cache_read: 0.1300000002
-    output: 0.79
-  deepseek/deepseek-v3.1-terminus:exacto:
-    input: 0.21
-    cache_read: 0.168
     output: 0.79
   deepseek/deepseek-v3.2:
     input: 0.25
@@ -530,10 +530,6 @@ models:
     input: 0.08
     cache_read: 0.08
     output: 0.3
-  meta-llama/llama-guard-2-8b:
-    input: 0.2
-    cache_read: 0.2
-    output: 0.2
   meta-llama/llama-guard-3-8b:
     input: 0.02
     cache_read: 0.02
@@ -571,9 +567,9 @@ models:
     cache_read: 0.0290000007
     output: 0.95
   minimax/minimax-m2.5:
-    input: 0.295
-    cache_read: 0.03
-    output: 1.2
+    input: 0.27
+    cache_read: 0.0299999997
+    output: 0.95
   mistralai/codestral-2508:
     input: 0.3
     cache_read: 0.3
@@ -682,10 +678,6 @@ models:
     input: 0.4
     cache_read: 0.15
     output: 2
-  moonshotai/kimi-k2-0905:exacto:
-    input: 0.6
-    cache_read: 0.6
-    output: 2.5
   moonshotai/kimi-k2-thinking:
     input: 0.47
     cache_read: 0.141
@@ -702,14 +694,6 @@ models:
     input: 0.9
     cache_read: 0.9
     output: 1.9
-  neversleep/llama-3.1-lumimaid-8b:
-    input: 0.09
-    cache_read: 0.09
-    output: 0.6
-  neversleep/noromaid-20b:
-    input: 1
-    cache_read: 1
-    output: 1.75
   nex-agi/deepseek-v3.1-nex-n1:
     input: 0.27
     cache_read: 0.27
@@ -954,10 +938,6 @@ models:
     input: 0.039
     cache_read: 0.039
     output: 0.19
-  openai/gpt-oss-120b:exacto:
-    input: 0.039
-    cache_read: 0.039
-    output: 0.19
   openai/gpt-oss-120b:free:
     input: 0
     cache_read: 0
@@ -1166,10 +1146,6 @@ models:
     input: 0.65
     cache_read: 0.13
     output: 3.25
-  qwen/qwen3-coder:exacto:
-    input: 0.22
-    cache_read: 0.022
-    output: 1.8
   qwen/qwen3-coder:free:
     input: 0
     cache_read: 0
@@ -1238,6 +1214,10 @@ models:
     input: 0.39
     cache_read: 0.39
     output: 2.34
+  qwen/qwen3.5-9b:
+    input: 0.1
+    cache_read: 0.1
+    output: 0.15
   qwen/qwen3.5-flash-02-23:
     input: 0.1
     cache_read: 0.1
@@ -1250,10 +1230,6 @@ models:
     input: 0.15
     cache_read: 0.15
     output: 0.4
-  raifle/sorcererlm-8x22b:
-    input: 4.5
-    cache_read: 4.5
-    output: 4.5
   relace/relace-apply-3:
     input: 0.85
     cache_read: 0.85
@@ -1275,9 +1251,9 @@ models:
     cache_read: 3
     output: 3
   sao10k/l3.1-euryale-70b:
-    input: 0.65
-    cache_read: 0.65
-    output: 0.75
+    input: 0.85
+    cache_read: 0.85
+    output: 0.85
   sao10k/l3.3-euryale-70b:
     input: 0.65
     cache_read: 0.65
@@ -1390,10 +1366,6 @@ models:
     input: 0.39
     cache_read: 0.39
     output: 1.9
-  z-ai/glm-4.6:exacto:
-    input: 0.44
-    cache_read: 0.11
-    output: 1.76
   z-ai/glm-4.6v:
     input: 0.3
     cache_read: 0.3
@@ -1407,6 +1379,6 @@ models:
     cache_read: 0.0100000002
     output: 0.4
   z-ai/glm-5:
-    input: 0.8
-    cache_read: 0.16
-    output: 2.56
+    input: 0.72
+    cache_read: 0.72
+    output: 2.3
