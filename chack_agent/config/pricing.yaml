@@ -273,9 +273,9 @@ models:
     cache_read: 0.1300000002
     output: 0.79
   deepseek/deepseek-v3.2:
-    input: 0.25
-    cache_read: 0.25
-    output: 0.4
+    input: 0.26
+    cache_read: 0.13
+    output: 0.38
   deepseek/deepseek-v3.2-exp:
     input: 0.27
     cache_read: 0.27
@@ -738,6 +738,10 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  nvidia/nemotron-3-super-120b-a12b:free:
+    input: 0
+    cache_read: 0
+    output: 0
   nvidia/nemotron-nano-12b-v2-vl:
     input: 0.2
     cache_read: 0.2
@@ -1006,6 +1010,14 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  openrouter/healer-alpha:
+    input: 0
+    cache_read: 0
+    output: 0
+  openrouter/hunter-alpha:
+    input: 0
+    cache_read: 0
+    output: 0
   perplexity/sonar:
     input: 1
     cache_read: 1
@@ -1167,25 +1179,25 @@ models:
     cache_read: 0
     output: 0
   qwen/qwen3-next-80b-a3b-thinking:
-    input: 0.15
-    cache_read: 0.15
-    output: 1.2
+    input: 0.0975
+    cache_read: 0.0975
+    output: 0.78
   qwen/qwen3-vl-235b-a22b-instruct:
     input: 0.2
     cache_read: 0.11
     output: 0.88
   qwen/qwen3-vl-235b-a22b-thinking:
-    input: 0
-    cache_read: 0
-    output: 0
+    input: 0.26
+    cache_read: 0.26
+    output: 2.6
   qwen/qwen3-vl-30b-a3b-instruct:
     input: 0.13
     cache_read: 0.13
     output: 0.52
   qwen/qwen3-vl-30b-a3b-thinking:
-    input: 0
-    cache_read: 0
-    output: 0
+    input: 0.13
+    cache_read: 0.13
+    output: 1.56
   qwen/qwen3-vl-32b-instruct:
     input: 0.104
     cache_read: 0.104
