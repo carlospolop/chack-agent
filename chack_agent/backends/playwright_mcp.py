@@ -58,11 +58,23 @@ def playwright_mcp_browser_executable_path() -> str | None:
     return None
 
 
+@lru_cache(maxsize=1)
+def playwright_mcp_needs_no_sandbox() -> bool:
+    explicit = str(os.environ.get("CHACK_PLAYWRIGHT_MCP_NO_SANDBOX", "") or "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    return Path("/.dockerenv").exists()
+
+
 def playwright_mcp_server_config() -> dict[str, Any]:
     args: list[str] = ["-y", _PLAYWRIGHT_MCP_PACKAGE]
     browser_executable = playwright_mcp_browser_executable_path()
     if browser_executable:
         args.extend(["--executable-path", browser_executable])
+    if playwright_mcp_needs_no_sandbox():
+        args.append("--no-sandbox")
     return {
         "command": "npx",
         "args": args,

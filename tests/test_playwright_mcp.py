@@ -49,6 +49,10 @@ def test_playwright_mcp_server_config_shape(monkeypatch):
         "chack_agent.backends.playwright_mcp.playwright_mcp_browser_executable_path",
         lambda: None,
     )
+    monkeypatch.setattr(
+        "chack_agent.backends.playwright_mcp.playwright_mcp_needs_no_sandbox",
+        lambda: False,
+    )
     assert playwright_mcp_server_config() == {
         "command": "npx",
         "args": ["-y", "@playwright/mcp@latest"],
@@ -78,6 +82,10 @@ def test_playwright_mcp_server_config_uses_browser_executable(monkeypatch):
         "chack_agent.backends.playwright_mcp.playwright_mcp_browser_executable_path",
         lambda: "/tmp/playwright-chromium",
     )
+    monkeypatch.setattr(
+        "chack_agent.backends.playwright_mcp.playwright_mcp_needs_no_sandbox",
+        lambda: False,
+    )
     assert playwright_mcp_server_config() == {
         "command": "npx",
         "args": [
@@ -87,6 +95,18 @@ def test_playwright_mcp_server_config_uses_browser_executable(monkeypatch):
             "/tmp/playwright-chromium",
         ],
     }
+
+
+def test_playwright_mcp_server_config_adds_no_sandbox(monkeypatch):
+    monkeypatch.setattr(
+        "chack_agent.backends.playwright_mcp.playwright_mcp_browser_executable_path",
+        lambda: "/tmp/playwright-chromium",
+    )
+    monkeypatch.setattr(
+        "chack_agent.backends.playwright_mcp.playwright_mcp_needs_no_sandbox",
+        lambda: True,
+    )
+    assert playwright_mcp_server_config()["args"][-1] == "--no-sandbox"
 
 
 def test_playwright_mcp_result_to_text_joins_text_blocks():
