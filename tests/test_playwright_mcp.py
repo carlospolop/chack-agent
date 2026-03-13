@@ -44,7 +44,11 @@ def _build_claude_executor(tmp_path: Path, tools_config_json: str) -> ClaudeCode
     )
 
 
-def test_playwright_mcp_server_config_shape():
+def test_playwright_mcp_server_config_shape(monkeypatch):
+    monkeypatch.setattr(
+        "chack_agent.backends.playwright_mcp.playwright_mcp_browser_executable_path",
+        lambda: None,
+    )
     assert playwright_mcp_server_config() == {
         "command": "npx",
         "args": ["-y", "@playwright/mcp@latest"],
@@ -67,6 +71,22 @@ def _build_config(*, provider: str, playwright_enabled: bool) -> ChackConfig:
 def test_playwright_mcp_server_instance_name():
     server = playwright_mcp_server_instance()
     assert server.name == "playwright"
+
+
+def test_playwright_mcp_server_config_uses_browser_executable(monkeypatch):
+    monkeypatch.setattr(
+        "chack_agent.backends.playwright_mcp.playwright_mcp_browser_executable_path",
+        lambda: "/tmp/playwright-chromium",
+    )
+    assert playwright_mcp_server_config() == {
+        "command": "npx",
+        "args": [
+            "-y",
+            "@playwright/mcp@latest",
+            "--executable-path",
+            "/tmp/playwright-chromium",
+        ],
+    }
 
 
 def test_playwright_mcp_result_to_text_joins_text_blocks():

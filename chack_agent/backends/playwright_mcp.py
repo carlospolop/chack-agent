@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import threading
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from agents.mcp import MCPServerStdio
@@ -15,13 +17,55 @@ _PLAYWRIGHT_MCP_PACKAGE = "@playwright/mcp@latest"
 
 @lru_cache(maxsize=1)
 def playwright_mcp_is_available() -> bool:
-    return bool(shutil.which("npx"))
+    return bool(shutil.which("npx")) and bool(playwright_mcp_browser_executable_path())
+
+
+@lru_cache(maxsize=1)
+def playwright_mcp_browser_executable_path() -> str | None:
+    explicit = str(os.environ.get("CHACK_PLAYWRIGHT_MCP_EXECUTABLE_PATH", "") or "").strip()
+    if explicit and Path(explicit).is_file():
+        return explicit
+
+    commands = [
+        shutil.which("google-chrome"),
+        shutil.which("google-chrome-stable"),
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+    ]
+    for command in commands:
+        if command:
+            return command
+
+    home = Path.home()
+    candidates = [
+        home / ".cache/ms-playwright",
+        home / "Library/Caches/ms-playwright",
+    ]
+    patterns = [
+        "chromium-*/chrome-linux/chrome",
+        "chromium-*/chrome-linux/headless_shell",
+        "chromium_headless_shell-*/chrome-linux/headless_shell",
+        "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        "chromium_headless_shell-*/chrome-mac/headless_shell",
+    ]
+    for root in candidates:
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            matches = sorted(root.glob(pattern))
+            if matches:
+                return str(matches[0])
+    return None
 
 
 def playwright_mcp_server_config() -> dict[str, Any]:
+    args: list[str] = ["-y", _PLAYWRIGHT_MCP_PACKAGE]
+    browser_executable = playwright_mcp_browser_executable_path()
+    if browser_executable:
+        args.extend(["--executable-path", browser_executable])
     return {
         "command": "npx",
-        "args": ["-y", _PLAYWRIGHT_MCP_PACKAGE],
+        "args": args,
     }
 
 
