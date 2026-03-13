@@ -4,6 +4,11 @@ from typing import Any, Optional
 
 from .brave_search import BraveSearchTool, get_brave_search_tool
 from .config import ToolsConfig
+from .playwright_fetch import (
+    PlaywrightFetchTool,
+    get_playwright_fetch_tool,
+    is_playwright_available,
+)
 from .serpapi_web_search import (
     SerpApiWebSearchTool,
     get_google_web_search_tool,
@@ -34,6 +39,7 @@ _WEBSEARCHER_AGENT_SYSTEM_PROMPT = """### RULES
 - Use multiple search engines (Brave + Google + Bing) and compare findings.
 - Use AI-mode endpoints when useful to bootstrap a broad overview, but always ground conclusions with linked sources.
 - Prioritize primary/original sources and include relevant URLs in your final answer.
+- When you need the contents of a concrete page, use Playwright to open and read the rendered page.
 - Never mention internal tool names in the final answer but mention where you found the information.
 - Do a comprehensive and extensive research of the topic given by the user
 - Do not ask the user questions, you are an autonomous agent, provide the best possible result with available data.
@@ -78,6 +84,8 @@ class WebSearcherAgentTool:
         
         tools = [get_task_steps_manager_tool(task_helper)]
         tools.append(get_brave_search_tool(self.brave))
+        if self.config.playwright_enabled and is_playwright_available():
+            tools.append(get_playwright_fetch_tool(PlaywrightFetchTool(self.config)))
 
         has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
         if has_serpapi:

@@ -13,6 +13,11 @@ class ToolsConfig:
     brave_api_key: str = ""
     brave_max_results: int = 10
 
+    playwright_enabled: bool = False
+    playwright_timeout_seconds: int = 30
+    playwright_max_output_chars: int = 12000
+    playwright_headless: bool = True
+
     social_network_enabled: bool = False
     forumscout_api_key: str = ""
     forumscout_max_results: int = 10

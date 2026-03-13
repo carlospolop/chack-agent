@@ -62,6 +62,7 @@ result = agent.run(
         exec_enabled=True,
         exec_cwd="/path/to/repo",
         brave_enabled=True,
+        playwright_enabled=True,
         websearcher_enabled=True,
         scientific_enabled=True,
         social_network_enabled=True,
@@ -173,6 +174,7 @@ The agent can delegate to specialized sub‑agents. Sub‑agents run with restri
   * `task_steps_manager`: Maintain a dynamic task list.
 * **Web Tools**:
   * `brave_search`: Brave Search API.
+  * `playwright_fetch`: Open a real Chromium browser to read rendered page content and save text/HTML locally.
   * `serpapi`: Google/Bing web and AI‑mode endpoints.
 
 ### 3. Memory Architecture
@@ -203,6 +205,15 @@ Most tools require API keys. Provide them via env vars (recommended) or your own
 | `FORUMSCOUT_API_KEY` | ForumScout API Key | Social network tools |
 | `FORUMSCOUT_BASE_URL` | ForumScout API base URL | Optional override |
 | `CHACK_AWS_PROFILES` | Base64 of an AWS credentials file | AWS profile injection |
+
+`playwright_fetch` also requires the Python `playwright` package plus installed browser binaries. Once installed, set `tools.playwright_enabled: true` to expose it. If Playwright is missing or Chromium cannot launch, the tool is not registered.
+
+```bash
+pip install playwright
+python -m playwright install chromium
+```
+
+For MCP-capable CLI backends (`codex`, `claude`, `gemini`), enabling `tools.playwright_enabled` now also injects Microsoft’s official Playwright MCP server (`npx @playwright/mcp@latest`) when `npx` is available on the host. This lets those backends control the browser through [`microsoft/playwright-mcp`](https://github.com/microsoft/playwright-mcp) in addition to the local `playwright_fetch` tool.
 
 ### Detailed Config Structure
 

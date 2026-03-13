@@ -23,6 +23,7 @@ from chack_tools.telemetry import log_event
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
+from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
@@ -473,9 +474,20 @@ class GeminiCliExecutor:
                 }
             },
         }
+        if self._playwright_mcp_enabled():
+            settings_payload["mcpServers"]["playwright"] = playwright_mcp_server_config()
         with open(settings_path, "w", encoding="utf-8") as handle:
             json.dump(settings_payload, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+
+    def _playwright_mcp_enabled(self) -> bool:
+        try:
+            cfg = json.loads(self._tools_config_json or "{}")
+        except Exception:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        return bool(cfg.get("playwright_enabled")) and playwright_mcp_is_available()
 
     def _gemini_mcp_env_map(self) -> dict[str, str]:
         env_keys = [

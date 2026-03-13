@@ -4,6 +4,11 @@ from .config import ToolsConfig
 from .brave_search import BraveSearchTool, get_brave_search_tool
 from .exec_tool import ExecTool, get_exec_tool
 from .pdf_text import PdfTextTool, get_pdf_text_tool
+from .playwright_fetch import (
+    PlaywrightFetchTool,
+    get_playwright_fetch_tool,
+    is_playwright_available,
+)
 from .scientific_research_agent import ScientificResearchAgentTool, get_scientific_research_tool
 from .serpapi_web_search import (
     SerpApiWebSearchTool,
@@ -94,6 +99,10 @@ class AgentsToolset:
         if self.config.brave_enabled:
             brave_helper = BraveSearchTool(self.config)
             tools.append(get_brave_search_tool(brave_helper))
+
+        if self.config.playwright_enabled and is_playwright_available():
+            playwright_helper = PlaywrightFetchTool(self.config)
+            tools.append(get_playwright_fetch_tool(playwright_helper))
 
         has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
         if has_serpapi and self.config.serpapi_google_web_enabled:

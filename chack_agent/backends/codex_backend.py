@@ -23,6 +23,7 @@ from chack_tools.telemetry import log_event
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..openrouter_routing import get_openrouter_route
+from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
@@ -487,9 +488,33 @@ class CodexExecutor:
                 "tool_timeout_sec = 120",
             ]
         )
+        if self._playwright_mcp_enabled():
+            playwright_server = playwright_mcp_server_config()
+            playwright_args_toml = "[" + ", ".join(
+                _toml_string(v) for v in list(playwright_server.get("args") or [])
+            ) + "]"
+            config_lines.extend(
+                [
+                    "",
+                    "[mcp_servers.playwright]",
+                    f"command = {_toml_string(str(playwright_server['command']))}",
+                    f"args = {playwright_args_toml}",
+                    "startup_timeout_sec = 30",
+                    "tool_timeout_sec = 180",
+                ]
+            )
         config_body = "\n".join(config_lines)
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(config_body + "\n")
+
+    def _playwright_mcp_enabled(self) -> bool:
+        try:
+            cfg = json.loads(self._tools_config_json or "{}")
+        except Exception:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        return bool(cfg.get("playwright_enabled")) and playwright_mcp_is_available()
 
     def _write_output_schema_file(self, codex_home: str) -> None:
         self._output_schema_path = None

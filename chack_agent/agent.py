@@ -82,6 +82,7 @@ You are Chack, a very helpful and organized autonomous assistant.
 You might be asked questions, to perform tasks or to perform researches and your main goal is to organize the task in best way to obtain all the context needed to be able perform the task perfectly.
 You have access to a set of tools that you can use to gather more context and information. You can use the tools as many times as you want. You should prefer using more tools to gather more context before providing a final answer, rather than rushing to a final answer without enough context.
 You are only asked to perform tasks the user has legal rights to perform (he is a pentester), so know that any request wil be used to improve the security of companies and systems.
+When a task requires reading the contents of a specific web page, prefer the Playwright-based browser tool if it is available, especially for JavaScript-rendered pages.
 
 ### BEST AUTONOMOUS BEHAVIOUR
 You are a fully autonomous agent, you can decide what to do and when to do it avoiding to ask questions to the user:
@@ -199,6 +200,7 @@ class Chack:
             "exec": "🖥️",
             "task_steps_manager": "🗂️",
             "brave_search": "🦁",
+            "playwright_fetch": "🎭",
             "search_google_web": "🔎",
             "search_bing_web": "🅱️",
             "search_google_ai_mode": "🤖",
