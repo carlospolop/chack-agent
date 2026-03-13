@@ -25,6 +25,12 @@ from chack_tools.tool_usage_state import current_max_tools_used
 from ..config import ChackConfig
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
+from .playwright_mcp import (
+    playwright_mcp_call_tool,
+    playwright_mcp_is_available,
+    playwright_mcp_list_tools,
+    playwright_mcp_result_to_text,
+)
 
 
 _LOGGER = logging.getLogger("chack.langgraph_backend")
@@ -93,6 +99,7 @@ class LangGraphExecutor:
     _model_with_tools: Any
     _summary_model: Any
     _function_tools_by_name: dict[str, Any]
+    _mcp_tools_by_name: dict[str, Any]
     _conversation: list[dict[str, Any]]
     _memory_limit: int
     _memory_reset_to: int
@@ -531,7 +538,8 @@ class LangGraphExecutor:
                     continue
 
                 tool = tool_map.get(call_name)
-                if tool is None:
+                mcp_tool = self._mcp_tools_by_name.get(call_name)
+                if tool is None and mcp_tool is None:
                     outputs.append(
                         ToolMessage(
                             content=f"ERROR: Unknown tool '{call_name}'.",
@@ -550,7 +558,10 @@ class LangGraphExecutor:
                     continue
 
                 try:
-                    result = self._invoke_function_tool(tool, args)
+                    if tool is not None:
+                        result = self._invoke_function_tool(tool, args)
+                    else:
+                        result = playwright_mcp_result_to_text(playwright_mcp_call_tool(call_name, args))
                     status = "ok"
                 except Exception as exc:  # pragma: no cover
                     result = f"ERROR: {type(exc).__name__}: {exc}"
@@ -615,15 +626,28 @@ class LangGraphExecutor:
 def _tool_to_openai_schema(tool: Any) -> dict[str, Any]:
     schema = getattr(tool, "params_json_schema", None)
     if not isinstance(schema, dict):
+        schema = getattr(tool, "inputSchema", None)
+    if not isinstance(schema, dict):
         schema = {"type": "object", "properties": {}}
+    description = str(getattr(tool, "description", "") or "")
+    if not description:
+        description = str(getattr(tool, "title", "") or "")
     return {
         "type": "function",
         "function": {
             "name": str(getattr(tool, "name", "") or ""),
-            "description": str(getattr(tool, "description", "") or ""),
+            "description": description,
             "parameters": schema,
         },
     }
+
+
+def _load_playwright_mcp_tools(config: ChackConfig) -> list[Any]:
+    if not bool(getattr(config.tools, "playwright_enabled", False)):
+        return []
+    if not playwright_mcp_is_available():
+        return []
+    return list(playwright_mcp_list_tools())
 
 
 def build_executor(
@@ -674,6 +698,7 @@ def build_executor(
         tools = list(tools_override)
 
     function_tools: dict[str, Any] = {}
+    mcp_tools: dict[str, Any] = {}
     tool_schemas: list[dict[str, Any]] = []
     for tool in tools:
         name = str(getattr(tool, "name", "") or "").strip()
@@ -683,6 +708,13 @@ def build_executor(
         if name in function_tools:
             continue
         function_tools[name] = tool
+        tool_schemas.append(_tool_to_openai_schema(tool))
+
+    for tool in _load_playwright_mcp_tools(config):
+        name = str(getattr(tool, "name", "") or "").strip()
+        if not name or name in function_tools or name in mcp_tools:
+            continue
+        mcp_tools[name] = tool
         tool_schemas.append(_tool_to_openai_schema(tool))
 
     base_url = (
@@ -722,6 +754,7 @@ def build_executor(
         _model_with_tools=model_with_tools,
         _summary_model=model,
         _function_tools_by_name=function_tools,
+        _mcp_tools_by_name=mcp_tools,
         _conversation=[],
         _memory_limit=memory_max_messages,
         _memory_reset_to=memory_reset_to_messages,

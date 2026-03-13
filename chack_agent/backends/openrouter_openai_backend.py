@@ -39,6 +39,7 @@ from chack_tools.tool_usage_state import (
     current_usage_session_id,
     non_task_tool_count,
 )
+from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_instance
 
 
 _FIRST_TOOL_LOCK = threading.Lock()
@@ -47,6 +48,12 @@ _FIRST_TOOL_STATE_MAX = 5000
 _LOGGER = logging.getLogger("chack.openrouter_openai_backend")
 
 _OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _build_mcp_servers(config: ChackConfig) -> list[Any]:
+    if bool(getattr(config.tools, "playwright_enabled", False)) and playwright_mcp_is_available():
+        return [playwright_mcp_server_instance()]
+    return []
 
 
 class _OpenRouterResponsesModel(OpenAIResponsesModel):
@@ -1118,6 +1125,7 @@ def build_executor(
         name="Chack",
         instructions=system_prompt,
         tools=tools,
+        mcp_servers=_build_mcp_servers(config),
         model=model,
         model_settings=ModelSettings(),
         output_type=output_schema,

@@ -2,7 +2,13 @@ import json
 from pathlib import Path
 
 from chack_agent.backends.playwright_mcp import playwright_mcp_server_config
+from chack_agent.backends.playwright_mcp import playwright_mcp_result_to_text
+from chack_agent.backends.playwright_mcp import playwright_mcp_server_instance
 from chack_agent.backends.claude_code_backend import ClaudeCodeExecutor
+from chack_agent.backends.langgraph_backend import _load_playwright_mcp_tools
+from chack_agent.backends.openai_compaction_backend import _build_mcp_servers as build_openai_mcp_servers
+from chack_agent.backends.openrouter_openai_backend import _build_mcp_servers as build_openrouter_mcp_servers
+from chack_agent.config import AgentConfig, ChackConfig, CredentialsConfig, LoggingConfig, ModelConfig, SessionConfig, ToolsConfig
 
 
 def _build_claude_executor(tmp_path: Path, tools_config_json: str) -> ClaudeCodeExecutor:
@@ -45,6 +51,36 @@ def test_playwright_mcp_server_config_shape():
     }
 
 
+def _build_config(*, provider: str, playwright_enabled: bool) -> ChackConfig:
+    return ChackConfig(
+        model=ModelConfig(primary="gpt-5", provider=provider),
+        agent=AgentConfig(),
+        session=SessionConfig(),
+        tools=ToolsConfig(playwright_enabled=playwright_enabled),
+        credentials=CredentialsConfig(),
+        logging=LoggingConfig(),
+        system_prompt="system",
+        env={},
+    )
+
+
+def test_playwright_mcp_server_instance_name():
+    server = playwright_mcp_server_instance()
+    assert server.name == "playwright"
+
+
+def test_playwright_mcp_result_to_text_joins_text_blocks():
+    class _TextBlock:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class _Result:
+        content = [_TextBlock("first"), _TextBlock("second")]
+        structuredContent = None
+
+    assert playwright_mcp_result_to_text(_Result()) == "first\n\nsecond"
+
+
 def test_claude_settings_include_playwright_mcp_when_enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "chack_agent.backends.claude_code_backend.playwright_mcp_is_available",
@@ -75,3 +111,43 @@ def test_claude_settings_skip_playwright_mcp_when_disabled(monkeypatch, tmp_path
     payload = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
 
     assert "playwright" not in payload["mcpServers"]
+
+
+def test_openai_backend_includes_playwright_mcp_when_enabled(monkeypatch):
+    monkeypatch.setattr(
+        "chack_agent.backends.openai_compaction_backend.playwright_mcp_is_available",
+        lambda: True,
+    )
+    servers = build_openai_mcp_servers(_build_config(provider="openai", playwright_enabled=True))
+    assert len(servers) == 1
+    assert getattr(servers[0], "name", "") == "playwright"
+
+
+def test_openrouter_backend_includes_playwright_mcp_when_enabled(monkeypatch):
+    monkeypatch.setattr(
+        "chack_agent.backends.openrouter_openai_backend.playwright_mcp_is_available",
+        lambda: True,
+    )
+    servers = build_openrouter_mcp_servers(_build_config(provider="openrouter", playwright_enabled=True))
+    assert len(servers) == 1
+    assert getattr(servers[0], "name", "") == "playwright"
+
+
+def test_langgraph_loads_playwright_mcp_tools_when_enabled(monkeypatch):
+    class _Tool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.description = f"{name} description"
+            self.inputSchema = {"type": "object", "properties": {}}
+
+    monkeypatch.setattr(
+        "chack_agent.backends.langgraph_backend.playwright_mcp_is_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "chack_agent.backends.langgraph_backend.playwright_mcp_list_tools",
+        lambda: [_Tool("browser_navigate")],
+    )
+
+    tools = _load_playwright_mcp_tools(_build_config(provider="langgraph", playwright_enabled=True))
+    assert [getattr(tool, "name", "") for tool in tools] == ["browser_navigate"]
