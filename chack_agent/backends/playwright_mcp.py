@@ -21,7 +21,7 @@ def playwright_mcp_is_available() -> bool:
 def playwright_mcp_server_config() -> dict[str, Any]:
     return {
         "command": "npx",
-        "args": [_PLAYWRIGHT_MCP_PACKAGE],
+        "args": ["-y", _PLAYWRIGHT_MCP_PACKAGE],
     }
 
 

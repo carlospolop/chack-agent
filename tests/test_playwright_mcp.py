@@ -47,7 +47,7 @@ def _build_claude_executor(tmp_path: Path, tools_config_json: str) -> ClaudeCode
 def test_playwright_mcp_server_config_shape():
     assert playwright_mcp_server_config() == {
         "command": "npx",
-        "args": ["@playwright/mcp@latest"],
+        "args": ["-y", "@playwright/mcp@latest"],
     }
 
 
