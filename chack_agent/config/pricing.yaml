@@ -1227,8 +1227,8 @@ models:
     cache_read: 0.39
     output: 2.34
   qwen/qwen3.5-9b:
-    input: 0.1
-    cache_read: 0.1
+    input: 0.05
+    cache_read: 0.05
     output: 0.15
   qwen/qwen3.5-flash-02-23:
     input: 0.1
