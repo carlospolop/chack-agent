@@ -151,6 +151,9 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
             or ("invalid_argument" in err and "function call" in err and "function response" in err)
             or "not found in agent chack" in err
             or ("tool " in err and " not found in agent " in err)
+            or ("previous response with id" in err and "not found" in err)
+            or ("response with id" in err and "not found" in err)
+            or ("conversation with id" in err and "not found" in err)
         )
 
     def _normalize_output_tools(self, output_items: list[Any], tool_names: set[str]) -> None:

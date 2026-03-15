@@ -49,6 +49,19 @@ _OPENAI_RUNNER_MAX_RETRIES = 2
 _OPENAI_RUNNER_RETRY_DELAY_SECONDS = 2
 
 
+def _is_sequence_recoverable_error(exc: Exception) -> bool:
+    err = str(exc).lower()
+    return (
+        "function response turn comes immediately after a function call turn" in err
+        or ("invalid_argument" in err and "function call" in err and "function response" in err)
+        or "not found in agent chack" in err
+        or ("tool " in err and " not found in agent " in err)
+        or ("previous response with id" in err and "not found" in err)
+        or ("response with id" in err and "not found" in err)
+        or ("conversation with id" in err and "not found" in err)
+    )
+
+
 def _build_mcp_servers(config: ChackConfig) -> list[Any]:
     if bool(getattr(config.tools, "playwright_enabled", False)) and playwright_mcp_is_available():
         return [playwright_mcp_server_instance()]
@@ -408,15 +421,9 @@ class AgentsExecutor:
                 time.sleep(_OPENAI_RUNNER_RETRY_DELAY_SECONDS * attempt)
                 continue
             except (BadRequestError, ModelBehaviorError) as exc:
-                err = str(exc).lower()
                 recoverable = (
                     self._previous_response_id is not None
-                    and (
-                        "function response turn comes immediately after a function call turn" in err
-                        or ("invalid_argument" in err and "function call" in err and "function response" in err)
-                        or "not found in agent chack" in err
-                        or ("tool " in err and " not found in agent " in err)
-                    )
+                    and _is_sequence_recoverable_error(exc)
                 )
                 if not recoverable:
                     raise
