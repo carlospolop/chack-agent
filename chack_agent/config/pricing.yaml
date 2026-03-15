@@ -567,9 +567,9 @@ models:
     cache_read: 0.0290000007
     output: 0.95
   minimax/minimax-m2.5:
-    input: 0.27
-    cache_read: 0.0299999997
-    output: 0.95
+    input: 0.25
+    cache_read: 0.25
+    output: 1.2
   mistralai/codestral-2508:
     input: 0.3
     cache_read: 0.3
