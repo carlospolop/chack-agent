@@ -570,6 +570,10 @@ models:
     input: 0.25
     cache_read: 0.25
     output: 1.2
+  minimax/minimax-m2.5:free:
+    input: 0
+    cache_read: 0
+    output: 0
   mistralai/codestral-2508:
     input: 0.3
     cache_read: 0.3
@@ -1402,3 +1406,7 @@ models:
     input: 0.72
     cache_read: 0.72
     output: 2.3
+  z-ai/glm-5-turbo:
+    input: 0.96
+    cache_read: 0.192
+    output: 3.2
