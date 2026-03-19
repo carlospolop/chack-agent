@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-OPENAI_BEST_QUALITY = "gpt-5.2-codex"
+OPENAI_BEST_QUALITY = "gpt-5.4"
 OPENAI_CHEAP_BUT_QUALITY = "gpt-5-mini"
 OPENAI_BEST_CHEAPEST = "gpt-5-nano"
 ANTHROPIC_BEST_QUALITY = "claude-opus-4-6"
@@ -180,17 +180,15 @@ def _refresh_remote_alias_caches() -> None:
 
 def _get_model_aliases() -> Dict[str, str]:
     _refresh_remote_alias_caches()
-    merged = dict(MODEL_ALIASES)
-    if _REMOTE_MODEL_CACHE:
-        merged.update(_REMOTE_MODEL_CACHE)
+    merged = dict(_REMOTE_MODEL_CACHE or {})
+    merged.update(MODEL_ALIASES)
     return merged
 
 
 def _get_backend_aliases() -> Dict[str, str]:
     _refresh_remote_alias_caches()
-    merged = dict(BACKEND_ALIASES)
-    if _REMOTE_BACKEND_CACHE:
-        merged.update(_REMOTE_BACKEND_CACHE)
+    merged = dict(_REMOTE_BACKEND_CACHE or {})
+    merged.update(BACKEND_ALIASES)
     return merged
 
 

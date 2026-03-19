@@ -81,7 +81,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
     def test_resolve_model_alias_uses_api_key_priority_when_provider_is_unspecified(self) -> None:
         self.assertEqual(
             resolve_model_alias("BEST_QUALITY", openai_api_key="oa-test"),
-            "gpt-5.2-codex",
+            "gpt-5.4",
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", anthropic_api_key="anth-test"),
@@ -97,7 +97,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             resolve_model_alias("BEST_QUALITY", openai_api_key="oa-test", anthropic_api_key="anth-test", openrouter_api_key="or-test"),
-            "gpt-5.2-codex",
+            "gpt-5.4",
         )
 
     def test_resolve_model_alias_raises_when_generic_alias_has_no_api_key(self) -> None:

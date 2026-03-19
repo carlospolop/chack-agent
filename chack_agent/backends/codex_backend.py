@@ -23,6 +23,7 @@ from chack_tools.telemetry import log_event
 from ..codex_auth import (
     emit_codex_auth_invalid,
     emit_codex_auth_updated,
+    extract_codex_refresh_token,
     force_codex_auth_refresh,
     normalize_codex_auth_json,
     refresh_codex_auth,
@@ -43,6 +44,15 @@ _LOGGER = logging.getLogger("chack.codex_backend")
 
 def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _update_process_codex_refresh_token(codex_auth_json: str) -> None:
+    try:
+        refreshed_refresh_token = extract_codex_refresh_token(codex_auth_json)
+    except Exception:
+        return
+    if refreshed_refresh_token:
+        os.environ["CODEX_REFRESH_TOKEN"] = refreshed_refresh_token
 
 
 @dataclass
@@ -487,6 +497,7 @@ class CodexExecutor:
         except Exception:
             return
         if refreshed:
+            _update_process_codex_refresh_token(refreshed)
             emit_codex_auth_updated(refreshed)
 
     def _preflight_codex_auth_cache(self) -> str:
@@ -851,6 +862,7 @@ def build_executor(
     if not route and raw_codex_refresh_token:
         try:
             codex_auth_json = refresh_codex_auth(raw_codex_refresh_token)
+            _update_process_codex_refresh_token(codex_auth_json)
             emit_codex_auth_updated(codex_auth_json)
         except Exception as exc:
             emit_codex_auth_invalid(raw_codex_refresh_token)
