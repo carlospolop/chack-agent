@@ -202,6 +202,23 @@ class Chack:
                 continue
             if name not in names:
                 names.append(name)
+        if names:
+            return names
+        allowed_tools_json = str(getattr(executor, "_allowed_tools_json", "") or "").strip()
+        if not allowed_tools_json:
+            return names
+        try:
+            parsed = json.loads(allowed_tools_json)
+        except Exception:
+            return names
+        if not isinstance(parsed, list):
+            return names
+        for item in parsed:
+            name = str(item or "").strip()
+            if not name:
+                continue
+            if name not in names:
+                names.append(name)
         return names
 
     @staticmethod
