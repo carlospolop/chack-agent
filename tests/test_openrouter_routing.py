@@ -1,6 +1,8 @@
 import os
 import tempfile
 import unittest
+import base64
+import json
 from unittest.mock import patch
 
 from chack_agent.config import (
@@ -38,6 +40,25 @@ def _make_config(provider: str, primary: str) -> ChackConfig:
         system_prompt="test system prompt",
         env={},
     )
+
+
+def _fake_chatgpt_access_token(
+    *,
+    account_id: str = "workspace-123",
+    plan_type: str = "plus",
+) -> str:
+    def _b64(data: dict) -> str:
+        raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    header = {"alg": "none", "typ": "JWT"}
+    payload = {
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_plan_type": plan_type,
+        }
+    }
+    return f"{_b64(header)}.{_b64(payload)}.sig"
 
 
 class OpenRouterRoutingTests(unittest.TestCase):
@@ -96,27 +117,39 @@ class OpenRouterRoutingTests(unittest.TestCase):
     def test_codex_executor_uses_direct_codex_access_token(self) -> None:
         config = _make_config("codex", "gpt-5-mini")
         config.credentials.openrouter_api_key = ""
-        config.credentials.codex_access_token = "codex-access-token"
-        try:
-            executor = build_codex_executor(
-                config,
-                system_prompt="system",
-                max_turns=2,
-                memory_max_messages=10,
-                memory_reset_to_messages=5,
-            )
-            self.assertTrue(executor._use_codex_access_token)
-            env = executor._build_env()
-            self.assertNotIn("OPENAI_API_KEY", env)
-            self.assertEqual(env["CODEX_API_KEY"], "codex-access-token")
-        finally:
-            pass
+        config.credentials.codex_access_token = _fake_chatgpt_access_token()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            previous = os.environ.get("CHACK_CODEX_HOME_BASE")
+            os.environ["CHACK_CODEX_HOME_BASE"] = tmpdir
+            try:
+                executor = build_codex_executor(
+                    config,
+                    system_prompt="system",
+                    max_turns=2,
+                    memory_max_messages=10,
+                    memory_reset_to_messages=5,
+                )
+                self.assertTrue(executor._use_codex_access_token)
+                executor._ensure_codex_home_and_config()
+                env = executor._build_env()
+                self.assertNotIn("OPENAI_API_KEY", env)
+                self.assertNotIn("CODEX_API_KEY", env)
+                with open(os.path.join(executor._codex_home, "auth.json"), "r", encoding="utf-8") as handle:
+                    auth_payload = json.load(handle)
+                self.assertEqual(auth_payload["auth_mode"], "chatgptAuthTokens")
+                self.assertEqual(auth_payload["tokens"]["access_token"], config.credentials.codex_access_token)
+                self.assertEqual(auth_payload["tokens"]["account_id"], "workspace-123")
+            finally:
+                if previous is None:
+                    os.environ.pop("CHACK_CODEX_HOME_BASE", None)
+                else:
+                    os.environ["CHACK_CODEX_HOME_BASE"] = previous
 
     def test_codex_executor_prefers_access_token_over_openai_api_key_when_both_are_present(self) -> None:
         config = _make_config("codex", "gpt-5-mini")
         config.credentials.openrouter_api_key = ""
         config.credentials.openai_api_key = "sk-openai-direct"
-        config.credentials.codex_access_token = "codex-access-token"
+        config.credentials.codex_access_token = _fake_chatgpt_access_token()
 
         previous_openai = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "sk-openai-env"
@@ -129,9 +162,10 @@ class OpenRouterRoutingTests(unittest.TestCase):
                 memory_reset_to_messages=5,
             )
             self.assertTrue(executor._use_codex_access_token)
+            executor._ensure_codex_home_and_config()
             env = executor._build_env()
             self.assertNotIn("OPENAI_API_KEY", env)
-            self.assertEqual(env["CODEX_API_KEY"], "codex-access-token")
+            self.assertNotIn("CODEX_API_KEY", env)
         finally:
             if previous_openai is None:
                 os.environ.pop("OPENAI_API_KEY", None)
@@ -142,7 +176,7 @@ class OpenRouterRoutingTests(unittest.TestCase):
         config = _make_config("codex", "gpt-5-mini")
         config.credentials.openrouter_api_key = ""
         config.credentials.openai_api_key = "sk-openai-direct"
-        config.credentials.codex_access_token = "codex-access-token"
+        config.credentials.codex_access_token = _fake_chatgpt_access_token()
 
         executor = build_codex_executor(
             config,
@@ -153,6 +187,17 @@ class OpenRouterRoutingTests(unittest.TestCase):
         )
 
         self.assertTrue(executor._use_codex_access_token)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            previous = os.environ.get("CHACK_CODEX_HOME_BASE")
+            os.environ["CHACK_CODEX_HOME_BASE"] = tmpdir
+            try:
+                executor._ensure_codex_home_and_config()
+                self.assertTrue(os.path.exists(os.path.join(executor._codex_home, "auth.json")))
+            finally:
+                if previous is None:
+                    os.environ.pop("CHACK_CODEX_HOME_BASE", None)
+                else:
+                    os.environ["CHACK_CODEX_HOME_BASE"] = previous
         with patch.object(
             executor,
             "_run_codex_once",
@@ -168,6 +213,7 @@ class OpenRouterRoutingTests(unittest.TestCase):
         self.assertEqual(executor._openai_api_key, "sk-openai-direct")
         fallback_mock.assert_called_once_with("prompt", allow_api_key_fallback=False)
         self.assertEqual(result, ("fallback ok", [], None))
+        self.assertFalse(os.path.exists(os.path.join(executor._codex_home, "auth.json")))
 
     def test_claude_backend_delegates_to_openrouter_backend_for_routed_models(self) -> None:
         config = _make_config("claude", "openrouter/anthropic/claude-3.7-sonnet")

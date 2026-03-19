@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+import base64
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -324,6 +325,7 @@ class CodexExecutor:
         )
         self._use_codex_access_token = False
         self._openai_api_key = self._fallback_openai_api_key
+        self._remove_codex_auth_file()
         return self._run_codex_once(prompt, allow_api_key_fallback=False)
 
     @staticmethod
@@ -391,7 +393,7 @@ class CodexExecutor:
                 env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
         elif self._use_codex_access_token:
             env.pop("OPENAI_API_KEY", None)
-            env["CODEX_API_KEY"] = self._codex_access_token
+            env.pop("CODEX_API_KEY", None)
         else:
             env.setdefault("OPENAI_API_KEY", self._openai_api_key)
             env.setdefault("CODEX_API_KEY", self._openai_api_key)
@@ -436,6 +438,7 @@ class CodexExecutor:
         os.makedirs(base, exist_ok=True)
         self._codex_home = base
         self._write_codex_config(base)
+        self._write_codex_auth(base)
         self._write_output_schema_file(base)
 
     def _write_codex_config(self, codex_home: str) -> None:
@@ -554,6 +557,65 @@ class CodexExecutor:
         config_body = "\n".join(config_lines)
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(config_body + "\n")
+
+    def _write_codex_auth(self, codex_home: str) -> None:
+        if self._uses_openrouter_route or not self._use_codex_access_token:
+            self._remove_codex_auth_file()
+            return
+        auth_path = os.path.join(codex_home, "auth.json")
+        auth_payload = self._build_codex_chatgpt_auth_payload(self._codex_access_token)
+        with open(auth_path, "w", encoding="utf-8") as handle:
+            json.dump(auth_payload, handle, ensure_ascii=False)
+            handle.write("\n")
+
+    def _remove_codex_auth_file(self) -> None:
+        if not self._codex_home:
+            return
+        auth_path = os.path.join(self._codex_home, "auth.json")
+        try:
+            os.remove(auth_path)
+        except FileNotFoundError:
+            return
+
+    @staticmethod
+    def _build_codex_chatgpt_auth_payload(access_token: str) -> dict[str, Any]:
+        claims = CodexExecutor._decode_jwt_claims(access_token)
+        auth_claims = claims.get("https://api.openai.com/auth")
+        if not isinstance(auth_claims, dict):
+            auth_claims = {}
+        account_id = str(auth_claims.get("chatgpt_account_id", "") or "").strip()
+        if not account_id:
+            raise ValueError(
+                "CODEX_ACCESS_TOKEN is missing chatgpt_account_id in JWT claims and cannot be used for Codex ChatGPT auth."
+            )
+        return {
+            "auth_mode": "chatgptAuthTokens",
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "id_token": access_token,
+                "access_token": access_token,
+                "refresh_token": "",
+                "account_id": account_id,
+            },
+            "last_refresh": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+
+    @staticmethod
+    def _decode_jwt_claims(token: str) -> dict[str, Any]:
+        raw = str(token or "").strip()
+        parts = raw.split(".")
+        if len(parts) != 3 or not parts[1]:
+            raise ValueError("CODEX_ACCESS_TOKEN is not a valid JWT.")
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(payload.encode("ascii"))
+            parsed = json.loads(decoded.decode("utf-8"))
+        except Exception as exc:
+            raise ValueError("Failed to decode CODEX_ACCESS_TOKEN JWT claims.") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("CODEX_ACCESS_TOKEN JWT payload is not a JSON object.")
+        return parsed
 
     def _playwright_mcp_enabled(self) -> bool:
         try:
