@@ -128,6 +128,55 @@ class ChackConfig:
     user_prompt_variables: Dict[str, Any] = field(default_factory=dict)
 
 
+def resolve_api_key_type(config: ChackConfig) -> str:
+    provider = str(getattr(config.model, "provider", "") or "").strip().lower()
+    credentials = getattr(config, "credentials", CredentialsConfig())
+
+    codex_access_token = (
+        str(getattr(credentials, "codex_access_token", "") or "").strip()
+        or os.environ.get("CODEX_ACCESS_TOKEN", "").strip()
+    )
+    openai_api_key = (
+        str(getattr(credentials, "openai_api_key", "") or "").strip()
+        or os.environ.get("OPENAI_API_KEY", "").strip()
+    )
+    anthropic_api_key = (
+        str(getattr(credentials, "anthropic_api_key", "") or "").strip()
+        or str(getattr(credentials, "claude_api_key", "") or "").strip()
+        or os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        or os.environ.get("CLAUDE_API_KEY", "").strip()
+    )
+    openrouter_api_key = (
+        str(getattr(credentials, "openrouter_api_key", "") or "").strip()
+        or os.environ.get("OPENROUTER_API_KEY", "").strip()
+    )
+
+    if provider == "codex":
+        if codex_access_token:
+            return "codex_token"
+        if openai_api_key:
+            return "openai"
+    if provider == "openai":
+        if openai_api_key:
+            return "openai"
+    if provider in {"claude", "claude-code", "claude_code"}:
+        if anthropic_api_key:
+            return "anthropic"
+    if provider in {"openrouter", "langgraph"}:
+        if openrouter_api_key:
+            return "openrouter"
+
+    if codex_access_token:
+        return "codex_token"
+    if openai_api_key:
+        return "openai"
+    if anthropic_api_key:
+        return "anthropic"
+    if openrouter_api_key:
+        return "openrouter"
+    return "openai"
+
+
 def resolve_backend_type(config: ChackConfig) -> str:
     provider = str(getattr(config.model, "provider", "") or "").strip().lower()
     if not provider:

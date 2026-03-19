@@ -21,7 +21,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency / analysis fallback
     MaxTurnsExceeded = None
 
-from .config import ChackConfig, load_config
+from .config import ChackConfig, load_config, resolve_api_key_type, resolve_backend_type
 from .env_utils import export_env
 from .backends import build_executor
 from .long_term_memory import (
@@ -165,6 +165,16 @@ class Chack:
         self._pricing = load_pricing(resolve_pricing_path())
         self._self_critique_prompt = _SELF_CRITIQUE_PROMPT
         export_env(self.config, self.config_path)
+        try:
+            backend = resolve_backend_type(self.config)
+        except Exception:
+            backend = str(getattr(self.config.model, "provider", "") or "").strip().lower() or "unknown"
+        self.logger.info(
+            "Agent instantiated: model=%s backend=%s api_key_type=%s",
+            str(getattr(self.config.model, "primary", "") or "").strip(),
+            backend,
+            resolve_api_key_type(self.config),
+        )
 
     @classmethod
     def from_config_path(cls, config_path: str) -> "Chack":

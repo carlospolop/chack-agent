@@ -3,7 +3,8 @@ import textwrap
 import unittest
 from unittest.mock import patch
 
-from chack_agent.config import load_config
+from chack_agent import Chack
+from chack_agent.config import load_config, resolve_api_key_type
 from chack_agent.model_aliases import (
     OPENROUTER_BEST_CHEAPEST,
     OPENROUTER_CHEAP_BUT_QUALITY,
@@ -170,6 +171,59 @@ class ModelAliasResolutionTests(unittest.TestCase):
 
         self.assertEqual(config.model.provider, "claude")
         self.assertEqual(config.model.primary, "claude-sonnet-4-6")
+
+    def test_resolve_api_key_type_prefers_codex_token_for_codex_provider(self) -> None:
+        config_yaml = textwrap.dedent(
+            """
+            system_prompt: test system prompt
+            agent:
+              primary: CHEAP_BUT_QUALITY
+              provider: codex
+              main_action: test
+              sub_action: run
+            credentials:
+              codex_access_token: codex-access-token
+              openai_api_key: oa-test
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(config_yaml)
+            path = handle.name
+
+        config = load_config(path)
+
+        self.assertEqual(resolve_api_key_type(config), "codex_token")
+
+    def test_chack_logs_instantiation_details(self) -> None:
+        config_yaml = textwrap.dedent(
+            """
+            system_prompt: test system prompt
+            agent:
+              primary: BEST_QUALITY
+              provider: openrouter
+              main_action: test
+              sub_action: run
+            credentials:
+              openrouter_api_key: or-test
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(config_yaml)
+            path = handle.name
+
+        with patch("chack_agent.agent.load_pricing", return_value={}), patch(
+            "chack_agent.agent.resolve_pricing_path", return_value="pricing.yaml"
+        ), patch("chack_agent.agent.export_env"), patch(
+            "chack_agent.agent.logging.getLogger"
+        ) as logger_mock:
+            Chack(path)
+
+        logger_mock.return_value.info.assert_any_call(
+            "Agent instantiated: model=%s backend=%s api_key_type=%s",
+            "openrouter/openai/gpt-5.4",
+            "openrouter",
+            "openrouter",
+        )
 
     def test_default_model_aliases_do_not_publish_generic_best_aliases(self) -> None:
         aliases = get_default_model_aliases()
