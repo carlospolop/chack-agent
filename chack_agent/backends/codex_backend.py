@@ -849,6 +849,7 @@ def build_executor(
 
     route = get_openrouter_route(config)
     uses_openrouter_route = route is not None
+    codex_auth_json_path = str(os.environ.get("CODEX_AUTH_JSON_PATH", "") or "").strip()
     fallback_openai_api_key = (
         str(config.credentials.openai_api_key or "").strip()
         or os.environ.get("OPENAI_API_KEY", "").strip()
@@ -858,7 +859,16 @@ def build_executor(
         or os.environ.get("CODEX_REFRESH_TOKEN", "").strip()
     )
     codex_auth_json = ""
-    if not route and raw_codex_refresh_token:
+    if not route and codex_auth_json_path:
+        try:
+            with open(codex_auth_json_path, "r", encoding="utf-8") as handle:
+                codex_auth_json = normalize_codex_auth_json(handle.read())
+            _update_process_codex_refresh_token(codex_auth_json)
+            emit_codex_auth_updated(codex_auth_json)
+        except Exception as exc:
+            _LOGGER.warning("Ignoring invalid CODEX_AUTH_JSON_PATH payload: %s", exc)
+            codex_auth_json = ""
+    if not route and not codex_auth_json and raw_codex_refresh_token:
         try:
             # Codex CLI can authenticate from an auth cache built directly from a
             # ChatGPT refresh token, so don't eagerly exchange it here. That
