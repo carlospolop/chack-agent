@@ -100,24 +100,16 @@ class OpenRouterRoutingTests(unittest.TestCase):
 
         previous_refresh_token = os.environ.get("CODEX_REFRESH_TOKEN")
         os.environ["CODEX_REFRESH_TOKEN"] = "rt_env_old.refresh"
-        refreshed_auth_json = (
-            '{"auth_mode":"chatgpt","tokens":{"access_token":"a","account_id":"acc",'
-            '"id_token":"i","refresh_token":"rt_new.refresh"},"last_refresh":"2026-03-19T00:00:00+00:00"}'
-        )
         try:
-            with patch(
-                "chack_agent.backends.codex_backend.refresh_codex_auth",
-                return_value=refreshed_auth_json,
-            ):
-                executor = build_codex_executor(
-                    config,
-                    system_prompt="system",
-                    max_turns=2,
-                    memory_max_messages=10,
-                    memory_reset_to_messages=5,
-                )
+            executor = build_codex_executor(
+                config,
+                system_prompt="system",
+                max_turns=2,
+                memory_max_messages=10,
+                memory_reset_to_messages=5,
+            )
             self.assertTrue(executor._use_codex_auth_cache)
-            self.assertEqual(os.environ.get("CODEX_REFRESH_TOKEN"), "rt_new.refresh")
+            self.assertEqual(os.environ.get("CODEX_REFRESH_TOKEN"), "rt_old.refresh")
         finally:
             if previous_refresh_token is None:
                 os.environ.pop("CODEX_REFRESH_TOKEN", None)
@@ -134,28 +126,20 @@ class OpenRouterRoutingTests(unittest.TestCase):
         previous_refresh = os.environ.get("CODEX_REFRESH_TOKEN")
         os.environ["OPENAI_API_KEY"] = "sk-openai-env"
         os.environ["CODEX_REFRESH_TOKEN"] = "rt_env_old.refresh"
-        refreshed_auth_json = (
-            '{"auth_mode":"chatgpt","tokens":{"access_token":"a","account_id":"acc",'
-            '"id_token":"i","refresh_token":"rt_new.refresh"},"last_refresh":"2026-03-19T00:00:00+00:00"}'
-        )
         try:
-            with patch(
-                "chack_agent.backends.codex_backend.refresh_codex_auth",
-                return_value=refreshed_auth_json,
-            ):
-                executor = build_codex_executor(
-                    config,
-                    system_prompt="system",
-                    max_turns=2,
-                    memory_max_messages=10,
-                    memory_reset_to_messages=5,
-                )
+            executor = build_codex_executor(
+                config,
+                system_prompt="system",
+                max_turns=2,
+                memory_max_messages=10,
+                memory_reset_to_messages=5,
+            )
             self.assertTrue(executor._use_codex_auth_cache)
             env = executor._build_env()
             self.assertNotIn("OPENAI_API_KEY", env)
             self.assertNotIn("CODEX_API_KEY", env)
             self.assertNotIn("CODEX_REFRESH_TOKEN", env)
-            self.assertEqual(os.environ.get("CODEX_REFRESH_TOKEN"), "rt_new.refresh")
+            self.assertEqual(os.environ.get("CODEX_REFRESH_TOKEN"), "rt_old.refresh")
         finally:
             if previous_openai is None:
                 os.environ.pop("OPENAI_API_KEY", None)

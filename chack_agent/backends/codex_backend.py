@@ -26,7 +26,6 @@ from ..codex_auth import (
     extract_codex_refresh_token,
     force_codex_auth_refresh,
     normalize_codex_auth_json,
-    refresh_codex_auth,
 )
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
@@ -861,7 +860,11 @@ def build_executor(
     codex_auth_json = ""
     if not route and raw_codex_refresh_token:
         try:
-            codex_auth_json = refresh_codex_auth(raw_codex_refresh_token)
+            # Codex CLI can authenticate from an auth cache built directly from a
+            # ChatGPT refresh token, so don't eagerly exchange it here. That
+            # avoids treating single-use/rotated refresh responses as a hard
+            # failure when provider=codex and no OPENAI_API_KEY is configured.
+            codex_auth_json = normalize_codex_auth_json(raw_codex_refresh_token)
             _update_process_codex_refresh_token(codex_auth_json)
             emit_codex_auth_updated(codex_auth_json)
         except Exception as exc:
