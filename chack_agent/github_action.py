@@ -113,8 +113,8 @@ def main() -> None:
     openai_api_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get(
         "INPUT_OPENAI_API_KEY", ""
     )
-    codex_refresh_token = os.environ.get("CODEX_REFRESH_TOKEN", "") or os.environ.get(
-        "INPUT_CODEX_REFRESH_TOKEN", ""
+    codex_access_token = os.environ.get("CODEX_ACCESS_TOKEN", "") or os.environ.get(
+        "INPUT_CODEX_ACCESS_TOKEN", ""
     )
     openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "") or os.environ.get(
         "INPUT_OPENROUTER_API_KEY", ""
@@ -135,6 +135,7 @@ def main() -> None:
         provider = resolve_backend_alias(
             os.environ.get("INPUT_PROVIDER", "DEFAULT_BACKEND").strip() or "DEFAULT_BACKEND",
             openai_api_key=openai_api_key,
+            codex_access_token=codex_access_token,
             anthropic_api_key=anthropic_api_key,
             openrouter_api_key=openrouter_api_key,
         ).strip() or "codex"
@@ -147,8 +148,8 @@ def main() -> None:
         )
     if provider == "openai" and not openai_api_key:
         raise SystemExit("OPENAI_API_KEY is required for provider=openai")
-    if provider == "codex" and not codex_refresh_token and not openai_api_key:
-        raise SystemExit("CODEX_REFRESH_TOKEN or OPENAI_API_KEY is required for provider=codex")
+    if provider == "codex" and not codex_access_token and not openai_api_key:
+        raise SystemExit("CODEX_ACCESS_TOKEN or OPENAI_API_KEY is required for provider=codex")
     if provider == "langgraph" and not openrouter_api_key:
         raise SystemExit("OPENROUTER_API_KEY is required for provider=langgraph")
     if provider == "openrouter" and not openrouter_api_key:
@@ -253,6 +254,7 @@ def main() -> None:
         tools=tools_cfg,
         credentials=CredentialsConfig(
             openai_api_key=openai_api_key,
+            codex_access_token=codex_access_token,
             openrouter_api_key=openrouter_api_key,
             openrouter_http_referer=os.environ.get("OPENROUTER_HTTP_REFERER", "")
             or os.environ.get("INPUT_OPENROUTER_HTTP_REFERER", ""),

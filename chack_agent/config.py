@@ -94,7 +94,7 @@ class CredentialsConfig:
     azure_tenant_id: str = ""
     gh_token: str = ""
     openai_api_key: str = ""
-    codex_refresh_token: str = ""
+    codex_access_token: str = ""
     openai_admin_key: str = ""
     openai_org_id: str = ""
     openai_org_ids: List[str] = field(default_factory=list)

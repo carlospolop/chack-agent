@@ -97,8 +97,8 @@ inputs:
     description: "OpenAI API key (optional, prefer env OPENAI_API_KEY)"
     required: false
     default: ""
-  codex_refresh_token:
-    description: "Codex refresh token (optional, prefer env CODEX_REFRESH_TOKEN; used first for provider=codex)"
+  codex_access_token:
+    description: "Codex access token (optional, prefer env CODEX_ACCESS_TOKEN; used first for provider=codex)"
     required: false
     default: ""
   openrouter_api_key:
@@ -177,7 +177,7 @@ runs:
         INPUT_LOGGING_LEVEL: ${{ inputs.logging_level }}
         INPUT_MAX_TURNS: ${{ inputs.max_turns }}
         INPUT_OPENAI_API_KEY: ${{ inputs.openai_api_key }}
-        INPUT_CODEX_REFRESH_TOKEN: ${{ inputs.codex_refresh_token }}
+        INPUT_CODEX_ACCESS_TOKEN: ${{ inputs.codex_access_token }}
         INPUT_OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
         INPUT_OPENROUTER_HTTP_REFERER: ${{ inputs.openrouter_http_referer }}
         INPUT_OPENROUTER_APP_NAME: ${{ inputs.openrouter_app_name }}

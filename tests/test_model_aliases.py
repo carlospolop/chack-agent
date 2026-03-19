@@ -15,7 +15,7 @@ from chack_agent.model_aliases import (
 
 
 class ModelAliasResolutionTests(unittest.TestCase):
-    def test_load_config_supports_codex_refresh_token_for_explicit_codex_provider(self) -> None:
+    def test_load_config_supports_codex_access_token_for_explicit_codex_provider(self) -> None:
         config_yaml = textwrap.dedent(
             """
             system_prompt: test system prompt
@@ -25,7 +25,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
               main_action: test
               sub_action: run
             credentials:
-              codex_refresh_token: rt_example.refresh_token
+              codex_access_token: codex-access-token
             """
         )
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
@@ -36,13 +36,13 @@ class ModelAliasResolutionTests(unittest.TestCase):
 
         self.assertEqual(config.model.provider, "codex")
         self.assertEqual(config.model.primary, "gpt-5-mini")
-        self.assertEqual(config.credentials.codex_refresh_token, "rt_example.refresh_token")
+        self.assertEqual(config.credentials.codex_access_token, "codex-access-token")
 
-    def test_resolve_backend_alias_prefers_codex_refresh_then_openai_then_anthropic_then_openrouter(self) -> None:
+    def test_resolve_backend_alias_prefers_codex_access_then_openai_then_anthropic_then_openrouter(self) -> None:
         self.assertEqual(
             resolve_backend_alias(
                 "DEFAULT_BACKEND",
-                codex_refresh_token="rt_example.refresh_token",
+                codex_access_token="codex-access-token",
                 openai_api_key="oa-test",
                 anthropic_api_key="anth-test",
                 openrouter_api_key="or-test",
@@ -110,8 +110,8 @@ class ModelAliasResolutionTests(unittest.TestCase):
             "gpt-5.4",
         )
 
-    def test_resolve_model_alias_does_not_treat_codex_refresh_token_as_generic_model_priority(self) -> None:
-        with patch.dict("os.environ", {"CODEX_REFRESH_TOKEN": "rt_example.refresh_token"}, clear=False):
+    def test_resolve_model_alias_does_not_treat_codex_access_token_as_generic_model_priority(self) -> None:
+        with patch.dict("os.environ", {"CODEX_ACCESS_TOKEN": "codex-access-token"}, clear=False):
             with self.assertRaisesRegex(ValueError, "requires one of OPENAI_API_KEY"):
                 resolve_model_alias("BEST_QUALITY")
 
@@ -119,17 +119,17 @@ class ModelAliasResolutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires one of OPENAI_API_KEY"):
             resolve_model_alias("BEST_QUALITY")
 
-    def test_resolve_backend_alias_uses_codex_refresh_token_without_openai_api_key(self) -> None:
+    def test_resolve_backend_alias_uses_codex_access_token_without_openai_api_key(self) -> None:
         self.assertEqual(
             resolve_backend_alias(
                 "DEFAULT_BACKEND",
-                codex_refresh_token="rt_example.refresh_token",
+                codex_access_token="codex-access-token",
             ),
             "codex",
         )
 
     def test_resolve_backend_alias_raises_when_default_backend_has_no_api_key(self) -> None:
-        with self.assertRaisesRegex(ValueError, "DEFAULT_BACKEND requires one of CODEX_REFRESH_TOKEN, OPENAI_API_KEY"):
+        with self.assertRaisesRegex(ValueError, "DEFAULT_BACKEND requires one of CODEX_ACCESS_TOKEN, OPENAI_API_KEY"):
             resolve_backend_alias("DEFAULT_BACKEND")
 
     def test_resolve_model_alias_logs_resolution_for_generic_alias(self) -> None:

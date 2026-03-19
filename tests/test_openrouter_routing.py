@@ -93,13 +93,10 @@ class OpenRouterRoutingTests(unittest.TestCase):
                 else:
                     os.environ["CHACK_CODEX_HOME_BASE"] = previous
 
-    def test_codex_executor_rotates_process_refresh_token_on_each_task_setup(self) -> None:
+    def test_codex_executor_uses_direct_codex_access_token(self) -> None:
         config = _make_config("codex", "gpt-5-mini")
         config.credentials.openrouter_api_key = ""
-        config.credentials.codex_refresh_token = "rt_old.refresh"
-
-        previous_refresh_token = os.environ.get("CODEX_REFRESH_TOKEN")
-        os.environ["CODEX_REFRESH_TOKEN"] = "rt_env_old.refresh"
+        config.credentials.codex_access_token = "codex-access-token"
         try:
             executor = build_codex_executor(
                 config,
@@ -108,24 +105,21 @@ class OpenRouterRoutingTests(unittest.TestCase):
                 memory_max_messages=10,
                 memory_reset_to_messages=5,
             )
-            self.assertTrue(executor._use_codex_auth_cache)
-            self.assertEqual(os.environ.get("CODEX_REFRESH_TOKEN"), "rt_old.refresh")
+            self.assertTrue(executor._use_codex_access_token)
+            env = executor._build_env()
+            self.assertNotIn("OPENAI_API_KEY", env)
+            self.assertEqual(env["CODEX_API_KEY"], "codex-access-token")
         finally:
-            if previous_refresh_token is None:
-                os.environ.pop("CODEX_REFRESH_TOKEN", None)
-            else:
-                os.environ["CODEX_REFRESH_TOKEN"] = previous_refresh_token
+            pass
 
-    def test_codex_executor_prefers_refresh_token_over_openai_api_key_when_both_are_present(self) -> None:
+    def test_codex_executor_prefers_access_token_over_openai_api_key_when_both_are_present(self) -> None:
         config = _make_config("codex", "gpt-5-mini")
         config.credentials.openrouter_api_key = ""
         config.credentials.openai_api_key = "sk-openai-direct"
-        config.credentials.codex_refresh_token = "rt_old.refresh"
+        config.credentials.codex_access_token = "codex-access-token"
 
         previous_openai = os.environ.get("OPENAI_API_KEY")
-        previous_refresh = os.environ.get("CODEX_REFRESH_TOKEN")
         os.environ["OPENAI_API_KEY"] = "sk-openai-env"
-        os.environ["CODEX_REFRESH_TOKEN"] = "rt_env_old.refresh"
         try:
             executor = build_codex_executor(
                 config,
@@ -134,21 +128,46 @@ class OpenRouterRoutingTests(unittest.TestCase):
                 memory_max_messages=10,
                 memory_reset_to_messages=5,
             )
-            self.assertTrue(executor._use_codex_auth_cache)
+            self.assertTrue(executor._use_codex_access_token)
             env = executor._build_env()
             self.assertNotIn("OPENAI_API_KEY", env)
-            self.assertNotIn("CODEX_API_KEY", env)
-            self.assertNotIn("CODEX_REFRESH_TOKEN", env)
-            self.assertEqual(os.environ.get("CODEX_REFRESH_TOKEN"), "rt_old.refresh")
+            self.assertEqual(env["CODEX_API_KEY"], "codex-access-token")
         finally:
             if previous_openai is None:
                 os.environ.pop("OPENAI_API_KEY", None)
             else:
                 os.environ["OPENAI_API_KEY"] = previous_openai
-            if previous_refresh is None:
-                os.environ.pop("CODEX_REFRESH_TOKEN", None)
-            else:
-                os.environ["CODEX_REFRESH_TOKEN"] = previous_refresh
+
+    def test_codex_executor_falls_back_to_openai_api_key_when_access_token_fails(self) -> None:
+        config = _make_config("codex", "gpt-5-mini")
+        config.credentials.openrouter_api_key = ""
+        config.credentials.openai_api_key = "sk-openai-direct"
+        config.credentials.codex_access_token = "codex-access-token"
+
+        executor = build_codex_executor(
+            config,
+            system_prompt="system",
+            max_turns=2,
+            memory_max_messages=10,
+            memory_reset_to_messages=5,
+        )
+
+        self.assertTrue(executor._use_codex_access_token)
+        with patch.object(
+            executor,
+            "_run_codex_once",
+            return_value=("fallback ok", [], None),
+        ) as fallback_mock:
+            result = executor._maybe_retry_with_api_key(
+                "prompt",
+                ("ERROR: 401 Unauthorized: Incorrect API key provided", [], None),
+                allow_api_key_fallback=True,
+            )
+
+        self.assertFalse(executor._use_codex_access_token)
+        self.assertEqual(executor._openai_api_key, "sk-openai-direct")
+        fallback_mock.assert_called_once_with("prompt", allow_api_key_fallback=False)
+        self.assertEqual(result, ("fallback ok", [], None))
 
     def test_claude_backend_delegates_to_openrouter_backend_for_routed_models(self) -> None:
         config = _make_config("claude", "openrouter/anthropic/claude-3.7-sonnet")

@@ -254,16 +254,16 @@ def _has_value(value: Any) -> bool:
 def _select_api_key_type(
     *,
     openai_api_key: str = "",
-    codex_refresh_token: str = "",
+    codex_access_token: str = "",
     anthropic_api_key: str = "",
     openrouter_api_key: str = "",
     credentials: Any = None,
-    prefer_codex_refresh_token: bool = False,
+    prefer_codex_access_token: bool = False,
 ) -> str:
-    resolved_codex_refresh = str(
-        codex_refresh_token
-        or getattr(credentials, "codex_refresh_token", "")
-        or os.environ.get("CODEX_REFRESH_TOKEN", "")
+    resolved_codex_access = str(
+        codex_access_token
+        or getattr(credentials, "codex_access_token", "")
+        or os.environ.get("CODEX_ACCESS_TOKEN", "")
     ).strip()
     resolved_openai = str(openai_api_key or getattr(credentials, "openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")).strip()
     resolved_anthropic = str(
@@ -279,7 +279,7 @@ def _select_api_key_type(
         or os.environ.get("OPENROUTER_API_KEY", "")
     ).strip()
 
-    if prefer_codex_refresh_token and resolved_codex_refresh:
+    if prefer_codex_access_token and resolved_codex_access:
         return "openai"
     if resolved_openai:
         return "openai"
@@ -294,7 +294,7 @@ def resolve_backend_alias(
     name: str,
     *,
     openai_api_key: str = "",
-    codex_refresh_token: str = "",
+    codex_access_token: str = "",
     anthropic_api_key: str = "",
     openrouter_api_key: str = "",
     credentials: Any = None,
@@ -307,11 +307,11 @@ def resolve_backend_alias(
     if raw_name == "DEFAULT_BACKEND":
         key_type = _select_api_key_type(
             openai_api_key=openai_api_key,
-            codex_refresh_token=codex_refresh_token,
+            codex_access_token=codex_access_token,
             anthropic_api_key=anthropic_api_key,
             openrouter_api_key=openrouter_api_key,
             credentials=credentials,
-            prefer_codex_refresh_token=True,
+            prefer_codex_access_token=True,
         )
         if key_type == "openai":
             effective_name = "OPENAI_DEFAULT_BACKEND"
@@ -321,7 +321,7 @@ def resolve_backend_alias(
             effective_name = "OPENROUTER_DEFAULT_BACKEND"
         else:
             raise ValueError(
-                "DEFAULT_BACKEND requires one of CODEX_REFRESH_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY/CLAUDE_API_KEY, or OPENROUTER_API_KEY"
+                "DEFAULT_BACKEND requires one of CODEX_ACCESS_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY/CLAUDE_API_KEY, or OPENROUTER_API_KEY"
             )
 
     aliases = _get_backend_aliases()
