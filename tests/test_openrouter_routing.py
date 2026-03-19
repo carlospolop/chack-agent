@@ -124,6 +124,48 @@ class OpenRouterRoutingTests(unittest.TestCase):
             else:
                 os.environ["CODEX_REFRESH_TOKEN"] = previous_refresh_token
 
+    def test_codex_executor_prefers_refresh_token_over_openai_api_key_when_both_are_present(self) -> None:
+        config = _make_config("codex", "gpt-5-mini")
+        config.credentials.openrouter_api_key = ""
+        config.credentials.openai_api_key = "sk-openai-direct"
+        config.credentials.codex_refresh_token = "rt_old.refresh"
+
+        previous_openai = os.environ.get("OPENAI_API_KEY")
+        previous_refresh = os.environ.get("CODEX_REFRESH_TOKEN")
+        os.environ["OPENAI_API_KEY"] = "sk-openai-env"
+        os.environ["CODEX_REFRESH_TOKEN"] = "rt_env_old.refresh"
+        refreshed_auth_json = (
+            '{"auth_mode":"chatgpt","tokens":{"access_token":"a","account_id":"acc",'
+            '"id_token":"i","refresh_token":"rt_new.refresh"},"last_refresh":"2026-03-19T00:00:00+00:00"}'
+        )
+        try:
+            with patch(
+                "chack_agent.backends.codex_backend.refresh_codex_auth",
+                return_value=refreshed_auth_json,
+            ):
+                executor = build_codex_executor(
+                    config,
+                    system_prompt="system",
+                    max_turns=2,
+                    memory_max_messages=10,
+                    memory_reset_to_messages=5,
+                )
+            self.assertTrue(executor._use_codex_auth_cache)
+            env = executor._build_env()
+            self.assertNotIn("OPENAI_API_KEY", env)
+            self.assertNotIn("CODEX_API_KEY", env)
+            self.assertNotIn("CODEX_REFRESH_TOKEN", env)
+            self.assertEqual(os.environ.get("CODEX_REFRESH_TOKEN"), "rt_new.refresh")
+        finally:
+            if previous_openai is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_openai
+            if previous_refresh is None:
+                os.environ.pop("CODEX_REFRESH_TOKEN", None)
+            else:
+                os.environ["CODEX_REFRESH_TOKEN"] = previous_refresh
+
     def test_claude_backend_delegates_to_openrouter_backend_for_routed_models(self) -> None:
         config = _make_config("claude", "openrouter/anthropic/claude-3.7-sonnet")
 

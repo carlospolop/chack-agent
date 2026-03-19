@@ -38,7 +38,17 @@ class ModelAliasResolutionTests(unittest.TestCase):
         self.assertEqual(config.model.primary, "gpt-5-mini")
         self.assertEqual(config.credentials.codex_refresh_token, "rt_example.refresh_token")
 
-    def test_resolve_backend_alias_prefers_openai_then_anthropic_then_openrouter(self) -> None:
+    def test_resolve_backend_alias_prefers_codex_refresh_then_openai_then_anthropic_then_openrouter(self) -> None:
+        self.assertEqual(
+            resolve_backend_alias(
+                "DEFAULT_BACKEND",
+                codex_refresh_token="rt_example.refresh_token",
+                openai_api_key="oa-test",
+                anthropic_api_key="anth-test",
+                openrouter_api_key="or-test",
+            ),
+            "codex",
+        )
         self.assertEqual(
             resolve_backend_alias(
                 "DEFAULT_BACKEND",
@@ -100,12 +110,26 @@ class ModelAliasResolutionTests(unittest.TestCase):
             "gpt-5.4",
         )
 
+    def test_resolve_model_alias_does_not_treat_codex_refresh_token_as_generic_model_priority(self) -> None:
+        with patch.dict("os.environ", {"CODEX_REFRESH_TOKEN": "rt_example.refresh_token"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "requires one of OPENAI_API_KEY"):
+                resolve_model_alias("BEST_QUALITY")
+
     def test_resolve_model_alias_raises_when_generic_alias_has_no_api_key(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires one of OPENAI_API_KEY"):
             resolve_model_alias("BEST_QUALITY")
 
+    def test_resolve_backend_alias_uses_codex_refresh_token_without_openai_api_key(self) -> None:
+        self.assertEqual(
+            resolve_backend_alias(
+                "DEFAULT_BACKEND",
+                codex_refresh_token="rt_example.refresh_token",
+            ),
+            "codex",
+        )
+
     def test_resolve_backend_alias_raises_when_default_backend_has_no_api_key(self) -> None:
-        with self.assertRaisesRegex(ValueError, "DEFAULT_BACKEND requires one of OPENAI_API_KEY"):
+        with self.assertRaisesRegex(ValueError, "DEFAULT_BACKEND requires one of CODEX_REFRESH_TOKEN, OPENAI_API_KEY"):
             resolve_backend_alias("DEFAULT_BACKEND")
 
     def test_resolve_model_alias_logs_resolution_for_generic_alias(self) -> None:
