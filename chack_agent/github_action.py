@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import time
@@ -105,6 +106,10 @@ def _resolve_session_id(main_action: str, sub_action: str) -> str:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=os.environ.get("INPUT_LOGGING_LEVEL", "INFO").strip() or "INFO",
+        format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+    )
     supported_backends = set()
     for allowed in BACKENDS_BY_API_KEY_TYPE.values():
         supported_backends.update(allowed)
