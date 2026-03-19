@@ -2,9 +2,9 @@ name: "chack-agent"
 description: "Run the chack agent with a prompt and parameters."
 inputs:
   provider:
-    description: "Model provider: openai, openrouter, codex, gemini, claude, or langgraph"
+    description: "Model provider/backend: DEFAULT_BACKEND, openai, openrouter, codex, gemini, claude, or langgraph"
     required: false
-    default: "openrouter"
+    default: "DEFAULT_BACKEND"
   model_primary:
     description: "Primary model (e.g., gpt-4o, gpt-5.2-codex)"
     required: false
@@ -97,6 +97,10 @@ inputs:
     description: "OpenAI API key (optional, prefer env OPENAI_API_KEY)"
     required: false
     default: ""
+  codex_refresh_token:
+    description: "Codex refresh token (optional, prefer env CODEX_REFRESH_TOKEN; used first for provider=codex)"
+    required: false
+    default: ""
   openrouter_api_key:
     description: "OpenRouter API key (optional, prefer env OPENROUTER_API_KEY)"
     required: false
@@ -173,6 +177,7 @@ runs:
         INPUT_LOGGING_LEVEL: ${{ inputs.logging_level }}
         INPUT_MAX_TURNS: ${{ inputs.max_turns }}
         INPUT_OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        INPUT_CODEX_REFRESH_TOKEN: ${{ inputs.codex_refresh_token }}
         INPUT_OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
         INPUT_OPENROUTER_HTTP_REFERER: ${{ inputs.openrouter_http_referer }}
         INPUT_OPENROUTER_APP_NAME: ${{ inputs.openrouter_app_name }}

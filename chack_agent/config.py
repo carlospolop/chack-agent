@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from .model_aliases import resolve_model_alias
+from .model_aliases import resolve_backend_alias, resolve_model_alias
 
 from chack_tools.config import ToolsConfig as BaseToolsConfig
 
@@ -94,9 +94,12 @@ class CredentialsConfig:
     azure_tenant_id: str = ""
     gh_token: str = ""
     openai_api_key: str = ""
+    codex_refresh_token: str = ""
     openai_admin_key: str = ""
     openai_org_id: str = ""
     openai_org_ids: List[str] = field(default_factory=list)
+    anthropic_api_key: str = ""
+    claude_api_key: str = ""
     openrouter_api_key: str = ""
     openrouter_http_referer: str = ""
     openrouter_app_name: str = ""
@@ -251,7 +254,13 @@ def load_config(path: str) -> ChackConfig:
         with open(schema_path, "r", encoding="utf-8") as handle:
             agent.output_schema_json = yaml.safe_load(handle) or {}
 
-    provider = str(model_cfg.provider or "").strip().lower()
+    provider = resolve_backend_alias(
+        model_cfg.provider,
+        credentials=credentials,
+    ).strip().lower()
+    if not provider:
+        raise ValueError("agent.provider could not be resolved from config")
+    model_cfg.provider = provider
     model_cfg.primary = resolve_model_alias(
         model_cfg.primary,
         provider=provider,

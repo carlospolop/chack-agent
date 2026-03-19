@@ -6,6 +6,7 @@ from pathlib import Path
 
 from chack_agent import (
     AgentConfig,
+    BACKENDS_BY_API_KEY_TYPE,
     Chack,
     ChackConfig,
     CredentialsConfig,
@@ -14,7 +15,7 @@ from chack_agent import (
     SessionConfig,
     ToolsConfig,
 )
-from chack_agent.model_aliases import resolve_model_alias
+from chack_agent.model_aliases import resolve_backend_alias, resolve_model_alias
 
 
 def _load_json(name: str) -> dict:
@@ -104,14 +105,16 @@ def _resolve_session_id(main_action: str, sub_action: str) -> str:
 
 
 def main() -> None:
-    provider = os.environ.get("INPUT_PROVIDER", "openai").strip() or "openai"
-    if provider not in {"openai", "openrouter", "codex", "langgraph", "gemini", "claude", "claude-code", "claude_code"}:
-        raise SystemExit(
-            "provider must be 'openai', 'openrouter', 'codex', 'gemini', 'langgraph', or 'claude'"
-        )
+    supported_backends = set()
+    for allowed in BACKENDS_BY_API_KEY_TYPE.values():
+        supported_backends.update(allowed)
+    supported_backends.update({"claude-code", "claude_code"})
 
     openai_api_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get(
         "INPUT_OPENAI_API_KEY", ""
+    )
+    codex_refresh_token = os.environ.get("CODEX_REFRESH_TOKEN", "") or os.environ.get(
+        "INPUT_CODEX_REFRESH_TOKEN", ""
     )
     openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "") or os.environ.get(
         "INPUT_OPENROUTER_API_KEY", ""
@@ -128,10 +131,24 @@ def main() -> None:
         or os.environ.get("INPUT_ANTHROPIC_API_KEY", "")
         or os.environ.get("INPUT_CLAUDE_API_KEY", "")
     )
+    try:
+        provider = resolve_backend_alias(
+            os.environ.get("INPUT_PROVIDER", "DEFAULT_BACKEND").strip() or "DEFAULT_BACKEND",
+            openai_api_key=openai_api_key,
+            anthropic_api_key=anthropic_api_key,
+            openrouter_api_key=openrouter_api_key,
+        ).strip() or "codex"
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    if provider not in supported_backends:
+        raise SystemExit(
+            "provider must be one of: "
+            + ", ".join(sorted(supported_backends))
+        )
     if provider == "openai" and not openai_api_key:
         raise SystemExit("OPENAI_API_KEY is required for provider=openai")
-    if provider == "codex" and not openai_api_key:
-        raise SystemExit("OPENAI_API_KEY is required for provider=codex")
+    if provider == "codex" and not codex_refresh_token and not openai_api_key:
+        raise SystemExit("CODEX_REFRESH_TOKEN or OPENAI_API_KEY is required for provider=codex")
     if provider == "langgraph" and not openrouter_api_key:
         raise SystemExit("OPENROUTER_API_KEY is required for provider=langgraph")
     if provider == "openrouter" and not openrouter_api_key:
@@ -186,29 +203,32 @@ def main() -> None:
     except ValueError:
         raise SystemExit("max_turns must be an integer")
 
-    model = ModelConfig(
-        primary=resolve_model_alias(
-            os.environ.get("INPUT_MODEL_PRIMARY", "gpt-4o"),
+    try:
+        model = ModelConfig(
+            primary=resolve_model_alias(
+                os.environ.get("INPUT_MODEL_PRIMARY", "gpt-4o"),
+                provider=provider,
+            ),
             provider=provider,
-        ),
-        provider=provider,
-        social_network=resolve_model_alias(
-            os.environ.get("INPUT_MODEL_SOCIAL", "CHEAP_BUT_QUALITY"),
-            provider=provider,
-        ),
-        scientific=resolve_model_alias(
-            os.environ.get("INPUT_MODEL_SCIENTIFIC", "CHEAP_BUT_QUALITY"),
-            provider=provider,
-        ),
-        websearcher=resolve_model_alias(
-            os.environ.get("INPUT_MODEL_WEBSEARCHER", "CHEAP_BUT_QUALITY"),
-            provider=provider,
-        ),
-        tester=resolve_model_alias(
-            os.environ.get("INPUT_MODEL_TESTER", "CHEAP_BUT_QUALITY"),
-            provider=provider,
-        ),
-    )
+            social_network=resolve_model_alias(
+                os.environ.get("INPUT_MODEL_SOCIAL", "CHEAP_BUT_QUALITY"),
+                provider=provider,
+            ),
+            scientific=resolve_model_alias(
+                os.environ.get("INPUT_MODEL_SCIENTIFIC", "CHEAP_BUT_QUALITY"),
+                provider=provider,
+            ),
+            websearcher=resolve_model_alias(
+                os.environ.get("INPUT_MODEL_WEBSEARCHER", "CHEAP_BUT_QUALITY"),
+                provider=provider,
+            ),
+            tester=resolve_model_alias(
+                os.environ.get("INPUT_MODEL_TESTER", "CHEAP_BUT_QUALITY"),
+                provider=provider,
+            ),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc))
 
     agent_cfg = AgentConfig(
         main_action=os.environ.get("INPUT_MAIN_ACTION", "github_action"),

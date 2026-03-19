@@ -2,28 +2,25 @@ import json
 import os
 from typing import Dict
 
+from chack_agent.model_aliases import get_public_backend_aliases, get_public_model_aliases
 
-DEFAULT_ALIASES: Dict[str, str] = {
-    "BEST_QUALITY": "google/gemini-3-pro-preview",
-    "CHEAP_BUT_QUALITY": "google/gemini-3-flash-preview",
-    "BEST_CHEAPEST": "xiaomi/mimo-v2-flash",
-    "OPENAI_BEST_QUALITY": "gpt-5.2-codex",
-    "OPENAI_CHEAP_BUT_QUALITY": "gpt-5-mini",
-    "OPENAI_BEST_CHEAPEST": "gpt-5-nano",
-}
+DEFAULT_MODEL_ALIASES: Dict[str, str] = get_public_model_aliases()
+DEFAULT_BACKEND_ALIASES: Dict[str, str] = get_public_backend_aliases()
 
-
-def _env_aliases() -> Dict[str, str]:
+def _env_aliases(prefix: str, defaults: Dict[str, str]) -> Dict[str, str]:
     aliases: Dict[str, str] = {}
-    for key, default_value in DEFAULT_ALIASES.items():
-        value = os.environ.get(f"MODEL_ALIAS_{key}", default_value).strip()
+    for key, default_value in defaults.items():
+        value = os.environ.get(f"{prefix}{key}", default_value).strip()
         if value:
             aliases[key] = value
     return aliases
 
 
 def handler(event, context):
-    body = {"model_aliases": _env_aliases()}
+    body = {
+        "model_aliases": _env_aliases("MODEL_ALIAS_", DEFAULT_MODEL_ALIASES),
+        "backend_aliases": _env_aliases("BACKEND_ALIAS_", DEFAULT_BACKEND_ALIASES),
+    }
     return {
         "statusCode": 200,
         "headers": {

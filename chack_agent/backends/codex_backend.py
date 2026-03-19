@@ -20,6 +20,13 @@ from chack_tools.task_steps_manager_state import (
 )
 from chack_tools.telemetry import log_event
 
+from ..codex_auth import (
+    emit_codex_auth_invalid,
+    emit_codex_auth_updated,
+    force_codex_auth_refresh,
+    normalize_codex_auth_json,
+    refresh_codex_auth,
+)
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..openrouter_routing import get_openrouter_route
@@ -59,6 +66,9 @@ class CodexExecutor:
     _max_turns: int
     _codex_path: str
     _openai_api_key: str
+    _fallback_openai_api_key: str
+    _codex_auth_json: str
+    _use_codex_auth_cache: bool
     _tools_config_json: str
     _allowed_tools_json: str
     _serialized_tools_override_b64: str
@@ -141,6 +151,18 @@ class CodexExecutor:
 
     def _run_codex(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_codex_home_and_config()
+        preflight_error = self._preflight_codex_auth_cache()
+        if preflight_error:
+            result = (preflight_error, [], _RawResult(raw_responses=[]))
+            return self._maybe_retry_with_api_key(prompt, result, allow_api_key_fallback=True)
+        return self._run_codex_once(prompt, allow_api_key_fallback=True)
+
+    def _run_codex_once(
+        self,
+        prompt: str,
+        *,
+        allow_api_key_fallback: bool,
+    ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         command = self._build_command()
         env = self._build_env()
         timeout_seconds = int(os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "900") or "900")
@@ -280,18 +302,58 @@ class CodexExecutor:
                 )
 
         return_code = process.wait()
+        self._capture_refreshed_auth_state()
         if return_code != 0:
             details = "\n".join(combined_output_lines).strip() or "No error output captured."
-            return (
+            result = (
                 f"ERROR: Codex exec failed (exit={return_code}).\n{details}",
                 steps,
                 _RawResult(raw_responses=[]),
             )
+            return self._maybe_retry_with_api_key(prompt, result, allow_api_key_fallback)
 
         raw_responses: list[Any] = []
         if usage_payload is not None:
             raw_responses.append({"usage": usage_payload})
-        return output, steps, _RawResult(raw_responses=raw_responses)
+        result = (output, steps, _RawResult(raw_responses=raw_responses))
+        return self._maybe_retry_with_api_key(prompt, result, allow_api_key_fallback)
+
+    def _maybe_retry_with_api_key(
+        self,
+        prompt: str,
+        result: tuple[str, list[tuple[ToolAction, Any]], _RawResult],
+        allow_api_key_fallback: bool,
+    ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        if not allow_api_key_fallback:
+            return result
+        if not self._use_codex_auth_cache:
+            return result
+        if not self._fallback_openai_api_key:
+            return result
+        if not self._looks_like_auth_failure(result[0]):
+            return result
+
+        _LOGGER.warning(
+            "Codex auth cache failed. Falling back to OPENAI_API_KEY for provider=codex."
+        )
+        self._use_codex_auth_cache = False
+        self._remove_codex_auth_file()
+        if self._codex_home:
+            self._write_codex_config(self._codex_home)
+        return self._run_codex_once(prompt, allow_api_key_fallback=False)
+
+    @staticmethod
+    def _looks_like_auth_failure(output: str) -> bool:
+        normalized = str(output or "").lower()
+        indicators = (
+            "failed to refresh token",
+            "not signed in",
+            "invalid id token",
+            "error checking login status",
+            "401",
+            "unauthorized",
+        )
+        return any(indicator in normalized for indicator in indicators)
 
     def _build_command(self) -> list[str]:
         if self._thread_id:
@@ -344,6 +406,11 @@ class CodexExecutor:
                 env["OPENROUTER_HTTP_REFERER"] = self._openrouter_http_referer
             if self._openrouter_app_name:
                 env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
+        elif self._use_codex_auth_cache:
+            # Force Codex CLI to use the refreshed auth cache instead of any inherited API key.
+            env.pop("OPENAI_API_KEY", None)
+            env.pop("CODEX_API_KEY", None)
+            env.pop("CODEX_REFRESH_TOKEN", None)
         else:
             env.setdefault("OPENAI_API_KEY", self._openai_api_key)
             env.setdefault("CODEX_API_KEY", self._openai_api_key)
@@ -387,8 +454,65 @@ class CodexExecutor:
         base = os.path.join(home_base, safe_session)
         os.makedirs(base, exist_ok=True)
         self._codex_home = base
+        if self._use_codex_auth_cache and self._codex_auth_json:
+            self._write_auth_file(base)
         self._write_codex_config(base)
         self._write_output_schema_file(base)
+
+    def _write_auth_file(self, codex_home: str) -> None:
+        os.makedirs(codex_home, exist_ok=True)
+        auth_path = os.path.join(codex_home, "auth.json")
+        with open(auth_path, "w", encoding="utf-8") as handle:
+            handle.write(force_codex_auth_refresh(self._codex_auth_json))
+            handle.write("\n")
+
+    def _remove_codex_auth_file(self) -> None:
+        if not self._codex_home:
+            return
+        auth_path = os.path.join(self._codex_home, "auth.json")
+        try:
+            os.remove(auth_path)
+        except FileNotFoundError:
+            return
+        except Exception:
+            return
+
+    def _capture_refreshed_auth_state(self) -> None:
+        if not self._use_codex_auth_cache or not self._codex_home:
+            return
+        auth_path = os.path.join(self._codex_home, "auth.json")
+        try:
+            with open(auth_path, "r", encoding="utf-8") as handle:
+                refreshed = normalize_codex_auth_json(handle.read())
+        except Exception:
+            return
+        if refreshed:
+            emit_codex_auth_updated(refreshed)
+
+    def _preflight_codex_auth_cache(self) -> str:
+        if not self._use_codex_auth_cache or not self._codex_home:
+            return ""
+        try:
+            env = os.environ.copy()
+            env["CODEX_HOME"] = self._codex_home
+            result = subprocess.run(
+                [self._codex_path, "login", "status"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except FileNotFoundError:
+            return ""
+        except Exception as exc:
+            return f"ERROR: Could not verify Codex auth cache before execution: {exc}"
+
+        self._capture_refreshed_auth_state()
+        if result.returncode == 0:
+            return ""
+        details = (result.stderr or result.stdout or "").strip() or "Codex auth cache is not valid."
+        return f"ERROR: Codex auth cache validation failed.\n{details}"
 
     def _write_codex_config(self, codex_home: str) -> None:
         os.makedirs(codex_home, exist_ok=True)
@@ -715,19 +839,30 @@ def build_executor(
 
     route = get_openrouter_route(config)
     uses_openrouter_route = route is not None
-    openai_api_key = (
-        route.api_key
-        if route is not None
-        else (
-            str(config.credentials.openai_api_key or "").strip()
-            or os.environ.get("OPENAI_API_KEY", "").strip()
-        )
+    fallback_openai_api_key = (
+        str(config.credentials.openai_api_key or "").strip()
+        or os.environ.get("OPENAI_API_KEY", "").strip()
     )
-    if not openai_api_key:
+    raw_codex_refresh_token = (
+        str(getattr(config.credentials, "codex_refresh_token", "") or "").strip()
+        or os.environ.get("CODEX_REFRESH_TOKEN", "").strip()
+    )
+    codex_auth_json = ""
+    if not route and raw_codex_refresh_token:
+        try:
+            codex_auth_json = refresh_codex_auth(raw_codex_refresh_token)
+            emit_codex_auth_updated(codex_auth_json)
+        except Exception as exc:
+            emit_codex_auth_invalid(raw_codex_refresh_token)
+            _LOGGER.warning("Ignoring invalid CODEX_REFRESH_TOKEN payload: %s", exc)
+            codex_auth_json = ""
+
+    codex_api_key = route.api_key if route is not None else fallback_openai_api_key
+    if not codex_auth_json and not codex_api_key:
         raise ValueError(
             "OPENROUTER_API_KEY is required for OpenRouter-routed Codex models"
             if uses_openrouter_route
-            else "OPENAI_API_KEY is required when model.provider=codex"
+            else "CODEX_REFRESH_TOKEN or OPENAI_API_KEY is required when model.provider=codex"
         )
 
     configured_codex_path = os.environ.get("CODEX_PATH", "").strip() or "codex"
@@ -742,7 +877,10 @@ def build_executor(
         _model_name=str(route.model_name if route is not None else config.model.primary),
         _max_turns=int(max_turns or 0),
         _codex_path=codex_path,
-        _openai_api_key=openai_api_key,
+        _openai_api_key=codex_api_key,
+        _fallback_openai_api_key=fallback_openai_api_key,
+        _codex_auth_json=codex_auth_json,
+        _use_codex_auth_cache=bool(codex_auth_json) and not uses_openrouter_route,
         _tools_config_json=json.dumps(getattr(config.tools, "__dict__", {}), ensure_ascii=False),
         _allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False)
         if allowed_tool_names is not None
