@@ -136,7 +136,7 @@ class OpenRouterRoutingTests(unittest.TestCase):
                 self.assertNotIn("CODEX_API_KEY", env)
                 with open(os.path.join(executor._codex_home, "auth.json"), "r", encoding="utf-8") as handle:
                     auth_payload = json.load(handle)
-                self.assertEqual(auth_payload["auth_mode"], "chatgptAuthTokens")
+                self.assertEqual(auth_payload["auth_mode"], "chatgpt")
                 self.assertEqual(auth_payload["tokens"]["access_token"], config.credentials.codex_access_token)
                 self.assertEqual(auth_payload["tokens"]["account_id"], "workspace-123")
             finally:

@@ -611,7 +611,7 @@ class CodexExecutor:
                 "CODEX_ACCESS_TOKEN is missing chatgpt_account_id in JWT claims and cannot be used for Codex ChatGPT auth."
             )
         return {
-            "auth_mode": "chatgptAuthTokens",
+            "auth_mode": "chatgpt",
             "OPENAI_API_KEY": None,
             "tokens": {
                 "id_token": access_token,
