@@ -884,6 +884,7 @@ class Chack:
                 self.config,
                 tools=replace(self.config.tools, exec_cwd=exec_cwd_value),
             )
+            export_env(config, self.config_path)
 
         memory_max_messages = int(self.config.session.memory_max_messages)
         memory_reset_to_messages = int(self.config.session.memory_reset_to_messages)
