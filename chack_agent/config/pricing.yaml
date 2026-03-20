@@ -270,8 +270,8 @@ models:
     output: 0.29
   deepseek/deepseek-v3.1-terminus:
     input: 0.21
-    cache_read: 0.1300000002
-    output: 0.79
+    cache_read: 0.105
+    output: 0.78
   deepseek/deepseek-v3.2:
     input: 0.26
     cache_read: 0.13
@@ -1411,8 +1411,8 @@ models:
     cache_read: 0.3
     output: 0.9
   z-ai/glm-4.7:
-    input: 0.4
-    cache_read: 0.08
+    input: 0.39
+    cache_read: 0.195
     output: 1.75
   z-ai/glm-4.7-flash:
     input: 0.06
