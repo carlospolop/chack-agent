@@ -37,6 +37,15 @@ _LOGGER = logging.getLogger("chack.codex_backend")
 
 def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _resolve_codex_exec_cwd() -> str:
+    candidate = str(os.environ.get("CHACK_EXEC_CWD", "") or "").strip()
+    if candidate:
+        return candidate
+    return os.getcwd()
+
+
 @dataclass
 class ToolAction:
     tool: str
@@ -154,11 +163,13 @@ class CodexExecutor:
         command = self._build_command()
         env = self._build_env()
         timeout_seconds = int(os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "900") or "900")
+        exec_cwd = _resolve_codex_exec_cwd()
         _LOGGER.info(
-            "Starting Codex CLI process: model=%s timeout_seconds=%s thread_id=%s ts=%s",
+            "Starting Codex CLI process: model=%s timeout_seconds=%s thread_id=%s cwd=%s ts=%s",
             self._model_name,
             timeout_seconds,
             self._thread_id or "",
+            exec_cwd,
             _log_timestamp(),
         )
         try:
@@ -341,6 +352,7 @@ class CodexExecutor:
         return any(indicator in normalized for indicator in indicators)
 
     def _build_command(self) -> list[str]:
+        exec_cwd = _resolve_codex_exec_cwd()
         if self._thread_id:
             args = [
                 self._codex_path,
@@ -349,6 +361,8 @@ class CodexExecutor:
                 "--json",
                 "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox",
+                "--cd",
+                exec_cwd,
             ]
             args.extend(
                 [
@@ -369,7 +383,7 @@ class CodexExecutor:
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
-            os.getcwd(),
+            exec_cwd,
         ]
         args.extend(
             [
