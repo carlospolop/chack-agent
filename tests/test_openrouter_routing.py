@@ -207,6 +207,7 @@ class OpenRouterRoutingTests(unittest.TestCase):
                 "prompt",
                 ("ERROR: 401 Unauthorized: Incorrect API key provided", [], None),
                 allow_api_key_fallback=True,
+                codex_exec_failed=True,
             )
 
         self.assertFalse(executor._use_codex_access_token)
@@ -214,6 +215,29 @@ class OpenRouterRoutingTests(unittest.TestCase):
         fallback_mock.assert_called_once_with("prompt", allow_api_key_fallback=False)
         self.assertEqual(result, ("fallback ok", [], None))
         self.assertFalse(os.path.exists(os.path.join(executor._codex_home, "auth.json")))
+
+    def test_codex_access_token_does_not_fallback_on_successful_output_mentioning_401(self) -> None:
+        config = _make_config("codex", "gpt-5.4")
+        config.credentials.codex_access_token = _fake_chatgpt_access_token()
+        config.openai_api_key = "sk-openai-direct"
+
+        executor = build_codex_executor(
+            config,
+            system_prompt="system",
+            max_turns=2,
+            memory_max_messages=10,
+            memory_reset_to_messages=5,
+        )
+
+        result = executor._maybe_retry_with_api_key(
+            "prompt",
+            ("Focus on HTTP 401 handling and authorization bypasses", [], None),
+            allow_api_key_fallback=True,
+            codex_exec_failed=False,
+        )
+
+        self.assertTrue(executor._use_codex_access_token)
+        self.assertEqual(result, ("Focus on HTTP 401 handling and authorization bypasses", [], None))
 
     def test_claude_backend_delegates_to_openrouter_backend_for_routed_models(self) -> None:
         config = _make_config("claude", "openrouter/anthropic/claude-3.7-sonnet")

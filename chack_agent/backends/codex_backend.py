@@ -308,25 +308,39 @@ class CodexExecutor:
                 steps,
                 _RawResult(raw_responses=[]),
             )
-            return self._maybe_retry_with_api_key(prompt, result, allow_api_key_fallback)
+            return self._maybe_retry_with_api_key(
+                prompt,
+                result,
+                allow_api_key_fallback,
+                codex_exec_failed=True,
+            )
 
         raw_responses: list[Any] = []
         if usage_payload is not None:
             raw_responses.append({"usage": usage_payload})
         result = (output, steps, _RawResult(raw_responses=raw_responses))
-        return self._maybe_retry_with_api_key(prompt, result, allow_api_key_fallback)
+        return self._maybe_retry_with_api_key(
+            prompt,
+            result,
+            allow_api_key_fallback,
+            codex_exec_failed=False,
+        )
 
     def _maybe_retry_with_api_key(
         self,
         prompt: str,
         result: tuple[str, list[tuple[ToolAction, Any]], _RawResult],
         allow_api_key_fallback: bool,
+        *,
+        codex_exec_failed: bool,
     ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         if not allow_api_key_fallback:
             return result
         if not self._use_codex_access_token:
             return result
         if not self._fallback_openai_api_key:
+            return result
+        if not codex_exec_failed:
             return result
         if not self._looks_like_auth_failure(result[0]):
             return result
@@ -345,7 +359,8 @@ class CodexExecutor:
         indicators = (
             "not signed in",
             "error checking login status",
-            "401",
+            "401 unauthorized",
+            "status code: 401",
             "unauthorized",
             "incorrect api key provided",
         )
