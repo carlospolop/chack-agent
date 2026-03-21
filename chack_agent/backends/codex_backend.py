@@ -204,6 +204,7 @@ class CodexExecutor:
         output = ""
         usage_payload: dict[str, Any] | None = None
         combined_output_lines: list[str] = []
+        error_messages: list[str] = []
         started_at = time.monotonic()
 
         if process.stdin is not None:
@@ -244,9 +245,21 @@ class CodexExecutor:
                     self._thread_id = thread_id
                 continue
 
+            if event_type == "error":
+                message = str(event.get("message", "") or "").strip()
+                if message:
+                    error_messages.append(message)
+                continue
+
             if event_type == "item.completed":
                 item = event.get("item") if isinstance(event.get("item"), dict) else {}
                 item_type = str(item.get("type", "") or "")
+
+                if item_type == "error":
+                    message = str(item.get("message", "") or "").strip()
+                    if message:
+                        error_messages.append(message)
+                    continue
 
                 if item_type == "reasoning":
                     reasoning_text = str(item.get("text", "") or "")
@@ -318,6 +331,21 @@ class CodexExecutor:
         raw_responses: list[Any] = []
         if usage_payload is not None:
             raw_responses.append({"usage": usage_payload})
+        if not output and usage_payload is None and not steps:
+            details = "\n".join(error_messages or combined_output_lines).strip() or (
+                "Codex CLI exited successfully but produced no response events."
+            )
+            result = (
+                f"ERROR: Codex exec produced no usable response.\n{details}",
+                steps,
+                _RawResult(raw_responses=[]),
+            )
+            return self._maybe_retry_with_api_key(
+                prompt,
+                result,
+                allow_api_key_fallback,
+                codex_exec_failed=True,
+            )
         result = (output, steps, _RawResult(raw_responses=raw_responses))
         return self._maybe_retry_with_api_key(
             prompt,
@@ -362,6 +390,7 @@ class CodexExecutor:
             "401 unauthorized",
             "status code: 401",
             "unauthorized",
+            "missing bearer or basic authentication",
             "incorrect api key provided",
         )
         return any(indicator in normalized for indicator in indicators)
