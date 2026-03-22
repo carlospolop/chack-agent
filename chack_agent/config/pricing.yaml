@@ -670,6 +670,10 @@ models:
     input: 0.54
     cache_read: 0.54
     output: 0.54
+  mistralai/pixtral-12b:
+    input: 0.10000000000000001
+    cache_read: 0.10000000000000001
+    output: 0.10000000000000001
   mistralai/pixtral-large-2411:
     input: 2
     cache_read: 0.2
@@ -734,6 +738,10 @@ models:
     input: 1.2
     cache_read: 1.2
     output: 1.2
+  nvidia/llama-3.1-nemotron-ultra-253b-v1:
+    input: 0.6
+    cache_read: 0.6
+    output: 1.8
   nvidia/llama-3.3-nemotron-super-49b-v1.5:
     input: 0.1
     cache_read: 0.1
@@ -968,8 +976,8 @@ models:
     output: 0
   openai/gpt-oss-20b:
     input: 0.03
-    cache_read: 0.03
-    output: 0.14
+    cache_read: 0.015
+    output: 0.11
   openai/gpt-oss-20b:free:
     input: 0
     cache_read: 0
