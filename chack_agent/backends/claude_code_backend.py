@@ -621,6 +621,7 @@ class ClaudeCodeExecutor:
             "CHACK_DISABLE_STDOUT_EVENTS",
             "CHACK_MIN_TOOLS_USED",
             "CHACK_MAX_TOOLS_USED",
+            "AISEC_LOCAL_VULN_STORE_PATH",
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
             "BRAVE_API_KEY",

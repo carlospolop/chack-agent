@@ -201,7 +201,7 @@ class CodexExecutor:
             )
 
         steps: list[tuple[ToolAction, Any]] = []
-        output = ""
+        output_parts: list[str] = []
         usage_payload: dict[str, Any] | None = None
         combined_output_lines: list[str] = []
         error_messages: list[str] = []
@@ -285,7 +285,15 @@ class CodexExecutor:
                     continue
 
                 if item_type == "agent_message":
-                    output = str(item.get("text", "") or "")
+                    message_text = self._extract_message_text(item)
+                    if message_text:
+                        output_parts.append(message_text)
+                    continue
+
+                if item_type in {"assistant_message", "message"}:
+                    message_text = self._extract_message_text(item)
+                    if message_text:
+                        output_parts.append(message_text)
                     continue
 
                 step = self._item_to_step(item)
@@ -293,6 +301,12 @@ class CodexExecutor:
                     steps.append((step, None))
                     self._log_tool_called(step.tool, step.tool_input)
                     self._sync_task_steps_manager(item)
+                continue
+
+            if event_type in {"message", "agent_message"}:
+                message_text = self._extract_message_text(event)
+                if message_text:
+                    output_parts.append(message_text)
                 continue
 
             if event_type == "turn.completed":
@@ -313,6 +327,7 @@ class CodexExecutor:
                     cache_write_tokens=0,
                 )
 
+        output = "\n".join(part for part in output_parts if part).strip()
         return_code = process.wait()
         if return_code != 0:
             details = "\n".join(combined_output_lines).strip() or "No error output captured."
@@ -524,6 +539,7 @@ class CodexExecutor:
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
             "CHACK_DISABLE_STDOUT_EVENTS",
+            "AISEC_LOCAL_VULN_STORE_PATH",
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
             "BRAVE_API_KEY",
@@ -724,6 +740,55 @@ class CodexExecutor:
         if not isinstance(parsed, dict):
             return None
         return parsed
+
+    @classmethod
+    def _extract_message_text(cls, payload: Any) -> str:
+        text = cls._extract_text_candidate(payload)
+        return text.strip()
+
+    @classmethod
+    def _extract_text_candidate(cls, payload: Any) -> str:
+        if payload is None:
+            return ""
+        if isinstance(payload, str):
+            return payload
+        if isinstance(payload, list):
+            parts = [cls._extract_text_candidate(item) for item in payload]
+            return "\n".join(part for part in parts if part).strip()
+        if not isinstance(payload, dict):
+            return ""
+
+        direct_fields = (
+            "text",
+            "message",
+            "content",
+            "output_text",
+            "final_text",
+        )
+        for field in direct_fields:
+            value = payload.get(field)
+            text = cls._extract_text_candidate(value)
+            if text:
+                return text
+
+        for field in ("parts", "chunks", "content_parts"):
+            value = payload.get(field)
+            text = cls._extract_text_candidate(value)
+            if text:
+                return text
+
+        if payload.get("type") in {"text", "output_text"}:
+            value = payload.get("text") or payload.get("value")
+            text = cls._extract_text_candidate(value)
+            if text:
+                return text
+
+        if isinstance(payload.get("item"), dict):
+            text = cls._extract_text_candidate(payload.get("item"))
+            if text:
+                return text
+
+        return ""
 
     @staticmethod
     def _item_to_step(item: dict[str, Any]) -> Optional[ToolAction]:
