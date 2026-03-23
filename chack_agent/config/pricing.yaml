@@ -27,10 +27,6 @@ models:
     input: 0.09
     cache_read: 0.09
     output: 0.45
-  allenai/molmo-2-8b:
-    input: 0.2
-    cache_read: 0.2
-    output: 0.2
   allenai/olmo-2-0325-32b-instruct:
     input: 0.05
     cache_read: 0.05
@@ -39,14 +35,6 @@ models:
     input: 0.15
     cache_read: 0.15
     output: 0.5
-  allenai/olmo-3-7b-instruct:
-    input: 0.1
-    cache_read: 0.1
-    output: 0.2
-  allenai/olmo-3-7b-think:
-    input: 0.12
-    cache_read: 0.12
-    output: 0.2
   allenai/olmo-3.1-32b-instruct:
     input: 0.2
     cache_read: 0.2
@@ -270,8 +258,8 @@ models:
     output: 0.29
   deepseek/deepseek-v3.1-terminus:
     input: 0.21
-    cache_read: 0.105
-    output: 0.78
+    cache_read: 0.1300000002
+    output: 0.79
   deepseek/deepseek-v3.2:
     input: 0.26
     cache_read: 0.13
@@ -1323,9 +1311,9 @@ models:
     cache_read: 0.4
     output: 0.4
   tngtech/deepseek-r1t2-chimera:
-    input: 0.25
-    cache_read: 0.125
-    output: 0.85
+    input: 0.3
+    cache_read: 0.15
+    output: 1.1
   undi95/remm-slerp-l2-13b:
     input: 0.45
     cache_read: 0.45
