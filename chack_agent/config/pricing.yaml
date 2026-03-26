@@ -334,11 +334,6 @@ models:
     cache_read: 0.2
     cache_write: 0.375
     output: 12
-  google/gemini-3-pro-preview:
-    input: 2
-    cache_read: 0.2
-    cache_write: 0.375
-    output: 12
   google/gemini-3.1-flash-image-preview:
     input: 0.5
     cache_read: 0.5
@@ -1238,6 +1233,10 @@ models:
     input: 0.15
     cache_read: 0.15
     output: 0.58
+  reka/reka-edge:
+    input: 0.2
+    cache_read: 0.2
+    output: 0.2
   relace/relace-apply-3:
     input: 0.85
     cache_read: 0.85
