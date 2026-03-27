@@ -1234,9 +1234,9 @@ models:
     cache_read: 0.15
     output: 0.58
   reka/reka-edge:
-    input: 0.2
-    cache_read: 0.2
-    output: 0.2
+    input: 0.1
+    cache_read: 0.1
+    output: 0.1
   relace/relace-apply-3:
     input: 0.85
     cache_read: 0.85
