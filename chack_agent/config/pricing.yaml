@@ -429,6 +429,10 @@ models:
     input: 0.207
     cache_read: 0.0414
     output: 0.828
+  kwaipilot/kat-coder-pro-v2:
+    input: 0.3
+    cache_read: 0.06
+    output: 1.2
   liquid/lfm-2-24b-a2b:
     input: 0.03
     cache_read: 0.03
