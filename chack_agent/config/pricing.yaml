@@ -546,9 +546,9 @@ models:
     cache_read: 0.0290000007
     output: 0.95
   minimax/minimax-m2.5:
-    input: 0.2
-    cache_read: 0.1
-    output: 1.17
+    input: 0.19
+    cache_read: 0.095
+    output: 1.15
   minimax/minimax-m2.5:free:
     input: 0
     cache_read: 0
@@ -633,10 +633,6 @@ models:
     input: 0.03
     cache_read: 0.015
     output: 0.11
-  mistralai/mistral-small-3.1-24b-instruct:free:
-    input: 0
-    cache_read: 0
-    output: 0
   mistralai/mistral-small-3.2-24b-instruct:
     input: 0.075
     cache_read: 0.075
@@ -674,8 +670,8 @@ models:
     cache_read: 0.141
     output: 2
   moonshotai/kimi-k2.5:
-    input: 0.45
-    cache_read: 0.225
+    input: 0.42
+    cache_read: 0.21
     output: 2.2
   morph/morph-v3-fast:
     input: 0.8
@@ -1125,10 +1121,6 @@ models:
     input: 0.08
     cache_read: 0.04
     output: 0.24
-  qwen/qwen3-4b:free:
-    input: 0
-    cache_read: 0
-    output: 0
   qwen/qwen3-8b:
     input: 0.05
     cache_read: 0.05
