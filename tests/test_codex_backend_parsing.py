@@ -124,3 +124,23 @@ def test_gemini_mcp_env_allowlist_includes_local_vulnerability_store_path():
     )
 
     assert "AISEC_LOCAL_VULN_STORE_PATH" in env_vars
+
+
+def test_codex_backend_logs_codex_cli_failure_event():
+    module_ast = ast.parse(MODULE_PATH.read_text())
+    found = False
+
+    for node in ast.walk(module_ast):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Name) or func.id != "log_event":
+            continue
+        if not node.args:
+            continue
+        first_arg = node.args[0]
+        if isinstance(first_arg, ast.Constant) and first_arg.value == "codex_cli_failure":
+            found = True
+            break
+
+    assert found is True

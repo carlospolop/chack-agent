@@ -39,6 +39,13 @@ def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _preview_text(value: Any, *, max_chars: int = 2000) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "...[truncated]"
+
+
 def _resolve_codex_exec_cwd() -> str:
     candidate = str(os.environ.get("CHACK_EXEC_CWD", "") or "").strip()
     if candidate:
@@ -183,6 +190,17 @@ class CodexExecutor:
                 env=env,
             )
         except FileNotFoundError:
+            self._log_codex_failure(
+                "codex_cli_missing",
+                command=command,
+                cwd=exec_cwd,
+                details=(
+                    "ERROR: Codex CLI executable was not found.\n"
+                    f"Configured path: {self._codex_path!r}.\n"
+                    "Install Codex CLI (e.g. `npm i -g @openai/codex`) or set CODEX_PATH "
+                    "to the absolute executable path."
+                ),
+            )
             return (
                 (
                     "ERROR: Codex CLI executable was not found.\n"
@@ -194,6 +212,12 @@ class CodexExecutor:
                 _RawResult(raw_responses=[]),
             )
         except Exception as exc:
+            self._log_codex_failure(
+                "codex_cli_launch_failed",
+                command=command,
+                cwd=exec_cwd,
+                details=f"{type(exc).__name__}: {exc}",
+            )
             return (
                 f"ERROR: Failed to launch Codex CLI: {type(exc).__name__}: {exc}",
                 [],
@@ -217,6 +241,13 @@ class CodexExecutor:
         while True:
             if (time.monotonic() - started_at) > timeout_seconds:
                 process.kill()
+                self._log_codex_failure(
+                    "codex_cli_timeout",
+                    command=command,
+                    cwd=exec_cwd,
+                    details="\n".join(combined_output_lines).strip()
+                    or f"Timed out after {timeout_seconds}s with no captured output.",
+                )
                 return (
                     f"ERROR: Codex execution timed out after {timeout_seconds}s.",
                     steps,
@@ -331,6 +362,13 @@ class CodexExecutor:
         return_code = process.wait()
         if return_code != 0:
             details = "\n".join(combined_output_lines).strip() or "No error output captured."
+            self._log_codex_failure(
+                "codex_exec_failed",
+                command=command,
+                cwd=exec_cwd,
+                details=details,
+                return_code=return_code,
+            )
             result = (
                 f"ERROR: Codex exec failed (exit={return_code}).\n{details}",
                 steps,
@@ -349,6 +387,13 @@ class CodexExecutor:
         if not output and usage_payload is None and not steps:
             details = "\n".join(error_messages or combined_output_lines).strip() or (
                 "Codex CLI exited successfully but produced no response events."
+            )
+            self._log_codex_failure(
+                "codex_no_usable_response",
+                command=command,
+                cwd=exec_cwd,
+                details=details,
+                return_code=return_code,
             )
             result = (
                 f"ERROR: Codex exec produced no usable response.\n{details}",
@@ -395,6 +440,47 @@ class CodexExecutor:
         self._openai_api_key = self._fallback_openai_api_key
         self._remove_codex_auth_file()
         return self._run_codex_once(prompt, allow_api_key_fallback=False)
+
+    def _log_codex_failure(
+        self,
+        failure_type: str,
+        *,
+        command: list[str],
+        cwd: str,
+        details: str,
+        return_code: int | None = None,
+    ) -> None:
+        preview = _preview_text(details)
+        _LOGGER.error(
+            "Codex CLI failure: type=%s provider=%s model=%s return_code=%s thread_id=%s cwd=%s command=%s details=%s ts=%s",
+            failure_type,
+            self._model_provider,
+            self._model_name,
+            return_code,
+            self._thread_id or "",
+            cwd,
+            command,
+            preview,
+            _log_timestamp(),
+        )
+        try:
+            log_event(
+                "codex_cli_failure",
+                payload={
+                    "failure_type": failure_type,
+                    "provider": str(self._model_provider or ""),
+                    "model": str(self._model_name or ""),
+                    "return_code": return_code,
+                    "thread_id": str(self._thread_id or ""),
+                    "cwd": str(cwd or ""),
+                    "command": [str(part) for part in command],
+                    "details_preview": preview,
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _looks_like_auth_failure(output: str) -> bool:
