@@ -26,9 +26,15 @@ from ..live_cost_state import report_live_usage
 from ..openrouter_routing import get_openrouter_route
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
+    CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_TOOLS_APPEND_B64_ENV,
+    CHACK_TOOLS_APPEND_B64_PATH_ENV,
+    CHACK_TOOLS_CONFIG_JSON_PATH_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
+    CHACK_TOOLS_OVERRIDE_B64_PATH_ENV,
+    CHACK_INLINE_ENV_VALUE_MAX_CHARS,
     serialize_tools_payload,
+    write_payload_to_file,
 )
 
 
@@ -558,12 +564,34 @@ class CodexExecutor:
             env.setdefault("CODEX_API_KEY", self._openai_api_key)
         if self._codex_home:
             env["CODEX_HOME"] = self._codex_home
-        env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
-        env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
-        if self._serialized_tools_override_b64:
-            env[CHACK_TOOLS_OVERRIDE_B64_ENV] = self._serialized_tools_override_b64
-        if self._serialized_tools_append_b64:
-            env[CHACK_TOOLS_APPEND_B64_ENV] = self._serialized_tools_append_b64
+        self._set_env_or_file(
+            env,
+            "CHACK_TOOLS_CONFIG_JSON",
+            self._tools_config_json,
+            path_env_key=CHACK_TOOLS_CONFIG_JSON_PATH_ENV,
+            prefix="chack_tools_config_",
+        )
+        self._set_env_or_file(
+            env,
+            "CHACK_ALLOWED_TOOLS_JSON",
+            self._allowed_tools_json,
+            path_env_key=CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
+            prefix="chack_allowed_tools_",
+        )
+        self._set_env_or_file(
+            env,
+            CHACK_TOOLS_OVERRIDE_B64_ENV,
+            self._serialized_tools_override_b64,
+            path_env_key=CHACK_TOOLS_OVERRIDE_B64_PATH_ENV,
+            prefix="chack_tools_override_",
+        )
+        self._set_env_or_file(
+            env,
+            CHACK_TOOLS_APPEND_B64_ENV,
+            self._serialized_tools_append_b64,
+            path_env_key=CHACK_TOOLS_APPEND_B64_PATH_ENV,
+            prefix="chack_tools_append_",
+        )
         env["CHACK_MODEL_PROVIDER"] = self._model_provider
         env["CHACK_DEFAULT_MODEL"] = self._default_model
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
@@ -585,6 +613,27 @@ class CodexExecutor:
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
         return env
+
+    def _set_env_or_file(
+        self,
+        env: dict[str, str],
+        env_key: str,
+        value: str,
+        *,
+        path_env_key: str,
+        prefix: str,
+    ) -> None:
+        raw = str(value or "")
+        env.pop(env_key, None)
+        env.pop(path_env_key, None)
+        if not raw:
+            return
+        if len(raw) <= CHACK_INLINE_ENV_VALUE_MAX_CHARS:
+            env[env_key] = raw
+            return
+        payload_dir = self._codex_home or os.environ.get("CHACK_CODEX_HOME_BASE", "").strip() or ""
+        path = write_payload_to_file(raw, prefix=prefix, directory=payload_dir)
+        env[path_env_key] = path
 
     def _ensure_codex_home_and_config(self) -> None:
         if self._codex_home:

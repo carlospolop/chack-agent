@@ -23,6 +23,10 @@ from chack_agent.backends.codex_backend import build_executor as build_codex_exe
 from chack_agent.backends.claude_code_backend import build_executor as build_claude_executor
 from chack_agent.backends.gemini_cli_backend import build_executor as build_gemini_executor
 from chack_agent.backends.openai_compaction_backend import build_executor as build_openai_executor
+from chack_agent.backends.tool_payloads import (
+    CHACK_TOOLS_APPEND_B64_ENV,
+    CHACK_TOOLS_APPEND_B64_PATH_ENV,
+)
 
 
 def _make_config(provider: str, primary: str) -> ChackConfig:
@@ -238,6 +242,37 @@ class OpenRouterRoutingTests(unittest.TestCase):
 
         self.assertTrue(executor._use_codex_access_token)
         self.assertEqual(result, ("Focus on HTTP 401 handling and authorization bypasses", [], None))
+
+    def test_codex_executor_spills_large_tool_payloads_to_file(self) -> None:
+        config = _make_config("codex", "gpt-5.4")
+        config.credentials.openrouter_api_key = ""
+        config.credentials.codex_access_token = _fake_chatgpt_access_token()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            previous = os.environ.get("CHACK_CODEX_HOME_BASE")
+            os.environ["CHACK_CODEX_HOME_BASE"] = tmpdir
+            try:
+                executor = build_codex_executor(
+                    config,
+                    system_prompt="system",
+                    max_turns=2,
+                    memory_max_messages=10,
+                    memory_reset_to_messages=5,
+                )
+                executor._ensure_codex_home_and_config()
+                executor._serialized_tools_append_b64 = "x" * 30000
+
+                env = executor._build_env()
+
+                self.assertNotIn(CHACK_TOOLS_APPEND_B64_ENV, env)
+                payload_path = env.get(CHACK_TOOLS_APPEND_B64_PATH_ENV, "")
+                self.assertTrue(payload_path)
+                with open(payload_path, "r", encoding="utf-8") as handle:
+                    self.assertEqual(handle.read(), "x" * 30000)
+            finally:
+                if previous is None:
+                    os.environ.pop("CHACK_CODEX_HOME_BASE", None)
+                else:
+                    os.environ["CHACK_CODEX_HOME_BASE"] = previous
 
     def test_claude_backend_delegates_to_openrouter_backend_for_routed_models(self) -> None:
         config = _make_config("claude", "openrouter/anthropic/claude-3.7-sonnet")

@@ -20,9 +20,14 @@ from chack_tools.config import ToolsConfig
 from chack_tools.task_steps_manager_state import STORE, set_active_context
 from chack_agent.limit_event_state import emit_limit_reached
 from .tool_payloads import (
+    CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_TOOLS_APPEND_B64_ENV,
+    CHACK_TOOLS_APPEND_B64_PATH_ENV,
+    CHACK_TOOLS_CONFIG_JSON_PATH_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
+    CHACK_TOOLS_OVERRIDE_B64_PATH_ENV,
     deserialize_tools_payload,
+    read_payload_from_env_or_file,
 )
 
 
@@ -137,7 +142,13 @@ def _truncate_tool_output(value: str) -> str:
 
 
 def _load_toolset() -> list[Any]:
-    tools_cfg_raw = os.environ.get("CHACK_TOOLS_CONFIG_JSON", "{}").strip() or "{}"
+    tools_cfg_raw = (
+        read_payload_from_env_or_file(
+            os.environ.get("CHACK_TOOLS_CONFIG_JSON", ""),
+            os.environ.get(CHACK_TOOLS_CONFIG_JSON_PATH_ENV, ""),
+        ).strip()
+        or "{}"
+    )
     try:
         tools_cfg_data = json.loads(tools_cfg_raw)
     except json.JSONDecodeError:
@@ -164,8 +175,14 @@ def _load_toolset() -> list[Any]:
         except Exception:
             return default
 
-    serialized_tools_override_b64 = os.environ.get(CHACK_TOOLS_OVERRIDE_B64_ENV, "")
-    serialized_tools_append_b64 = os.environ.get(CHACK_TOOLS_APPEND_B64_ENV, "")
+    serialized_tools_override_b64 = read_payload_from_env_or_file(
+        os.environ.get(CHACK_TOOLS_OVERRIDE_B64_ENV, ""),
+        os.environ.get(CHACK_TOOLS_OVERRIDE_B64_PATH_ENV, ""),
+    )
+    serialized_tools_append_b64 = read_payload_from_env_or_file(
+        os.environ.get(CHACK_TOOLS_APPEND_B64_ENV, ""),
+        os.environ.get(CHACK_TOOLS_APPEND_B64_PATH_ENV, ""),
+    )
     override_tools = deserialize_tools_payload(serialized_tools_override_b64)
     append_tools = deserialize_tools_payload(serialized_tools_append_b64)
 
@@ -184,7 +201,10 @@ def _load_toolset() -> list[Any]:
         tester_max_turns=_to_int("CHACK_TESTER_MAX_TURNS", 50),
         subchack_max_turns=_to_int("CHACK_SUBCHACK_MAX_TURNS", 100),
     )
-    allowed_tools_raw = os.environ.get("CHACK_ALLOWED_TOOLS_JSON", "").strip()
+    allowed_tools_raw = read_payload_from_env_or_file(
+        os.environ.get("CHACK_ALLOWED_TOOLS_JSON", ""),
+        os.environ.get(CHACK_ALLOWED_TOOLS_JSON_PATH_ENV, ""),
+    ).strip()
     allowed_tools: set[str] | None = None
     if allowed_tools_raw:
         try:
