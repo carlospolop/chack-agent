@@ -757,7 +757,7 @@ class CodexExecutor:
                 f"env_vars = {env_vars_toml}",
                 "required = true",
                 "startup_timeout_sec = 30",
-                "tool_timeout_sec = 120",
+                f"tool_timeout_sec = {int(os.environ.get('CHACK_MCP_TOOL_TIMEOUT_SECONDS', '3600') or '3600')}",
             ]
         )
         if self._playwright_mcp_enabled():
