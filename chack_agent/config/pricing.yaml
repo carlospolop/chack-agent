@@ -397,6 +397,14 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  google/lyria-3-clip-preview:
+    input: 0
+    cache_read: 0
+    output: 0
+  google/lyria-3-pro-preview:
+    input: 0
+    cache_read: 0
+    output: 0
   gryphe/mythomax-l2-13b:
     input: 0.06
     cache_read: 0.06
@@ -425,10 +433,6 @@ models:
     input: 2.5
     cache_read: 2.5
     output: 10
-  kwaipilot/kat-coder-pro:
-    input: 0.207
-    cache_read: 0.0414
-    output: 0.828
   kwaipilot/kat-coder-pro-v2:
     input: 0.3
     cache_read: 0.06
@@ -1225,6 +1229,10 @@ models:
     input: 0.26
     cache_read: 0.26
     output: 1.56
+  qwen/qwen3.6-plus-preview:free:
+    input: 0
+    cache_read: 0
+    output: 0
   qwen/qwq-32b:
     input: 0.15
     cache_read: 0.15
@@ -1233,6 +1241,10 @@ models:
     input: 0.1
     cache_read: 0.1
     output: 0.1
+  rekaai/reka-flash-3:
+    input: 0.1
+    cache_read: 0.1
+    output: 0.2
   relace/relace-apply-3:
     input: 0.85
     cache_read: 0.85
@@ -1263,7 +1275,7 @@ models:
     output: 0.75
   stepfun/step-3.5-flash:
     input: 0.1
-    cache_read: 0.02
+    cache_read: 0.1
     output: 0.3
   stepfun/step-3.5-flash:free:
     input: 0
