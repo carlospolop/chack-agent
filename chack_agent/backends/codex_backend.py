@@ -677,6 +677,7 @@ class CodexExecutor:
             "AISEC_LOCAL_VULN_STORE_PATH",
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
+            "CODEX_ACCESS_TOKEN",
             "BRAVE_API_KEY",
             "SERPAPI_API_KEY",
             "FORUMSCOUT_API_KEY",
