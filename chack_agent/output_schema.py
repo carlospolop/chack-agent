@@ -37,6 +37,26 @@ def _extract_json_from_thinking_output(text: str) -> str:
     return stripped  # empty string if nothing usable found
 
 
+def _strip_extra_properties(data: Any, schema: dict[str, Any]) -> Any:
+    """Recursively remove keys not declared in a JSON schema with additionalProperties=False.
+
+    Open-weight models often append extra fields (e.g. 'environment_context')
+    that are not in the declared schema.  Rather than failing validation, prune
+    them so that strict jsonschema validation can succeed.
+    """
+    if not isinstance(data, dict) or not isinstance(schema, dict):
+        return data
+    if schema.get("additionalProperties") is not False:
+        return data
+    allowed = set(schema.get("properties", {}).keys())
+    nested = schema.get("properties", {})
+    return {
+        k: _strip_extra_properties(v, nested.get(k, {}))
+        for k, v in data.items()
+        if k in allowed
+    }
+
+
 def _normalize_root_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
     if "type" in schema:
         return schema
@@ -92,7 +112,26 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
         try:
             import jsonschema  # type: ignore
 
-            jsonschema.validate(instance=data, schema=self._schema)
+            try:
+                jsonschema.validate(instance=data, schema=self._schema)
+            except jsonschema.ValidationError as exc:
+                # Open-weight models sometimes add extra fields not in the
+                # schema.  When the only issue is additionalProperties, strip
+                # the unexpected keys and re-validate instead of failing.
+                if "additional properties are not allowed" in str(exc).lower():
+                    data = _strip_extra_properties(data, self._schema)
+                    try:
+                        jsonschema.validate(instance=data, schema=self._schema)
+                    except jsonschema.ValidationError as exc2:
+                        raise ModelBehaviorError(
+                            f"Output did not match schema: {exc2}"
+                        ) from exc2
+                else:
+                    raise ModelBehaviorError(
+                        f"Output did not match schema: {exc}"
+                    ) from exc
+        except ModelBehaviorError:
+            raise
         except ModuleNotFoundError:
             # Best-effort validation when jsonschema isn't installed.
             pass
