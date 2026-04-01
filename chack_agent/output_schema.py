@@ -1,8 +1,40 @@
 import json
+import re
 from typing import Any, Optional
 
 from agents.agent_output import AgentOutputSchemaBase, ensure_strict_json_schema
 from agents.exceptions import ModelBehaviorError
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    """Remove <think>...</think> blocks emitted by thinking models (e.g. Qwen3).
+
+    Returns the remaining text stripped of leading/trailing whitespace.
+    """
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+def _extract_json_from_thinking_output(text: str) -> str:
+    """Strip <think> blocks and return the remaining text.
+
+    If nothing remains after stripping (i.e. the model placed its entire answer
+    inside a <think> block), fall back to finding the last JSON object or array
+    within the thinking block itself.
+    """
+    stripped = _strip_thinking_blocks(text)
+    if stripped:
+        return stripped
+
+    # Fallback: extract JSON from inside the <think> block
+    think_match = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
+    if think_match:
+        inner = think_match.group(1).strip()
+        # Return the last JSON object/array found (model tends to put it last)
+        candidates = list(re.finditer(r"\{[\s\S]*\}|\[[\s\S]*\]", inner))
+        if candidates:
+            return candidates[-1].group(0).strip()
+
+    return stripped  # empty string if nothing usable found
 
 
 def _normalize_root_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -47,6 +79,11 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
         return self._strict
 
     def validate_json(self, json_str: str) -> Any:
+        # Thinking models (e.g. qwen3-*-thinking-*) wrap their reasoning in
+        # <think>...</think> blocks before the actual JSON answer.  Strip those
+        # blocks so that json.loads sees only the structured output.
+        if json_str and "<think>" in json_str:
+            json_str = _extract_json_from_thinking_output(json_str)
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError as exc:
