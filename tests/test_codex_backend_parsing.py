@@ -144,3 +144,33 @@ def test_codex_backend_logs_codex_cli_failure_event():
             break
 
     assert found is True
+
+
+def test_codex_backend_does_not_pass_cd_to_exec_resume():
+    module_ast = ast.parse(MODULE_PATH.read_text())
+
+    for node in ast.walk(module_ast):
+        if not isinstance(node, ast.FunctionDef) or node.name != "_build_command":
+            continue
+        for if_node in [child for child in ast.walk(node) if isinstance(child, ast.If)]:
+            test = if_node.test
+            if not isinstance(test, ast.Attribute):
+                continue
+            if not isinstance(test.value, ast.Name) or test.value.id != "self":
+                continue
+            if test.attr != "_thread_id":
+                continue
+
+            found_resume = False
+            found_cd = False
+            for child in ast.walk(if_node):
+                if isinstance(child, ast.Constant) and child.value == "resume":
+                    found_resume = True
+                if isinstance(child, ast.Constant) and child.value == "--cd":
+                    found_cd = True
+
+            assert found_resume is True
+            assert found_cd is False
+            return
+
+    raise AssertionError("Could not find _thread_id resume branch in _build_command")

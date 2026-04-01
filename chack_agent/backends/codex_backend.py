@@ -512,8 +512,6 @@ class CodexExecutor:
                 "--json",
                 "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox",
-                "--cd",
-                exec_cwd,
             ]
             args.extend(
                 [
