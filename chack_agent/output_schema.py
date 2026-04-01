@@ -37,6 +37,58 @@ def _extract_json_from_thinking_output(text: str) -> str:
     return stripped  # empty string if nothing usable found
 
 
+def _strip_markdown_fences(text: str) -> str:
+    """Strip leading/trailing markdown code fences from a string.
+
+    Models often wrap their JSON output in ```json...``` or ```...``` blocks.
+    This function removes those fences so json.loads can parse the content.
+    """
+    stripped = text.strip()
+    # Match opening fence: ```json or ``` (with optional language tag)
+    fence_match = re.match(r'^`{3,}[a-zA-Z0-9]*\s*', stripped)
+    if fence_match:
+        stripped = stripped[fence_match.end():]
+        # Remove closing fence
+        stripped = re.sub(r'\s*`{3,}\s*$', '', stripped)
+    return stripped.strip()
+
+
+def _filter_invalid_array_items(data: Any, schema: dict[str, Any]) -> Any:
+    """Remove array items that are missing required properties.
+
+    Open-weight models sometimes produce array elements that are missing one
+    or more required fields.  Rather than failing the whole output, drop the
+    offending items so the rest of the data can be used.
+    """
+    if not isinstance(data, dict) or not isinstance(schema, dict):
+        return data
+
+    props = schema.get("properties", {})
+    result = dict(data)
+    for key, prop_schema in props.items():
+        if key not in result:
+            continue
+        value = result[key]
+        if prop_schema.get("type") != "array" or not isinstance(value, list):
+            continue
+        item_schema = prop_schema.get("items", {})
+        if not isinstance(item_schema, dict):
+            continue
+        required_fields = set(item_schema.get("required", []))
+        if not required_fields:
+            continue
+        filtered = []
+        for item in value:
+            if not isinstance(item, dict):
+                filtered.append(item)
+                continue
+            if required_fields.issubset(item.keys()):
+                filtered.append(item)
+            # else: silently drop the item that's missing required fields
+        result[key] = filtered
+    return result
+
+
 def _strip_extra_properties(data: Any, schema: dict[str, Any]) -> Any:
     """Recursively remove keys not declared in a JSON schema with additionalProperties=False.
 
@@ -163,6 +215,10 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
         # blocks so that json.loads sees only the structured output.
         if json_str and "<think>" in json_str:
             json_str = _extract_json_from_thinking_output(json_str)
+        # Some models wrap their JSON answer in markdown code fences
+        # (e.g. ```json\n{...}\n```).  Strip the fences before parsing.
+        if json_str and json_str.lstrip().startswith("`"):
+            json_str = _strip_markdown_fences(json_str)
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError as exc:
@@ -184,6 +240,10 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
                     # Model returned wrong type for a field (e.g. a list where
                     # a string is expected).  Try to coerce the values.
                     data = _coerce_types(data, self._schema)
+                elif "is a required property" in err_msg:
+                    # Model returned array items missing required fields.
+                    # Drop the offending items rather than failing entirely.
+                    data = _filter_invalid_array_items(data, self._schema)
                 else:
                     raise ModelBehaviorError(
                         f"Output did not match schema: {exc}"
@@ -193,8 +253,14 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
                 try:
                     jsonschema.validate(instance=data, schema=self._schema)
                 except jsonschema.ValidationError as exc2:
-                    # One last attempt: apply both fixes together.
-                    data = _coerce_types(_strip_extra_properties(data, self._schema), self._schema)
+                    # One last attempt: apply all fixes together.
+                    data = _coerce_types(
+                        _filter_invalid_array_items(
+                            _strip_extra_properties(data, self._schema),
+                            self._schema,
+                        ),
+                        self._schema,
+                    )
                     try:
                         jsonschema.validate(instance=data, schema=self._schema)
                     except jsonschema.ValidationError as exc3:
