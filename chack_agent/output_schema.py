@@ -95,18 +95,34 @@ def _strip_extra_properties(data: Any, schema: dict[str, Any]) -> Any:
     Open-weight models often append extra fields (e.g. 'environment_context')
     that are not in the declared schema.  Rather than failing validation, prune
     them so that strict jsonschema validation can succeed.
+
+    Also recurses into array items so that properties like 'sensitive_actions'
+    whose item schema has additionalProperties=false are cleaned up too.
     """
-    if not isinstance(data, dict) or not isinstance(schema, dict):
+    if not isinstance(schema, dict):
         return data
-    if schema.get("additionalProperties") is not False:
+
+    if isinstance(data, list):
+        # Recurse into each array element using the items sub-schema.
+        item_schema = schema.get("items", {})
+        if isinstance(item_schema, dict):
+            return [_strip_extra_properties(elem, item_schema) for elem in data]
         return data
-    allowed = set(schema.get("properties", {}).keys())
-    nested = schema.get("properties", {})
-    return {
-        k: _strip_extra_properties(v, nested.get(k, {}))
-        for k, v in data.items()
-        if k in allowed
-    }
+
+    if not isinstance(data, dict):
+        return data
+
+    props = schema.get("properties", {})
+    result = {}
+    for k, v in data.items():
+        prop_schema = props.get(k, {})
+        if isinstance(prop_schema, dict) and prop_schema.get("type") == "array" and isinstance(v, list):
+            # Always recurse into array-typed properties regardless of additionalProperties flag.
+            result[k] = _strip_extra_properties(v, prop_schema)
+        elif schema.get("additionalProperties") is not False or k in props:
+            result[k] = _strip_extra_properties(v, prop_schema)
+        # else: key is not in props and additionalProperties=false → drop it
+    return result
 
 
 def _coerce_types(data: Any, schema: dict[str, Any]) -> Any:
