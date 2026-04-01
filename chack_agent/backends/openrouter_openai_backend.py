@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from openai import AsyncOpenAI, BadRequestError, RateLimitError
+from openai import AsyncOpenAI, APIStatusError, BadRequestError, RateLimitError
 from agents import (
     Agent,
     ModelSettings,
@@ -144,6 +144,25 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
         return name
 
     @staticmethod
+    def _is_output_schema_tools_conflict(exc: Exception) -> bool:
+        """Return True when the provider rejected a response_format+tools combination.
+
+        Some providers (e.g. Friendli via OpenRouter) do not support structured
+        output (response_format / JSON schema) together with tool calls in the same
+        request.  When this happens we retry without the output_schema so the model
+        can still produce JSON following the system-prompt instructions; the SDK's
+        turn resolution will call output_schema.validate_json() on the plain-text
+        result and validate/parse it as usual.
+        """
+        if not isinstance(exc, APIStatusError):
+            return False
+        status = getattr(exc, "status_code", 0)
+        if status not in (400, 422):
+            return False
+        msg = str(exc).lower()
+        return ("response_format" in msg or "response format" in msg) and "tool" in msg
+
+    @staticmethod
     def _is_sequence_recoverable_error(exc: Exception) -> bool:
         err = str(exc).lower()
         return (
@@ -205,8 +224,8 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
         conversation_id: str | None = None,
         prompt=None,
     ):
+        prepared_input = self._prepare_input_items(input, previous_response_id)
         try:
-            prepared_input = self._prepare_input_items(input, previous_response_id)
             response = await self._get_response_with_retries(
                 system_instructions=system_instructions,
                 input=prepared_input,
@@ -239,6 +258,29 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
                 handoffs=handoffs,
                 tracing=tracing,
                 previous_response_id=None,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
+        except APIStatusError as exc:
+            # Some providers (e.g. Friendli) do not support response_format when
+            # tools are also specified.  Drop the output_schema from the API call
+            # and retry; the model will still produce JSON per the system prompt
+            # and the SDK runner will validate it via output_schema.validate_json().
+            if not (self._is_output_schema_tools_conflict(exc) and output_schema is not None and tools):
+                raise
+            _LOGGER.warning(
+                "Provider rejected response_format+tools combination (%s); retrying without output_schema.",
+                exc,
+            )
+            response = await self._get_response_with_retries(
+                system_instructions=system_instructions,
+                input=prepared_input,
+                model_settings=model_settings,
+                tools=tools,
+                output_schema=None,
+                handoffs=handoffs,
+                tracing=tracing,
+                previous_response_id=previous_response_id,
                 conversation_id=conversation_id,
                 prompt=prompt,
             )
