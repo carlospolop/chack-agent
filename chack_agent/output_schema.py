@@ -57,6 +57,65 @@ def _strip_extra_properties(data: Any, schema: dict[str, Any]) -> Any:
     }
 
 
+def _coerce_types(data: Any, schema: dict[str, Any]) -> Any:
+    """Best-effort coercion of values that don't match the declared JSON schema types.
+
+    Open-weight models occasionally return a list where a string is expected
+    (e.g. common_vulns as ['...', '...'] instead of a single string).  Rather
+    than failing hard, coerce the value to the expected type when possible.
+
+    Handles: list/dict/number/bool → string  |  string → int/float/bool/list
+    """
+    if not isinstance(schema, dict) or not isinstance(data, dict):
+        return data
+
+    props = schema.get("properties", {})
+    result = dict(data)
+    for key, prop_schema in props.items():
+        if key not in result:
+            continue
+        value = result[key]
+        expected_type = prop_schema.get("type")
+        if expected_type is None:
+            continue
+
+        if expected_type == "string" and not isinstance(value, str):
+            if isinstance(value, list):
+                result[key] = "\n".join(str(v) for v in value)
+            elif isinstance(value, dict):
+                result[key] = json.dumps(value, ensure_ascii=False)
+            else:
+                result[key] = str(value)
+
+        elif expected_type in ("integer", "number") and isinstance(value, str):
+            try:
+                result[key] = int(value) if expected_type == "integer" else float(value)
+            except (ValueError, TypeError):
+                pass
+
+        elif expected_type == "array" and isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    result[key] = parsed
+            except (ValueError, TypeError):
+                result[key] = [value]
+
+        elif expected_type == "object" and isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    result[key] = parsed
+            except (ValueError, TypeError):
+                pass
+
+        # Recurse into nested objects
+        if expected_type == "object" and isinstance(result[key], dict):
+            result[key] = _coerce_types(result[key], prop_schema)
+
+    return result
+
+
 def _normalize_root_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
     if "type" in schema:
         return schema
@@ -118,18 +177,30 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
                 # Open-weight models sometimes add extra fields not in the
                 # schema.  When the only issue is additionalProperties, strip
                 # the unexpected keys and re-validate instead of failing.
-                if "additional properties are not allowed" in str(exc).lower():
+                err_msg = str(exc).lower()
+                if "additional properties are not allowed" in err_msg:
                     data = _strip_extra_properties(data, self._schema)
-                    try:
-                        jsonschema.validate(instance=data, schema=self._schema)
-                    except jsonschema.ValidationError as exc2:
-                        raise ModelBehaviorError(
-                            f"Output did not match schema: {exc2}"
-                        ) from exc2
+                elif "is not of type" in err_msg:
+                    # Model returned wrong type for a field (e.g. a list where
+                    # a string is expected).  Try to coerce the values.
+                    data = _coerce_types(data, self._schema)
                 else:
                     raise ModelBehaviorError(
                         f"Output did not match schema: {exc}"
                     ) from exc
+
+                # Re-validate after the fix attempt.  If it still fails, raise.
+                try:
+                    jsonschema.validate(instance=data, schema=self._schema)
+                except jsonschema.ValidationError as exc2:
+                    # One last attempt: apply both fixes together.
+                    data = _coerce_types(_strip_extra_properties(data, self._schema), self._schema)
+                    try:
+                        jsonschema.validate(instance=data, schema=self._schema)
+                    except jsonschema.ValidationError as exc3:
+                        raise ModelBehaviorError(
+                            f"Output did not match schema: {exc3}"
+                        ) from exc3
         except ModelBehaviorError:
             raise
         except ModuleNotFoundError:
