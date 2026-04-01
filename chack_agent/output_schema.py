@@ -37,20 +37,38 @@ def _extract_json_from_thinking_output(text: str) -> str:
     return stripped  # empty string if nothing usable found
 
 
-def _strip_markdown_fences(text: str) -> str:
-    """Strip leading/trailing markdown code fences from a string.
+def _extract_json_from_text(text: str) -> str:
+    """Best-effort extraction of a JSON value from arbitrary free-form text.
 
-    Models often wrap their JSON output in ```json...``` or ```...``` blocks.
-    This function removes those fences so json.loads can parse the content.
+    Models often produce output like:
+      - JSON wrapped in ```json ... ``` code fences
+      - Narrative sentences before or after the fence / JSON object
+      - A mix of thinking prose and JSON embedded anywhere in the reply
+
+    Strategy (in order):
+    1. Entire text is a single code fence  → return its content.
+    2. First code fence found anywhere     → return its content.
+    3. First '{' or '[' found              → return everything from there.
     """
     stripped = text.strip()
-    # Match opening fence: ```json or ``` (with optional language tag)
-    fence_match = re.match(r'^`{3,}[a-zA-Z0-9]*\s*', stripped)
-    if fence_match:
-        stripped = stripped[fence_match.end():]
-        # Remove closing fence
-        stripped = re.sub(r'\s*`{3,}\s*$', '', stripped)
-    return stripped.strip()
+    if not stripped:
+        return stripped
+
+    # 1 & 2: markdown code fences (full wrap or anywhere in text)
+    fence_re = re.compile(r'`{3,}[a-zA-Z0-9]*[ \t]*\n?([\s\S]*?)\n?`{3,}', re.DOTALL)
+    m = fence_re.search(stripped)
+    if m:
+        candidate = m.group(1).strip()
+        if candidate:
+            return candidate
+
+    # 3: find first JSON object or array
+    for ch in ('{', '['):
+        idx = stripped.find(ch)
+        if idx >= 0:
+            return stripped[idx:]
+
+    return stripped
 
 
 def _filter_invalid_array_items(data: Any, schema: dict[str, Any]) -> Any:
@@ -231,14 +249,17 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
         # blocks so that json.loads sees only the structured output.
         if json_str and "<think>" in json_str:
             json_str = _extract_json_from_thinking_output(json_str)
-        # Some models wrap their JSON answer in markdown code fences
-        # (e.g. ```json\n{...}\n```).  Strip the fences before parsing.
-        if json_str and json_str.lstrip().startswith("`"):
-            json_str = _strip_markdown_fences(json_str)
+        # First attempt: parse as-is (handles clean JSON with no wrapping).
         try:
             data = json.loads(json_str)
-        except json.JSONDecodeError as exc:
-            raise ModelBehaviorError(f"Invalid JSON output: {exc}") from exc
+        except json.JSONDecodeError:
+            # Second attempt: model may have wrapped JSON in markdown fences or
+            # added narrative text before/after – extract the JSON portion and retry.
+            extracted = _extract_json_from_text(json_str or "")
+            try:
+                data = json.loads(extracted)
+            except json.JSONDecodeError as exc:
+                raise ModelBehaviorError(f"Invalid JSON output: {exc}") from exc
 
         try:
             import jsonschema  # type: ignore
