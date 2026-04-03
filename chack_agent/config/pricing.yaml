@@ -153,9 +153,9 @@ models:
     cache_read: 0
     output: 0
   arcee-ai/trinity-large-thinking:
-    input: 0.25
-    cache_read: 0.06
-    output: 0.9
+    input: 0.22
+    cache_read: 0.22
+    output: 0.85
   arcee-ai/trinity-mini:
     input: 0.045
     cache_read: 0.045
@@ -401,6 +401,10 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  google/gemma-4-31b-it:
+    input: 0.14
+    cache_read: 0.14
+    output: 0.4
   google/lyria-3-clip-preview:
     input: 0
     cache_read: 0
@@ -445,10 +449,6 @@ models:
     input: 0.03
     cache_read: 0.03
     output: 0.12
-  liquid/lfm-2.2-6b:
-    input: 0.01
-    cache_read: 0.01
-    output: 0.02
   liquid/lfm-2.5-1.2b-instruct:free:
     input: 0
     cache_read: 0
@@ -457,10 +457,6 @@ models:
     input: 0
     cache_read: 0
     output: 0
-  liquid/lfm2-8b-a1b:
-    input: 0.01
-    cache_read: 0.01
-    output: 0.02
   mancer/weaver:
     input: 0.75
     cache_read: 0.75
@@ -554,8 +550,8 @@ models:
     cache_read: 0.0290000007
     output: 0.95
   minimax/minimax-m2.5:
-    input: 0.12
-    cache_read: 0.06
+    input: 0.118
+    cache_read: 0.059
     output: 1
   minimax/minimax-m2.5:free:
     input: 0
@@ -678,9 +674,9 @@ models:
     cache_read: 0.141
     output: 2
   moonshotai/kimi-k2.5:
-    input: 0.4
-    cache_read: 0.2
-    output: 1.99
+    input: 0.3827
+    cache_read: 0.19135
+    output: 1.909
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
@@ -1233,7 +1229,7 @@ models:
     input: 0.26
     cache_read: 0.26
     output: 1.56
-  qwen/qwen3.6-plus-preview:free:
+  qwen/qwen3.6-plus:free:
     input: 0
     cache_read: 0
     output: 0
