@@ -447,9 +447,20 @@ class CopilotCliExecutor:
         env = {k: v for k, v in os.environ.items() if v is not None}
         env["PYTHONUNBUFFERED"] = "1"
 
-        # Copilot CLI auth
+        # Copilot CLI auth — classic PATs (ghp_) are rejected by copilot CLI,
+        # so only pass the token when it is NOT a classic PAT.
         if self._copilot_github_token:
-            env["COPILOT_GITHUB_TOKEN"] = self._copilot_github_token
+            if self._copilot_github_token.startswith("ghp_"):
+                _LOGGER.warning(
+                    "Classic PAT (ghp_) detected — not setting COPILOT_GITHUB_TOKEN. "
+                    "Copilot CLI requires a fine-grained PAT or OAuth token."
+                )
+                # Remove any classic-PAT env vars so copilot falls through to
+                # its own auth (e.g. `copilot login` or stored OAuth session).
+                for key in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+                    env.pop(key, None)
+            else:
+                env["COPILOT_GITHUB_TOKEN"] = self._copilot_github_token
 
         if self._copilot_home:
             env["COPILOT_HOME"] = self._copilot_home
