@@ -36,7 +36,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         config = load_config(path)
 
         self.assertEqual(config.model.provider, "codex")
-        self.assertEqual(config.model.primary, "gpt-5-mini")
+        self.assertEqual(config.model.primary, "gpt-5.4-mini")
         self.assertEqual(config.credentials.codex_access_token, "codex-access-token")
 
     def test_resolve_backend_alias_prefers_codex_access_then_openai_then_anthropic_then_openrouter(self) -> None:
@@ -78,11 +78,11 @@ class ModelAliasResolutionTests(unittest.TestCase):
     def test_resolve_model_alias_uses_provider_specific_defaults(self) -> None:
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", provider="codex"),
-            "gpt-5-mini",
+            "gpt-5.4-mini",
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", provider="claude"),
-            "claude-sonnet-4-6",
+            "claude-sonnet-4.6",
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", provider="openrouter"),
@@ -96,7 +96,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", anthropic_api_key="anth-test"),
-            "claude-sonnet-4-6",
+            "claude-sonnet-4.6",
         )
         self.assertEqual(
             resolve_model_alias("BEST_CHEAPEST", openrouter_api_key="or-test"),
@@ -170,7 +170,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         config = load_config(path)
 
         self.assertEqual(config.model.provider, "claude")
-        self.assertEqual(config.model.primary, "claude-sonnet-4-6")
+        self.assertEqual(config.model.primary, "claude-sonnet-4.6")
 
     def test_resolve_api_key_type_prefers_codex_token_for_codex_provider(self) -> None:
         config_yaml = textwrap.dedent(
