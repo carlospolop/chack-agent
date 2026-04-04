@@ -152,6 +152,10 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  arcee-ai/trinity-large-thinking:
+    input: 0.22
+    cache_read: 0.22
+    output: 0.85
   arcee-ai/trinity-mini:
     input: 0.045
     cache_read: 0.045
@@ -397,6 +401,14 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  google/gemma-4-26b-a4b-it:
+    input: 0.13
+    cache_read: 0.13
+    output: 0.4
+  google/gemma-4-31b-it:
+    input: 0.14
+    cache_read: 0.14
+    output: 0.4
   google/lyria-3-clip-preview:
     input: 0
     cache_read: 0
@@ -441,10 +453,6 @@ models:
     input: 0.03
     cache_read: 0.03
     output: 0.12
-  liquid/lfm-2.2-6b:
-    input: 0.01
-    cache_read: 0.01
-    output: 0.02
   liquid/lfm-2.5-1.2b-instruct:free:
     input: 0
     cache_read: 0
@@ -453,10 +461,6 @@ models:
     input: 0
     cache_read: 0
     output: 0
-  liquid/lfm2-8b-a1b:
-    input: 0.01
-    cache_read: 0.01
-    output: 0.02
   mancer/weaver:
     input: 0.75
     cache_read: 0.75
@@ -550,9 +554,9 @@ models:
     cache_read: 0.0290000007
     output: 0.95
   minimax/minimax-m2.5:
-    input: 0.16
-    cache_read: 0.08
-    output: 1.1
+    input: 0.118
+    cache_read: 0.059
+    output: 0.99
   minimax/minimax-m2.5:free:
     input: 0
     cache_read: 0
@@ -674,9 +678,9 @@ models:
     cache_read: 0.141
     output: 2
   moonshotai/kimi-k2.5:
-    input: 0.42
-    cache_read: 0.21
-    output: 2.2
+    input: 0.3827
+    cache_read: 0.1935
+    output: 1.72
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
@@ -1229,7 +1233,7 @@ models:
     input: 0.26
     cache_read: 0.26
     output: 1.56
-  qwen/qwen3.6-plus-preview:free:
+  qwen/qwen3.6-plus:free:
     input: 0
     cache_read: 0
     output: 0
@@ -1237,7 +1241,7 @@ models:
     input: 0.15
     cache_read: 0.15
     output: 0.58
-  reka/reka-edge:
+  rekaai/reka-edge:
     input: 0.1
     cache_read: 0.1
     output: 0.1
@@ -1414,6 +1418,10 @@ models:
     cache_read: 0.72
     output: 2.3
   z-ai/glm-5-turbo:
+    input: 1.2
+    cache_read: 0.24
+    output: 4
+  z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
     output: 4
