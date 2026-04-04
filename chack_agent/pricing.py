@@ -159,6 +159,7 @@ def _resolve_model_lookup(pricing: PricingTable, model: str) -> Optional[str]:
     ]
     if len(stripped_matches) == 1:
         return stripped_matches[0]
+
     return None
 
 

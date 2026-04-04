@@ -762,6 +762,12 @@ def build_executor(
         or os.environ.get("GH_TOKEN", "").strip()
         or os.environ.get("GITHUB_TOKEN", "").strip()
     )
+    if not copilot_github_token:
+        raise ValueError(
+            "Copilot backend requires a GitHub token. "
+            "Set COPILOT_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN, "
+            "or configure credentials.copilot_github_token in the config."
+        )
 
     configured_copilot_path = os.environ.get("COPILOT_CLI_PATH", "").strip() or "copilot"
     copilot_cli_path = shutil.which(configured_copilot_path) or configured_copilot_path
