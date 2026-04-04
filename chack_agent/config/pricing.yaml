@@ -401,6 +401,10 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  google/gemma-4-26b-a4b-it:
+    input: 0.13
+    cache_read: 0.13
+    output: 0.4
   google/gemma-4-31b-it:
     input: 0.14
     cache_read: 0.14
@@ -552,7 +556,7 @@ models:
   minimax/minimax-m2.5:
     input: 0.118
     cache_read: 0.059
-    output: 1
+    output: 0.99
   minimax/minimax-m2.5:free:
     input: 0
     cache_read: 0
@@ -675,8 +679,8 @@ models:
     output: 2
   moonshotai/kimi-k2.5:
     input: 0.3827
-    cache_read: 0.19135
-    output: 1.909
+    cache_read: 0.1935
+    output: 1.72
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
