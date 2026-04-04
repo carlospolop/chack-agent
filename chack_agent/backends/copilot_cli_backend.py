@@ -429,7 +429,7 @@ class CopilotCliExecutor:
             self._copilot_cli_path,
             "-p",
             prompt,
-            "--allow-all-tools",
+            "--allow-all",
             "--output-format",
             "json",
         ]
