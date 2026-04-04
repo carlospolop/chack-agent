@@ -107,6 +107,7 @@ class CredentialsConfig:
     gemini_api_key: str = ""
     aws_profile: str = ""
     aws_credentials_file: str = ""
+    copilot_github_token: str = ""
 
 
 @dataclass
@@ -162,6 +163,15 @@ def resolve_api_key_type(config: ChackConfig) -> str:
     if provider in {"claude", "claude-code", "claude_code"}:
         if anthropic_api_key:
             return "anthropic"
+    if provider in {"copilot", "copilot-cli", "copilot_cli", "gh-copilot", "gh_copilot"}:
+        copilot_token = (
+            str(getattr(credentials, "copilot_github_token", "") or "").strip()
+            or os.environ.get("COPILOT_GITHUB_TOKEN", "").strip()
+            or os.environ.get("GH_TOKEN", "").strip()
+            or os.environ.get("GITHUB_TOKEN", "").strip()
+        )
+        if copilot_token:
+            return "copilot"
     if provider in {"openrouter", "langgraph"}:
         if openrouter_api_key:
             return "openrouter"
@@ -193,6 +203,8 @@ def resolve_backend_type(config: ChackConfig) -> str:
         return "gemini"
     if provider in {"claude", "claude-code", "claude_code"}:
         return "claude"
+    if provider in {"copilot", "copilot-cli", "copilot_cli", "gh-copilot", "gh_copilot"}:
+        return "copilot"
     raise ValueError(f"Unsupported model.provider value: {provider!r}")
 
 

@@ -10,6 +10,7 @@ from .openai_compaction_backend import build_executor as build_openai_compaction
 from .openrouter_openai_backend import build_executor as build_openrouter_executor
 from .gemini_cli_backend import build_executor as build_gemini_executor
 from .claude_code_backend import build_executor as build_claude_executor
+from .copilot_cli_backend import build_executor as build_copilot_executor
 from ..openrouter_routing import get_openrouter_route
 
 
@@ -51,6 +52,8 @@ def build_executor(config: ChackConfig, **kwargs: Any):
         return _call_executor_with_supported_kwargs(build_gemini_executor, config, **kwargs)
     if backend_type == "claude":
         return _call_executor_with_supported_kwargs(build_claude_executor, config, **kwargs)
+    if backend_type == "copilot":
+        return _call_executor_with_supported_kwargs(build_copilot_executor, config, **kwargs)
     raise ValueError(f"Unsupported backend resolved from model.provider: {backend_type}")
 
 __all__ = ["build_executor"]
