@@ -226,6 +226,7 @@ class CopilotCliExecutor:
             )
 
         output_parts: list[str] = []
+        delta_parts: list[str] = []
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
         raw_responses: list[Any] = []
@@ -301,12 +302,39 @@ class CopilotCliExecutor:
                 # -- Message deltas (ephemeral) ----------------------------
 
                 if event_type == "assistant.message_delta":
+                    delta_text = ""
+                    raw_delta = data.get("content") or data.get("delta") or data.get("text")
+                    if isinstance(raw_delta, str):
+                        delta_text = raw_delta
+                    elif isinstance(raw_delta, dict):
+                        delta_text = str(raw_delta.get("text") or raw_delta.get("content") or "")
+                    elif isinstance(raw_delta, list):
+                        for part in raw_delta:
+                            if isinstance(part, dict):
+                                delta_text += str(part.get("text") or part.get("content") or "")
+                            elif isinstance(part, str):
+                                delta_text += part
+                    if delta_text:
+                        delta_parts.append(delta_text)
                     continue
 
                 # -- Complete assistant message ----------------------------
 
                 if event_type == "assistant.message":
-                    content = str(data.get("content") or "").strip()
+                    raw_content = data.get("content")
+                    content = ""
+                    if isinstance(raw_content, str):
+                        content = raw_content.strip()
+                    elif isinstance(raw_content, list):
+                        # Handle array-format content blocks: [{"type":"text","text":"..."}]
+                        for part in raw_content:
+                            if isinstance(part, dict):
+                                content += str(part.get("text") or part.get("content") or "")
+                            elif isinstance(part, str):
+                                content += part
+                        content = content.strip()
+                    elif isinstance(raw_content, dict):
+                        content = str(raw_content.get("text") or raw_content.get("content") or "").strip()
                     if content:
                         output_parts.append(content)
 
@@ -383,6 +411,24 @@ class CopilotCliExecutor:
                     if session_id:
                         self._copilot_session_id = session_id
 
+                    # Capture any content/message in the result event
+                    for key in ("content", "message", "text", "output"):
+                        result_content = event.get(key) or data.get(key)
+                        if isinstance(result_content, str) and result_content.strip():
+                            output_parts.append(result_content.strip())
+                            break
+                        elif isinstance(result_content, list):
+                            text_bits = []
+                            for part in result_content:
+                                if isinstance(part, dict):
+                                    text_bits.append(str(part.get("text") or part.get("content") or ""))
+                                elif isinstance(part, str):
+                                    text_bits.append(part)
+                            joined = "".join(text_bits).strip()
+                            if joined:
+                                output_parts.append(joined)
+                                break
+
                     usage = event.get("usage")
                     if isinstance(usage, dict):
                         api_duration_ms = int(usage.get("totalApiDurationMs", 0) or 0)
@@ -413,6 +459,8 @@ class CopilotCliExecutor:
             )
 
         response = "".join(output_parts).strip()
+        if not response and delta_parts:
+            response = "".join(delta_parts).strip()
         if not response and raw_lines:
             response = "\n".join(raw_lines).strip()
             if response:
