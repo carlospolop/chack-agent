@@ -222,13 +222,15 @@ class GeminiCliExecutor:
         self._ensure_gemini_home_and_config()
         command = self._build_command(prompt)
         env = self._build_env()
+        exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
         timeout_seconds = int(os.environ.get("CHACK_GEMINI_EXEC_TIMEOUT_SECONDS", "900") or "900")
 
         _LOGGER.info(
-            "Starting Gemini CLI process: model=%s timeout_seconds=%s gemini_session_id=%s",
+            "Starting Gemini CLI process: model=%s timeout_seconds=%s gemini_session_id=%s cwd=%s",
             self._model_name,
             timeout_seconds,
             self._gemini_session_id or "",
+            exec_cwd or "(inherited)",
         )
 
         try:
@@ -240,6 +242,7 @@ class GeminiCliExecutor:
                 text=True,
                 bufsize=1,
                 env=env,
+                cwd=exec_cwd,
             )
         except FileNotFoundError:
             return (

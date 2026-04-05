@@ -194,6 +194,7 @@ class CodexExecutor:
                 text=True,
                 bufsize=1,
                 env=env,
+                cwd=exec_cwd or None,
             )
         except FileNotFoundError:
             self._log_codex_failure(
