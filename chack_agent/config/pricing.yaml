@@ -81,11 +81,6 @@ models:
     cache_read: 0.08
     cache_write: 1
     output: 4
-  anthropic/claude-3.5-sonnet:
-    input: 6
-    cache_read: 0.6
-    cache_write: 7.5
-    output: 30
   anthropic/claude-3.7-sonnet:
     input: 3
     cache_read: 0.3
