@@ -735,6 +735,18 @@ class CodexExecutor:
         ) + "]"
 
         config_lines = [f"model = {_toml_string(self._model_name)}"]
+
+        # System-level instructions to prevent the model from calling
+        # non-existent built-in tools like `report_intent` instead of the
+        # real MCP tools.
+        instructions_text = (
+            "CRITICAL: You do NOT have a tool called `report_intent`. "
+            "It does not exist. Never attempt to call it. "
+            "To report or save a vulnerability finding you MUST call the MCP tool "
+            "`chack_tools-save_discovered_vulnerability`. "
+            "Any call to `report_intent` will silently discard your finding."
+        )
+        config_lines.append(f"instructions = {_toml_string(instructions_text)}")
         if self._uses_openrouter_route:
             config_lines.extend(
                 [
