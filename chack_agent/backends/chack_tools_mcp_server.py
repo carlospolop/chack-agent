@@ -345,7 +345,7 @@ def main() -> None:
             STORE.ensure_run(session_id, run_label)
             set_active_context(session_id, run_label)
 
-        mcp = FastMCP("Chack Tools MCP")
+        mcp = FastMCP("t")
         tools = _load_toolset()
         state = _ServerPolicyState(
             require_task_steps_manager_init_first=_as_bool(
