@@ -760,7 +760,7 @@ class CodexExecutor:
         config_lines.extend(
             [
                 "",
-                '[mcp_servers."t"]',
+                '[mcp_servers.chack_tools]',
                 f"command = {_toml_string(python_cmd)}",
                 f"args = {args_toml}",
                 f"env_vars = {env_vars_toml}",
