@@ -548,6 +548,11 @@ class CodexExecutor:
 
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
+        # Ensure PYTHONPATH includes the script directory so MCP server
+        # subprocesses can import application modules via cloudpickle.
+        if "PYTHONPATH" not in env:
+            script_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv else os.getcwd()
+            env["PYTHONPATH"] = script_dir
         if self._uses_openrouter_route:
             env["OPENROUTER_API_KEY"] = self._openai_api_key
             env["OPENROUTER_BASE_URL"] = self._openrouter_base_url
@@ -654,9 +659,14 @@ class CodexExecutor:
         python_cmd = sys.executable or "python3"
         env_vars = [
             "CHACK_TOOLS_CONFIG_JSON",
+            "CHACK_TOOLS_CONFIG_JSON_PATH",
             "CHACK_ALLOWED_TOOLS_JSON",
+            "CHACK_ALLOWED_TOOLS_JSON_PATH",
             "CHACK_TOOLS_OVERRIDE_B64",
+            "CHACK_TOOLS_OVERRIDE_B64_PATH",
             "CHACK_TOOLS_APPEND_B64",
+            "CHACK_TOOLS_APPEND_B64_PATH",
+            "PYTHONPATH",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",
