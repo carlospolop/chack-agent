@@ -81,6 +81,7 @@ class CopilotCliExecutor:
         max_tools_used: int,
         require_task_steps_manager_init_first: bool,
         output_schema_json: str,
+        deny_builtin_tools: list[str] | None = None,
     ) -> None:
         self._conversation = conversation
         self._memory_limit = memory_max_messages
@@ -112,6 +113,7 @@ class CopilotCliExecutor:
             require_task_steps_manager_init_first
         )
         self._output_schema_json = output_schema_json or ""
+        self._deny_builtin_tools: list[str] = list(deny_builtin_tools or [])
 
         self._copilot_home: str | None = None
         self._copilot_session_id: str | None = None
@@ -492,6 +494,8 @@ class CopilotCliExecutor:
             mcp_config_path = os.path.join(self._copilot_home, "mcp-config.json")
             if os.path.isfile(mcp_config_path):
                 args.extend(["--additional-mcp-config", f"@{mcp_config_path}"])
+        for denied in self._deny_builtin_tools:
+            args.extend(["--deny-tool", str(denied)])
         return args
 
     def _build_env(self) -> dict[str, str]:
@@ -871,4 +875,5 @@ def build_executor(
             if getattr(config.agent, "output_schema_json", None)
             else ""
         ),
+        deny_builtin_tools=list(getattr(config.tools, "deny_builtin_tools", None) or []),
     )

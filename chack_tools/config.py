@@ -71,6 +71,8 @@ class ToolsConfig:
     scientific_agent: dict = field(default_factory=dict)
     websearcher_agent: dict = field(default_factory=dict)
 
+    deny_builtin_tools: list = field(default_factory=list)
+
     min_tools_used: int = 10
     max_tools_used: int = 0
 
