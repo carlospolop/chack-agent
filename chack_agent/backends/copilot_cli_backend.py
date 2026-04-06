@@ -151,11 +151,12 @@ class CopilotCliExecutor:
                 f"in {exec_cwd}. Now you MUST save every vulnerability you found.\n\n"
                 f"PREFERRED: Call `{save_tool}` for each vulnerability with:\n"
                 "  name, description, worst_impact, cvss_vector, remediation,\n"
-                "  steps (array of {file_path, code, description}).\n"
+                "  steps (array of {{file_path, code, description}}).\n"
                 "  Each step MUST have the actual source file path and a verbatim code snippet.\n\n"
-                "FALLBACK: Write a JSON file to `.vulns/` (see AGENTS.md for format).\n\n"
+                "FALLBACK: Run `bash save_vuln.sh '<JSON>'` (see AGENTS.md for format).\n"
+                "  The script validates all fields and rejects incomplete data — read error output.\n\n"
                 "You MUST save at least one vulnerability. "
-                "Do NOT just describe findings in text — call the tool or write JSON."
+                "Do NOT just describe findings in text — call the tool or run save_vuln.sh."
             )
             retry_output, retry_steps, retry_raw = self._run_copilot(retry_prompt)
             # Merge results
@@ -235,7 +236,7 @@ class CopilotCliExecutor:
                 "    steps (array of objects with file_path, code, description).\n"
                 "    Each step MUST include the actual file_path in the repo and the\n"
                 "    verbatim source code snippet from that file.\n"
-                "  FALLBACK: Write a JSON file to `.vulns/` directory (see AGENTS.md).\n"
+                "  FALLBACK: Run `bash save_vuln.sh '<JSON>'` — it validates all fields.\n"
                 "  If you do NOT save findings they are LOST."
             )
             # Warn about built-in tools that silently discard findings
@@ -684,10 +685,12 @@ class CopilotCliExecutor:
 
     def _write_agents_md(self, exec_cwd: str | None) -> str | None:
         """Write an AGENTS.md in the workspace so copilot CLI loads it as
-        system-level instructions.  Also creates a .vulns/ directory so
-        the model can write JSON fallback files when MCP calls fail.
+        system-level instructions.  Also creates a save_vuln.sh helper
+        script and .vulns/ directory for the JSON fallback mechanism.
         Returns the path written (for cleanup) or *None* if nothing was written."""
-        if not exec_cwd or not self._deny_builtin_tools:
+        if not exec_cwd:
+            return None
+        if not self._deny_builtin_tools and not self._has_save_vulnerability_tool():
             return None
 
         agents_md_path = os.path.join(exec_cwd, "AGENTS.md")
@@ -707,6 +710,65 @@ class CopilotCliExecutor:
         except OSError:
             pass
 
+        # Write save_vuln.sh — a validating helper script
+        save_vuln_path = os.path.join(exec_cwd, "save_vuln.sh")
+        save_vuln_script = r'''#!/usr/bin/env bash
+# save_vuln.sh — Save a vulnerability as validated JSON to .vulns/
+# Usage: bash save_vuln.sh '<JSON>'
+# The JSON MUST contain: name, description, worst_impact, cvss_vector, remediation
+# and steps (array) where each step has: file_path, code, description
+set -euo pipefail
+mkdir -p .vulns
+JSON="$1"
+python3 -c "
+import json, sys, os, time
+try:
+    d = json.loads(sys.argv[1])
+except Exception as e:
+    print(f'ERROR: Invalid JSON: {e}', file=sys.stderr)
+    print('Fix the JSON syntax and call save_vuln.sh again.', file=sys.stderr)
+    sys.exit(1)
+errors = []
+for f in ['name','description','worst_impact','cvss_vector','remediation']:
+    if not str(d.get(f,'')).strip():
+        errors.append(f'Missing required field: {f}')
+steps = d.get('steps')
+if not isinstance(steps, list) or len(steps) == 0:
+    errors.append('steps must be a non-empty array of objects')
+else:
+    for i, s in enumerate(steps):
+        if not isinstance(s, dict):
+            errors.append(f'steps[{i}] must be an object with file_path, code, description')
+            continue
+        fp = str(s.get('file_path','')).strip()
+        code = str(s.get('code','')).strip()
+        desc = str(s.get('description','')).strip()
+        if not fp or fp == 'unknown':
+            errors.append(f'steps[{i}].file_path is missing — must be the actual source file path')
+        elif not os.path.isfile(fp):
+            errors.append(f'steps[{i}].file_path \"{fp}\" does not exist — check the path')
+        if not code:
+            errors.append(f'steps[{i}].code is empty — must contain the actual vulnerable source code snippet')
+        if not desc:
+            errors.append(f'steps[{i}].description is empty — explain why this code is vulnerable')
+if errors:
+    print('ERROR: Vulnerability NOT saved. Fix these issues and call save_vuln.sh again:', file=sys.stderr)
+    for e in errors:
+        print(f'  - {e}', file=sys.stderr)
+    sys.exit(1)
+fname = f'.vulns/vuln_{int(time.time()*1000)}.json'
+with open(fname, 'w') as f:
+    json.dump(d, f, indent=2)
+print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
+" "$JSON"
+'''
+        try:
+            with open(save_vuln_path, "w", encoding="utf-8") as fh:
+                fh.write(save_vuln_script)
+            os.chmod(save_vuln_path, 0o755)
+        except OSError:
+            pass
+
         # Build AGENTS.md content
         content = (
             "# Copilot Agent Instructions\n\n"
@@ -723,34 +785,37 @@ class CopilotCliExecutor:
             "  - `file_path`: Path to the affected source file (e.g., `app.py`)\n"
             "  - `code`: Verbatim source code snippet from that file\n"
             "  - `description`: Why this code is vulnerable\n\n"
-            "### Method 2 (FALLBACK): Write JSON to `.vulns/` directory\n"
-            "If the MCP tool fails, write a JSON file directly:\n"
+            "### Method 2 (FALLBACK): Run `bash save_vuln.sh '<JSON>'`\n"
+            "If the MCP tool is unavailable, use the helper script.\n"
+            "The script validates the data and rejects incomplete submissions:\n"
             "```bash\n"
-            f"cat > .vulns/vuln_$(date +%s%N).json << 'ENDVULN'\n"
-            "{\n"
-            '  "name": "Vulnerability Name",\n'
-            '  "description": "Detailed description",\n'
-            '  "worst_impact": "Worst case impact",\n'
+            "bash save_vuln.sh '{\n"
+            '  "name": "SQL Injection in login",\n'
+            '  "description": "User input is concatenated into SQL query without parameterization",\n'
+            '  "worst_impact": "Full database compromise",\n'
             '  "cvss_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",\n'
-            '  "remediation": "How to fix",\n'
+            '  "remediation": "Use parameterized queries",\n'
             '  "steps": [\n'
-            '    {\n'
-            '      "file_path": "path/to/file.py",\n'
-            '      "code": "actual source code snippet from the file",\n'
-            '      "description": "Why this code is vulnerable"\n'
-            '    }\n'
-            '  ]\n'
-            "}\n"
-            "ENDVULN\n"
-            "```\n\n"
+            "    {\n"
+            '      "file_path": "app/routes/login.py",\n'
+            '      "code": "query = f\\"SELECT * FROM users WHERE id={user_id}\\"",\n'
+            '      "description": "Unsanitized user input in SQL query"\n'
+            "    }\n"
+            "  ]\n"
+            "}'\n"
+            "```\n"
+            "If save_vuln.sh rejects the data, read the error output and fix the issues.\n\n"
             "### Rules\n"
             "- You MUST save EVERY vulnerability found using one of the methods above\n"
-            "- EVERY vulnerability MUST include `steps` with real `file_path` and `code`\n"
-            "- `code` must be a verbatim snippet copied from the source file, NOT analysis text\n"
+            "- EVERY step MUST have a real `file_path` (existing file) and `code` (verbatim source snippet)\n"
+            "- `code` must be copied from the source file, NOT analysis text\n"
             "- Do NOT just describe findings in text — they are LOST unless saved\n\n"
-            "## FORBIDDEN Tools\n\n"
-            f"The following built-in tools must NEVER be called: {denied}.\n"
         )
+        if denied:
+            content += (
+                "## FORBIDDEN Tools\n\n"
+                f"The following built-in tools must NEVER be called: {denied}.\n"
+            )
         # Dynamic warning for specific built-in tools
         for builtin in ("report_intent", "task"):
             if builtin not in self._deny_builtin_tools:
