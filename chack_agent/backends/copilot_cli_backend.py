@@ -1018,6 +1018,7 @@ print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
             "ANTHROPIC_API_KEY",
             "CLAUDE_API_KEY",
             "GEMINI_API_KEY",
+            "PYTHONPATH",
         ]
 
         src_env = self._build_env()

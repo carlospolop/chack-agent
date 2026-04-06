@@ -89,6 +89,41 @@ class ClaudeCodeExecutor:
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_claude(prompt)
 
+        # Save-or-retry: if save_discovered_vulnerability is available but was never called,
+        # and the agent DID use other tools (analysis happened), re-run to prompt saving.
+        if (
+            self._has_save_vulnerability_tool()
+            and not self._steps_contain_save(steps)
+            and self._steps_contain_analysis(steps)
+        ):
+            env = self._build_env()
+            exec_cwd = str(
+                env.get("CHACK_EXEC_CWD", "")
+                or os.environ.get("CHACK_EXEC_CWD", "")
+                or ""
+            ).strip() or "/tmp"
+            _LOGGER.info(
+                "Save-retry: no save_discovered_vulnerability calls detected. Re-running to prompt saving. cwd=%s",
+                exec_cwd,
+            )
+            save_tool = f"{self._mcp_tool_prefix()}save_discovered_vulnerability"
+            retry_prompt = (
+                f"You have already analysed the source code in {exec_cwd}. "
+                "Now you MUST save every vulnerability you found.\n\n"
+                f"Call `{save_tool}` for each vulnerability with:\n"
+                "  name, description, worst_impact, cvss_vector, remediation,\n"
+                "  steps (array of {{file_path, code, description}}).\n\n"
+                "You MUST save at least one vulnerability. Do NOT just describe findings in text."
+            )
+            retry_output, retry_steps, retry_raw = self._run_claude(retry_prompt)
+            if retry_output:
+                output = output + "\n\n" + retry_output if output else retry_output
+            steps.extend(retry_steps)
+            if retry_raw.raw_responses:
+                raw_result = _RawResult(
+                    raw_responses=raw_result.raw_responses + retry_raw.raw_responses,
+                )
+
         if user_input:
             self._conversation.append({"role": "user", "content": user_input})
         if output:
@@ -111,6 +146,40 @@ class ClaudeCodeExecutor:
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
 
+    def _has_save_vulnerability_tool(self) -> bool:
+        """Check if save_discovered_vulnerability is in the allowed tools."""
+        try:
+            if self._allowed_tools_json:
+                return "save_discovered_vulnerability" in self._allowed_tools_json
+        except Exception:
+            pass
+        try:
+            if self._serialized_tools_append_b64:
+                import base64
+                decoded = base64.b64decode(self._serialized_tools_append_b64).decode("utf-8", errors="replace")
+                return "save_discovered_vulnerability" in decoded
+        except Exception:
+            pass
+        return False
+
+    def _mcp_tool_prefix(self) -> str:
+        return "chack_tools-"
+
+    @staticmethod
+    def _steps_contain_save(steps: list[tuple[ToolAction, Any]]) -> bool:
+        for step, _ in steps:
+            if "save_discovered_vulnerability" in str(getattr(step, "tool", "") or ""):
+                return True
+        return False
+
+    @staticmethod
+    def _steps_contain_analysis(steps: list[tuple[ToolAction, Any]]) -> bool:
+        analysis_tools = {"bash", "exec", "read", "grep", "glob"}
+        for step, _ in steps:
+            if str(getattr(step, "tool", "") or "").lower() in analysis_tools:
+                return True
+        return False
+
     def _compose_prompt(self, user_input: str) -> str:
         base = str(self._base_system_prompt or "").strip()
 
@@ -127,6 +196,21 @@ class ClaudeCodeExecutor:
             policy_lines.append(
                 f"- Do not exceed {self._max_tools_used} non-task tool calls in total."
             )
+
+        # Inject save requirement when save_discovered_vulnerability is available
+        if self._has_save_vulnerability_tool():
+            mcp_prefix = self._mcp_tool_prefix()
+            save_tool_name = f"{mcp_prefix}save_discovered_vulnerability"
+            save_block = (
+                "- CRITICAL: For EACH vulnerability you find, you MUST save it.\n"
+                f"  Call `{save_tool_name}` with parameters:\n"
+                "    name, description, worst_impact, cvss_vector, remediation,\n"
+                "    steps (array of objects with file_path, code, description).\n"
+                "    Each step MUST include the actual file_path in the repo and the\n"
+                "    verbatim source code snippet from that file.\n"
+                "  If you do NOT save findings they are LOST."
+            )
+            policy_lines.append(save_block)
 
         schema_lines: list[str] = []
         if self._output_schema_json:
@@ -154,6 +238,7 @@ class ClaudeCodeExecutor:
         command = self._build_command(prompt)
         env = self._build_env()
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
+        agents_md_path = self._write_agents_md(exec_cwd)
         timeout_seconds = int(
             os.environ.get("CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS", "900") or "900"
         )
@@ -344,6 +429,11 @@ class ClaudeCodeExecutor:
             if response:
                 response = response[-4000:]
 
+        # Pick up any JSON-fallback vulns written via save_vuln.sh
+        bash_vuln_steps = self._collect_bash_saved_vulns(exec_cwd)
+        if bash_vuln_steps:
+            steps.extend(bash_vuln_steps)
+
         return response, steps, _RawResult(raw_responses=raw_responses)
 
     def _extract_message_content(
@@ -466,6 +556,152 @@ class ClaudeCodeExecutor:
 
         if str(step.tool).strip() == "task_steps_manager":
             self._sync_task_steps_manager(tool_input, status)
+
+    def _write_agents_md(self, exec_cwd: str | None) -> str | None:
+        """Write AGENTS.md + save_vuln.sh + .vulns/ directory in exec_cwd so the model
+        knows how to save vulnerabilities. Only written when save_discovered_vulnerability
+        is available. Returns path to AGENTS.md or None."""
+        if not exec_cwd or not self._has_save_vulnerability_tool():
+            return None
+        agents_md_path = os.path.join(exec_cwd, "AGENTS.md")
+        if os.path.exists(agents_md_path):
+            return agents_md_path
+
+        try:
+            mcp_prefix = self._mcp_tool_prefix()
+            save_tool_name = f"{mcp_prefix}save_discovered_vulnerability"
+
+            # Create .vulns/ directory for bash JSON fallback
+            vulns_dir = os.path.join(exec_cwd, ".vulns")
+            os.makedirs(vulns_dir, exist_ok=True)
+
+            # Write save_vuln.sh
+            save_vuln_path = os.path.join(exec_cwd, "save_vuln.sh")
+            save_vuln_sh = '''#!/usr/bin/env bash
+# save_vuln.sh — Save a vulnerability as validated JSON to .vulns/
+# Usage: bash save_vuln.sh '<JSON>'
+set -e
+JSON="$1"
+if [ -z "$JSON" ]; then
+    echo "Usage: bash save_vuln.sh '<JSON>'" >&2
+    exit 1
+fi
+mkdir -p .vulns
+python3 - "$JSON" <<'PYEOF'
+import sys, json, time
+data = json.loads(sys.argv[1])
+errors = []
+if not data.get("name"):
+    errors.append("missing: name")
+if not data.get("description"):
+    errors.append("missing: description")
+if errors:
+    print("ERROR: Vulnerability NOT saved. Fix these issues:", file=sys.stderr)
+    for e in errors:
+        print(f"  - {e}", file=sys.stderr)
+    sys.exit(1)
+fname = f".vulns/vuln_{int(time.time()*1000)}.json"
+with open(fname, "w") as f:
+    json.dump(data, f, indent=2)
+print(f"Saved to {fname}")
+PYEOF
+'''
+            with open(save_vuln_path, "w", encoding="utf-8") as f:
+                f.write(save_vuln_sh)
+            os.chmod(save_vuln_path, 0o755)
+
+            agents_md_content = f"""# Agent Instructions
+
+## MANDATORY: Saving Vulnerability Findings
+
+### Method 1 (PREFERRED): Call `{save_tool_name}` directly
+Parameters:
+  - `name`: vulnerability title (required)
+  - `description`: detailed description (required)
+  - `worst_impact`: what the attacker gains
+  - `cvss_vector`: CVSS:3.0 vector string
+  - `remediation`: how to fix it
+  - `steps`: JSON array of exploitation steps
+  - `is_full_eop`: 1 if full privilege escalation chain, 0 otherwise
+  - `poc`: working PoC script (required for is_full_eop=1)
+  - `category`: vulnerability class (dylib_injection, xpc_abuse, etc.)
+  - `attack_vector`: trigger path
+
+### Method 2 (FALLBACK): Run `bash save_vuln.sh '<JSON>'`
+Example:
+```bash
+bash save_vuln.sh '{{
+  "name": "Vulnerability Title",
+  "description": "Detailed description",
+  "worst_impact": "root code execution",
+  "cvss_vector": "CVSS:3.0/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+  "remediation": "Fix description",
+  "steps": [],
+  "is_full_eop": 0
+}}'
+```
+
+**If you do NOT save findings they are LOST. You MUST save every real vulnerability.**
+"""
+            with open(agents_md_path, "w", encoding="utf-8") as f:
+                f.write(agents_md_content)
+
+            # Also write to .github/copilot-instructions.md for compatibility
+            gh_dir = os.path.join(exec_cwd, ".github")
+            os.makedirs(gh_dir, exist_ok=True)
+            gh_instructions = os.path.join(gh_dir, "copilot-instructions.md")
+            with open(gh_instructions, "w", encoding="utf-8") as f:
+                f.write(agents_md_content)
+
+            _LOGGER.info("Wrote AGENTS.md to %s", agents_md_path)
+            return agents_md_path
+        except Exception as exc:
+            _LOGGER.warning("Failed to write AGENTS.md: %s", exc)
+            return None
+
+    @staticmethod
+    def _collect_bash_saved_vulns(exec_cwd: str | None) -> list[tuple[ToolAction, Any]]:
+        """Read JSON files from .vulns/ directory written by save_vuln.sh and convert to steps."""
+        if not exec_cwd:
+            return []
+        vulns_dir = os.path.join(exec_cwd, ".vulns")
+        if not os.path.isdir(vulns_dir):
+            return []
+        steps: list[tuple[ToolAction, Any]] = []
+        for fname in os.listdir(vulns_dir):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(vulns_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as fh:
+                    data = json.loads(fh.read())
+                if not isinstance(data, dict) or not data.get("name"):
+                    continue
+                tool_input: dict[str, Any] = {
+                    "name": str(data.get("name", "")),
+                    "description": str(data.get("description", "")),
+                    "worst_impact": str(data.get("worst_impact", "")),
+                    "cvss_vector": str(data.get("cvss_vector", "")),
+                    "remediation": str(data.get("remediation", "")),
+                }
+                raw_steps = data.get("steps")
+                if isinstance(raw_steps, list) and raw_steps:
+                    tool_input["steps"] = raw_steps
+                step = ToolAction(
+                    tool="chack_tools-save_discovered_vulnerability",
+                    tool_input={
+                        "tool_id": f"bash_save_{fname}",
+                        "status": "success",
+                        "tool_input": tool_input,
+                        "result": "Vulnerability saved via JSON fallback",
+                    },
+                )
+                steps.append((step, None))
+            except Exception:
+                continue
+        if steps:
+            _LOGGER.info("Collected %d JSON-fallback vulnerabilities from %s", len(steps), vulns_dir)
+        return steps
 
     def _build_command(self, prompt: str) -> list[str]:
         args: list[str] = [
@@ -664,6 +900,7 @@ class ClaudeCodeExecutor:
             "OPENROUTER_API_KEY",
             "OPENROUTER_HTTP_REFERER",
             "OPENROUTER_APP_NAME",
+            "PYTHONPATH",
         ]
 
         src_env = self._build_env()
