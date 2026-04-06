@@ -574,19 +574,47 @@ class CopilotCliExecutor:
         denied = ", ".join(f"`{t}`" for t in self._deny_builtin_tools)
         content = (
             "# Copilot Agent Instructions\n\n"
-            "## CRITICAL TOOL RESTRICTIONS\n\n"
-            f"The following built-in tools are **FORBIDDEN** and must NEVER be called: {denied}.\n\n"
-            "- `report_intent` is a no-op that only logs a string and immediately discards it. "
-            "Calling it does NOT save any vulnerability or finding.\n"
-            "- If you need to report or save a vulnerability, you MUST use the MCP tool "
-            "`chack_tools-save_discovered_vulnerability`. This is the ONLY tool that persists findings.\n"
-            "- Calling `report_intent` instead of `chack_tools-save_discovered_vulnerability` "
-            "will cause your findings to be **permanently lost**.\n"
+            "## MANDATORY: How to Save Findings\n\n"
+            "When you discover a vulnerability or security finding, you **MUST** call the MCP tool\n"
+            "`chack_tools-save_discovered_vulnerability` to persist it. This is the ONLY way your\n"
+            "findings get saved. If you do not call this tool, your work is lost.\n\n"
+            "### Example call\n"
+            "```\n"
+            "chack_tools-save_discovered_vulnerability(\n"
+            '  name="SQL Injection in login endpoint",\n'
+            '  description="User input flows unsanitized into SQL query",\n'
+            '  worst_impact="Full database compromise",\n'
+            '  cvss_vector="CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",\n'
+            '  remediation="Use parameterized queries",\n'
+            '  steps=[{"code":"query = f\\"SELECT * FROM users WHERE id={user_id}\\"",\n'
+            '          "file_path":"app/routes/login.py",\n'
+            '          "description":"Unsanitized input reaches SQL query"}]\n'
+            ")\n"
+            "```\n\n"
+            "### Required parameters\n"
+            "- `name`: Short vulnerability title\n"
+            "- `description`: Detailed description with attack flow\n"
+            "- `worst_impact`: Worst possible impact\n"
+            "- `cvss_vector`: CVSS:3.0 vector string\n"
+            "- `remediation`: How to fix it\n"
+            "- `steps`: Array of {code, file_path, description} objects (optional but recommended)\n\n"
+            "## FORBIDDEN Tools\n\n"
+            f"The following built-in tools must NEVER be called: {denied}.\n"
+            "`report_intent` is a no-op that silently discards your findings. Never use it.\n"
         )
         try:
             with open(agents_md_path, "w", encoding="utf-8") as fh:
                 fh.write(content)
             _LOGGER.info("Wrote AGENTS.md to %s", agents_md_path)
+
+            # Also write .github/copilot-instructions.md (copilot CLI reads this too)
+            gh_dir = os.path.join(exec_cwd, ".github")
+            os.makedirs(gh_dir, exist_ok=True)
+            copilot_instr_path = os.path.join(gh_dir, "copilot-instructions.md")
+            if not os.path.exists(copilot_instr_path):
+                with open(copilot_instr_path, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+
             return agents_md_path
         except OSError as exc:
             _LOGGER.warning("Failed to write AGENTS.md: %s", exc)
@@ -594,11 +622,18 @@ class CopilotCliExecutor:
 
     @staticmethod
     def _cleanup_agents_md(path: str | None) -> None:
-        """Remove the AGENTS.md file we created (if any)."""
+        """Remove the AGENTS.md and .github/copilot-instructions.md we created."""
         if path is None:
             return
         try:
             os.remove(path)
+        except OSError:
+            pass
+        # Also clean up .github/copilot-instructions.md
+        parent = os.path.dirname(path)
+        ci_path = os.path.join(parent, ".github", "copilot-instructions.md")
+        try:
+            os.remove(ci_path)
         except OSError:
             pass
 
