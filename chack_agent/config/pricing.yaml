@@ -39,10 +39,6 @@ models:
     input: 0.2
     cache_read: 0.2
     output: 0.6
-  allenai/olmo-3.1-32b-think:
-    input: 0.15
-    cache_read: 0.15
-    output: 0.5
   alpindale/goliath-120b:
     input: 3.75
     cache_read: 3.75
