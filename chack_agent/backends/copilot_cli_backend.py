@@ -145,17 +145,16 @@ class CopilotCliExecutor:
                 exec_cwd,
             )
             retry_prompt = (
-                "You are a security auditor. Analyse the source code in the current directory "
-                f"({exec_cwd}) and for EACH vulnerability you find, call the MCP tool "
-                "chack_tools-save_discovered_vulnerability with these parameters:\n"
-                "  name (string): vulnerability title\n"
-                "  description (string): detailed description\n"
-                "  worst_impact (string): worst case scenario\n"
-                "  cvss_vector (string): CVSS:3.0 vector\n"
-                "  remediation (string): how to fix\n\n"
-                "You MUST call chack_tools-save_discovered_vulnerability at least once. "
-                "Do NOT use report_intent. Do NOT just describe findings in text — you MUST "
-                "call the tool to persist each finding."
+                "You are a security auditor. You have already analysed the source code "
+                f"in {exec_cwd}. Now you MUST save every vulnerability you found.\n\n"
+                "PREFERRED METHOD: For each vulnerability, run:\n"
+                "  bash save_vuln.sh \"<name>\" \"<full description>\" "
+                "\"<worst impact>\" \"<CVSS:3.0/... vector>\" \"<remediation>\"\n\n"
+                "ALTERNATIVE: Call the MCP tool chack_tools-save_discovered_vulnerability "
+                "with parameters: name, description, worst_impact, cvss_vector, remediation.\n\n"
+                "You MUST save at least one vulnerability. "
+                "Do NOT use report_intent. Do NOT just describe findings in text — "
+                "run bash save_vuln.sh or call the MCP tool to persist each finding."
             )
             retry_output, retry_steps, retry_raw = self._run_copilot(retry_prompt)
             # Merge results
@@ -227,10 +226,12 @@ class CopilotCliExecutor:
         # Inject save requirement when save_discovered_vulnerability is available
         if self._has_save_vulnerability_tool():
             policy_lines.append(
-                "- CRITICAL: For EACH vulnerability you find, you MUST call the MCP tool "
-                "`chack_tools-save_discovered_vulnerability` with parameters: "
-                "name (str), description (str), worst_impact (str), cvss_vector (str), "
-                "remediation (str). If you do NOT call this tool, your findings are LOST. "
+                "- CRITICAL: For EACH vulnerability you find, you MUST save it using one of these methods:\n"
+                "  Option A (PREFERRED): Run `bash save_vuln.sh \"<name>\" \"<description>\" "
+                "\"<worst_impact>\" \"<cvss_vector>\" \"<remediation>\"`\n"
+                "  Option B: Call MCP tool `chack_tools-save_discovered_vulnerability` with "
+                "parameters: name, description, worst_impact, cvss_vector, remediation.\n"
+                "  If you do NOT save findings they are LOST. "
                 "Do NOT use `report_intent` — it discards your findings."
             )
 
@@ -284,7 +285,12 @@ class CopilotCliExecutor:
             os.environ.get("CHACK_COPILOT_EXEC_TIMEOUT_SECONDS", "900") or "900"
         )
         try:
-            return self.__run_copilot_subprocess(command, env, exec_cwd, timeout_seconds)
+            output, steps, raw_result = self.__run_copilot_subprocess(command, env, exec_cwd, timeout_seconds)
+            # Collect any vulnerabilities saved via the bash helper script
+            bash_vuln_steps = self._collect_bash_saved_vulns(exec_cwd)
+            if bash_vuln_steps:
+                steps.extend(bash_vuln_steps)
+            return output, steps, raw_result
         finally:
             self._cleanup_agents_md(agents_md_path)
 
@@ -648,8 +654,9 @@ class CopilotCliExecutor:
 
     def _write_agents_md(self, exec_cwd: str | None) -> str | None:
         """Write an AGENTS.md in the workspace so copilot CLI loads it as
-        system-level instructions.  Returns the path written (for cleanup)
-        or *None* if nothing was written."""
+        system-level instructions.  Also writes a save_vuln.sh helper
+        script that the model can call via bash to persist findings.
+        Returns the path written (for cleanup) or *None* if nothing was written."""
         if not exec_cwd or not self._deny_builtin_tools:
             return None
 
@@ -660,32 +667,65 @@ class CopilotCliExecutor:
             return None
 
         denied = ", ".join(f"`{t}`" for t in self._deny_builtin_tools)
+
+        # Write a bash-callable save script.  The model strongly prefers bash
+        # over MCP tools, so this gives it a reliable way to persist findings.
+        save_script_path = os.path.join(exec_cwd, "save_vuln.sh")
+        vulns_dir = os.path.join(exec_cwd, ".vulns")
+        try:
+            os.makedirs(vulns_dir, exist_ok=True)
+            with open(save_script_path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    '#!/bin/bash\n'
+                    '# Save a vulnerability finding to a JSON file.\n'
+                    '# Usage: bash save_vuln.sh <name> <description> <worst_impact> <cvss_vector> <remediation>\n'
+                    'set -e\n'
+                    'NAME="${1:?name required}"\n'
+                    'DESC="${2:?description required}"\n'
+                    'IMPACT="${3:?worst_impact required}"\n'
+                    'CVSS="${4:?cvss_vector required}"\n'
+                    'REMED="${5:?remediation required}"\n'
+                    f'DIR="{vulns_dir}"\n'
+                    'mkdir -p "$DIR"\n'
+                    'FILE="$DIR/vuln_$(date +%s%N).json"\n'
+                    'python3 -c "\n'
+                    'import json, sys\n'
+                    'd = {\"name\": sys.argv[1], \"description\": sys.argv[2],\n'
+                    '     \"worst_impact\": sys.argv[3], \"cvss_vector\": sys.argv[4],\n'
+                    '     \"remediation\": sys.argv[5]}\n'
+                    'with open(sys.argv[6], \"w\") as f:\n'
+                    '    json.dump(d, f)\n'
+                    '" "$NAME" "$DESC" "$IMPACT" "$CVSS" "$REMED" "$FILE"\n'
+                    'echo "Vulnerability saved to $FILE"\n'
+                )
+            os.chmod(save_script_path, 0o755)
+        except OSError:
+            pass
+
         content = (
             "# Copilot Agent Instructions\n\n"
             "## MANDATORY: How to Save Findings\n\n"
-            "When you discover a vulnerability or security finding, you **MUST** call the MCP tool\n"
-            "`chack_tools-save_discovered_vulnerability` to persist it. This is the ONLY way your\n"
-            "findings get saved. If you do not call this tool, your work is lost.\n\n"
-            "### Example call\n"
+            "When you discover a vulnerability or security finding, you **MUST** save it.\n\n"
+            "### Method 1 (PREFERRED): Use the bash save script\n"
+            "```bash\n"
+            "bash save_vuln.sh \"Vuln Name\" \"Full description of the vulnerability\" "
+            "\"Worst case impact\" \"CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\" "
+            "\"How to fix it\"\n"
+            "```\n\n"
+            "### Method 2: Use the MCP tool\n"
             "```\n"
             "chack_tools-save_discovered_vulnerability(\n"
-            '  name="SQL Injection in login endpoint",\n'
-            '  description="User input flows unsanitized into SQL query",\n'
-            '  worst_impact="Full database compromise",\n'
+            '  name="Vuln Name",\n'
+            '  description="Full description",\n'
+            '  worst_impact="Worst case impact",\n'
             '  cvss_vector="CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",\n'
-            '  remediation="Use parameterized queries",\n'
-            '  steps=[{"code":"query = f\\"SELECT * FROM users WHERE id={user_id}\\"",\n'
-            '          "file_path":"app/routes/login.py",\n'
-            '          "description":"Unsanitized input reaches SQL query"}]\n'
+            '  remediation="How to fix"\n'
             ")\n"
             "```\n\n"
-            "### Required parameters\n"
-            "- `name`: Short vulnerability title\n"
-            "- `description`: Detailed description with attack flow\n"
-            "- `worst_impact`: Worst possible impact\n"
-            "- `cvss_vector`: CVSS:3.0 vector string\n"
-            "- `remediation`: How to fix it\n"
-            "- `steps`: Array of {code, file_path, description} objects (optional but recommended)\n\n"
+            "### Rules\n"
+            "- You MUST save EVERY vulnerability found using one of the methods above\n"
+            "- Do NOT just describe findings in text — they are LOST unless saved\n"
+            "- Call `save_vuln.sh` for each individual vulnerability\n\n"
             "## FORBIDDEN Tools\n\n"
             f"The following built-in tools must NEVER be called: {denied}.\n"
             "`report_intent` is a no-op that silently discards your findings. Never use it.\n"
@@ -710,20 +750,75 @@ class CopilotCliExecutor:
 
     @staticmethod
     def _cleanup_agents_md(path: str | None) -> None:
-        """Remove the AGENTS.md and .github/copilot-instructions.md we created."""
+        """Remove the AGENTS.md, save_vuln.sh, .vulns, and .github/copilot-instructions.md."""
         if path is None:
             return
         try:
             os.remove(path)
         except OSError:
             pass
-        # Also clean up .github/copilot-instructions.md
         parent = os.path.dirname(path)
-        ci_path = os.path.join(parent, ".github", "copilot-instructions.md")
+        # Clean up helper files
+        for cleanup in (
+            os.path.join(parent, "save_vuln.sh"),
+            os.path.join(parent, ".github", "copilot-instructions.md"),
+        ):
+            try:
+                os.remove(cleanup)
+            except OSError:
+                pass
+        # Clean up .vulns directory
+        vulns_dir = os.path.join(parent, ".vulns")
         try:
-            os.remove(ci_path)
-        except OSError:
+            import shutil as _shutil
+            _shutil.rmtree(vulns_dir, ignore_errors=True)
+        except Exception:
             pass
+
+    @staticmethod
+    def _collect_bash_saved_vulns(exec_cwd: str | None) -> list[tuple[ToolAction, Any]]:
+        """Read JSON files from .vulns/ directory written by save_vuln.sh
+        and convert them to ToolAction steps matching save_discovered_vulnerability."""
+        if not exec_cwd:
+            return []
+        vulns_dir = os.path.join(exec_cwd, ".vulns")
+        if not os.path.isdir(vulns_dir):
+            return []
+        steps: list[tuple[ToolAction, Any]] = []
+        for fname in os.listdir(vulns_dir):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(vulns_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as fh:
+                    data = json.loads(fh.read())
+                if not isinstance(data, dict) or not data.get("name"):
+                    continue
+                step = ToolAction(
+                    tool="chack_tools-save_discovered_vulnerability",
+                    tool_input={
+                        "tool_id": f"bash_save_{fname}",
+                        "status": "success",
+                        "tool_input": {
+                            "name": str(data.get("name", "")),
+                            "description": str(data.get("description", "")),
+                            "worst_impact": str(data.get("worst_impact", "")),
+                            "cvss_vector": str(data.get("cvss_vector", "")),
+                            "remediation": str(data.get("remediation", "")),
+                        },
+                        "result": "Vulnerability saved via bash helper",
+                    },
+                )
+                steps.append((step, None))
+            except Exception:
+                continue
+        if steps:
+            _LOGGER.info(
+                "Collected %d bash-saved vulnerabilities from %s",
+                len(steps),
+                vulns_dir,
+            )
+        return steps
 
     def _ensure_copilot_home_and_config(self) -> None:
         if self._copilot_home:
