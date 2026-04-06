@@ -124,6 +124,43 @@ class CopilotCliExecutor:
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_copilot(prompt)
 
+        # Save-or-retry: if save_discovered_vulnerability is available but was
+        # never called, and the agent DID use other tools (meaning it analysed
+        # code), re-run with --resume asking it to save its findings.
+        if (
+            self._has_save_vulnerability_tool()
+            and self._copilot_session_id
+            and not self._steps_contain_save(steps)
+            and self._steps_contain_analysis(steps)
+        ):
+            _LOGGER.info(
+                "Save-retry: no save_discovered_vulnerability calls detected after %d tool calls. "
+                "Re-running with --resume to prompt saving.",
+                len(steps),
+            )
+            retry_prompt = (
+                "You analysed the code but did NOT call chack_tools-save_discovered_vulnerability "
+                "for any finding. Your work is LOST unless you save it NOW.\n\n"
+                "For EACH vulnerability you identified, call:\n"
+                "chack_tools-save_discovered_vulnerability(\n"
+                '  name="<title>",\n'
+                '  description="<detailed description>",\n'
+                '  worst_impact="<worst case>",\n'
+                '  cvss_vector="CVSS:3.0/...",\n'
+                '  remediation="<how to fix>"\n'
+                ")\n\n"
+                "Do this NOW for every vulnerability you found. Do NOT skip any."
+            )
+            retry_output, retry_steps, retry_raw = self._run_copilot(retry_prompt)
+            # Merge results
+            if retry_output:
+                output = output + "\n\n" + retry_output if output else retry_output
+            steps.extend(retry_steps)
+            if retry_raw.raw_responses:
+                raw_result = _RawResult(
+                    raw_responses=raw_result.raw_responses + retry_raw.raw_responses,
+                )
+
         if user_input:
             self._conversation.append({"role": "user", "content": user_input})
         if output:
@@ -141,6 +178,25 @@ class CopilotCliExecutor:
             "intermediate_steps": steps,
             "raw_result": raw_result,
         }
+
+    @staticmethod
+    def _steps_contain_save(steps: list[tuple[ToolAction, Any]]) -> bool:
+        """Check if any step is a save_discovered_vulnerability call."""
+        for step, _ in steps:
+            tool_name = str(getattr(step, "tool", "") or "")
+            if "save_discovered_vulnerability" in tool_name:
+                return True
+        return False
+
+    @staticmethod
+    def _steps_contain_analysis(steps: list[tuple[ToolAction, Any]]) -> bool:
+        """Check if steps contain file-reading / analysis tools (bash, view, grep, exec)."""
+        analysis_tools = {"bash", "view", "grep", "exec", "read_file"}
+        for step, _ in steps:
+            tool_name = str(getattr(step, "tool", "") or "")
+            if tool_name in analysis_tools:
+                return True
+        return False
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
@@ -162,6 +218,16 @@ class CopilotCliExecutor:
                 f"- Do not exceed {self._max_tools_used} non-task tool calls in total."
             )
 
+        # Inject save requirement when save_discovered_vulnerability is available
+        if self._has_save_vulnerability_tool():
+            policy_lines.append(
+                "- CRITICAL: For EACH vulnerability you find, you MUST call the MCP tool "
+                "`chack_tools-save_discovered_vulnerability` with parameters: "
+                "name (str), description (str), worst_impact (str), cvss_vector (str), "
+                "remediation (str). If you do NOT call this tool, your findings are LOST. "
+                "Do NOT use `report_intent` — it discards your findings."
+            )
+
         schema_lines: list[str] = []
         if self._output_schema_json:
             schema_lines.append(
@@ -181,6 +247,22 @@ class CopilotCliExecutor:
 
         prompt_parts = [p for p in (base, user_input, policy_block, schema_block) if p.strip()]
         return "\n".join(prompt_parts)
+
+    def _has_save_vulnerability_tool(self) -> bool:
+        """Check if save_discovered_vulnerability is in the allowed tools."""
+        try:
+            if self._allowed_tools_json:
+                return "save_discovered_vulnerability" in self._allowed_tools_json
+        except Exception:
+            pass
+        try:
+            if self._serialized_tools_append_b64:
+                import base64
+                decoded = base64.b64decode(self._serialized_tools_append_b64).decode("utf-8", errors="replace")
+                return "save_discovered_vulnerability" in decoded
+        except Exception:
+            pass
+        return False
 
     # ------------------------------------------------------------------
     #  Core execution
