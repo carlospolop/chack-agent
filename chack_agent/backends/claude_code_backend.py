@@ -163,7 +163,8 @@ class ClaudeCodeExecutor:
         return False
 
     def _mcp_tool_prefix(self) -> str:
-        return "chack_tools-"
+        # Claude Code names MCP tools as mcp__<server>__<tool>
+        return "mcp__chack_tools__"
 
     @staticmethod
     def _steps_contain_save(steps: list[tuple[ToolAction, Any]]) -> bool:
@@ -287,9 +288,9 @@ class ClaudeCodeExecutor:
         return_seen = False
 
         try:
+            # Close stdin immediately — prompt is already in the command args
             if process.stdin is not None:
                 try:
-                    process.stdin.write(prompt)
                     process.stdin.close()
                 except Exception:
                     pass
@@ -706,17 +707,17 @@ bash save_vuln.sh '{{
     def _build_command(self, prompt: str) -> list[str]:
         args: list[str] = [
             self._claude_cli_path,
-            "-p",
-            prompt,
             "--print",
             "--verbose",
             "--output-format",
             "stream-json",
             "--tools",
             "",
+            "--dangerously-skip-permissions",
             "--mcp-config",
             os.path.join(self._claude_home or os.getcwd(), "settings.json"),
             "--strict-mcp-config",
+            prompt,
         ]
 
         if self._max_turns > 0:
