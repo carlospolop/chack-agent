@@ -191,10 +191,16 @@ class CopilotCliExecutor:
         command = self._build_command(prompt)
         env = self._build_env()
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
+        agents_md_path = self._write_agents_md(exec_cwd)
         timeout_seconds = int(
             os.environ.get("CHACK_COPILOT_EXEC_TIMEOUT_SECONDS", "900") or "900"
         )
+        try:
+            return self.__run_copilot_subprocess(command, env, exec_cwd, timeout_seconds)
+        finally:
+            self._cleanup_agents_md(agents_md_path)
 
+    def __run_copilot_subprocess(self, command, env, exec_cwd, timeout_seconds):
         _LOGGER.info(
             "Starting Copilot CLI process: model=%s timeout_seconds=%s session_id=%s cwd=%s",
             self._model_name,
@@ -551,6 +557,50 @@ class CopilotCliExecutor:
     # ------------------------------------------------------------------
     #  Home / MCP config
     # ------------------------------------------------------------------
+
+    def _write_agents_md(self, exec_cwd: str | None) -> str | None:
+        """Write an AGENTS.md in the workspace so copilot CLI loads it as
+        system-level instructions.  Returns the path written (for cleanup)
+        or *None* if nothing was written."""
+        if not exec_cwd or not self._deny_builtin_tools:
+            return None
+
+        agents_md_path = os.path.join(exec_cwd, "AGENTS.md")
+        # Don't overwrite a pre-existing file (it belongs to the target repo)
+        if os.path.exists(agents_md_path):
+            _LOGGER.debug("AGENTS.md already exists at %s — skipping write", agents_md_path)
+            return None
+
+        denied = ", ".join(f"`{t}`" for t in self._deny_builtin_tools)
+        content = (
+            "# Copilot Agent Instructions\n\n"
+            "## CRITICAL TOOL RESTRICTIONS\n\n"
+            f"The following built-in tools are **FORBIDDEN** and must NEVER be called: {denied}.\n\n"
+            "- `report_intent` is a no-op that only logs a string and immediately discards it. "
+            "Calling it does NOT save any vulnerability or finding.\n"
+            "- If you need to report or save a vulnerability, you MUST use the MCP tool "
+            "`chack_tools-save_discovered_vulnerability`. This is the ONLY tool that persists findings.\n"
+            "- Calling `report_intent` instead of `chack_tools-save_discovered_vulnerability` "
+            "will cause your findings to be **permanently lost**.\n"
+        )
+        try:
+            with open(agents_md_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            _LOGGER.info("Wrote AGENTS.md to %s", agents_md_path)
+            return agents_md_path
+        except OSError as exc:
+            _LOGGER.warning("Failed to write AGENTS.md: %s", exc)
+            return None
+
+    @staticmethod
+    def _cleanup_agents_md(path: str | None) -> None:
+        """Remove the AGENTS.md file we created (if any)."""
+        if path is None:
+            return
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     def _ensure_copilot_home_and_config(self) -> None:
         if self._copilot_home:
