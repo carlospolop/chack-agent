@@ -126,30 +126,36 @@ class CopilotCliExecutor:
 
         # Save-or-retry: if save_discovered_vulnerability is available but was
         # never called, and the agent DID use other tools (meaning it analysed
-        # code), re-run with --resume asking it to save its findings.
+        # code), re-run asking it to save its findings.
         if (
             self._has_save_vulnerability_tool()
-            and self._copilot_session_id
             and not self._steps_contain_save(steps)
             and self._steps_contain_analysis(steps)
         ):
+            exec_cwd = str(
+                self._build_env().get("CHACK_EXEC_CWD", "")
+                or os.environ.get("CHACK_EXEC_CWD", "")
+                or ""
+            ).strip() or "/tmp"
             _LOGGER.info(
                 "Save-retry: no save_discovered_vulnerability calls detected after %d tool calls. "
-                "Re-running with --resume to prompt saving.",
+                "Re-running %sto prompt saving. cwd=%s",
                 len(steps),
+                "with --resume " if self._copilot_session_id else "fresh ",
+                exec_cwd,
             )
             retry_prompt = (
-                "You analysed the code but did NOT call chack_tools-save_discovered_vulnerability "
-                "for any finding. Your work is LOST unless you save it NOW.\n\n"
-                "For EACH vulnerability you identified, call:\n"
-                "chack_tools-save_discovered_vulnerability(\n"
-                '  name="<title>",\n'
-                '  description="<detailed description>",\n'
-                '  worst_impact="<worst case>",\n'
-                '  cvss_vector="CVSS:3.0/...",\n'
-                '  remediation="<how to fix>"\n'
-                ")\n\n"
-                "Do this NOW for every vulnerability you found. Do NOT skip any."
+                "You are a security auditor. Analyse the source code in the current directory "
+                f"({exec_cwd}) and for EACH vulnerability you find, call the MCP tool "
+                "chack_tools-save_discovered_vulnerability with these parameters:\n"
+                "  name (string): vulnerability title\n"
+                "  description (string): detailed description\n"
+                "  worst_impact (string): worst case scenario\n"
+                "  cvss_vector (string): CVSS:3.0 vector\n"
+                "  remediation (string): how to fix\n\n"
+                "You MUST call chack_tools-save_discovered_vulnerability at least once. "
+                "Do NOT use report_intent. Do NOT just describe findings in text — you MUST "
+                "call the tool to persist each finding."
             )
             retry_output, retry_steps, retry_raw = self._run_copilot(retry_prompt)
             # Merge results
