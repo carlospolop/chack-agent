@@ -705,15 +705,19 @@ class CopilotCliExecutor:
         mcp_prefix = self._mcp_tool_prefix()
         save_tool = f"{mcp_prefix}save_discovered_vulnerability"
 
-        # Create .vulns/ directory for bash JSON fallback
-        vulns_dir = os.path.join(exec_cwd, ".vulns")
-        try:
-            os.makedirs(vulns_dir, exist_ok=True)
-        except OSError:
-            pass
+        has_save_tool = self._has_save_vulnerability_tool()
 
-        # Write save_vuln.sh — a validating helper script
-        save_vuln_path = os.path.join(exec_cwd, "save_vuln.sh")
+        # Only create .vulns/ and save_vuln.sh when the save tool is available
+        if has_save_tool:
+            # Create .vulns/ directory for bash JSON fallback
+            vulns_dir = os.path.join(exec_cwd, ".vulns")
+            try:
+                os.makedirs(vulns_dir, exist_ok=True)
+            except OSError:
+                pass
+
+            # Write save_vuln.sh — a validating helper script
+            save_vuln_path = os.path.join(exec_cwd, "save_vuln.sh")
         save_vuln_script = r'''#!/usr/bin/env bash
 # save_vuln.sh — Save a vulnerability as validated JSON to .vulns/
 # Usage (heredoc — PREFERRED, avoids quoting issues):
@@ -779,50 +783,53 @@ print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
             pass
 
         # Build AGENTS.md content
-        content = (
-            "# Copilot Agent Instructions\n\n"
-            "## MANDATORY: How to Save Findings\n\n"
-            "When you discover a vulnerability, you **MUST** save it.\n\n"
-            f"### Method 1 (PREFERRED): Call the MCP tool `{save_tool}`\n"
-            "Parameters:\n"
-            "- `name`: Vulnerability name\n"
-            "- `description`: Detailed description with attack flow\n"
-            "- `worst_impact`: Worst case impact\n"
-            "- `cvss_vector`: CVSS:3.0 vector string\n"
-            "- `remediation`: How to fix\n"
-            "- `steps`: Array of step objects, EACH with:\n"
-            "  - `file_path`: Path to the affected source file (e.g., `app.py`)\n"
-            "  - `code`: Verbatim source code snippet from that file\n"
-            "  - `description`: Why this code is vulnerable\n\n"
-            "### Method 2 (FALLBACK): Run `bash save_vuln.sh` with a heredoc\n"
-            "If the MCP tool is unavailable, use the helper script with a **heredoc**.\n"
-            "IMPORTANT: Always use a heredoc (<<'VULN_EOF') to avoid bash quoting issues:\n"
-            "```bash\n"
-            "bash save_vuln.sh <<'VULN_EOF'\n"
-            '{\n'
-            '  "name": "SQL Injection in login",\n'
-            '  "description": "User input is concatenated into SQL query without parameterization",\n'
-            '  "worst_impact": "Full database compromise",\n'
-            '  "cvss_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",\n'
-            '  "remediation": "Use parameterized queries",\n'
-            '  "steps": [\n'
-            "    {\n"
-            '      "file_path": "app/routes/login.py",\n'
-            '      "code": "query = f\\"SELECT * FROM users WHERE id={user_id}\\"",\n'
-            '      "description": "Unsanitized user input in SQL query"\n'
-            "    }\n"
-            "  ]\n"
-            "}\n"
-            "VULN_EOF\n"
-            "```\n"
-            "NEVER use `bash save_vuln.sh '{...}'` with single quotes — it breaks on special characters.\n"
-            "If save_vuln.sh rejects the data, read the error output and fix the issues.\n\n"
-            "### Rules\n"
-            "- You MUST save EVERY vulnerability found using one of the methods above\n"
-            "- EVERY step MUST have a real `file_path` (existing file) and `code` (verbatim source snippet)\n"
-            "- `code` must be copied from the source file, NOT analysis text\n"
-            "- Do NOT just describe findings in text — they are LOST unless saved\n\n"
-        )
+        content = "# Copilot Agent Instructions\n\n"
+
+        # Only include vulnerability save instructions when the tool is available
+        if has_save_tool:
+            content += (
+                "## MANDATORY: How to Save Findings\n\n"
+                "When you discover a vulnerability, you **MUST** save it.\n\n"
+                f"### Method 1 (PREFERRED): Call the MCP tool `{save_tool}`\n"
+                "Parameters:\n"
+                "- `name`: Vulnerability name\n"
+                "- `description`: Detailed description with attack flow\n"
+                "- `worst_impact`: Worst case impact\n"
+                "- `cvss_vector`: CVSS:3.0 vector string\n"
+                "- `remediation`: How to fix\n"
+                "- `steps`: Array of step objects, EACH with:\n"
+                "  - `file_path`: Path to the affected source file (e.g., `app.py`)\n"
+                "  - `code`: Verbatim source code snippet from that file\n"
+                "  - `description`: Why this code is vulnerable\n\n"
+                "### Method 2 (FALLBACK): Run `bash save_vuln.sh` with a heredoc\n"
+                "If the MCP tool is unavailable, use the helper script with a **heredoc**.\n"
+                "IMPORTANT: Always use a heredoc (<<'VULN_EOF') to avoid bash quoting issues:\n"
+                "```bash\n"
+                "bash save_vuln.sh <<'VULN_EOF'\n"
+                '{\n'
+                '  "name": "SQL Injection in login",\n'
+                '  "description": "User input is concatenated into SQL query without parameterization",\n'
+                '  "worst_impact": "Full database compromise",\n'
+                '  "cvss_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",\n'
+                '  "remediation": "Use parameterized queries",\n'
+                '  "steps": [\n'
+                "    {\n"
+                '      "file_path": "app/routes/login.py",\n'
+                '      "code": "query = f\\"SELECT * FROM users WHERE id={user_id}\\"",\n'
+                '      "description": "Unsanitized user input in SQL query"\n'
+                "    }\n"
+                "  ]\n"
+                "}\n"
+                "VULN_EOF\n"
+                "```\n"
+                "NEVER use `bash save_vuln.sh '{...}'` with single quotes — it breaks on special characters.\n"
+                "If save_vuln.sh rejects the data, read the error output and fix the issues.\n\n"
+                "### Rules\n"
+                "- You MUST save EVERY vulnerability found using one of the methods above\n"
+                "- EVERY step MUST have a real `file_path` (existing file) and `code` (verbatim source snippet)\n"
+                "- `code` must be copied from the source file, NOT analysis text\n"
+                "- Do NOT just describe findings in text — they are LOST unless saved\n\n"
+            )
         if denied:
             content += (
                 "## FORBIDDEN Tools\n\n"
