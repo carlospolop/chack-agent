@@ -782,12 +782,9 @@ persist_base = os.environ.get('AISEC_LOCAL_VULN_STORE_PATH', '')
 if persist_base:
     persist_dir = os.path.join(persist_base, 'bash_vulns')
     os.makedirs(persist_dir, exist_ok=True)
-    # Extract agent_id from session id (format: action:scan:round:agent_id:ts)
-    session_id = os.environ.get('CHACK_TASK_SESSION_ID', '')
-    parts = session_id.split(':')
-    agent_id = parts[3] if len(parts) > 3 else 'unknown'
-    # Add discovered_by for retrieval filtering
-    d['discovered_by'] = agent_id
+    # Use full session id as discovered_by (unique per agent invocation)
+    session_id = os.environ.get('CHACK_TASK_SESSION_ID', 'unknown')
+    d['discovered_by'] = session_id
     d['CVSS'] = d.get('cvss_vector', '')
     persist_fname = os.path.join(persist_dir, f'vuln_{uuid.uuid4().hex[:12]}.json')
     with open(persist_fname, 'w') as f:
