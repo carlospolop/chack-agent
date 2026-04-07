@@ -719,7 +719,7 @@ class CopilotCliExecutor:
 
             # Write save_vuln.sh — a validating helper script
             save_vuln_path = os.path.join(exec_cwd, "save_vuln.sh")
-        save_vuln_script = r'''#!/usr/bin/env bash
+            save_vuln_script = r'''#!/usr/bin/env bash
 # save_vuln.sh — Save a vulnerability as validated JSON
 # Usage (heredoc — PREFERRED, avoids quoting issues):
 #   bash save_vuln.sh <<'VULN_EOF'
@@ -793,12 +793,12 @@ if persist_base:
 print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
 " "$JSON"
 '''
-        try:
-            with open(save_vuln_path, "w", encoding="utf-8") as fh:
-                fh.write(save_vuln_script)
-            os.chmod(save_vuln_path, 0o755)
-        except OSError:
-            pass
+            try:
+                with open(save_vuln_path, "w", encoding="utf-8") as fh:
+                    fh.write(save_vuln_script)
+                os.chmod(save_vuln_path, 0o755)
+            except OSError:
+                pass
 
         # Build AGENTS.md content
         content = "# Copilot Agent Instructions\n\n"
