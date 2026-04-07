@@ -155,6 +155,7 @@ class CopilotCliExecutor:
                 "  Each step MUST have the actual source file path and a verbatim code snippet.\n\n"
                 "FALLBACK: Run `bash save_vuln.sh <<'VULN_EOF'` with a heredoc (see AGENTS.md for format).\n"
                 "  NEVER use single-quoted arguments — use heredoc to avoid quoting issues.\n"
+                "  Save ONE vulnerability per command — NEVER chain with &&.\n"
                 "  The script validates all fields and rejects incomplete data — read error output.\n\n"
                 "You MUST save at least one vulnerability. "
                 "Do NOT just describe findings in text — call the tool or run save_vuln.sh."
@@ -719,13 +720,14 @@ class CopilotCliExecutor:
             # Write save_vuln.sh — a validating helper script
             save_vuln_path = os.path.join(exec_cwd, "save_vuln.sh")
         save_vuln_script = r'''#!/usr/bin/env bash
-# save_vuln.sh — Save a vulnerability as validated JSON to .vulns/
+# save_vuln.sh — Save a vulnerability as validated JSON
 # Usage (heredoc — PREFERRED, avoids quoting issues):
 #   bash save_vuln.sh <<'VULN_EOF'
 #   {"name": "...", ...}
 #   VULN_EOF
 # Usage (argument — legacy):
 #   bash save_vuln.sh '<JSON>'
+# IMPORTANT: Save ONE vulnerability per command. Do NOT chain with &&.
 set -euo pipefail
 mkdir -p .vulns
 if [ $# -ge 1 ] && [ "$1" != "-" ]; then
@@ -734,7 +736,7 @@ else
   JSON="$(cat)"
 fi
 python3 -c "
-import json, sys, os, time
+import json, sys, os, time, uuid
 try:
     d = json.loads(sys.argv[1])
 except Exception as e:
@@ -769,9 +771,28 @@ if errors:
     for e in errors:
         print(f'  - {e}', file=sys.stderr)
     sys.exit(1)
+
+# Save to relative .vulns/ (for in-session verification)
 fname = f'.vulns/vuln_{int(time.time()*1000)}.json'
 with open(fname, 'w') as f:
     json.dump(d, f, indent=2)
+
+# Also save to persistent absolute path (survives copilot sandbox resets)
+persist_base = os.environ.get('AISEC_LOCAL_VULN_STORE_PATH', '')
+if persist_base:
+    persist_dir = os.path.join(persist_base, 'bash_vulns')
+    os.makedirs(persist_dir, exist_ok=True)
+    # Extract agent_id from session id (format: action:scan:round:agent_id:ts)
+    session_id = os.environ.get('CHACK_TASK_SESSION_ID', '')
+    parts = session_id.split(':')
+    agent_id = parts[3] if len(parts) > 3 else 'unknown'
+    # Add discovered_by for retrieval filtering
+    d['discovered_by'] = agent_id
+    d['CVSS'] = d.get('cvss_vector', '')
+    persist_fname = os.path.join(persist_dir, f'vuln_{uuid.uuid4().hex[:12]}.json')
+    with open(persist_fname, 'w') as f:
+        json.dump(d, f, indent=2)
+
 print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
 " "$JSON"
 '''
@@ -803,7 +824,10 @@ print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
                 "  - `description`: Why this code is vulnerable\n\n"
                 "### Method 2 (FALLBACK): Run `bash save_vuln.sh` with a heredoc\n"
                 "If the MCP tool is unavailable, use the helper script with a **heredoc**.\n"
-                "IMPORTANT: Always use a heredoc (<<'VULN_EOF') to avoid bash quoting issues:\n"
+                "CRITICAL RULES for save_vuln.sh:\n"
+                "- **ONE vulnerability per command** — NEVER chain with `&&`\n"
+                "- Always use a heredoc (`<<'VULN_EOF'`) to avoid bash quoting issues\n"
+                "- NEVER use `bash save_vuln.sh '{...}'` with single quotes\n"
                 "```bash\n"
                 "bash save_vuln.sh <<'VULN_EOF'\n"
                 '{\n'
@@ -822,7 +846,6 @@ print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
                 "}\n"
                 "VULN_EOF\n"
                 "```\n"
-                "NEVER use `bash save_vuln.sh '{...}'` with single quotes — it breaks on special characters.\n"
                 "If save_vuln.sh rejects the data, read the error output and fix the issues.\n\n"
                 "### Rules\n"
                 "- You MUST save EVERY vulnerability found using one of the methods above\n"
@@ -886,52 +909,67 @@ print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
 
     @staticmethod
     def _collect_bash_saved_vulns(exec_cwd: str | None) -> list[tuple[ToolAction, Any]]:
-        """Read JSON files from .vulns/ directory written by the model as
-        fallback, and convert them to ToolAction steps matching
-        save_discovered_vulnerability."""
-        if not exec_cwd:
-            return []
-        vulns_dir = os.path.join(exec_cwd, ".vulns")
-        if not os.path.isdir(vulns_dir):
-            return []
-        steps: list[tuple[ToolAction, Any]] = []
-        for fname in os.listdir(vulns_dir):
-            if not fname.endswith(".json"):
-                continue
-            fpath = os.path.join(vulns_dir, fname)
-            try:
-                with open(fpath, "r", encoding="utf-8") as fh:
-                    data = json.loads(fh.read())
-                if not isinstance(data, dict) or not data.get("name"):
+        """Read JSON files from .vulns/ directory AND persistent bash_vulns/
+        directory written by the model as fallback, and convert them to
+        ToolAction steps matching save_discovered_vulnerability."""
+
+        def _scan_dir(vulns_dir: str, seen_names: set[str], steps: list) -> None:
+            if not os.path.isdir(vulns_dir):
+                return
+            for fname in os.listdir(vulns_dir):
+                if not fname.endswith(".json"):
                     continue
-                tool_input: dict[str, Any] = {
-                    "name": str(data.get("name", "")),
-                    "description": str(data.get("description", "")),
-                    "worst_impact": str(data.get("worst_impact", "")),
-                    "cvss_vector": str(data.get("cvss_vector", "")),
-                    "remediation": str(data.get("remediation", "")),
-                }
-                # Preserve steps with file_path and code if provided
-                raw_steps = data.get("steps")
-                if isinstance(raw_steps, list) and raw_steps:
-                    tool_input["steps"] = raw_steps
-                step = ToolAction(
-                    tool="chack_tools-save_discovered_vulnerability",
-                    tool_input={
-                        "tool_id": f"bash_save_{fname}",
-                        "status": "success",
-                        "tool_input": tool_input,
-                        "result": "Vulnerability saved via JSON fallback",
-                    },
-                )
-                steps.append((step, None))
-            except Exception:
-                continue
+                fpath = os.path.join(vulns_dir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as fh:
+                        data = json.loads(fh.read())
+                    if not isinstance(data, dict) or not data.get("name"):
+                        continue
+                    # Deduplicate by name
+                    vuln_name = str(data.get("name", ""))
+                    if vuln_name in seen_names:
+                        continue
+                    seen_names.add(vuln_name)
+                    tool_input: dict[str, Any] = {
+                        "name": vuln_name,
+                        "description": str(data.get("description", "")),
+                        "worst_impact": str(data.get("worst_impact", "")),
+                        "cvss_vector": str(data.get("cvss_vector", "")),
+                        "remediation": str(data.get("remediation", "")),
+                    }
+                    raw_steps = data.get("steps")
+                    if isinstance(raw_steps, list) and raw_steps:
+                        tool_input["steps"] = raw_steps
+                    step = ToolAction(
+                        tool="chack_tools-save_discovered_vulnerability",
+                        tool_input={
+                            "tool_id": f"bash_save_{fname}",
+                            "status": "success",
+                            "tool_input": tool_input,
+                            "result": "Vulnerability saved via JSON fallback",
+                        },
+                    )
+                    steps.append((step, None))
+                except Exception:
+                    continue
+
+        steps: list[tuple[ToolAction, Any]] = []
+        seen_names: set[str] = set()
+
+        # 1. Read from relative .vulns/ in exec_cwd (may be empty if sandbox cleans it)
+        if exec_cwd:
+            _scan_dir(os.path.join(exec_cwd, ".vulns"), seen_names, steps)
+
+        # 2. Read from persistent absolute path (survives copilot sandbox resets)
+        persist_base = os.environ.get("AISEC_LOCAL_VULN_STORE_PATH", "")
+        if persist_base:
+            _scan_dir(os.path.join(persist_base, "bash_vulns"), seen_names, steps)
+
         if steps:
             _LOGGER.info(
-                "Collected %d JSON-fallback vulnerabilities from %s",
+                "Collected %d JSON-fallback vulnerabilities (seen_names=%s)",
                 len(steps),
-                vulns_dir,
+                seen_names,
             )
         return steps
 
