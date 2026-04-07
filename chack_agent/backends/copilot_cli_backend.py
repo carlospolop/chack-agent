@@ -153,7 +153,8 @@ class CopilotCliExecutor:
                 "  name, description, worst_impact, cvss_vector, remediation,\n"
                 "  steps (array of {{file_path, code, description}}).\n"
                 "  Each step MUST have the actual source file path and a verbatim code snippet.\n\n"
-                "FALLBACK: Run `bash save_vuln.sh '<JSON>'` (see AGENTS.md for format).\n"
+                "FALLBACK: Run `bash save_vuln.sh <<'VULN_EOF'` with a heredoc (see AGENTS.md for format).\n"
+                "  NEVER use single-quoted arguments — use heredoc to avoid quoting issues.\n"
                 "  The script validates all fields and rejects incomplete data — read error output.\n\n"
                 "You MUST save at least one vulnerability. "
                 "Do NOT just describe findings in text — call the tool or run save_vuln.sh."
@@ -236,7 +237,8 @@ class CopilotCliExecutor:
                 "    steps (array of objects with file_path, code, description).\n"
                 "    Each step MUST include the actual file_path in the repo and the\n"
                 "    verbatim source code snippet from that file.\n"
-                "  FALLBACK: Run `bash save_vuln.sh '<JSON>'` — it validates all fields.\n"
+                "  FALLBACK: Run `bash save_vuln.sh <<'VULN_EOF'` with a heredoc — it validates all fields.\n"
+                "  NEVER use `bash save_vuln.sh '{...}'` with single quotes — it breaks on special characters.\n"
                 "  If you do NOT save findings they are LOST."
             )
             # Warn about built-in tools that silently discard findings
@@ -714,12 +716,19 @@ class CopilotCliExecutor:
         save_vuln_path = os.path.join(exec_cwd, "save_vuln.sh")
         save_vuln_script = r'''#!/usr/bin/env bash
 # save_vuln.sh — Save a vulnerability as validated JSON to .vulns/
-# Usage: bash save_vuln.sh '<JSON>'
-# The JSON MUST contain: name, description, worst_impact, cvss_vector, remediation
-# and steps (array) where each step has: file_path, code, description
+# Usage (heredoc — PREFERRED, avoids quoting issues):
+#   bash save_vuln.sh <<'VULN_EOF'
+#   {"name": "...", ...}
+#   VULN_EOF
+# Usage (argument — legacy):
+#   bash save_vuln.sh '<JSON>'
 set -euo pipefail
 mkdir -p .vulns
-JSON="$1"
+if [ $# -ge 1 ] && [ "$1" != "-" ]; then
+  JSON="$1"
+else
+  JSON="$(cat)"
+fi
 python3 -c "
 import json, sys, os, time
 try:
@@ -785,11 +794,12 @@ print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
             "  - `file_path`: Path to the affected source file (e.g., `app.py`)\n"
             "  - `code`: Verbatim source code snippet from that file\n"
             "  - `description`: Why this code is vulnerable\n\n"
-            "### Method 2 (FALLBACK): Run `bash save_vuln.sh '<JSON>'`\n"
-            "If the MCP tool is unavailable, use the helper script.\n"
-            "The script validates the data and rejects incomplete submissions:\n"
+            "### Method 2 (FALLBACK): Run `bash save_vuln.sh` with a heredoc\n"
+            "If the MCP tool is unavailable, use the helper script with a **heredoc**.\n"
+            "IMPORTANT: Always use a heredoc (<<'VULN_EOF') to avoid bash quoting issues:\n"
             "```bash\n"
-            "bash save_vuln.sh '{\n"
+            "bash save_vuln.sh <<'VULN_EOF'\n"
+            '{\n'
             '  "name": "SQL Injection in login",\n'
             '  "description": "User input is concatenated into SQL query without parameterization",\n'
             '  "worst_impact": "Full database compromise",\n'
@@ -802,8 +812,10 @@ print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
             '      "description": "Unsanitized user input in SQL query"\n'
             "    }\n"
             "  ]\n"
-            "}'\n"
+            "}\n"
+            "VULN_EOF\n"
             "```\n"
+            "NEVER use `bash save_vuln.sh '{...}'` with single quotes — it breaks on special characters.\n"
             "If save_vuln.sh rejects the data, read the error output and fix the issues.\n\n"
             "### Rules\n"
             "- You MUST save EVERY vulnerability found using one of the methods above\n"
