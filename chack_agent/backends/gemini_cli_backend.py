@@ -468,17 +468,29 @@ class GeminiCliExecutor:
             },
             "tools": {
                 "core": [],
+                "shell": {
+                    "inactivityTimeout": int(
+                        os.environ.get("CHACK_GEMINI_SHELL_INACTIVITY_TIMEOUT", "300")
+                    ),
+                },
             },
             "mcpServers": {
                 "chack_tools": {
                     "command": sys.executable,
                     "args": ["-m", "chack_agent.backends.chack_tools_mcp_server"],
                     "env": self._gemini_mcp_env_map(),
+                    "timeout": int(
+                        os.environ.get("CHACK_GEMINI_MCP_TOOL_TIMEOUT_MS", "300000")
+                    ),
                 }
             },
         }
         if self._playwright_mcp_enabled():
-            settings_payload["mcpServers"]["playwright"] = playwright_mcp_server_config()
+            pw_cfg = playwright_mcp_server_config()
+            pw_cfg["timeout"] = int(
+                os.environ.get("CHACK_GEMINI_MCP_TOOL_TIMEOUT_MS", "300000")
+            )
+            settings_payload["mcpServers"]["playwright"] = pw_cfg
         with open(settings_path, "w", encoding="utf-8") as handle:
             json.dump(settings_payload, handle, ensure_ascii=False, indent=2)
             handle.write("\n")

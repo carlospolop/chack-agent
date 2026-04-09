@@ -241,7 +241,7 @@ class ClaudeCodeExecutor:
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
         agents_md_path = self._write_agents_md(exec_cwd)
         timeout_seconds = int(
-            os.environ.get("CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS", "") or "0"
+            os.environ.get("CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS", "") or "900"
         )
 
         _LOGGER.info(
@@ -787,6 +787,25 @@ bash save_vuln.sh '{{
 
         env.setdefault("AWS_SHARED_CREDENTIALS_FILE", os.environ.get("AWS_SHARED_CREDENTIALS_FILE", ""))
         env.setdefault("AWS_CONFIG_FILE", os.environ.get("AWS_CONFIG_FILE", ""))
+
+        # Claude Code internal tool timeouts -----------------------------------
+        # BASH_DEFAULT_TIMEOUT_MS: default timeout for the Bash tool (default 120s)
+        env.setdefault(
+            "BASH_DEFAULT_TIMEOUT_MS",
+            os.environ.get("CHACK_CLAUDE_BASH_DEFAULT_TIMEOUT_MS", "120000"),
+        )
+        # BASH_MAX_TIMEOUT_MS: hard cap the model can request for Bash (default 600s)
+        env.setdefault(
+            "BASH_MAX_TIMEOUT_MS",
+            os.environ.get("CHACK_CLAUDE_BASH_MAX_TIMEOUT_MS", "600000"),
+        )
+        # MCP_TOOL_TIMEOUT: per-tool timeout for MCP calls.
+        # Claude Code defaults this to 1e8 ms (~27 hours) which is effectively
+        # infinite and can cause the agent to hang. We cap it at 5 minutes.
+        env.setdefault(
+            "MCP_TOOL_TIMEOUT",
+            os.environ.get("CHACK_CLAUDE_MCP_TOOL_TIMEOUT_MS", "300000"),
+        )
 
         return env
 
