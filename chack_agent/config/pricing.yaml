@@ -554,8 +554,8 @@ models:
     cache_read: 0.03
     output: 1.2
   minimax/minimax-m2.1:
-    input: 0.27
-    cache_read: 0.0290000007
+    input: 0.29
+    cache_read: 0.03
     output: 0.95
   minimax/minimax-m2.5:
     input: 0.118
@@ -675,12 +675,12 @@ models:
     output: 2.3
   moonshotai/kimi-k2-0905:
     input: 0.4
-    cache_read: 0.15
+    cache_read: 0.4
     output: 2
   moonshotai/kimi-k2-thinking:
-    input: 0.47
-    cache_read: 0.141
-    output: 2
+    input: 0.6
+    cache_read: 0.6
+    output: 2.5
   moonshotai/kimi-k2.5:
     input: 0.3827
     cache_read: 0.19135
@@ -1285,10 +1285,6 @@ models:
     input: 0.1
     cache_read: 0.1
     output: 0.3
-  stepfun/step-3.5-flash:free:
-    input: 0
-    cache_read: 0
-    output: 0
   switchpoint/router:
     input: 0.85
     cache_read: 0.85
@@ -1426,9 +1422,9 @@ models:
     cache_read: 0.24
     output: 4
   z-ai/glm-5.1:
-    input: 1.26
-    cache_read: 1.26
-    output: 3.96
+    input: 1.395
+    cache_read: 0.26
+    output: 4.4
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
