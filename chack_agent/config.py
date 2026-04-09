@@ -163,7 +163,7 @@ def resolve_api_key_type(config: ChackConfig) -> str:
     if provider == "openai":
         if openai_api_key:
             return "openai"
-    if provider in {"claude", "claude-code", "claude_code"}:
+    if provider in {"claude", "claude-code", "claude_code", "anthropic"}:
         if anthropic_api_key:
             return "anthropic"
     if provider in {"copilot", "copilot-cli", "copilot_cli", "gh-copilot", "gh_copilot"}:
@@ -204,7 +204,7 @@ def resolve_backend_type(config: ChackConfig) -> str:
         return "openai_compaction"
     if provider == "gemini":
         return "gemini"
-    if provider in {"claude", "claude-code", "claude_code"}:
+    if provider in {"claude", "claude-code", "claude_code", "anthropic"}:
         return "claude"
     if provider in {"copilot", "copilot-cli", "copilot_cli", "gh-copilot", "gh_copilot"}:
         return "copilot"

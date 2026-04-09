@@ -163,13 +163,13 @@ def main() -> None:
         raise SystemExit(
             "GEMINI_API_KEY or GOOGLE_API_KEY is required for provider=gemini"
         )
-    if provider in {"claude", "claude-code", "claude_code"} and not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("CLAUDE_API_KEY"):
+    if provider in {"claude", "claude-code", "claude_code", "anthropic"} and not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("CLAUDE_API_KEY"):
         if os.environ.get("INPUT_ANTHROPIC_API_KEY"):
             os.environ["ANTHROPIC_API_KEY"] = os.environ.get("INPUT_ANTHROPIC_API_KEY", "")
         elif os.environ.get("INPUT_CLAUDE_API_KEY"):
             os.environ["ANTHROPIC_API_KEY"] = os.environ.get("INPUT_CLAUDE_API_KEY", "")
 
-    if provider in {"claude", "claude-code", "claude_code"} and not anthropic_api_key:
+    if provider in {"claude", "claude-code", "claude_code", "anthropic"} and not anthropic_api_key:
         raise SystemExit(
             "ANTHROPIC_API_KEY or CLAUDE_API_KEY is required for provider=claude"
         )
