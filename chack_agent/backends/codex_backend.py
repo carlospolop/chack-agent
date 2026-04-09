@@ -391,6 +391,26 @@ class CodexExecutor:
         raw_responses: list[Any] = []
         if usage_payload is not None:
             raw_responses.append({"usage": usage_payload})
+        elif (output or steps) and usage_payload is None:
+            # Codex CLI with copilot tokens doesn't emit turn.completed events,
+            # so we never get real token counts.  Estimate from the prompt and
+            # output character lengths (≈4 chars/token) so callers at least get a
+            # non-zero cost signal.
+            est_input = max(len(prompt) // 4, 1)
+            est_output = max(len(output) // 4, 1) if output else 0
+            estimated = {
+                "input_tokens": est_input,
+                "output_tokens": est_output,
+                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+            }
+            raw_responses.append({"usage": estimated})
+            report_live_usage(
+                self._model_name,
+                prompt_tokens=est_input,
+                completion_tokens=est_output,
+                cached_prompt_tokens=0,
+                cache_write_tokens=0,
+            )
         if not output and usage_payload is None and not steps:
             details = "\n".join(error_messages or combined_output_lines).strip() or (
                 "Codex CLI exited successfully but produced no response events."
@@ -719,6 +739,13 @@ class CodexExecutor:
             "CHACK_EXEC_TIMEOUT",
             "CHACK_EXEC_MAX_OUTPUT",
             "CHACK_MCP_TOOL_MAX_TOKENS",
+            "CHACK_BUDGET_START_EPOCH",
+            "CHACK_BUDGET_MAX_RUNTIME_SECONDS",
+            "CHACK_BUDGET_MAX_COST_USD",
+            "CHACK_BUDGET_SPENT_USD",
+            "CHACK_BUDGET_WARNING_RATIO",
+            "CHACK_BUDGET_CRITICAL_RATIO",
+            "CHACK_BUDGET_INJECTION_ENABLED",
             "OPENROUTER_API_KEY",
             "OPENROUTER_BASE_URL",
             "OPENROUTER_HTTP_REFERER",

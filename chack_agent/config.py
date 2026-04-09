@@ -60,6 +60,9 @@ class AgentConfig:
     output_schema_file: str = ""
     output_schema_name: str = ""
     output_schema_strict: bool = True
+    budget_warning_ratio: float = 0.6
+    budget_critical_ratio: float = 0.9
+    budget_tool_injection_enabled: bool = True
 
 
 @dataclass

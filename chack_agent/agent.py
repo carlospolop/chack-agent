@@ -56,6 +56,15 @@ from .limit_event_state import (
     reset_active_limit_event_callback,
     set_active_limit_event_callback,
 )
+from .budget_warning_state import (
+    budget_prompt_warning,
+    export_budget_env,
+    export_spent_usd_env,
+    inject_budget_warning,
+    reset_budget_context,
+    set_budget_context,
+    update_spent_usd,
+)
 from .pricing import (
     estimate_cost,
     estimate_costs_by_model,
@@ -1092,17 +1101,30 @@ class Chack:
             run_started_at = self._last_activity_at[session_id]
             max_runtime_minutes = max(0, int(self.config.agent.max_runtime_minutes or 0))
             max_runtime_seconds = max_runtime_minutes * 60.0
-            runtime_warning_threshold_seconds = max_runtime_seconds * 0.6
-            runtime_critical_threshold_seconds = max_runtime_seconds * 0.9
+            budget_warning_ratio = float(getattr(self.config.agent, "budget_warning_ratio", 0.7) or 0.7)
+            budget_critical_ratio = float(getattr(self.config.agent, "budget_critical_ratio", 0.9) or 0.9)
+            budget_tool_injection_enabled = bool(getattr(self.config.agent, "budget_tool_injection_enabled", True))
+            runtime_warning_threshold_seconds = max_runtime_seconds * budget_warning_ratio
+            runtime_critical_threshold_seconds = max_runtime_seconds * budget_critical_ratio
             try:
                 max_cost_usd = max(0.0, float(self.config.agent.max_cost_usd or 0.0))
             except (TypeError, ValueError):
                 max_cost_usd = 0.0
-            cost_warning_threshold = max_cost_usd * 0.6
-            cost_critical_threshold = max_cost_usd * 0.9
+            cost_warning_threshold = max_cost_usd * budget_warning_ratio
+            cost_critical_threshold = max_cost_usd * budget_critical_ratio
             estimated_cost_spent = 0.0
             progress_state = {"runtime_percent": 0, "cost_percent": 0}
             limit_event_state = {"runtime": False, "cost": False, "tools": False}
+
+            # Export budget env vars for MCP subprocess backends
+            export_budget_env(
+                start_epoch=run_started_at,
+                max_runtime_seconds=max_runtime_seconds,
+                max_cost_usd=max_cost_usd,
+                warning_ratio=budget_warning_ratio,
+                critical_ratio=budget_critical_ratio,
+                injection_enabled=budget_tool_injection_enabled,
+            )
 
             min_tools_used = max(0, int(self.config.tools.min_tools_used or 0))
             if min_tools_used_override is not None:
@@ -1325,8 +1347,31 @@ class Chack:
                         limit_event_token = set_active_limit_event_callback(
                             limit_event_callback_holder.get("callback")
                         )
+                        budget_tokens = set_budget_context(
+                            start_epoch=run_started_at,
+                            max_runtime_seconds=max_runtime_seconds,
+                            max_cost_usd=max_cost_usd,
+                            warning_ratio=budget_warning_ratio,
+                            critical_ratio=budget_critical_ratio,
+                            injection_enabled=budget_tool_injection_enabled,
+                        )
+                        update_spent_usd(estimated_cost_spent)
+                        export_spent_usd_env(estimated_cost_spent)
+                        prompt_to_send = current_prompt
+                        if budget_tool_injection_enabled:
+                            bw = budget_prompt_warning(
+                                start_epoch=run_started_at,
+                                max_runtime_seconds=max_runtime_seconds,
+                                elapsed_runtime_seconds=time.time() - run_started_at,
+                                spent_usd=estimated_cost_spent,
+                                max_cost_usd=max_cost_usd,
+                                warning_ratio=budget_warning_ratio,
+                                critical_ratio=budget_critical_ratio,
+                            )
+                            if bw:
+                                prompt_to_send = current_prompt + bw
                         try:
-                            return executor.invoke({"input": current_prompt}, context=context)
+                            return executor.invoke({"input": prompt_to_send}, context=context)
                         except Exception as exc:
                             if MaxTurnsExceeded is not None and isinstance(exc, MaxTurnsExceeded):
                                 return {
@@ -1341,6 +1386,7 @@ class Chack:
                                 }
                             raise
                         finally:
+                            reset_budget_context(budget_tokens)
                             reset_active_limit_event_callback(limit_event_token)
                             reset_active_live_cost_callback(live_cost_token)
                             reset_active_max_tools_used(max_tools_token)
@@ -1409,7 +1455,10 @@ class Chack:
                                 usage[1] += max(0, int(completion_tokens or 0))
                                 usage[2] += max(0, int(cached_prompt_tokens or 0))
                                 usage[3] += max(0, int(cache_write_tokens or 0))
-                            if max_cost_usd > 0 and _live_total_cost() >= max_cost_usd:
+                            current_live_cost = _live_total_cost()
+                            update_spent_usd(current_live_cost)
+                            export_spent_usd_env(current_live_cost)
+                            if max_cost_usd > 0 and current_live_cost >= max_cost_usd:
                                 self._emit_limit_reached_once(
                                     session_id=session_id,
                                     task_session_id=telemetry_task_session_id or task_session_id,
@@ -1417,7 +1466,7 @@ class Chack:
                                     limit_type="cost",
                                     payload={
                                         "max_cost_usd": max_cost_usd,
-                                        "spent_usd": _live_total_cost(),
+                                        "spent_usd": current_live_cost,
                                     },
                                 )
                                 raise LiveCostLimitExceeded(
@@ -1560,6 +1609,7 @@ class Chack:
                                 attempt_cost += nested_cost
                         if attempt_cost > 0.0:
                             estimated_cost_spent += attempt_cost
+                            export_spent_usd_env(estimated_cost_spent)
                         self._emit_progress_milestones(
                             session_id=session_id,
                             task_session_id=telemetry_task_session_id or task_session_id,
@@ -1704,10 +1754,22 @@ class Chack:
                             "accurately and confidently, rather than rushing to a final answer."
                         )
                         missing_tools_reminders_sent += 1
+
+                    budget_notice = budget_prompt_warning(
+                        start_epoch=run_started_at,
+                        max_runtime_seconds=max_runtime_seconds,
+                        elapsed_runtime_seconds=time.time() - run_started_at,
+                        spent_usd=estimated_cost_spent,
+                        max_cost_usd=max_cost_usd,
+                        warning_ratio=budget_warning_ratio,
+                        critical_ratio=budget_critical_ratio,
+                    )
+
                     current_prompt = (
                         "Continue the same run from your current context. "
                         "Do not provide your final answer yet.\n"
                         + " ".join(reminders)
+                        + (budget_notice if budget_notice else "")
                         + f"\n\nOriginal request:\n{prompt_text}"
                     )
 

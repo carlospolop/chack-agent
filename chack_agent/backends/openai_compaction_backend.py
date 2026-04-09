@@ -25,6 +25,7 @@ from agents.items import ToolCallItem
 from agents.exceptions import ModelBehaviorError
 
 from ..config import ChackConfig
+from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
@@ -670,6 +671,27 @@ def _apply_guardrails(tools: list[Any]) -> list[Any]:
     return _wrap_tools_with_logging(tools)
 
 
+def _apply_budget_injection(tools: list[Any]) -> list[Any]:
+    """Wrap ``on_invoke_tool`` on each function tool so that budget
+    warnings are appended to string results when thresholds are crossed."""
+    for tool in tools:
+        original_invoke = getattr(tool, "on_invoke_tool", None)
+        if original_invoke is None:
+            continue
+        if getattr(tool, "_chack_budget_wrapped", False):
+            continue
+
+        async def _budget_invoke(ctx, raw_args, _orig=original_invoke):
+            result = await _orig(ctx, raw_args)
+            if isinstance(result, str):
+                return inject_budget_warning(result)
+            return result
+
+        tool.on_invoke_tool = _budget_invoke  # type: ignore[attr-defined]
+        tool._chack_budget_wrapped = True  # type: ignore[attr-defined]
+    return tools
+
+
 def _get_tool_callable(tool: Any) -> tuple[Optional[Callable[..., Any]], Optional[str]]:
     for attr in ("callable", "func", "_callable", "_function", "_func"):
         target = getattr(tool, attr, None)
@@ -823,6 +845,7 @@ def build_executor(
         tools = list(tools_override)
 
     tools = _apply_guardrails(tools)
+    tools = _apply_budget_injection(tools)
     model: Any = model_name
     # For OpenAI compaction backend use native OpenAI Responses model.
 

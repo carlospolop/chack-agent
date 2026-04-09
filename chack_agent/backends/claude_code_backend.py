@@ -241,7 +241,7 @@ class ClaudeCodeExecutor:
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
         agents_md_path = self._write_agents_md(exec_cwd)
         timeout_seconds = int(
-            os.environ.get("CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS", "900") or "900"
+            os.environ.get("CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS", "") or "0"
         )
 
         _LOGGER.info(
@@ -296,7 +296,7 @@ class ClaudeCodeExecutor:
                     pass
 
             while True:
-                if (time.monotonic() - started_at) > timeout_seconds:
+                if timeout_seconds > 0 and (time.monotonic() - started_at) > timeout_seconds:
                     process.kill()
                     return (
                         f"ERROR: Claude execution timed out after {timeout_seconds}s.",
@@ -705,6 +705,13 @@ bash save_vuln.sh '{{
         return steps
 
     def _build_command(self, prompt: str) -> list[str]:
+        try:
+            tools_cfg = json.loads(self._tools_config_json or "{}")
+            _exec_enabled = bool(tools_cfg.get("exec_enabled", False))
+        except Exception:
+            _exec_enabled = False
+        builtin_tools = "Bash" if _exec_enabled else ""
+
         args: list[str] = [
             self._claude_cli_path,
             "--print",
@@ -712,7 +719,7 @@ bash save_vuln.sh '{{
             "--output-format",
             "stream-json",
             "--tools",
-            "",
+            builtin_tools,
             "--dangerously-skip-permissions",
             "--mcp-config",
             os.path.join(self._claude_home or os.getcwd(), "settings.json"),
@@ -861,6 +868,7 @@ bash save_vuln.sh '{{
             "CHACK_DISABLE_STDOUT_EVENTS",
             "CHACK_MIN_TOOLS_USED",
             "CHACK_MAX_TOOLS_USED",
+            "CHACK_EXEC_CWD",
             "AISEC_LOCAL_VULN_STORE_PATH",
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
@@ -893,6 +901,13 @@ bash save_vuln.sh '{{
             "CHACK_EXEC_TIMEOUT",
             "CHACK_EXEC_MAX_OUTPUT",
             "CHACK_MCP_TOOL_MAX_TOKENS",
+            "CHACK_BUDGET_START_EPOCH",
+            "CHACK_BUDGET_MAX_RUNTIME_SECONDS",
+            "CHACK_BUDGET_MAX_COST_USD",
+            "CHACK_BUDGET_SPENT_USD",
+            "CHACK_BUDGET_WARNING_RATIO",
+            "CHACK_BUDGET_CRITICAL_RATIO",
+            "CHACK_BUDGET_INJECTION_ENABLED",
             "ANTHROPIC_API_KEY",
             "CLAUDE_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",

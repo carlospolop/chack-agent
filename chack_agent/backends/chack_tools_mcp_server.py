@@ -19,6 +19,7 @@ from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
 from chack_tools.task_steps_manager_state import STORE, set_active_context
 from chack_agent.limit_event_state import emit_limit_reached
+from chack_agent.budget_warning_state import budget_status_from_env, inject_budget_warning_from_env
 from .tool_payloads import (
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_TOOLS_APPEND_B64_ENV,
@@ -314,6 +315,7 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                 result = await _invoke_function_tool(_tool, payload)
                 if is_task_steps_manager_init and str(result).startswith("SUCCESS:"):
                     state.has_task_steps_manager_init = True
+                result = inject_budget_warning_from_env(result)
                 return _truncate_tool_output(result)
             except Exception:
                 raise
@@ -355,6 +357,19 @@ def main() -> None:
             max_non_task_tools=max(0, _as_int(os.environ.get("CHACK_MAX_TOOLS_USED", "0"), 0)),
         )
         _register_tools(mcp, tools, state)
+
+        # ── Built-in budget status tool (not part of the dynamic toolset) ──
+        @mcp.tool(
+            name="check_budget_status",
+            description=(
+                "Returns the current runtime and cost budget status. "
+                "Call this periodically (every 5-10 tool calls) to check "
+                "if you are approaching budget limits and need to wrap up."
+            ),
+        )
+        async def _check_budget_status() -> str:
+            return budget_status_from_env()
+
         mcp.run(transport="stdio")
     except Exception:
         trace = traceback.format_exc()

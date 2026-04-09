@@ -23,6 +23,7 @@ from chack_tools.telemetry import log_event
 from chack_tools.tool_usage_state import current_max_tools_used
 
 from ..config import ChackConfig
+from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
 from .playwright_mcp import (
@@ -562,6 +563,7 @@ class LangGraphExecutor:
                         result = self._invoke_function_tool(tool, args)
                     else:
                         result = playwright_mcp_result_to_text(playwright_mcp_call_tool(call_name, args))
+                    result = inject_budget_warning(result)
                     status = "ok"
                 except Exception as exc:  # pragma: no cover
                     result = f"ERROR: {type(exc).__name__}: {exc}"

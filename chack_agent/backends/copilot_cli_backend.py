@@ -81,7 +81,6 @@ class CopilotCliExecutor:
         max_tools_used: int,
         require_task_steps_manager_init_first: bool,
         output_schema_json: str,
-        deny_builtin_tools: list[str] | None = None,
     ) -> None:
         self._conversation = conversation
         self._memory_limit = memory_max_messages
@@ -113,7 +112,6 @@ class CopilotCliExecutor:
             require_task_steps_manager_init_first
         )
         self._output_schema_json = output_schema_json or ""
-        self._deny_builtin_tools: list[str] = list(deny_builtin_tools or [])
 
         self._copilot_home: str | None = None
         self._copilot_session_id: str | None = None
@@ -123,52 +121,6 @@ class CopilotCliExecutor:
         user_input = str(payload.get("input", "") or "")
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_copilot(prompt)
-
-        # Save-or-retry: if save_discovered_vulnerability is available but was
-        # never called, and the agent DID use other tools (meaning it analysed
-        # code), re-run asking it to save its findings.
-        if (
-            self._has_save_vulnerability_tool()
-            and not self._steps_contain_save(steps)
-            and self._steps_contain_analysis(steps)
-        ):
-            exec_cwd = str(
-                self._build_env().get("CHACK_EXEC_CWD", "")
-                or os.environ.get("CHACK_EXEC_CWD", "")
-                or ""
-            ).strip() or "/tmp"
-            _LOGGER.info(
-                "Save-retry: no save_discovered_vulnerability calls detected after %d tool calls. "
-                "Re-running %sto prompt saving. cwd=%s",
-                len(steps),
-                "with --resume " if self._copilot_session_id else "fresh ",
-                exec_cwd,
-            )
-            mcp_prefix = self._mcp_tool_prefix()
-            save_tool = f"{mcp_prefix}save_discovered_vulnerability"
-            retry_prompt = (
-                "You are a security auditor. You have already analysed the source code "
-                f"in {exec_cwd}. Now you MUST save every vulnerability you found.\n\n"
-                f"PREFERRED: Call `{save_tool}` for each vulnerability with:\n"
-                "  name, description, worst_impact, cvss_vector, remediation,\n"
-                "  steps (array of {{file_path, code, description}}).\n"
-                "  Each step MUST have the actual source file path and a verbatim code snippet.\n\n"
-                "FALLBACK: Run `bash save_vuln.sh <<'VULN_EOF'` with a heredoc (see AGENTS.md for format).\n"
-                "  NEVER use single-quoted arguments — use heredoc to avoid quoting issues.\n"
-                "  Save ONE vulnerability per command — NEVER chain with &&.\n"
-                "  The script validates all fields and rejects incomplete data — read error output.\n\n"
-                "You MUST save at least one vulnerability. "
-                "Do NOT just describe findings in text — call the tool or run save_vuln.sh."
-            )
-            retry_output, retry_steps, retry_raw = self._run_copilot(retry_prompt)
-            # Merge results
-            if retry_output:
-                output = output + "\n\n" + retry_output if output else retry_output
-            steps.extend(retry_steps)
-            if retry_raw.raw_responses:
-                raw_result = _RawResult(
-                    raw_responses=raw_result.raw_responses + retry_raw.raw_responses,
-                )
 
         if user_input:
             self._conversation.append({"role": "user", "content": user_input})
@@ -187,25 +139,6 @@ class CopilotCliExecutor:
             "intermediate_steps": steps,
             "raw_result": raw_result,
         }
-
-    @staticmethod
-    def _steps_contain_save(steps: list[tuple[ToolAction, Any]]) -> bool:
-        """Check if any step is a save_discovered_vulnerability call."""
-        for step, _ in steps:
-            tool_name = str(getattr(step, "tool", "") or "")
-            if "save_discovered_vulnerability" in tool_name:
-                return True
-        return False
-
-    @staticmethod
-    def _steps_contain_analysis(steps: list[tuple[ToolAction, Any]]) -> bool:
-        """Check if steps contain file-reading / analysis tools (bash, view, grep, exec)."""
-        analysis_tools = {"bash", "view", "grep", "exec", "read_file"}
-        for step, _ in steps:
-            tool_name = str(getattr(step, "tool", "") or "")
-            if tool_name in analysis_tools:
-                return True
-        return False
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
@@ -227,33 +160,6 @@ class CopilotCliExecutor:
                 f"- Do not exceed {self._max_tools_used} non-task tool calls in total."
             )
 
-        # Inject save requirement when save_discovered_vulnerability is available
-        if self._has_save_vulnerability_tool():
-            mcp_prefix = self._mcp_tool_prefix()
-            save_tool_name = f"{mcp_prefix}save_discovered_vulnerability"
-            save_block = (
-                "- CRITICAL: For EACH vulnerability you find, you MUST save it.\n"
-                f"  PREFERRED: Call `{save_tool_name}` with parameters:\n"
-                "    name, description, worst_impact, cvss_vector, remediation,\n"
-                "    steps (array of objects with file_path, code, description).\n"
-                "    Each step MUST include the actual file_path in the repo and the\n"
-                "    verbatim source code snippet from that file.\n"
-                "  FALLBACK: Run `bash save_vuln.sh <<'VULN_EOF'` with a heredoc — it validates all fields.\n"
-                "  NEVER use `bash save_vuln.sh '{...}'` with single quotes — it breaks on special characters.\n"
-                "  If you do NOT save findings they are LOST."
-            )
-            # Warn about built-in tools that silently discard findings
-            builtin_warnings: list[str] = []
-            for builtin in ("report_intent", "task"):
-                if builtin not in self._deny_builtin_tools:
-                    builtin_warnings.append(f"`{builtin}`")
-            if builtin_warnings:
-                save_block += (
-                    "\n  ⚠ NEVER use " + " or ".join(builtin_warnings) +
-                    " — they silently discard your findings."
-                )
-            policy_lines.append(save_block)
-
         schema_lines: list[str] = []
         if self._output_schema_json:
             schema_lines.append(
@@ -274,37 +180,6 @@ class CopilotCliExecutor:
         prompt_parts = [p for p in (base, user_input, policy_block, schema_block) if p.strip()]
         return "\n".join(prompt_parts)
 
-    def _has_save_vulnerability_tool(self) -> bool:
-        """Check if save_discovered_vulnerability is in the allowed tools."""
-        try:
-            if self._allowed_tools_json:
-                return "save_discovered_vulnerability" in self._allowed_tools_json
-        except Exception:
-            pass
-        try:
-            if self._serialized_tools_append_b64:
-                import base64
-                decoded = base64.b64decode(self._serialized_tools_append_b64).decode("utf-8", errors="replace")
-                return "save_discovered_vulnerability" in decoded
-        except Exception:
-            pass
-        return False
-
-    def _mcp_tool_prefix(self) -> str:
-        """Return the MCP tool name prefix based on the MCP server name in config."""
-        if self._copilot_home:
-            mcp_cfg = os.path.join(self._copilot_home, "mcp-config.json")
-            try:
-                with open(mcp_cfg, "r") as fh:
-                    cfg = json.loads(fh.read())
-                servers = cfg.get("mcpServers", {})
-                if servers:
-                    server_name = next(iter(servers))
-                    return f"{server_name}-"
-            except Exception:
-                pass
-        return "chack_tools-"
-
     # ------------------------------------------------------------------
     #  Core execution
     # ------------------------------------------------------------------
@@ -313,28 +188,15 @@ class CopilotCliExecutor:
         self._ensure_copilot_home_and_config()
         command = self._build_command(prompt)
         env = self._build_env()
-        exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
-        agents_md_path = self._write_agents_md(exec_cwd)
         timeout_seconds = int(
             os.environ.get("CHACK_COPILOT_EXEC_TIMEOUT_SECONDS", "900") or "900"
         )
-        try:
-            output, steps, raw_result = self.__run_copilot_subprocess(command, env, exec_cwd, timeout_seconds)
-            # Collect any vulnerabilities saved via the bash helper script
-            bash_vuln_steps = self._collect_bash_saved_vulns(exec_cwd)
-            if bash_vuln_steps:
-                steps.extend(bash_vuln_steps)
-            return output, steps, raw_result
-        finally:
-            self._cleanup_agents_md(agents_md_path)
 
-    def __run_copilot_subprocess(self, command, env, exec_cwd, timeout_seconds):
         _LOGGER.info(
-            "Starting Copilot CLI process: model=%s timeout_seconds=%s session_id=%s cwd=%s",
+            "Starting Copilot CLI process: model=%s timeout_seconds=%s session_id=%s",
             self._model_name,
             timeout_seconds,
             self._copilot_session_id or "",
-            exec_cwd or "(inherited)",
         )
 
         try:
@@ -346,7 +208,6 @@ class CopilotCliExecutor:
                 text=True,
                 bufsize=1,
                 env=env,
-                cwd=exec_cwd,
             )
         except FileNotFoundError:
             return (
@@ -365,7 +226,6 @@ class CopilotCliExecutor:
             )
 
         output_parts: list[str] = []
-        delta_parts: list[str] = []
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
         raw_responses: list[Any] = []
@@ -441,39 +301,12 @@ class CopilotCliExecutor:
                 # -- Message deltas (ephemeral) ----------------------------
 
                 if event_type == "assistant.message_delta":
-                    delta_text = ""
-                    raw_delta = data.get("content") or data.get("delta") or data.get("text")
-                    if isinstance(raw_delta, str):
-                        delta_text = raw_delta
-                    elif isinstance(raw_delta, dict):
-                        delta_text = str(raw_delta.get("text") or raw_delta.get("content") or "")
-                    elif isinstance(raw_delta, list):
-                        for part in raw_delta:
-                            if isinstance(part, dict):
-                                delta_text += str(part.get("text") or part.get("content") or "")
-                            elif isinstance(part, str):
-                                delta_text += part
-                    if delta_text:
-                        delta_parts.append(delta_text)
                     continue
 
                 # -- Complete assistant message ----------------------------
 
                 if event_type == "assistant.message":
-                    raw_content = data.get("content")
-                    content = ""
-                    if isinstance(raw_content, str):
-                        content = raw_content.strip()
-                    elif isinstance(raw_content, list):
-                        # Handle array-format content blocks: [{"type":"text","text":"..."}]
-                        for part in raw_content:
-                            if isinstance(part, dict):
-                                content += str(part.get("text") or part.get("content") or "")
-                            elif isinstance(part, str):
-                                content += part
-                        content = content.strip()
-                    elif isinstance(raw_content, dict):
-                        content = str(raw_content.get("text") or raw_content.get("content") or "").strip()
+                    content = str(data.get("content") or "").strip()
                     if content:
                         output_parts.append(content)
 
@@ -550,24 +383,6 @@ class CopilotCliExecutor:
                     if session_id:
                         self._copilot_session_id = session_id
 
-                    # Capture any content/message in the result event
-                    for key in ("content", "message", "text", "output"):
-                        result_content = event.get(key) or data.get(key)
-                        if isinstance(result_content, str) and result_content.strip():
-                            output_parts.append(result_content.strip())
-                            break
-                        elif isinstance(result_content, list):
-                            text_bits = []
-                            for part in result_content:
-                                if isinstance(part, dict):
-                                    text_bits.append(str(part.get("text") or part.get("content") or ""))
-                                elif isinstance(part, str):
-                                    text_bits.append(part)
-                            joined = "".join(text_bits).strip()
-                            if joined:
-                                output_parts.append(joined)
-                                break
-
                     usage = event.get("usage")
                     if isinstance(usage, dict):
                         api_duration_ms = int(usage.get("totalApiDurationMs", 0) or 0)
@@ -598,8 +413,6 @@ class CopilotCliExecutor:
             )
 
         response = "".join(output_parts).strip()
-        if not response and delta_parts:
-            response = "".join(delta_parts).strip()
         if not response and raw_lines:
             response = "\n".join(raw_lines).strip()
             if response:
@@ -616,7 +429,7 @@ class CopilotCliExecutor:
             self._copilot_cli_path,
             "-p",
             prompt,
-            "--allow-all",
+            "--allow-all-tools",
             "--output-format",
             "json",
         ]
@@ -628,8 +441,6 @@ class CopilotCliExecutor:
             mcp_config_path = os.path.join(self._copilot_home, "mcp-config.json")
             if os.path.isfile(mcp_config_path):
                 args.extend(["--additional-mcp-config", f"@{mcp_config_path}"])
-        for denied in self._deny_builtin_tools:
-            args.extend(["--deny-tool", str(denied)])
         return args
 
     def _build_env(self) -> dict[str, str]:
@@ -685,290 +496,6 @@ class CopilotCliExecutor:
     # ------------------------------------------------------------------
     #  Home / MCP config
     # ------------------------------------------------------------------
-
-    def _write_agents_md(self, exec_cwd: str | None) -> str | None:
-        """Write an AGENTS.md in the workspace so copilot CLI loads it as
-        system-level instructions.  Also creates a save_vuln.sh helper
-        script and .vulns/ directory for the JSON fallback mechanism.
-        Returns the path written (for cleanup) or *None* if nothing was written."""
-        if not exec_cwd:
-            return None
-        if not self._deny_builtin_tools and not self._has_save_vulnerability_tool():
-            return None
-
-        agents_md_path = os.path.join(exec_cwd, "AGENTS.md")
-        # Don't overwrite a pre-existing file (it belongs to the target repo)
-        if os.path.exists(agents_md_path):
-            _LOGGER.debug("AGENTS.md already exists at %s — skipping write", agents_md_path)
-            return None
-
-        denied = ", ".join(f"`{t}`" for t in self._deny_builtin_tools)
-        mcp_prefix = self._mcp_tool_prefix()
-        save_tool = f"{mcp_prefix}save_discovered_vulnerability"
-
-        has_save_tool = self._has_save_vulnerability_tool()
-
-        # Only create .vulns/ and save_vuln.sh when the save tool is available
-        if has_save_tool:
-            # Create .vulns/ directory for bash JSON fallback
-            vulns_dir = os.path.join(exec_cwd, ".vulns")
-            try:
-                os.makedirs(vulns_dir, exist_ok=True)
-            except OSError:
-                pass
-
-            # Write save_vuln.sh — a validating helper script
-            save_vuln_path = os.path.join(exec_cwd, "save_vuln.sh")
-            save_vuln_script = r'''#!/usr/bin/env bash
-# save_vuln.sh — Save a vulnerability as validated JSON
-# Usage (heredoc — PREFERRED, avoids quoting issues):
-#   bash save_vuln.sh <<'VULN_EOF'
-#   {"name": "...", ...}
-#   VULN_EOF
-# Usage (argument — legacy):
-#   bash save_vuln.sh '<JSON>'
-# IMPORTANT: Save ONE vulnerability per command. Do NOT chain with &&.
-set -euo pipefail
-mkdir -p .vulns
-if [ $# -ge 1 ] && [ "$1" != "-" ]; then
-  JSON="$1"
-else
-  JSON="$(cat)"
-fi
-python3 -c "
-import json, sys, os, time, uuid
-try:
-    d = json.loads(sys.argv[1])
-except Exception as e:
-    print(f'ERROR: Invalid JSON: {e}', file=sys.stderr)
-    print('Fix the JSON syntax and call save_vuln.sh again.', file=sys.stderr)
-    sys.exit(1)
-errors = []
-for f in ['name','description','worst_impact','cvss_vector','remediation']:
-    if not str(d.get(f,'')).strip():
-        errors.append(f'Missing required field: {f}')
-steps = d.get('steps')
-if not isinstance(steps, list) or len(steps) == 0:
-    errors.append('steps must be a non-empty array of objects')
-else:
-    for i, s in enumerate(steps):
-        if not isinstance(s, dict):
-            errors.append(f'steps[{i}] must be an object with file_path, code, description')
-            continue
-        fp = str(s.get('file_path','')).strip()
-        code = str(s.get('code','')).strip()
-        desc = str(s.get('description','')).strip()
-        if not fp or fp == 'unknown':
-            errors.append(f'steps[{i}].file_path is missing — must be the actual source file path')
-        elif not os.path.isfile(fp):
-            errors.append(f'steps[{i}].file_path \"{fp}\" does not exist — check the path')
-        if not code:
-            errors.append(f'steps[{i}].code is empty — must contain the actual vulnerable source code snippet')
-        if not desc:
-            errors.append(f'steps[{i}].description is empty — explain why this code is vulnerable')
-if errors:
-    print('ERROR: Vulnerability NOT saved. Fix these issues and call save_vuln.sh again:', file=sys.stderr)
-    for e in errors:
-        print(f'  - {e}', file=sys.stderr)
-    sys.exit(1)
-
-# Save to relative .vulns/ (for in-session verification)
-fname = f'.vulns/vuln_{int(time.time()*1000)}.json'
-with open(fname, 'w') as f:
-    json.dump(d, f, indent=2)
-
-# Also save to persistent absolute path (survives copilot sandbox resets)
-persist_base = os.environ.get('AISEC_LOCAL_VULN_STORE_PATH', '')
-if persist_base:
-    persist_dir = os.path.join(persist_base, 'bash_vulns')
-    os.makedirs(persist_dir, exist_ok=True)
-    # Use full session id as discovered_by (unique per agent invocation)
-    session_id = os.environ.get('CHACK_TASK_SESSION_ID', 'unknown')
-    d['discovered_by'] = session_id
-    d['CVSS'] = d.get('cvss_vector', '')
-    persist_fname = os.path.join(persist_dir, f'vuln_{uuid.uuid4().hex[:12]}.json')
-    with open(persist_fname, 'w') as f:
-        json.dump(d, f, indent=2)
-
-print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
-" "$JSON"
-'''
-            try:
-                with open(save_vuln_path, "w", encoding="utf-8") as fh:
-                    fh.write(save_vuln_script)
-                os.chmod(save_vuln_path, 0o755)
-            except OSError:
-                pass
-
-        # Build AGENTS.md content
-        content = "# Copilot Agent Instructions\n\n"
-
-        # Only include vulnerability save instructions when the tool is available
-        if has_save_tool:
-            content += (
-                "## MANDATORY: How to Save Findings\n\n"
-                "When you discover a vulnerability, you **MUST** save it.\n\n"
-                f"### Method 1 (PREFERRED): Call the MCP tool `{save_tool}`\n"
-                "Parameters:\n"
-                "- `name`: Vulnerability name\n"
-                "- `description`: Detailed description with attack flow\n"
-                "- `worst_impact`: Worst case impact\n"
-                "- `cvss_vector`: CVSS:3.0 vector string\n"
-                "- `remediation`: How to fix\n"
-                "- `steps`: Array of step objects, EACH with:\n"
-                "  - `file_path`: Path to the affected source file (e.g., `app.py`)\n"
-                "  - `code`: Verbatim source code snippet from that file\n"
-                "  - `description`: Why this code is vulnerable\n\n"
-                "### Method 2 (FALLBACK): Run `bash save_vuln.sh` with a heredoc\n"
-                "If the MCP tool is unavailable, use the helper script with a **heredoc**.\n"
-                "CRITICAL RULES for save_vuln.sh:\n"
-                "- **ONE vulnerability per command** — NEVER chain with `&&`\n"
-                "- Always use a heredoc (`<<'VULN_EOF'`) to avoid bash quoting issues\n"
-                "- NEVER use `bash save_vuln.sh '{...}'` with single quotes\n"
-                "```bash\n"
-                "bash save_vuln.sh <<'VULN_EOF'\n"
-                '{\n'
-                '  "name": "SQL Injection in login",\n'
-                '  "description": "User input is concatenated into SQL query without parameterization",\n'
-                '  "worst_impact": "Full database compromise",\n'
-                '  "cvss_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",\n'
-                '  "remediation": "Use parameterized queries",\n'
-                '  "steps": [\n'
-                "    {\n"
-                '      "file_path": "app/routes/login.py",\n'
-                '      "code": "query = f\\"SELECT * FROM users WHERE id={user_id}\\"",\n'
-                '      "description": "Unsanitized user input in SQL query"\n'
-                "    }\n"
-                "  ]\n"
-                "}\n"
-                "VULN_EOF\n"
-                "```\n"
-                "If save_vuln.sh rejects the data, read the error output and fix the issues.\n\n"
-                "### Rules\n"
-                "- You MUST save EVERY vulnerability found using one of the methods above\n"
-                "- EVERY step MUST have a real `file_path` (existing file) and `code` (verbatim source snippet)\n"
-                "- `code` must be copied from the source file, NOT analysis text\n"
-                "- Do NOT just describe findings in text — they are LOST unless saved\n\n"
-            )
-        if denied:
-            content += (
-                "## FORBIDDEN Tools\n\n"
-                f"The following built-in tools must NEVER be called: {denied}.\n"
-            )
-        # Dynamic warning for specific built-in tools
-        for builtin in ("report_intent", "task"):
-            if builtin not in self._deny_builtin_tools:
-                content += f"`{builtin}` silently discards your findings. Never use it.\n"
-        try:
-            with open(agents_md_path, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            _LOGGER.info("Wrote AGENTS.md to %s", agents_md_path)
-
-            # Also write .github/copilot-instructions.md (copilot CLI reads this too)
-            gh_dir = os.path.join(exec_cwd, ".github")
-            os.makedirs(gh_dir, exist_ok=True)
-            copilot_instr_path = os.path.join(gh_dir, "copilot-instructions.md")
-            if not os.path.exists(copilot_instr_path):
-                with open(copilot_instr_path, "w", encoding="utf-8") as fh:
-                    fh.write(content)
-
-            return agents_md_path
-        except OSError as exc:
-            _LOGGER.warning("Failed to write AGENTS.md: %s", exc)
-            return None
-
-    @staticmethod
-    def _cleanup_agents_md(path: str | None) -> None:
-        """Remove the AGENTS.md, save_vuln.sh, .vulns, and .github/copilot-instructions.md."""
-        if path is None:
-            return
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        parent = os.path.dirname(path)
-        # Clean up helper files
-        for cleanup in (
-            os.path.join(parent, "save_vuln.sh"),  # legacy cleanup
-            os.path.join(parent, ".github", "copilot-instructions.md"),
-        ):
-            try:
-                os.remove(cleanup)
-            except OSError:
-                pass
-        # Clean up .vulns directory
-        vulns_dir = os.path.join(parent, ".vulns")
-        try:
-            import shutil as _shutil
-            _shutil.rmtree(vulns_dir, ignore_errors=True)
-        except Exception:
-            pass
-
-    @staticmethod
-    def _collect_bash_saved_vulns(exec_cwd: str | None) -> list[tuple[ToolAction, Any]]:
-        """Read JSON files from .vulns/ directory AND persistent bash_vulns/
-        directory written by the model as fallback, and convert them to
-        ToolAction steps matching save_discovered_vulnerability."""
-
-        def _scan_dir(vulns_dir: str, seen_names: set[str], steps: list) -> None:
-            if not os.path.isdir(vulns_dir):
-                return
-            for fname in os.listdir(vulns_dir):
-                if not fname.endswith(".json"):
-                    continue
-                fpath = os.path.join(vulns_dir, fname)
-                try:
-                    with open(fpath, "r", encoding="utf-8") as fh:
-                        data = json.loads(fh.read())
-                    if not isinstance(data, dict) or not data.get("name"):
-                        continue
-                    # Deduplicate by name
-                    vuln_name = str(data.get("name", ""))
-                    if vuln_name in seen_names:
-                        continue
-                    seen_names.add(vuln_name)
-                    tool_input: dict[str, Any] = {
-                        "name": vuln_name,
-                        "description": str(data.get("description", "")),
-                        "worst_impact": str(data.get("worst_impact", "")),
-                        "cvss_vector": str(data.get("cvss_vector", "")),
-                        "remediation": str(data.get("remediation", "")),
-                    }
-                    raw_steps = data.get("steps")
-                    if isinstance(raw_steps, list) and raw_steps:
-                        tool_input["steps"] = raw_steps
-                    step = ToolAction(
-                        tool="chack_tools-save_discovered_vulnerability",
-                        tool_input={
-                            "tool_id": f"bash_save_{fname}",
-                            "status": "success",
-                            "tool_input": tool_input,
-                            "result": "Vulnerability saved via JSON fallback",
-                        },
-                    )
-                    steps.append((step, None))
-                except Exception:
-                    continue
-
-        steps: list[tuple[ToolAction, Any]] = []
-        seen_names: set[str] = set()
-
-        # 1. Read from relative .vulns/ in exec_cwd (may be empty if sandbox cleans it)
-        if exec_cwd:
-            _scan_dir(os.path.join(exec_cwd, ".vulns"), seen_names, steps)
-
-        # 2. Read from persistent absolute path (survives copilot sandbox resets)
-        persist_base = os.environ.get("AISEC_LOCAL_VULN_STORE_PATH", "")
-        if persist_base:
-            _scan_dir(os.path.join(persist_base, "bash_vulns"), seen_names, steps)
-
-        if steps:
-            _LOGGER.info(
-                "Collected %d JSON-fallback vulnerabilities (seen_names=%s)",
-                len(steps),
-                seen_names,
-            )
-        return steps
 
     def _ensure_copilot_home_and_config(self) -> None:
         if self._copilot_home:
@@ -1069,10 +596,16 @@ print(f'OK: Saved vulnerability \"{d[\"name\"]}\" to {fname}')
             "CHACK_EXEC_TIMEOUT",
             "CHACK_EXEC_MAX_OUTPUT",
             "CHACK_MCP_TOOL_MAX_TOKENS",
+            "CHACK_BUDGET_START_EPOCH",
+            "CHACK_BUDGET_MAX_RUNTIME_SECONDS",
+            "CHACK_BUDGET_MAX_COST_USD",
+            "CHACK_BUDGET_SPENT_USD",
+            "CHACK_BUDGET_WARNING_RATIO",
+            "CHACK_BUDGET_CRITICAL_RATIO",
+            "CHACK_BUDGET_INJECTION_ENABLED",
             "ANTHROPIC_API_KEY",
             "CLAUDE_API_KEY",
             "GEMINI_API_KEY",
-            "PYTHONPATH",
         ]
 
         src_env = self._build_env()
@@ -1294,5 +827,4 @@ def build_executor(
             if getattr(config.agent, "output_schema_json", None)
             else ""
         ),
-        deny_builtin_tools=list(getattr(config.tools, "deny_builtin_tools", None) or []),
     )
