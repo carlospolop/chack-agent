@@ -156,10 +156,6 @@ models:
     input: 0.045
     cache_read: 0.045
     output: 0.15
-  arcee-ai/trinity-mini:free:
-    input: 0
-    cache_read: 0
-    output: 0
   arcee-ai/virtuoso-large:
     input: 0.75
     cache_read: 0.75
@@ -1422,9 +1418,9 @@ models:
     cache_read: 0.24
     output: 4
   z-ai/glm-5.1:
-    input: 1.395
-    cache_read: 0.26
-    output: 4.4
+    input: 1.26
+    cache_read: 1.26
+    output: 3.96
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
