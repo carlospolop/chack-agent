@@ -251,13 +251,6 @@ class ClaudeCodeExecutor:
             self._claude_session_id or "",
             exec_cwd or "(inherited)",
         )
-        _LOGGER.info(
-            "Claude env diagnostics: cli_path=%s which=%s ANTHROPIC_API_KEY_set=%s CLAUDE_ACCESS_TOKEN_set=%s",
-            self._claude_cli_path,
-            shutil.which(self._claude_cli_path) or "NOT_FOUND",
-            bool(env.get("ANTHROPIC_API_KEY")),
-            bool(env.get("CLAUDE_ACCESS_TOKEN")),
-        )
 
         try:
             process = subprocess.Popen(
@@ -807,6 +800,9 @@ bash save_vuln.sh '{{
             )
             if _api_key:
                 env["ANTHROPIC_API_KEY"] = _api_key
+
+        # Allow --dangerously-skip-permissions when running as root inside Docker/CI.
+        env.setdefault("IS_SANDBOX", "1")
 
         env.setdefault("AWS_SHARED_CREDENTIALS_FILE", os.environ.get("AWS_SHARED_CREDENTIALS_FILE", ""))
         env.setdefault("AWS_CONFIG_FILE", os.environ.get("AWS_CONFIG_FILE", ""))
