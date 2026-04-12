@@ -401,6 +401,14 @@ class ClaudeCodeExecutor:
 
                 if event_type == "tool_use":
                     self._record_tool_use(event, tool_calls)
+                    # StructuredOutput tool carries the --json-schema answer
+                    _tu_name = str(event.get("name") or "").strip()
+                    if _tu_name == "StructuredOutput":
+                        _tu_input = event.get("input")
+                        if isinstance(_tu_input, dict):
+                            output_parts.append(json.dumps(_tu_input))
+                        elif _tu_input is not None:
+                            output_parts.append(str(_tu_input))
                     continue
 
                 if event_type == "tool_result":
@@ -496,6 +504,11 @@ class ClaudeCodeExecutor:
                                 tool_input = {"input": str(tool_input)}
                     if tool_use_id:
                         tool_calls[tool_use_id] = (tool_name, tool_input)
+                    # StructuredOutput tool carries the --json-schema answer
+                    if tool_name == "StructuredOutput" and tool_input:
+                        output_parts.append(
+                            json.dumps(tool_input) if isinstance(tool_input, dict) else str(tool_input)
+                        )
                     continue
 
                 if item_type == "tool_result":
