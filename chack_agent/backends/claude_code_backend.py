@@ -251,6 +251,13 @@ class ClaudeCodeExecutor:
             self._claude_session_id or "",
             exec_cwd or "(inherited)",
         )
+        _LOGGER.info(
+            "Claude env diagnostics: cli_path=%s which=%s ANTHROPIC_API_KEY_set=%s CLAUDE_ACCESS_TOKEN_set=%s",
+            self._claude_cli_path,
+            shutil.which(self._claude_cli_path) or "NOT_FOUND",
+            bool(env.get("ANTHROPIC_API_KEY")),
+            bool(env.get("CLAUDE_ACCESS_TOKEN")),
+        )
 
         try:
             process = subprocess.Popen(
@@ -414,6 +421,18 @@ class ClaudeCodeExecutor:
                 pass
 
         return_code = process.wait()
+
+        _LOGGER.info(
+            "Claude process exit: return_code=%s raw_lines=%d output_parts=%d return_seen=%s",
+            return_code,
+            len(raw_lines),
+            len(output_parts),
+            return_seen,
+        )
+        if raw_lines:
+            _LOGGER.info("Claude raw_lines[0]: %s", raw_lines[0][:300] if raw_lines else "")
+        if return_code != 0 and raw_lines:
+            _LOGGER.warning("Claude stderr/stdout dump (first 1000 chars): %s", "\n".join(raw_lines)[:1000])
 
         if return_code != 0:
             details = "\n".join(raw_lines).strip() or "No output captured."
