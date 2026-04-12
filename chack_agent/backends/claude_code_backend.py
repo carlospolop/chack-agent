@@ -781,9 +781,15 @@ bash save_vuln.sh '{{
             if self._openrouter_app_name:
                 env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
         else:
-            env["ANTHROPIC_API_KEY"] = str(
+            _api_key = str(
                 os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("CLAUDE_API_KEY", "")
             )
+            if _api_key:
+                env["ANTHROPIC_API_KEY"] = _api_key
+            else:
+                # Don't set ANTHROPIC_API_KEY to empty — it would prevent the
+                # Claude CLI from falling back to CLAUDE_ACCESS_TOKEN (OAuth).
+                env.pop("ANTHROPIC_API_KEY", None)
 
         env.setdefault("AWS_SHARED_CREDENTIALS_FILE", os.environ.get("AWS_SHARED_CREDENTIALS_FILE", ""))
         env.setdefault("AWS_CONFIG_FILE", os.environ.get("AWS_CONFIG_FILE", ""))
