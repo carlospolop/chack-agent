@@ -101,6 +101,46 @@ class PricingRefreshTests(unittest.TestCase):
                 self.assertEqual(resolved_path, override_path)
                 mocked_urlopen.assert_not_called()
 
+    def test_estimate_cost_falls_back_to_claude_last_dash_as_dot(self) -> None:
+        table = pricing.PricingTable(
+            models={
+                "anthropic/claude-sonnet-4.6": pricing.ModelPricing(
+                    input=2.0,
+                    cached_input=0.5,
+                    output=6.0,
+                )
+            }
+        )
+
+        cost = pricing.estimate_cost(
+            table,
+            "claude-sonnet-4-6",
+            prompt_tokens=1_000_000,
+            completion_tokens=0,
+        )
+
+        self.assertEqual(cost, 2.0)
+
+    def test_estimate_cost_falls_back_to_claude_last_dash_as_dot_with_provider(self) -> None:
+        table = pricing.PricingTable(
+            models={
+                "anthropic/claude-sonnet-4.6": pricing.ModelPricing(
+                    input=2.0,
+                    cached_input=0.5,
+                    output=6.0,
+                )
+            }
+        )
+
+        cost = pricing.estimate_cost(
+            table,
+            "anthropic/claude-sonnet-4-6",
+            prompt_tokens=0,
+            completion_tokens=1_000_000,
+        )
+
+        self.assertEqual(cost, 6.0)
+
 
 if __name__ == "__main__":
     unittest.main()

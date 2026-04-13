@@ -146,6 +146,26 @@ def _strip_provider_prefix(model_name: str) -> str:
     return raw.split("/", 1)[1] if "/" in raw else raw
 
 
+def _claude_last_dash_to_dot_variant(model_name: str) -> Optional[str]:
+    raw = str(model_name or "").strip()
+    if not raw or "claude" not in raw.lower():
+        return None
+
+    provider = ""
+    bare = raw
+    if "/" in raw:
+        provider, bare = raw.split("/", 1)
+
+    last_dash_index = bare.rfind("-")
+    if last_dash_index <= 0 or last_dash_index >= len(bare) - 1:
+        return None
+
+    candidate_bare = f"{bare[:last_dash_index]}.{bare[last_dash_index + 1:]}"
+    if provider:
+        return f"{provider}/{candidate_bare}"
+    return candidate_bare
+
+
 def _resolve_model_lookup(pricing: PricingTable, model: str) -> Optional[str]:
     lookup = str(model or "").strip()
     if not lookup:
@@ -159,6 +179,20 @@ def _resolve_model_lookup(pricing: PricingTable, model: str) -> Optional[str]:
     ]
     if len(stripped_matches) == 1:
         return stripped_matches[0]
+
+    claude_variant = _claude_last_dash_to_dot_variant(lookup)
+    if not claude_variant:
+        return None
+
+    if claude_variant in pricing.models:
+        return claude_variant
+
+    bare_variant = _strip_provider_prefix(claude_variant)
+    bare_variant_matches = [
+        key for key in pricing.models.keys() if _strip_provider_prefix(key) == bare_variant
+    ]
+    if len(bare_variant_matches) == 1:
+        return bare_variant_matches[0]
 
     return None
 
