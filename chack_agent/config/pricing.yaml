@@ -241,8 +241,8 @@ models:
     cache_read: 0.7
     output: 2.5
   deepseek/deepseek-r1-0528:
-    input: 0.45
-    cache_read: 0.225
+    input: 0.5
+    cache_read: 0.35
     output: 2.15
   deepseek/deepseek-r1-distill-llama-70b:
     input: 0.7
@@ -267,10 +267,6 @@ models:
   deepseek/deepseek-v3.2-speciale:
     input: 0.4
     cache_read: 0.2
-    output: 1.2
-  eleutherai/llemma_7b:
-    input: 0.8
-    cache_read: 0.8
     output: 1.2
   essentialai/rnj-1-instruct:
     input: 0.15
@@ -563,7 +559,7 @@ models:
     output: 0
   minimax/minimax-m2.7:
     input: 0.3
-    cache_read: 0.06
+    cache_read: 0.059
     output: 1.2
   mistralai/codestral-2508:
     input: 0.3
@@ -1146,9 +1142,9 @@ models:
     cache_read: 0.039
     output: 0.975
   qwen/qwen3-coder-next:
-    input: 0.12
-    cache_read: 0.06
-    output: 0.75
+    input: 0.15
+    cache_read: 0.12
+    output: 0.8
   qwen/qwen3-coder-plus:
     input: 0.65
     cache_read: 0.13
