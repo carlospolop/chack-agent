@@ -349,10 +349,6 @@ models:
     input: 0.65
     cache_read: 0.65
     output: 0.65
-  google/gemma-2-9b-it:
-    input: 0.03
-    cache_read: 0.03
-    output: 0.09
   google/gemma-3-12b-it:
     input: 0.04
     cache_read: 0.04
@@ -421,15 +417,7 @@ models:
     input: 0.017
     cache_read: 0.017
     output: 0.11
-  inception/mercury:
-    input: 0.25
-    cache_read: 0.025
-    output: 0.75
   inception/mercury-2:
-    input: 0.25
-    cache_read: 0.025
-    output: 0.75
-  inception/mercury-coder:
     input: 0.25
     cache_read: 0.025
     output: 0.75
@@ -461,10 +449,6 @@ models:
     input: 0.75
     cache_read: 0.75
     output: 1
-  meituan/longcat-flash-chat:
-    input: 0.2
-    cache_read: 0.2
-    output: 0.8
   meta-llama/llama-3-70b-instruct:
     input: 0.51
     cache_read: 0.51
@@ -514,9 +498,9 @@ models:
     cache_read: 0.08
     output: 0.3
   meta-llama/llama-guard-3-8b:
-    input: 0.02
-    cache_read: 0.02
-    output: 0.06
+    input: 0.48
+    cache_read: 0.48
+    output: 0.03
   meta-llama/llama-guard-4-12b:
     input: 0.18
     cache_read: 0.18
@@ -671,7 +655,7 @@ models:
     output: 2
   moonshotai/kimi-k2-thinking:
     input: 0.6
-    cache_read: 0.6
+    cache_read: 0.15
     output: 2.5
   moonshotai/kimi-k2.5:
     input: 0.3827
@@ -717,10 +701,6 @@ models:
     input: 1.2
     cache_read: 1.2
     output: 1.2
-  nvidia/llama-3.1-nemotron-ultra-253b-v1:
-    input: 0.6
-    cache_read: 0.6
-    output: 1.8
   nvidia/llama-3.3-nemotron-super-49b-v1.5:
     input: 0.1
     cache_read: 0.1
@@ -1085,10 +1065,6 @@ models:
     input: 0.1365
     cache_read: 0.0273
     output: 0.4095
-  qwen/qwen2.5-coder-7b-instruct:
-    input: 0.03
-    cache_read: 0.03
-    output: 0.09
   qwen/qwen2.5-vl-32b-instruct:
     input: 0.2
     cache_read: 0.2
