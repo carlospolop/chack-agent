@@ -378,9 +378,9 @@ models:
     cache_read: 0
     output: 0
   google/gemma-3n-e4b-it:
-    input: 0.02
-    cache_read: 0.02
-    output: 0.04
+    input: 0.06
+    cache_read: 0.06
+    output: 0.12
   google/gemma-3n-e4b-it:free:
     input: 0
     cache_read: 0
@@ -505,6 +505,10 @@ models:
     input: 0.18
     cache_read: 0.18
     output: 0.18
+  meta-llama/llama-guard-4-12b:free:
+    input: 0
+    cache_read: 0
+    output: 0
   microsoft/phi-4:
     input: 0.065
     cache_read: 0.065
