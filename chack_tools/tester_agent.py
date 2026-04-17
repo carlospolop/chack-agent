@@ -75,10 +75,11 @@ class TesterAgentTool:
     def _build_subagent_tools(self):
         if function_tool is None:
             raise RuntimeError("OpenAI Agents SDK is not available in this runtime.")
-        
-        task_helper = TaskStepsManagerTool(self.config)
-        
-        tools = [get_task_steps_manager_tool(task_helper)]
+
+        tools = []
+        if getattr(self.config, "task_steps_manager_enabled", True):
+            task_helper = TaskStepsManagerTool(self.config)
+            tools.append(get_task_steps_manager_tool(task_helper))
         # Tester sub-agent always has execution and web-search capabilities.
         tools.append(get_exec_tool(self.exec))
         tools.append(get_brave_search_tool(self.brave))
@@ -161,7 +162,9 @@ class TesterAgentTool:
             min_tools_used_override=0,
             max_tools_used_override=self.config.tester_max_tools_used,
             enable_self_critique=None,
-            require_task_steps_manager_init_first=True,
+            require_task_steps_manager_init_first=bool(
+                getattr(self.config, "task_steps_manager_enabled", True)
+            ),
             tools_override=tools,
             system_prompt_override=config.system_prompt,
             usage_session_id=parent_task_session_id,

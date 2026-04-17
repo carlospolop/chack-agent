@@ -4,6 +4,8 @@ from typing import Any
 
 @dataclass
 class ToolsConfig:
+    task_steps_manager_enabled: bool = True
+
     exec_enabled: bool = False
     exec_cwd: str = ""
     exec_timeout_seconds: int = 60

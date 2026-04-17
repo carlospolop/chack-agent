@@ -193,7 +193,9 @@ class SubChackResearchAgentTool:
             min_tools_used_override=0,
             max_tools_used_override=self.config.subchack_max_tools_used,
             enable_self_critique=None,
-            require_task_steps_manager_init_first=True,
+            require_task_steps_manager_init_first=bool(
+                getattr(self.config, "task_steps_manager_enabled", True)
+            ),
             tools_override=tools,
             system_prompt_override=config.system_prompt,
             usage_session_id=parent_task_session_id,

@@ -82,10 +82,12 @@ class ScientificResearchAgentTool:
 
         search = self.search
         pdf = self.pdf
-        task_steps_manager_helper = TaskStepsManagerTool(self.config)
         exec_helper = ExecTool(self.config)
 
-        tools = [get_task_steps_manager_tool(task_steps_manager_helper)]
+        tools = []
+        if getattr(self.config, "task_steps_manager_enabled", True):
+            task_steps_manager_helper = TaskStepsManagerTool(self.config)
+            tools.append(get_task_steps_manager_tool(task_steps_manager_helper))
         # Scientific sub-agent always has the full scientific toolset.
         tools.append(get_arxiv_search_tool(search))
         tools.append(get_europe_pmc_search_tool(search))
@@ -179,7 +181,9 @@ class ScientificResearchAgentTool:
             min_tools_used_override=0,
             max_tools_used_override=self.config.scientific_max_tools_used,
             enable_self_critique=None,
-            require_task_steps_manager_init_first=True,
+            require_task_steps_manager_init_first=bool(
+                getattr(self.config, "task_steps_manager_enabled", True)
+            ),
             tools_override=tools,
             system_prompt_override=config.system_prompt,
             usage_session_id=parent_task_session_id,

@@ -1008,18 +1008,25 @@ def _get_tool_input(raw: Any) -> Any:
     return None
 
 
-def _apply_guardrails(tools: list[Any]) -> list[Any]:
+def _apply_guardrails(tools: list[Any], *, require_task_steps_manager_init_first: bool) -> list[Any]:
     for tool in tools:
         guards = getattr(tool, "tool_input_guardrails", None)
         if guards is None:
-            setattr(
-                tool,
-                "tool_input_guardrails",
-                [_require_task_steps_manager_init_first, _respect_max_tools_used],
-            )
+            new_guards = [_respect_max_tools_used]
+            if require_task_steps_manager_init_first:
+                new_guards.insert(0, _require_task_steps_manager_init_first)
+            setattr(tool, "tool_input_guardrails", new_guards)
             continue
-        if _require_task_steps_manager_init_first not in guards:
+        if (
+            require_task_steps_manager_init_first
+            and _require_task_steps_manager_init_first not in guards
+        ):
             guards.append(_require_task_steps_manager_init_first)
+        elif (
+            not require_task_steps_manager_init_first
+            and _require_task_steps_manager_init_first in guards
+        ):
+            guards.remove(_require_task_steps_manager_init_first)
         if _respect_max_tools_used not in guards:
             guards.append(_respect_max_tools_used)
     return _wrap_tools_with_logging(tools)
@@ -1176,7 +1183,20 @@ def build_executor(
     else:
         tools = list(tools_override)
 
-    tools = _apply_guardrails(tools)
+    has_task_steps_manager_tool = any(
+        str(getattr(tool, "name", "") or getattr(tool, "__name__", "") or "").strip()
+        == "task_steps_manager"
+        for tool in tools
+    )
+    require_task_steps_manager_init_first = bool(
+        getattr(config.agent, "require_task_steps_manager_init_first", True)
+        and has_task_steps_manager_tool
+    )
+
+    tools = _apply_guardrails(
+        tools,
+        require_task_steps_manager_init_first=require_task_steps_manager_init_first,
+    )
     tools = _apply_budget_injection(tools)
     model: Any = _OpenRouterResponsesModel(model=model_name, openai_client=client)
 

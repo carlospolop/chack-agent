@@ -93,8 +93,9 @@ class AgentsToolset:
             exec_helper = ExecTool(self.config)
             tools.append(get_exec_tool(exec_helper))
 
-        task_helper = TaskStepsManagerTool(self.config)
-        tools.append(get_task_steps_manager_tool(task_helper))
+        if getattr(self.config, "task_steps_manager_enabled", True):
+            task_helper = TaskStepsManagerTool(self.config)
+            tools.append(get_task_steps_manager_tool(task_helper))
 
         if self.config.brave_enabled:
             brave_helper = BraveSearchTool(self.config)

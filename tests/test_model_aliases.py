@@ -194,6 +194,26 @@ class ModelAliasResolutionTests(unittest.TestCase):
 
         self.assertEqual(resolve_api_key_type(config), "codex_token")
 
+    def test_resolve_api_key_type_accepts_claude_access_token_for_claude_provider(self) -> None:
+        config_yaml = textwrap.dedent(
+            """
+            system_prompt: test system prompt
+            agent:
+              primary: CHEAP_BUT_QUALITY
+              provider: claude
+              main_action: test
+              sub_action: run
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(config_yaml)
+            path = handle.name
+
+        config = load_config(path)
+
+        with patch.dict("os.environ", {"CLAUDE_ACCESS_TOKEN": "claude-cli-token"}, clear=False):
+            self.assertEqual(resolve_api_key_type(config), "anthropic")
+
     def test_chack_logs_instantiation_details(self) -> None:
         config_yaml = textwrap.dedent(
             """

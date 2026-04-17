@@ -759,6 +759,11 @@ def build_executor(
         )
         allowed_tool_names = _extract_tool_names(list(base_toolset.tools))
 
+    require_task_steps_manager_init_first = bool(
+        getattr(config.agent, "require_task_steps_manager_init_first", True)
+        and ("task_steps_manager" in allowed_tool_names)
+    )
+
     gemini_api_key = (
         str(config.credentials.gemini_api_key or "").strip()
         or os.environ.get("GEMINI_API_KEY", "").strip()
@@ -801,9 +806,7 @@ def build_executor(
         subchack_max_turns=int(config.model.subchack_max_turns or 30),
         min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
         max_tools_used=max(0, int(config.tools.max_tools_used or 0)),
-        require_task_steps_manager_init_first=bool(
-            getattr(config.agent, "require_task_steps_manager_init_first", True)
-        ),
+        require_task_steps_manager_init_first=require_task_steps_manager_init_first,
         output_schema_json=(
             json.dumps(config.agent.output_schema_json, ensure_ascii=False)
             if getattr(config.agent, "output_schema_json", None)

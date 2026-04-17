@@ -73,20 +73,66 @@ from .pricing import (
 )
 
 
-_SELF_CRITIQUE_PROMPT = """Is this the best you can do? Make sure you have gathered ALL the context about the request: Check the web for latest info, read more terraform/code files, read all logs needed, be 10000% sure you got EVERY CONTEXT NEEDED and up to date information to be sure that your repsonse is correct. Now check everything you have done and improve whatever you can:
+def _build_self_critique_prompt(*, mention_task_steps_manager: bool) -> str:
+    extra_line = ""
+    if mention_task_steps_manager:
+        extra_line = (
+            "\n  - If you continue with more tool calls, keep the live task plan updated with"
+            " task_steps_manager"
+        )
+    return f"""Is this the best you can do? Make sure you have gathered ALL the context about the request: Check the web for latest info, read more terraform/code files, read all logs needed, be 10000% sure you got EVERY CONTEXT NEEDED and up to date information to be sure that your repsonse is correct. Now check everything you have done and improve whatever you can:
   - Get more context about the request and the needed info to answer it
   - Check the web for latest info about errors, services, terraform, etc. related to the request
   - Read more repos/files/code/logs related to the request to get more context
   - Then, recheck if your answer was actually accurate and the best possible
   - Improve the PR if you made one
-  - Improve the answer recommendation you gave
+  - Improve the answer recommendation you gave{extra_line}
 Your response to this improvement request will be the final one you give to the user, so don't mention the previous answer, just give the improved final answer or PR and give the user the best possible solution and answer."""
 
 def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-CHACK_INITIAL_SYSTEM_PROMPT = """ ### PERSONALITY
+def _build_initial_system_prompt(
+    *,
+    task_steps_manager_enabled: bool,
+    require_task_steps_manager_init_first: bool,
+) -> str:
+    min_tool_note = (
+        "Note that task-steps-manager calls do NOT count toward the minimum non-task tool usage requirement; use the other tools normally for investigation/execution."
+        if task_steps_manager_enabled
+        else ""
+    )
+    if task_steps_manager_enabled and require_task_steps_manager_init_first:
+        starting_point = """### STARTING POINT
+
+IMPORTANT: These must be your first steps:
+    - Think and organize the requested task in small granular steps
+    - The first tool you must call is the task_steps_manager tool with action=init and a concise plan of the steps you will take to complete the task.
+    - Always remember to mark a step as completed once you have completed it.
+    - You can always update/add new steps to the task list as you progress. It's super important to keep the task list updated with the current state of the task and update it as much as needed.
+    - Use all the given tools to get 200% of the needed context to be able to complete the task in the best way possible with all the needed info. You don't have a time limit or a limit of tool calls, so use them as much as you need to gather as much context as possible. Always check every assumption (download repos, read code, check the web...)
+"""
+    elif task_steps_manager_enabled:
+        starting_point = """### STARTING POINT
+
+IMPORTANT: These must be your first steps:
+    - Think and organize the requested task in small granular steps
+    - If it helps you stay organized, use the task_steps_manager tool to keep a live plan updated as you progress.
+    - Use all the given tools to get 200% of the needed context to be able to complete the task in the best way possible with all the needed info. You don't have a time limit or a limit of tool calls, so use them as much as you need to gather as much context as possible. Always check every assumption (download repos, read code, check the web...)
+"""
+    else:
+        starting_point = """### STARTING POINT
+
+IMPORTANT: These must be your first steps:
+    - Think and organize the requested task in small granular steps
+    - Use all the given tools to get 200% of the needed context to be able to complete the task in the best way possible with all the needed info. You don't have a time limit or a limit of tool calls, so use them as much as you need to gather as much context as possible. Always check every assumption (download repos, read code, check the web...)
+"""
+    min_tool_usage = """### MIN TOOL USAGE
+As your responses usually lack of enough context, use at least 10+ tool calls to gather all the needed context (download all the repos needed, read/search/grep all the files needed, check all the infra in the cloud needed, check the web for errors or info...) before answering or performing any task.
+You will be forced a minimum amount of tools to use, so just use as many tools as needed to be 10000% sure of your response.{extra}
+""".format(extra=f"\n{min_tool_note}" if min_tool_note else "")
+    return f""" ### PERSONALITY
 You are Chack, a very helpful and organized autonomous assistant.
 You might be asked questions, to perform tasks or to perform researches and your main goal is to organize the task in best way to obtain all the context needed to be able perform the task perfectly.
 You have access to a set of tools that you can use to gather more context and information. You can use the tools as many times as you want. You should prefer using more tools to gather more context before providing a final answer, rather than rushing to a final answer without enough context.
@@ -103,25 +149,14 @@ You are a fully autonomous agent, you can decide what to do and when to do it av
     - Keep the tasks list updated adding new steps whenever needed and gather ALL the context possible before providing a final answer or completing the task.
 
 
-### MIN TOOL USAGE
-As your responses usually lack of enough context, use at least 10+ tool calls to gather all the needed context (download all the repos needed, read/search/grep all the files needed, check all the infra in the cloud needed, check the web for errors or info...) before answering or performing any task.
-You will be forced a minimum amount of tools to use, so just use as many tools as needed to be 10000% sure of your response.
-Note that task-steps-manager calls do NOT count toward the minimum non-task tool usage requirement; use the other tools normally for investigation/execution.
+{min_tool_usage}
 
 ### FINISH CRITERIA
 When you already have enough reliable information to provide an educated and actionable response, stop calling tools and provide the final answer immediately.
 Do not loop on additional searches for simple requests once the core facts are already verified.
 If a tool fails but available evidence is sufficient, give the best possible answer with a short note about uncertainty.
 
-### STARTING POINT
-
-IMPORTANT: These must be your first steps:
-    - Think and organize the requested task in small granular steps
-    - The first tool you must call is the task_steps_manager tool with action=init and a concise plan of the steps you will take to complete the task.
-    - Always remember to mark a step as completed once you have completed it.
-    - You can always update/add new steps to the task list as you progress. It's super important to keep the task list updated with the current state of the task and update it as much as needed.
-    - Use all the given tools to get 200% of the needed context to be able to complete the task in the best way possible with all the needed info. You don't have a time limit or a limit of tool calls, so use them as much as you need to gather as much context as possible. Always check every assumption (download repos, read code, check the web...)
-"""
+{starting_point}"""
 
 @dataclass
 class RunResult:
@@ -172,7 +207,12 @@ class Chack:
         self._executors: Dict[str, Any] = {}
         self._last_activity_at: Dict[str, float] = {}
         self._pricing = load_pricing(resolve_pricing_path())
-        self._self_critique_prompt = _SELF_CRITIQUE_PROMPT
+        self._self_critique_prompt = _build_self_critique_prompt(
+            mention_task_steps_manager=(
+                bool(getattr(self.config.tools, "task_steps_manager_enabled", True))
+                and bool(getattr(self.config.agent, "require_task_steps_manager_init_first", True))
+            ),
+        )
         export_env(self.config, self.config_path)
         try:
             backend = resolve_backend_type(self.config)
@@ -191,6 +231,18 @@ class Chack:
 
     def _require_self_critique_prompt(self) -> str:
         return self._self_critique_prompt
+
+    def _task_steps_manager_available(
+        self,
+        *,
+        available_tool_names: Optional[list[str]] = None,
+    ) -> bool:
+        if not bool(getattr(self.config.tools, "task_steps_manager_enabled", True)):
+            return False
+        if available_tool_names is None:
+            return True
+        names = {str(name or "").strip() for name in available_tool_names if str(name or "").strip()}
+        return "task_steps_manager" in names
 
     @staticmethod
     def _tool_name(step) -> str:
@@ -366,8 +418,16 @@ class Chack:
     def _system_prompt_for_session(self, session_id: str, system_prompt_override: Optional[str] = None) -> str:
         base = system_prompt_override or self.config.session.system_prompt or self.config.system_prompt
 
-        if CHACK_INITIAL_SYSTEM_PROMPT:
-            base = f"{CHACK_INITIAL_SYSTEM_PROMPT}\n\n{base}"
+        initial_system_prompt = _build_initial_system_prompt(
+            task_steps_manager_enabled=bool(
+                getattr(self.config.tools, "task_steps_manager_enabled", True)
+            ),
+            require_task_steps_manager_init_first=bool(
+                getattr(self.config.agent, "require_task_steps_manager_init_first", True)
+            ),
+        )
+        if initial_system_prompt:
+            base = f"{initial_system_prompt}\n\n{base}"
 
         if not self.config.session.long_term_memory_enabled:
             return base
@@ -1026,7 +1086,7 @@ class Chack:
         min_tools_used_override: Optional[int] = None,
         max_tools_used_override: Optional[int] = None,
         enable_self_critique: Optional[bool] = None,
-        require_task_steps_manager_init_first: bool = True,
+        require_task_steps_manager_init_first: Optional[bool] = None,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
         on_task_steps_manager_snapshot_update: Optional[TaskStepsSnapshotCallback] = None,
         tools_override: Optional[list[Any]] = None,
@@ -1064,7 +1124,7 @@ class Chack:
         min_tools_used_override: Optional[int] = None,
         max_tools_used_override: Optional[int] = None,
         enable_self_critique: Optional[bool] = None,
-        require_task_steps_manager_init_first: bool = True,
+        require_task_steps_manager_init_first: Optional[bool] = None,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
         on_task_steps_manager_snapshot_update: Optional[TaskStepsSnapshotCallback] = None,
         tools_override: Optional[list[Any]] = None,
@@ -1089,6 +1149,16 @@ class Chack:
         try:
             if enable_self_critique is None:
                 enable_self_critique = bool(self.config.agent.self_critique_enabled)
+            task_steps_manager_enabled = bool(
+                getattr(self.config.tools, "task_steps_manager_enabled", True)
+            )
+            if require_task_steps_manager_init_first is None:
+                require_task_steps_manager_init_first = bool(
+                    self.config.agent.require_task_steps_manager_init_first
+                )
+            require_task_steps_manager_init_first = bool(
+                require_task_steps_manager_init_first and task_steps_manager_enabled
+            )
 
             executor = self._get_executor(
                 session_id,
@@ -1153,6 +1223,10 @@ class Chack:
             TOOL_USAGE_STORE.reset_session(task_session_id)
             available_tool_names = self._available_tool_names(executor)
             update_log_context(available_tool_names=available_tool_names)
+            require_task_steps_manager_init_first = bool(
+                require_task_steps_manager_init_first
+                and self._task_steps_manager_available(available_tool_names=available_tool_names)
+            )
 
             log_event(
                 "agent_start",

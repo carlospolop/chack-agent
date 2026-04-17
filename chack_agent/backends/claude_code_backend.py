@@ -23,6 +23,7 @@ from chack_tools.telemetry import log_event
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
+from ..output_schema import JsonSchemaOutput
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
@@ -74,8 +75,11 @@ class ClaudeCodeExecutor:
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
+    _output_schema_name: str = "output_schema"
+    _output_schema_strict: bool = True
     _uses_openrouter_route: bool = False
     _anthropic_api_key: str = ""
+    _claude_access_token: str = ""
     _anthropic_base_url: str = ""
     _openrouter_http_referer: str = ""
     _openrouter_app_name: str = ""
@@ -88,6 +92,7 @@ class ClaudeCodeExecutor:
         user_input = str(payload.get("input", "") or "")
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_claude(prompt)
+        output = self._normalize_schema_output(output)
 
         # Save-or-retry: if save_discovered_vulnerability is available but was never called,
         # and the agent DID use other tools (analysis happened), re-run to prompt saving.
@@ -116,6 +121,7 @@ class ClaudeCodeExecutor:
                 "You MUST save at least one vulnerability. Do NOT just describe findings in text."
             )
             retry_output, retry_steps, retry_raw = self._run_claude(retry_prompt)
+            retry_output = self._normalize_schema_output(retry_output)
             if retry_output:
                 output = output + "\n\n" + retry_output if output else retry_output
             steps.extend(retry_steps)
@@ -142,6 +148,42 @@ class ClaudeCodeExecutor:
             "intermediate_steps": steps,
             "raw_result": raw_result,
         }
+
+    def _normalize_schema_output(self, output: str) -> str:
+        """Validate Claude CLI output against the configured schema when present.
+
+        Claude's `--json-schema` flag improves results substantially, but the CLI can
+        still emit wrapped text or partially-invalid JSON. Normalize the final payload
+        through the same JsonSchemaOutput helper used by the OpenAI/OpenRouter backends
+        so downstream agents consistently receive schema-shaped JSON.
+        """
+        if not self._output_schema_json:
+            return output
+
+        raw_schema = str(self._output_schema_json or "").strip()
+        if not raw_schema:
+            return output
+
+        try:
+            schema_obj = json.loads(raw_schema)
+        except json.JSONDecodeError:
+            _LOGGER.warning("Claude backend received invalid output schema JSON; skipping local validation")
+            return output
+
+        if not isinstance(schema_obj, dict):
+            return output
+
+        try:
+            validator = JsonSchemaOutput(
+                schema_obj,
+                name=str(self._output_schema_name or "output_schema"),
+                strict=bool(self._output_schema_strict),
+            )
+            validated = validator.validate_json(output or "")
+            return json.dumps(validated, ensure_ascii=False)
+        except Exception as exc:
+            _LOGGER.warning("Claude backend output failed local schema normalization: %s", exc)
+            return output
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
@@ -347,6 +389,14 @@ class ClaudeCodeExecutor:
                     result_text = str(event.get("result") or "").strip()
                     if result_text:
                         output_parts.append(result_text)
+                    structured_output = event.get("structured_output")
+                    if structured_output is not None:
+                        if isinstance(structured_output, (dict, list)):
+                            output_parts.append(json.dumps(structured_output, ensure_ascii=False))
+                        else:
+                            structured_text = str(structured_output).strip()
+                            if structured_text:
+                                output_parts.append(structured_text)
                     return_seen = True
 
                     usage: dict[str, Any] = {}
@@ -806,13 +856,19 @@ bash save_vuln.sh '{{
             if self._openrouter_app_name:
                 env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
         else:
-            _api_key = str(
-                os.environ.get("ANTHROPIC_API_KEY", "")
-                or os.environ.get("CLAUDE_API_KEY", "")
-                or os.environ.get("CLAUDE_ACCESS_TOKEN", "")
-            )
-            if _api_key:
-                env["ANTHROPIC_API_KEY"] = _api_key
+            if self._claude_access_token:
+                env["CLAUDE_ACCESS_TOKEN"] = self._claude_access_token
+                env.pop("ANTHROPIC_API_KEY", None)
+                env.pop("CLAUDE_API_KEY", None)
+                env.pop("ANTHROPIC_AUTH_TOKEN", None)
+            else:
+                _api_key = str(
+                    self._anthropic_api_key
+                    or os.environ.get("ANTHROPIC_API_KEY", "")
+                    or os.environ.get("CLAUDE_API_KEY", "")
+                )
+                if _api_key:
+                    env["ANTHROPIC_API_KEY"] = _api_key
 
         # Allow --dangerously-skip-permissions when running as root inside Docker/CI.
         env.setdefault("IS_SANDBOX", "1")
@@ -1132,6 +1188,11 @@ def build_executor(
         base_toolset = AgentsToolset(config.tools, **_build_toolset_kwargs())
         allowed_tool_names = _extract_tool_names(list(base_toolset.tools))
 
+    require_task_steps_manager_init_first = bool(
+        getattr(config.agent, "require_task_steps_manager_init_first", True)
+        and ("task_steps_manager" in allowed_tool_names)
+    )
+
     configured_claude_path = os.environ.get("CLAUDE_CLI_PATH", "").strip() or "claude"
     claude_cli_path = shutil.which(configured_claude_path) or configured_claude_path
     serialized_tools_override_b64 = serialize_tools_payload(tools_override)
@@ -1165,14 +1226,14 @@ def build_executor(
         _subchack_max_turns=int(config.model.subchack_max_turns or 30),
         _min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
         _max_tools_used=max(0, int(config.tools.max_tools_used or 0)),
-        _require_task_steps_manager_init_first=bool(
-            getattr(config.agent, "require_task_steps_manager_init_first", True)
-        ),
+        _require_task_steps_manager_init_first=require_task_steps_manager_init_first,
         _output_schema_json=(
             json.dumps(config.agent.output_schema_json, ensure_ascii=False)
             if getattr(config.agent, "output_schema_json", None)
             else ""
         ),
+        _output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
+        _output_schema_strict=bool(getattr(config.agent, "output_schema_strict", True)),
         _uses_openrouter_route=route is not None,
         _anthropic_api_key=str(
             route.api_key
@@ -1181,6 +1242,7 @@ def build_executor(
                 os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("CLAUDE_API_KEY", "")
             )
         ),
+        _claude_access_token=str("" if route is not None else os.environ.get("CLAUDE_ACCESS_TOKEN", "")),
         _anthropic_base_url=str(route.anthropic_base_url if route is not None else ""),
         _openrouter_http_referer=str((route.headers.get("HTTP-Referer", "") if route else "")),
         _openrouter_app_name=str((route.headers.get("X-Title", "") if route else "")),

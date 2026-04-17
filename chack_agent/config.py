@@ -150,6 +150,7 @@ def resolve_api_key_type(config: ChackConfig) -> str:
         or os.environ.get("ANTHROPIC_API_KEY", "").strip()
         or os.environ.get("CLAUDE_API_KEY", "").strip()
     )
+    claude_access_token = os.environ.get("CLAUDE_ACCESS_TOKEN", "").strip()
     openrouter_api_key = (
         str(getattr(credentials, "openrouter_api_key", "") or "").strip()
         or os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -164,7 +165,7 @@ def resolve_api_key_type(config: ChackConfig) -> str:
         if openai_api_key:
             return "openai"
     if provider in {"claude", "claude-code", "claude_code", "anthropic"}:
-        if anthropic_api_key:
+        if claude_access_token or anthropic_api_key:
             return "anthropic"
     if provider in {"copilot", "copilot-cli", "copilot_cli", "gh-copilot", "gh_copilot"}:
         copilot_token = (
@@ -183,6 +184,8 @@ def resolve_api_key_type(config: ChackConfig) -> str:
         return "codex_token"
     if openai_api_key:
         return "openai"
+    if claude_access_token:
+        return "anthropic"
     if anthropic_api_key:
         return "anthropic"
     if openrouter_api_key:

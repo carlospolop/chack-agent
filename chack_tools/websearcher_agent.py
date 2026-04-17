@@ -79,10 +79,11 @@ class WebSearcherAgentTool:
     def _build_subagent_tools(self):
         if function_tool is None:
             raise RuntimeError("OpenAI Agents SDK is not available in this runtime.")
-        
-        task_helper = TaskStepsManagerTool(self.config)
-        
-        tools = [get_task_steps_manager_tool(task_helper)]
+
+        tools = []
+        if getattr(self.config, "task_steps_manager_enabled", True):
+            task_helper = TaskStepsManagerTool(self.config)
+            tools.append(get_task_steps_manager_tool(task_helper))
         tools.append(get_brave_search_tool(self.brave))
         if self.config.playwright_enabled and is_playwright_available():
             tools.append(get_playwright_fetch_tool(PlaywrightFetchTool(self.config)))
@@ -172,7 +173,9 @@ class WebSearcherAgentTool:
             min_tools_used_override=0,
             max_tools_used_override=self.config.websearcher_max_tools_used,
             enable_self_critique=None,
-            require_task_steps_manager_init_first=True,
+            require_task_steps_manager_init_first=bool(
+                getattr(self.config, "task_steps_manager_enabled", True)
+            ),
             tools_override=tools,
             system_prompt_override=config.system_prompt,
             usage_session_id=parent_task_session_id,

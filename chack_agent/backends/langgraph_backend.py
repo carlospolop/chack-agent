@@ -699,6 +699,12 @@ def build_executor(
     else:
         tools = list(tools_override)
 
+    has_task_steps_manager_tool = any(
+        str(getattr(tool, "name", "") or getattr(tool, "__name__", "") or "").strip()
+        == "task_steps_manager"
+        for tool in tools
+    )
+
     function_tools: dict[str, Any] = {}
     mcp_tools: dict[str, Any] = {}
     tool_schemas: list[dict[str, Any]] = []
@@ -765,6 +771,7 @@ def build_executor(
         _max_non_task_tools=max(0, int(config.tools.max_tools_used or 0)),
         _require_task_steps_manager_init_first=bool(
             getattr(config.agent, "require_task_steps_manager_init_first", True)
+            and has_task_steps_manager_tool
         ),
         _recursion_limit=max_turns,
         _summary_trigger_messages=memory_max_messages,

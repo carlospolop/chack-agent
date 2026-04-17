@@ -1,4 +1,6 @@
 import ast
+import json
+import importlib.util
 from pathlib import Path
 from typing import Any
 
@@ -6,6 +8,7 @@ from typing import Any
 MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "backends" / "codex_backend.py"
 CLAUDE_MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "backends" / "claude_code_backend.py"
 GEMINI_MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "backends" / "gemini_cli_backend.py"
+OUTPUT_SCHEMA_MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "output_schema.py"
 
 
 def _load_codex_helper(function_name: str):
@@ -44,6 +47,37 @@ def _load_list_literal(path: Path, class_name: str, function_name: str, target_n
             if isinstance(target, ast.Name) and target.id == target_name:
                 return ast.literal_eval(node.value)
     raise AssertionError(f"{target_name} not found in {path}:{function_name}")
+
+
+def _load_claude_helper(function_name: str):
+    module_ast = ast.parse(CLAUDE_MODULE_PATH.read_text())
+    class_node = next(
+        node for node in module_ast.body if isinstance(node, ast.ClassDef) and node.name == "ClaudeCodeExecutor"
+    )
+    method_node = next(
+        node for node in class_node.body if isinstance(node, ast.FunctionDef) and node.name == function_name
+    )
+    method_node.decorator_list = []
+    isolated_module = ast.Module(body=[method_node], type_ignores=[])
+    ast.fix_missing_locations(isolated_module)
+
+    spec = importlib.util.spec_from_file_location("output_schema_module", OUTPUT_SCHEMA_MODULE_PATH)
+    output_schema_module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(output_schema_module)
+
+    class _Logger:
+        @staticmethod
+        def warning(*args, **kwargs):
+            return None
+
+    namespace = {
+        "json": json,
+        "JsonSchemaOutput": output_schema_module.JsonSchemaOutput,
+        "_LOGGER": _Logger(),
+    }
+    exec(compile(isolated_module, str(CLAUDE_MODULE_PATH), "exec"), namespace)
+    return namespace[function_name]
 
 
 extract_message_text = _load_codex_helper("_extract_message_text")
@@ -174,3 +208,43 @@ def test_codex_backend_does_not_pass_cd_to_exec_resume():
             return
 
     raise AssertionError("Could not find _thread_id resume branch in _build_command")
+
+
+def test_claude_backend_normalizes_schema_output_from_wrapped_text():
+    normalize_schema_output = _load_claude_helper("_normalize_schema_output")
+
+    class _ClaudeShim:
+        _output_schema_json = json.dumps(
+            {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "groups": {"type": "array", "items": {"type": "object"}},
+                },
+                "required": ["summary", "groups"],
+                "additionalProperties": False,
+            }
+        )
+        _output_schema_name = "grouping_output"
+        _output_schema_strict = True
+
+    normalized = normalize_schema_output(
+        _ClaudeShim(),
+        "Here is the result:\n```json\n{\"summary\":\"ok\",\"groups\":[]}\n```"
+    )
+
+    assert json.loads(normalized) == {"summary": "ok", "groups": []}
+
+
+def test_claude_backend_keeps_structured_output_from_result_event():
+    source = CLAUDE_MODULE_PATH.read_text()
+
+    assert 'event.get("structured_output")' in source
+
+
+def test_claude_backend_prefers_claude_access_token_over_anthropic_env_vars():
+    source = CLAUDE_MODULE_PATH.read_text()
+
+    assert 'env["CLAUDE_ACCESS_TOKEN"] = self._claude_access_token' in source
+    assert 'env.pop("ANTHROPIC_API_KEY", None)' in source
+    assert 'env.pop("CLAUDE_API_KEY", None)' in source

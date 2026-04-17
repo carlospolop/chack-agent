@@ -1141,6 +1141,16 @@ def build_executor(
         )
         allowed_tool_names = _extract_tool_names(list(base_toolset.tools) + list(tools_append))
 
+    has_task_steps_manager_tool = (
+        "task_steps_manager" in allowed_tool_names
+        if allowed_tool_names is not None
+        else bool(getattr(config.tools, "task_steps_manager_enabled", True))
+    )
+    require_task_steps_manager_init_first = bool(
+        getattr(config.agent, "require_task_steps_manager_init_first", True)
+        and has_task_steps_manager_tool
+    )
+
     route = get_openrouter_route(config)
     uses_openrouter_route = route is not None
     fallback_openai_api_key = (
@@ -1195,9 +1205,7 @@ def build_executor(
         _subchack_max_turns=int(config.model.subchack_max_turns or 30),
         _min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
         _max_tools_used=max(0, int(config.tools.max_tools_used or 0)),
-        _require_task_steps_manager_init_first=bool(
-            getattr(config.agent, "require_task_steps_manager_init_first", True)
-        ),
+        _require_task_steps_manager_init_first=require_task_steps_manager_init_first,
         _output_schema_json=(
             json.dumps(getattr(config.agent, "output_schema_json", None), ensure_ascii=False, indent=2)
             if getattr(config.agent, "output_schema_json", None)

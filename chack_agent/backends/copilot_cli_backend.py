@@ -773,6 +773,11 @@ def build_executor(
         base_toolset = AgentsToolset(config.tools, **_build_toolset_kwargs())
         allowed_tool_names = _extract_tool_names(list(base_toolset.tools))
 
+    require_task_steps_manager_init_first = bool(
+        getattr(config.agent, "require_task_steps_manager_init_first", True)
+        and ("task_steps_manager" in allowed_tool_names)
+    )
+
     # Resolve Copilot GitHub token from config or environment
     copilot_github_token = (
         str(getattr(config.credentials, "copilot_github_token", "") or "").strip()
@@ -819,9 +824,7 @@ def build_executor(
         subchack_max_turns=int(config.model.subchack_max_turns or 30),
         min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
         max_tools_used=max(0, int(config.tools.max_tools_used or 0)),
-        require_task_steps_manager_init_first=bool(
-            getattr(config.agent, "require_task_steps_manager_init_first", True)
-        ),
+        require_task_steps_manager_init_first=require_task_steps_manager_init_first,
         output_schema_json=(
             json.dumps(config.agent.output_schema_json, ensure_ascii=False)
             if getattr(config.agent, "output_schema_json", None)
