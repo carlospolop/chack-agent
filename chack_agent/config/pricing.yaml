@@ -258,9 +258,9 @@ models:
     cache_read: 0.1300000002
     output: 0.79
   deepseek/deepseek-v3.2:
-    input: 0.26
-    cache_read: 0.13
-    output: 0.38
+    input: 0.259
+    cache_read: 0.135
+    output: 0.42
   deepseek/deepseek-v3.2-exp:
     input: 0.27
     cache_read: 0.27
@@ -387,9 +387,9 @@ models:
     cache_read: 0
     output: 0
   google/gemma-4-26b-a4b-it:
-    input: 0.07
-    cache_read: 0.04
-    output: 0.4
+    input: 0.08
+    cache_read: 0.01
+    output: 0.35
   google/gemma-4-26b-a4b-it:free:
     input: 0
     cache_read: 0
@@ -506,10 +506,6 @@ models:
     input: 0.18
     cache_read: 0.18
     output: 0.18
-  meta-llama/llama-guard-4-12b:free:
-    input: 0
-    cache_read: 0
-    output: 0
   microsoft/phi-4:
     input: 0.065
     cache_read: 0.065
@@ -663,9 +659,9 @@ models:
     cache_read: 0.15
     output: 2.5
   moonshotai/kimi-k2.5:
-    input: 0.3827
-    cache_read: 0.19135
-    output: 1.72
+    input: 0
+    cache_read: 0
+    output: 0
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
@@ -719,9 +715,9 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3-super-120b-a12b:
-    input: 0.1
-    cache_read: 0.1
-    output: 0.5
+    input: 0.09
+    cache_read: 0.09
+    output: 0.45
   nvidia/nemotron-3-super-120b-a12b:free:
     input: 0
     cache_read: 0
@@ -1073,10 +1069,6 @@ models:
     input: 0.1365
     cache_read: 0.0273
     output: 0.4095
-  qwen/qwen2.5-vl-32b-instruct:
-    input: 0.2
-    cache_read: 0.2
-    output: 0.6
   qwen/qwen2.5-vl-72b-instruct:
     input: 0.25
     cache_read: 0.25
@@ -1209,8 +1201,8 @@ models:
     cache_read: 0.195
     output: 2.34
   qwen/qwen3.5-9b:
-    input: 0.05
-    cache_read: 0.05
+    input: 0.1
+    cache_read: 0.1
     output: 0.15
   qwen/qwen3.5-flash-02-23:
     input: 0.065
