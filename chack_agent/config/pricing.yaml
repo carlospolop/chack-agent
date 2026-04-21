@@ -258,9 +258,9 @@ models:
     cache_read: 0.1300000002
     output: 0.79
   deepseek/deepseek-v3.2:
-    input: 0.259
-    cache_read: 0.135
-    output: 0.42
+    input: 0.252
+    cache_read: 0.0252
+    output: 0.378
   deepseek/deepseek-v3.2-exp:
     input: 0.27
     cache_read: 0.27
@@ -535,9 +535,9 @@ models:
     cache_read: 0.03
     output: 0.95
   minimax/minimax-m2.5:
-    input: 0.118
-    cache_read: 0.059
-    output: 0.99
+    input: 0.15
+    cache_read: 0.075
+    output: 1.2
   minimax/minimax-m2.5:free:
     input: 0
     cache_read: 0
@@ -659,9 +659,13 @@ models:
     cache_read: 0.15
     output: 2.5
   moonshotai/kimi-k2.5:
-    input: 0.3827
-    cache_read: 0.19135
-    output: 1.72
+    input: 0.44
+    cache_read: 0.22
+    output: 2
+  moonshotai/kimi-k2.6:
+    input: 0.6
+    cache_read: 0.2
+    output: 2.8
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
@@ -1380,9 +1384,9 @@ models:
     cache_read: 0.3
     output: 0.9
   z-ai/glm-4.7:
-    input: 0.39
-    cache_read: 0.195
-    output: 1.75
+    input: 0.38
+    cache_read: 0.38
+    output: 1.74
   z-ai/glm-4.7-flash:
     input: 0.06
     cache_read: 0.0100000002
@@ -1396,9 +1400,9 @@ models:
     cache_read: 0.24
     output: 4
   z-ai/glm-5.1:
-    input: 0.95
-    cache_read: 0.475
-    output: 3.15
+    input: 0.698
+    cache_read: 0.26
+    output: 4.4
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
