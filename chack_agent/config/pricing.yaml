@@ -145,10 +145,10 @@ models:
     input: 0.18
     cache_read: 0.18
     output: 0.18
-  arcee-ai/trinity-large-preview:free:
-    input: 0
-    cache_read: 0
-    output: 0
+  arcee-ai/trinity-large-preview:
+    input: 0.15
+    cache_read: 0.15
+    output: 0.45
   arcee-ai/trinity-large-thinking:
     input: 0.22
     cache_read: 0.06
@@ -181,6 +181,10 @@ models:
     input: 0.42
     cache_read: 0.42
     output: 1.25
+  baidu/qianfan-ocr-fast:free:
+    input: 0
+    cache_read: 0
+    output: 0
   bytedance-seed/seed-1.6:
     input: 0.25
     cache_read: 0.25
@@ -221,10 +225,6 @@ models:
     input: 0.0375
     cache_read: 0.0375
     output: 0.15
-  deepcogito/cogito-v2.1-671b:
-    input: 1.25
-    cache_read: 1.25
-    output: 1.25
   deepseek/deepseek-chat:
     input: 0.32
     cache_read: 0.32
@@ -388,15 +388,15 @@ models:
     output: 0
   google/gemma-4-26b-a4b-it:
     input: 0.07
-    cache_read: 0.04
-    output: 0.35
+    cache_read: 0.07
+    output: 0.34
   google/gemma-4-26b-a4b-it:free:
     input: 0
     cache_read: 0
     output: 0
   google/gemma-4-31b-it:
     input: 0.13
-    cache_read: 0.0199999995
+    cache_read: 0.13
     output: 0.38
   google/gemma-4-31b-it:free:
     input: 0
@@ -667,8 +667,8 @@ models:
     cache_read: 0.22
     output: 2
   moonshotai/kimi-k2.6:
-    input: 0.8
-    cache_read: 0.2
+    input: 0.75
+    cache_read: 0.15
     output: 3.5
   morph/morph-v3-fast:
     input: 0.8
@@ -1094,9 +1094,9 @@ models:
     cache_read: 0.071
     output: 0.1
   qwen/qwen3-235b-a22b-thinking-2507:
-    input: 0.13
-    cache_read: 0.13
-    output: 0.6
+    input: 0.1495
+    cache_read: 0.1495
+    output: 1.495
   qwen/qwen3-30b-a3b:
     input: 0.08
     cache_read: 0.08
@@ -1360,6 +1360,14 @@ models:
     cache_read: 0.08
     output: 2
   xiaomi/mimo-v2-pro:
+    input: 1
+    cache_read: 0.2
+    output: 3
+  xiaomi/mimo-v2.5:
+    input: 0.4
+    cache_read: 0.08
+    output: 2
+  xiaomi/mimo-v2.5-pro:
     input: 1
     cache_read: 0.2
     output: 3
