@@ -278,9 +278,9 @@ models:
     cache_read: 0.028
     output: 0.28
   deepseek/deepseek-v4-pro:
-    input: 1.74
-    cache_read: 0.145
-    output: 3.48
+    input: 0.435
+    cache_read: 0.03625
+    output: 0.87
   essentialai/rnj-1-instruct:
     input: 0.15
     cache_read: 0.15
@@ -1143,8 +1143,8 @@ models:
     output: 0.4
   qwen/qwen3-coder:
     input: 0.22
-    cache_read: 0.022
-    output: 1
+    cache_read: 0.22
+    output: 1.8
   qwen/qwen3-coder-30b-a3b-instruct:
     input: 0.07
     cache_read: 0.07
