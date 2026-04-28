@@ -623,9 +623,9 @@ models:
     cache_read: 0.04
     output: 2
   mistralai/mistral-nemo:
-    input: 0.01
-    cache_read: 0.01
-    output: 0.03
+    input: 0.02
+    cache_read: 0.02
+    output: 0.04
   mistralai/mistral-saba:
     input: 0.2
     cache_read: 0.02
@@ -1246,14 +1246,23 @@ models:
     cache_read: 0.26
     cache_write: 0.325
     output: 1.56
+  qwen/qwen3.5-plus-20260420:
+    input: 0.4
+    cache_read: 0.4
+    output: 2.4
   qwen/qwen3.6-27b:
-    input: 0.195
-    cache_read: 0.0975
-    output: 1.56
+    input: 0.5
+    cache_read: 0.25
+    output: 2
   qwen/qwen3.6-35b-a3b:
     input: 0.1612
     cache_read: 0.1612
     output: 0.96525
+  qwen/qwen3.6-flash:
+    input: 0.25
+    cache_read: 0.25
+    cache_write: 0.3125
+    output: 1.5
   qwen/qwen3.6-max-preview:
     input: 1.3
     cache_read: 1.3
@@ -1464,8 +1473,40 @@ models:
     input: 1.2
     cache_read: 0.24
     output: 4
+  ~anthropic/claude-haiku-latest:
+    input: 1
+    cache_read: 0.1
+    cache_write: 1.25
+    output: 5
   ~anthropic/claude-opus-latest:
     input: 5
     cache_read: 0.5
     cache_write: 6.25
     output: 25
+  ~anthropic/claude-sonnet-latest:
+    input: 3
+    cache_read: 0.3
+    cache_write: 3.75
+    output: 15
+  ~google/gemini-flash-latest:
+    input: 0.5
+    cache_read: 0.05
+    cache_write: 0.08333333333333334
+    output: 3
+  ~google/gemini-pro-latest:
+    input: 2
+    cache_read: 0.2
+    cache_write: 0.375
+    output: 12
+  ~moonshotai/kimi-latest:
+    input: 0.7448
+    cache_read: 0.1463
+    output: 4.655
+  ~openai/gpt-latest:
+    input: 5
+    cache_read: 0.5
+    output: 30
+  ~openai/gpt-mini-latest:
+    input: 0.75
+    cache_read: 0.075
+    output: 4.5
