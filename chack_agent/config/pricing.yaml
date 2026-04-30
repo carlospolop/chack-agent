@@ -646,10 +646,6 @@ models:
     input: 0.075
     cache_read: 0.075
     output: 0.2
-  mistralai/mistral-small-creative:
-    input: 0.1
-    cache_read: 0.01
-    output: 0.3
   mistralai/mixtral-8x22b-instruct:
     input: 2
     cache_read: 0.2
@@ -683,9 +679,9 @@ models:
     cache_read: 0.22
     output: 2
   moonshotai/kimi-k2.6:
-    input: 0.7448
-    cache_read: 0.1463
-    output: 4.655
+    input: 0.75
+    cache_read: 0.15
+    output: 3.5
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
@@ -1507,9 +1503,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 0.7448
-    cache_read: 0.1463
-    output: 4.655
+    input: 0.75
+    cache_read: 0.15
+    output: 3.5
   ~openai/gpt-latest:
     input: 5
     cache_read: 0.5
