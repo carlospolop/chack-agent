@@ -1267,9 +1267,9 @@ models:
     cache_read: 0.4
     output: 2.4
   qwen/qwen3.6-27b:
-    input: 0.325
-    cache_read: 0.325
-    output: 3.25
+    input: 0.32
+    cache_read: 0.32
+    output: 3.2
   qwen/qwen3.6-35b-a3b:
     input: 0.1612
     cache_read: 0.1612
