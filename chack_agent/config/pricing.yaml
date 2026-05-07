@@ -31,10 +31,6 @@ models:
     input: 0.15
     cache_read: 0.15
     output: 0.5
-  allenai/olmo-3.1-32b-instruct:
-    input: 0.2
-    cache_read: 0.2
-    output: 0.6
   alpindale/goliath-120b:
     input: 3.75
     cache_read: 3.75
@@ -274,9 +270,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v3.2-speciale:
-    input: 0.4
-    cache_read: 0.2
-    output: 1.2
+    input: 0.287
+    cache_read: 0.058
+    output: 0.431
   deepseek/deepseek-v4-flash:
     input: 0.14
     cache_read: 0.0028
@@ -463,8 +459,8 @@ models:
     cache_read: 0.51
     output: 0.74
   meta-llama/llama-3-8b-instruct:
-    input: 0.03
-    cache_read: 0.03
+    input: 0.04
+    cache_read: 0.04
     output: 0.04
   meta-llama/llama-3.1-70b-instruct:
     input: 0.4
@@ -675,9 +671,9 @@ models:
     cache_read: 0.22
     output: 2
   moonshotai/kimi-k2.6:
-    input: 0.74
-    cache_read: 0.14
-    output: 3.49
+    input: 0.75
+    cache_read: 0.15
+    output: 3.5
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
@@ -742,10 +738,6 @@ models:
     input: 0
     cache_read: 0
     output: 0
-  nvidia/nemotron-nano-12b-v2-vl:
-    input: 0.2
-    cache_read: 0.2
-    output: 0.6
   nvidia/nemotron-nano-12b-v2-vl:free:
     input: 0
     cache_read: 0
@@ -1167,7 +1159,7 @@ models:
     cache_write: 0.24375
     output: 0.975
   qwen/qwen3-coder-next:
-    input: 0.12
+    input: 0.11
     cache_read: 0.07
     output: 0.8
   qwen/qwen3-coder-plus:
@@ -1511,9 +1503,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 0.74
-    cache_read: 0.14
-    output: 3.49
+    input: 0.75
+    cache_read: 0.15
+    output: 3.5
   ~openai/gpt-latest:
     input: 5
     cache_read: 0.5
