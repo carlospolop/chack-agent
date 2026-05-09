@@ -431,6 +431,10 @@ models:
     input: 0.08
     cache_read: 0.016
     output: 0.24
+  inclusionai/ring-2.6-1t:free:
+    input: 0
+    cache_read: 0
+    output: 0
   inflection/inflection-3-pi:
     input: 2.5
     cache_read: 2.5
@@ -1136,8 +1140,8 @@ models:
     output: 0.4
   qwen/qwen3-32b:
     input: 0.08
-    cache_read: 0.04
-    output: 0.24
+    cache_read: 0.08
+    output: 0.28
   qwen/qwen3-8b:
     input: 0.05
     cache_read: 0.05
@@ -1322,10 +1326,10 @@ models:
     input: 0.14
     cache_read: 0.14
     output: 0.57
-  tencent/hy3-preview:free:
-    input: 0
-    cache_read: 0
-    output: 0
+  tencent/hy3-preview:
+    input: 0.066
+    cache_read: 0.029
+    output: 0.26
   thedrummer/cydonia-24b-v4.1:
     input: 0.3
     cache_read: 0.15
@@ -1342,10 +1346,6 @@ models:
     input: 0.4
     cache_read: 0.4
     output: 0.4
-  tngtech/deepseek-r1t2-chimera:
-    input: 0.3
-    cache_read: 0.15
-    output: 1.1
   undi95/remm-slerp-l2-13b:
     input: 0.45
     cache_read: 0.45
@@ -1403,9 +1403,9 @@ models:
     cache_read: 0.02
     output: 1.5
   xiaomi/mimo-v2-flash:
-    input: 0.09
-    cache_read: 0.045
-    output: 0.29
+    input: 0.1
+    cache_read: 0.01
+    output: 0.3
   xiaomi/mimo-v2-omni:
     input: 0.4
     cache_read: 0.08
@@ -1451,9 +1451,9 @@ models:
     cache_read: 0.05
     output: 0.9
   z-ai/glm-4.7:
-    input: 0.38
-    cache_read: 0.38
-    output: 1.74
+    input: 0.4
+    cache_read: 0.08
+    output: 1.75
   z-ai/glm-4.7-flash:
     input: 0.06
     cache_read: 0.01
