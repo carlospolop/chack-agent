@@ -553,7 +553,7 @@ models:
     output: 0.95
   minimax/minimax-m2.5:
     input: 0.15
-    cache_read: 0.03
+    cache_read: 0.15
     output: 1.15
   minimax/minimax-m2.5:free:
     input: 0
