@@ -83,6 +83,7 @@ class CodexExecutor:
     _fallback_openai_api_key: str
     _codex_access_token: str
     _use_codex_access_token: bool
+    _use_existing_codex_auth_file: bool
     _tools_config_json: str
     _allowed_tools_json: str
     _serialized_tools_override_b64: str
@@ -580,9 +581,10 @@ class CodexExecutor:
                 env["OPENROUTER_HTTP_REFERER"] = self._openrouter_http_referer
             if self._openrouter_app_name:
                 env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
-        elif self._use_codex_access_token:
+        elif self._use_codex_access_token or self._use_existing_codex_auth_file:
             env.pop("OPENAI_API_KEY", None)
             env.pop("CODEX_API_KEY", None)
+            env.pop("CODEX_ACCESS_TOKEN", None)
         else:
             env.setdefault("OPENAI_API_KEY", self._openai_api_key)
             env.setdefault("CODEX_API_KEY", self._openai_api_key)
@@ -828,6 +830,8 @@ class CodexExecutor:
             handle.write(config_body + "\n")
 
     def _write_codex_auth(self, codex_home: str) -> None:
+        if self._use_existing_codex_auth_file:
+            return
         if self._uses_openrouter_route or not self._use_codex_access_token:
             self._remove_codex_auth_file()
             return
@@ -1104,6 +1108,21 @@ def build_executor(
         _LOGGER.debug(
             "codex build_executor: memory_summary_max_chars provided (unable to coerce to int in debug log)"
         )
+
+    def _existing_codex_auth_file() -> str:
+        candidates = []
+        configured_home = str(os.environ.get("CODEX_HOME", "") or "").strip()
+        if configured_home:
+            candidates.append(os.path.join(configured_home, "auth.json"))
+        candidates.append(os.path.join(os.path.expanduser("~"), ".codex", "auth.json"))
+        for candidate in candidates:
+            try:
+                if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                    return candidate
+            except OSError:
+                continue
+        return ""
+
     def _extract_tool_names(items: list[Any] | None) -> list[str]:
         names: list[str] = []
         seen: set[str] = set()
@@ -1161,12 +1180,13 @@ def build_executor(
         str(getattr(config.credentials, "codex_access_token", "") or "").strip()
         or os.environ.get("CODEX_ACCESS_TOKEN", "").strip()
     )
+    existing_codex_auth_file = "" if uses_openrouter_route else _existing_codex_auth_file()
     codex_api_key = route.api_key if route is not None else (codex_access_token or fallback_openai_api_key)
-    if not codex_api_key:
+    if not codex_api_key and not existing_codex_auth_file:
         raise ValueError(
             "OPENROUTER_API_KEY is required for OpenRouter-routed Codex models"
             if uses_openrouter_route
-            else "CODEX_ACCESS_TOKEN or OPENAI_API_KEY is required when model.provider=codex"
+            else "CODEX_ACCESS_TOKEN, OPENAI_API_KEY, or Codex auth.json is required when model.provider=codex"
         )
 
     configured_codex_path = os.environ.get("CODEX_PATH", "").strip() or "codex"
@@ -1185,6 +1205,7 @@ def build_executor(
         _fallback_openai_api_key=fallback_openai_api_key,
         _codex_access_token=codex_access_token,
         _use_codex_access_token=bool(codex_access_token) and not uses_openrouter_route,
+        _use_existing_codex_auth_file=bool(existing_codex_auth_file) and not codex_access_token and not uses_openrouter_route,
         _tools_config_json=json.dumps(getattr(config.tools, "__dict__", {}), ensure_ascii=False),
         _allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False)
         if allowed_tool_names is not None
