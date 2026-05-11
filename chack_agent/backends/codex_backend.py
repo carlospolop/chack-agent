@@ -84,6 +84,7 @@ class CodexExecutor:
     _codex_access_token: str
     _use_codex_access_token: bool
     _use_existing_codex_auth_file: bool
+    _existing_codex_auth_file: str
     _tools_config_json: str
     _allowed_tools_json: str
     _serialized_tools_override_b64: str
@@ -831,6 +832,14 @@ class CodexExecutor:
 
     def _write_codex_auth(self, codex_home: str) -> None:
         if self._use_existing_codex_auth_file:
+            if not self._existing_codex_auth_file:
+                return
+            auth_path = os.path.join(codex_home, "auth.json")
+            shutil.copyfile(self._existing_codex_auth_file, auth_path)
+            try:
+                os.chmod(auth_path, 0o600)
+            except OSError:
+                pass
             return
         if self._uses_openrouter_route or not self._use_codex_access_token:
             self._remove_codex_auth_file()
@@ -1206,6 +1215,7 @@ def build_executor(
         _codex_access_token=codex_access_token,
         _use_codex_access_token=bool(codex_access_token) and not uses_openrouter_route,
         _use_existing_codex_auth_file=bool(existing_codex_auth_file) and not codex_access_token and not uses_openrouter_route,
+        _existing_codex_auth_file=existing_codex_auth_file,
         _tools_config_json=json.dumps(getattr(config.tools, "__dict__", {}), ensure_ascii=False),
         _allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False)
         if allowed_tool_names is not None
