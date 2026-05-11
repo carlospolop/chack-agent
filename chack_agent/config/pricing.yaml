@@ -69,16 +69,6 @@ models:
     cache_read: 0.08
     cache_write: 1
     output: 4
-  anthropic/claude-3.7-sonnet:
-    input: 3
-    cache_read: 0.3
-    cache_write: 3.75
-    output: 15
-  anthropic/claude-3.7-sonnet:thinking:
-    input: 3
-    cache_read: 0.3
-    cache_write: 3.75
-    output: 15
   anthropic/claude-haiku-4.5:
     input: 1
     cache_read: 0.1
@@ -672,9 +662,9 @@ models:
     cache_read: 0.15
     output: 2.5
   moonshotai/kimi-k2.5:
-    input: 0.44
-    cache_read: 0.22
-    output: 2
+    input: 0.4
+    cache_read: 0.05
+    output: 1.98
   moonshotai/kimi-k2.6:
     input: 0.75
     cache_read: 0.15
