@@ -919,6 +919,7 @@ class CodexExecutor:
             return
         if not isinstance(schema_obj, dict):
             return
+        schema_obj = self._normalize_codex_output_schema(schema_obj)
         path = os.path.join(codex_home, "output_schema.json")
         try:
             with open(path, "w", encoding="utf-8") as handle:
@@ -927,6 +928,35 @@ class CodexExecutor:
             self._output_schema_path = path
         except Exception:
             self._output_schema_path = None
+
+    @classmethod
+    def _normalize_codex_output_schema(cls, schema: Any) -> Any:
+        if isinstance(schema, list):
+            return [cls._normalize_codex_output_schema(item) for item in schema]
+        if not isinstance(schema, dict):
+            return schema
+
+        normalized = {
+            key: cls._normalize_codex_output_schema(value)
+            for key, value in schema.items()
+        }
+        properties = normalized.get("properties")
+        if isinstance(properties, dict):
+            normalized["properties"] = {
+                str(key): cls._normalize_codex_output_schema(value)
+                for key, value in properties.items()
+            }
+            normalized["required"] = list(normalized["properties"].keys())
+            normalized.setdefault("additionalProperties", False)
+        for union_key in ("anyOf", "allOf", "oneOf"):
+            if isinstance(normalized.get(union_key), list):
+                normalized[union_key] = [
+                    cls._normalize_codex_output_schema(item)
+                    for item in normalized[union_key]
+                ]
+        if isinstance(normalized.get("items"), dict):
+            normalized["items"] = cls._normalize_codex_output_schema(normalized["items"])
+        return normalized
 
     @staticmethod
     def _parse_event_line(line: str) -> Optional[dict[str, Any]]:
