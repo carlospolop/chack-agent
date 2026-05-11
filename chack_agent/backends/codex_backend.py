@@ -948,6 +948,8 @@ class CodexExecutor:
             }
             normalized["required"] = list(normalized["properties"].keys())
             normalized.setdefault("additionalProperties", False)
+        elif "required" in normalized:
+            normalized.pop("required", None)
         for union_key in ("anyOf", "allOf", "oneOf"):
             if isinstance(normalized.get(union_key), list):
                 normalized[union_key] = [
