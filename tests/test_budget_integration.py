@@ -526,6 +526,8 @@ def _make_stub_codex_executor():
         _fallback_openai_api_key="",
         _codex_access_token="",
         _use_codex_access_token=False,
+        _use_existing_codex_auth_file=False,
+        _existing_codex_auth_file="",
     )
 
 
