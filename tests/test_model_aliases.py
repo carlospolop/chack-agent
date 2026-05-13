@@ -82,7 +82,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", provider="claude"),
-            "claude-sonnet-4.6",
+            "claude-sonnet-4-6",
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", provider="openrouter"),
@@ -96,7 +96,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", anthropic_api_key="anth-test"),
-            "claude-sonnet-4.6",
+            "claude-sonnet-4-6",
         )
         self.assertEqual(
             resolve_model_alias("BEST_CHEAPEST", openrouter_api_key="or-test"),
@@ -170,7 +170,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         config = load_config(path)
 
         self.assertEqual(config.model.provider, "claude")
-        self.assertEqual(config.model.primary, "claude-sonnet-4.6")
+        self.assertEqual(config.model.primary, "claude-sonnet-4-6")
 
     def test_resolve_api_key_type_prefers_codex_token_for_codex_provider(self) -> None:
         config_yaml = textwrap.dedent(

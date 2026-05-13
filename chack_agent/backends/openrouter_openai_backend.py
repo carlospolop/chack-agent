@@ -593,6 +593,9 @@ def _respect_max_tools_used(data) -> ToolGuardrailFunctionOutput:
     return ToolGuardrailFunctionOutput.allow()
 
 
+OpenRouterResponsesModel = _OpenRouterResponsesModel
+
+
 @dataclass
 class ToolAction:
     tool: str
