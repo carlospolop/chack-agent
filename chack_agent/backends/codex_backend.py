@@ -112,6 +112,30 @@ class CodexExecutor:
     _output_schema_path: Optional[str] = None
     _thread_id: Optional[str] = None
     _codex_home: Optional[str] = None
+    _disable_native_shell: bool = False
+    _disable_native_web_search: bool = False
+
+    def _disabled_native_tool_args(self) -> list[str]:
+        args: list[str] = []
+        if self._disable_native_shell:
+            args.extend(
+                [
+                    "--disable",
+                    "shell_tool",
+                    "--disable",
+                    "unified_exec",
+                ]
+            )
+        if self._disable_native_web_search:
+            args.extend(
+                [
+                    "--disable",
+                    "web_search_request",
+                    "--disable",
+                    "web_search_cached",
+                ]
+            )
+        return args
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
@@ -536,6 +560,7 @@ class CodexExecutor:
                 "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
+            args.extend(self._disabled_native_tool_args())
             args.extend(
                 [
                 "--model",
@@ -557,6 +582,7 @@ class CodexExecutor:
             "--cd",
             exec_cwd,
         ]
+        args.extend(self._disabled_native_tool_args())
         args.extend(
             [
                 "--model",
@@ -1210,6 +1236,12 @@ def build_executor(
         getattr(config.agent, "require_task_steps_manager_init_first", True)
         and has_task_steps_manager_tool
     )
+    disable_native_shell = False
+    disable_native_web_search = False
+    if allowed_tool_names is not None:
+        allowed_set = set(allowed_tool_names)
+        disable_native_shell = "exec" not in allowed_set
+        disable_native_web_search = "search_google_web" not in allowed_set
 
     route = get_openrouter_route(config)
     uses_openrouter_route = route is not None
@@ -1278,4 +1310,6 @@ def build_executor(
         _openrouter_base_url=str(route.base_url if route is not None else ""),
         _openrouter_http_referer=str((route.headers.get("HTTP-Referer", "") if route else "")),
         _openrouter_app_name=str((route.headers.get("X-Title", "") if route else "")),
+        _disable_native_shell=disable_native_shell,
+        _disable_native_web_search=disable_native_web_search,
     )

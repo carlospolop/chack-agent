@@ -531,6 +531,20 @@ def _make_stub_codex_executor():
     )
 
 
+def test_codex_build_command_can_disable_native_shell_and_web_search():
+    executor = _make_stub_codex_executor()
+    executor._disable_native_shell = True
+    executor._disable_native_web_search = True
+
+    command = executor._build_command()
+
+    assert command.count("--disable") == 4
+    assert "shell_tool" in command
+    assert "unified_exec" in command
+    assert "web_search_request" in command
+    assert "web_search_cached" in command
+
+
 def _make_stub_copilot_executor():
     from chack_agent.backends.copilot_cli_backend import CopilotCliExecutor
     return CopilotCliExecutor(
