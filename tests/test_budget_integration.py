@@ -539,6 +539,8 @@ def test_codex_build_command_can_disable_native_shell_and_web_search():
     command = executor._build_command()
 
     assert command.count("--disable") == 4
+    assert "-c" in command
+    assert 'web_search="disabled"' in command
     assert "shell_tool" in command
     assert "unified_exec" in command
     assert "web_search_request" in command

@@ -129,6 +129,8 @@ class CodexExecutor:
         if self._disable_native_web_search:
             args.extend(
                 [
+                    "-c",
+                    'web_search="disabled"',
                     "--disable",
                     "web_search_request",
                     "--disable",
