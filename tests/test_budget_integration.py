@@ -531,20 +531,24 @@ def _make_stub_codex_executor():
     )
 
 
-def test_codex_build_command_can_disable_native_shell_and_web_search():
+def test_codex_build_command_can_disable_native_shell_web_search_and_mcp_resources():
     executor = _make_stub_codex_executor()
     executor._disable_native_shell = True
     executor._disable_native_web_search = True
+    executor._disable_native_mcp_resources = True
 
     command = executor._build_command()
 
-    assert command.count("--disable") == 4
+    assert command.count("--disable") == 7
     assert "-c" in command
     assert 'web_search="disabled"' in command
     assert "shell_tool" in command
     assert "unified_exec" in command
     assert "web_search_request" in command
     assert "web_search_cached" in command
+    assert "list_mcp_resources" in command
+    assert "list_mcp_resource_templates" in command
+    assert "read_mcp_resource" in command
 
 
 def _make_stub_copilot_executor():

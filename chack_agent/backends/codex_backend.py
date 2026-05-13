@@ -114,6 +114,7 @@ class CodexExecutor:
     _codex_home: Optional[str] = None
     _disable_native_shell: bool = False
     _disable_native_web_search: bool = False
+    _disable_native_mcp_resources: bool = False
 
     def _disabled_native_tool_args(self) -> list[str]:
         args: list[str] = []
@@ -135,6 +136,17 @@ class CodexExecutor:
                     "web_search_request",
                     "--disable",
                     "web_search_cached",
+                ]
+            )
+        if self._disable_native_mcp_resources:
+            args.extend(
+                [
+                    "--disable",
+                    "list_mcp_resources",
+                    "--disable",
+                    "list_mcp_resource_templates",
+                    "--disable",
+                    "read_mcp_resource",
                 ]
             )
         return args
@@ -1240,10 +1252,14 @@ def build_executor(
     )
     disable_native_shell = False
     disable_native_web_search = False
+    disable_native_mcp_resources = False
     if allowed_tool_names is not None:
         allowed_set = set(allowed_tool_names)
         disable_native_shell = "exec" not in allowed_set
         disable_native_web_search = "search_google_web" not in allowed_set
+        disable_native_mcp_resources = not (
+            {"list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"} & allowed_set
+        )
 
     route = get_openrouter_route(config)
     uses_openrouter_route = route is not None
@@ -1314,4 +1330,5 @@ def build_executor(
         _openrouter_app_name=str((route.headers.get("X-Title", "") if route else "")),
         _disable_native_shell=disable_native_shell,
         _disable_native_web_search=disable_native_web_search,
+        _disable_native_mcp_resources=disable_native_mcp_resources,
     )
