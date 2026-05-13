@@ -100,6 +100,11 @@ models:
     cache_read: 0.5
     cache_write: 6.25
     output: 25
+  anthropic/claude-opus-4.7-fast:
+    input: 30
+    cache_read: 3
+    cache_write: 37.5
+    output: 150
   anthropic/claude-sonnet-4:
     input: 3
     cache_read: 0.3
@@ -550,8 +555,8 @@ models:
     cache_read: 0
     output: 0
   minimax/minimax-m2.7:
-    input: 0.299
-    cache_read: 0.299
+    input: 0.28
+    cache_read: 0.28
     output: 1.2
   mistralai/codestral-2508:
     input: 0.3
@@ -663,8 +668,8 @@ models:
     output: 2.5
   moonshotai/kimi-k2.5:
     input: 0.4
-    cache_read: 0.05
-    output: 1.98
+    cache_read: 0.09
+    output: 1.9
   moonshotai/kimi-k2.6:
     input: 0.74
     cache_read: 0.25
@@ -1021,6 +1026,10 @@ models:
     input: -1000000
     cache_read: -1000000
     output: -1000000
+  perceptron/perceptron-mk1:
+    input: 0.15
+    cache_read: 0.15
+    output: 1.5
   perplexity/sonar:
     input: 1
     cache_read: 1
@@ -1065,10 +1074,6 @@ models:
     input: 0.66
     cache_read: 0.66
     output: 1
-  qwen/qwen-max:
-    input: 1.04
-    cache_read: 0.208
-    output: 4.16
   qwen/qwen-plus:
     input: 0.26
     cache_read: 0.052
@@ -1084,18 +1089,6 @@ models:
     cache_read: 0.26
     cache_write: 0.325
     output: 0.78
-  qwen/qwen-turbo:
-    input: 0.0325
-    cache_read: 0.0065
-    output: 0.13
-  qwen/qwen-vl-max:
-    input: 0.52
-    cache_read: 0.52
-    output: 2.08
-  qwen/qwen-vl-plus:
-    input: 0.1365
-    cache_read: 0.0273
-    output: 0.4095
   qwen/qwen2.5-vl-72b-instruct:
     input: 0.25
     cache_read: 0.25
@@ -1225,7 +1218,7 @@ models:
     output: 1
   qwen/qwen3.5-397b-a17b:
     input: 0.39
-    cache_read: 0.195
+    cache_read: 0.39
     output: 2.34
   qwen/qwen3.5-9b:
     input: 0.04
@@ -1457,9 +1450,9 @@ models:
     cache_read: 0.24
     output: 4
   z-ai/glm-5.1:
-    input: 0.98
-    cache_read: 0.182
-    output: 3.08
+    input: 1.05
+    cache_read: 0.525
+    output: 3.5
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
