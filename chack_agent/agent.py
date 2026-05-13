@@ -14,7 +14,7 @@ import subprocess
 from datetime import datetime, timezone
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 
 try:
     from agents import MaxTurnsExceeded
@@ -363,6 +363,52 @@ class Chack:
                 continue
             total += count
         return total
+
+    @staticmethod
+    def _normalize_required_tool_names(names: Any) -> list[str]:
+        if names is None:
+            return []
+        if isinstance(names, str):
+            raw_items = [part.strip() for part in names.split(",")]
+        elif isinstance(names, Sequence):
+            raw_items = [str(item or "").strip() for item in names]
+        else:
+            raw_items = [str(names or "").strip()]
+        normalized: list[str] = []
+        for item in raw_items:
+            if item and item not in normalized:
+                normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _tool_name_satisfies_required(tool_name: str, required_name: str) -> bool:
+        tool = str(tool_name or "").strip()
+        required = str(required_name or "").strip()
+        if not tool or not required:
+            return False
+        if tool == required:
+            return True
+        normalized_tool = tool.replace("-", "_")
+        normalized_required = required.replace("-", "_")
+        if normalized_tool == normalized_required:
+            return True
+        suffixes = (
+            f"-{required}",
+            f"_{required}",
+            f"__{required}",
+            f"-{normalized_required}",
+            f"_{normalized_required}",
+            f"__{normalized_required}",
+        )
+        return any(tool.endswith(suffix) or normalized_tool.endswith(suffix) for suffix in suffixes)
+
+    def _missing_required_tool_names(self, steps, required_tool_names: Sequence[str]) -> list[str]:
+        called = [self._tool_name(step) for step in steps]
+        missing: list[str] = []
+        for required_name in required_tool_names:
+            if not any(self._tool_name_satisfies_required(tool, required_name) for tool in called):
+                missing.append(required_name)
+        return missing
 
     def _step_tool_counts(self, steps) -> Counter:
         counts: Counter = Counter()
@@ -1085,6 +1131,8 @@ class Chack:
         *,
         min_tools_used_override: Optional[int] = None,
         max_tools_used_override: Optional[int] = None,
+        required_tool_names: Optional[Sequence[str] | str] = None,
+        required_tool_call_attempts: Optional[int] = None,
         enable_self_critique: Optional[bool] = None,
         require_task_steps_manager_init_first: Optional[bool] = None,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
@@ -1103,6 +1151,8 @@ class Chack:
             text,
             min_tools_used_override=min_tools_used_override,
             max_tools_used_override=max_tools_used_override,
+            required_tool_names=required_tool_names,
+            required_tool_call_attempts=required_tool_call_attempts,
             enable_self_critique=enable_self_critique,
             require_task_steps_manager_init_first=require_task_steps_manager_init_first,
             on_task_steps_manager_update=on_task_steps_manager_update,
@@ -1123,6 +1173,8 @@ class Chack:
         *,
         min_tools_used_override: Optional[int] = None,
         max_tools_used_override: Optional[int] = None,
+        required_tool_names: Optional[Sequence[str] | str] = None,
+        required_tool_call_attempts: Optional[int] = None,
         enable_self_critique: Optional[bool] = None,
         require_task_steps_manager_init_first: Optional[bool] = None,
         on_task_steps_manager_update: Optional[Callable[[str], None]] = None,
@@ -1202,6 +1254,20 @@ class Chack:
             max_tools_used = max(0, int(self.config.tools.max_tools_used or 0))
             if max_tools_used_override is not None:
                 max_tools_used = max(0, int(max_tools_used_override))
+            configured_required_tool_names = self._normalize_required_tool_names(
+                required_tool_names
+                if required_tool_names is not None
+                else getattr(self.config.tools, "required_tool_names", [])
+            )
+            configured_required_tool_attempts = max(
+                1,
+                int(
+                    required_tool_call_attempts
+                    if required_tool_call_attempts is not None
+                    else getattr(self.config.tools, "required_tool_call_attempts", 3)
+                    or 3
+                ),
+            )
 
             # Internal bookkeeping/session key for TaskStepsManager state.
             task_session_id = f"{session_id}:{int(time.time() * 1000)}"
@@ -1240,6 +1306,8 @@ class Chack:
                     "model": str(self.config.model.primary or ""),
                     "min_tools": min_tools_used,
                     "max_tools": max_tools_used,
+                    "required_tools": configured_required_tool_names,
+                    "required_tool_call_attempts": configured_required_tool_attempts,
                     "max_turns": int(self.config.session.max_turns or 0),
                     "self_critique_enabled": bool(enable_self_critique),
                     "require_task_steps_manager_init_first": bool(require_task_steps_manager_init_first),
@@ -1294,17 +1362,19 @@ class Chack:
                 STORE.register_listener(task_session_id, _listener)
 
             self.logger.info(
-                "Run start: session=%s task_session=%s min_tools=%s max_tools=%s self_critique=%s require_task_steps_manager_init=%s ts=%s",
+                "Run start: session=%s task_session=%s min_tools=%s max_tools=%s required_tools=%s required_tool_attempts=%s self_critique=%s require_task_steps_manager_init=%s ts=%s",
                 session_id,
                 telemetry_task_session_id or task_session_id,
                 min_tools_used,
                 max_tools_used,
+                configured_required_tool_names,
+                configured_required_tool_attempts,
                 enable_self_critique,
                 require_task_steps_manager_init_first,
                 _log_timestamp(),
             )
 
-            max_attempts = 6
+            max_attempts = max(6, configured_required_tool_attempts + 1)
             max_missing_tools_reminders = max(
                 0,
                 int(
@@ -1327,6 +1397,7 @@ class Chack:
                 *,
                 min_tools_target: Optional[int] = None,
                 require_task_steps_manager_init: Optional[bool] = None,
+                required_tools_target: Optional[Sequence[str]] = None,
             ):
                 nonlocal estimated_cost_spent
                 result = {}
@@ -1337,6 +1408,19 @@ class Chack:
                 cache_write_total = 0
                 current_prompt = prompt_text
                 missing_tools_reminders_sent = 0
+                missing_required_reminders_sent = 0
+                effective_required_tools = (
+                    list(configured_required_tool_names)
+                    if required_tools_target is None
+                    else self._normalize_required_tool_names(required_tools_target)
+                )
+                if effective_required_tools:
+                    required_list = ", ".join(f"`{name}`" for name in effective_required_tools)
+                    current_prompt = (
+                        f"{prompt_text}\n\n### REQUIRED TOOL CALLS\n"
+                        f"Before you finish this run, you MUST call: {required_list}.\n"
+                        "Do not provide a final answer until those required tool calls have completed."
+                    )
                 effective_min_tools = (
                     min_tools_used if min_tools_target is None else max(0, int(min_tools_target))
                 )
@@ -1783,18 +1867,24 @@ class Chack:
                     non_task_tools = self._non_task_tool_count(all_steps)
                     missing_init = effective_require_init and not has_init
                     missing_tools = effective_min_tools > 0 and non_task_tools < effective_min_tools
+                    missing_required_tools = self._missing_required_tool_names(
+                        all_steps,
+                        effective_required_tools,
+                    )
+                    missing_required = bool(missing_required_tools)
                     max_tools_reached = effective_max_tools > 0 and non_task_tools >= effective_max_tools
                     self.logger.info(
-                        "%s: steps=%s non_task_tools=%s has_init=%s missing_tools=%s max_tools_reached=%s ts=%s.",
+                        "%s: steps=%s non_task_tools=%s has_init=%s missing_tools=%s missing_required_tools=%s max_tools_reached=%s ts=%s.",
                         run_label,
                         len(all_steps),
                         non_task_tools,
                         has_init,
                         missing_tools,
+                        missing_required_tools,
                         max_tools_reached,
                         _log_timestamp(),
                     )
-                    if not missing_init and not missing_tools:
+                    if not missing_init and not missing_tools and not missing_required:
                         break
                     if max_tools_reached:
                         self._emit_limit_reached_once(
@@ -1806,6 +1896,13 @@ class Chack:
                                 "max_tools_used": effective_max_tools,
                                 "used": non_task_tools,
                             },
+                        )
+                        break
+                    if missing_required and missing_required_reminders_sent >= configured_required_tool_attempts:
+                        result["error"] = "missing_required_tool_call"
+                        result["output"] = (
+                            "ERROR: Agent finished without calling required tool(s): "
+                            + ", ".join(missing_required_tools)
                         )
                         break
                     if (
@@ -1828,6 +1925,15 @@ class Chack:
                             "accurately and confidently, rather than rushing to a final answer."
                         )
                         missing_tools_reminders_sent += 1
+                    if missing_required:
+                        missing_required_reminders_sent += 1
+                        required_list = ", ".join(f"`{name}`" for name in missing_required_tools)
+                        reminders.append(
+                            "You attempted to finish without calling required tool(s): "
+                            f"{required_list}. Do not provide a final answer yet. "
+                            "Call the missing required tool(s) now with the final structured result. "
+                            "The run cannot complete until the required tool call is recorded."
+                        )
 
                     budget_notice = budget_prompt_warning(
                         start_epoch=run_started_at,
@@ -1911,6 +2017,7 @@ class Chack:
                     "Run 2 (self-critique)",
                     min_tools_target=0,
                     require_task_steps_manager_init=False,
+                    required_tools_target=[],
                 )
                 prompt_tokens += run2_prompt_tokens
                 completion_tokens += run2_completion_tokens

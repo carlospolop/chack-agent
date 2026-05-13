@@ -25,18 +25,6 @@ from chack_agent import (
 
 # 1. Configure the agent
 config = ChackConfig(
-
-You can also replace the default toolset entirely:
-
-```python
-result = agent.run(
-  session_id="demo",
-  text="Use only my custom tool.",
-  tools_override=[my_tool],
-)
-```
-
-`tools_append` and `tools_override` work with both in-process backends and CLI backends such as `codex`, `claude`, and `gemini`.
     model=ModelConfig(
         primary="gpt-4o",
         # Defaults for specialized tools are CHEAP_BUT_QUALITY.
@@ -87,6 +75,47 @@ result = agent.run(
 )
 
 print(result.output)
+```
+
+You can also replace the default toolset entirely:
+
+```python
+result = agent.run(
+  session_id="demo",
+  text="Use only my custom tool.",
+  tools_override=[my_tool],
+)
+```
+
+`tools_append` and `tools_override` work with both in-process backends and CLI backends such as `codex`, `claude`, and `gemini`.
+
+You can also require specific tools to be called before a run is accepted as
+complete. This is useful when a workflow must persist a verdict or update a
+database row:
+
+```python
+result = agent.run(
+  session_id="tester-123",
+  text="Test this vulnerability and save the verdict.",
+  required_tool_names=["update_vulnerability"],
+  required_tool_call_attempts=3,
+)
+```
+
+If the model tries to finish without the required tool, Chack re-prompts it to
+call the missing tool instead of accepting the final answer. Tool names are
+matched suffix-aware, so `update_vulnerability`,
+`chack_tools-update_vulnerability`, and similar MCP-prefixed names satisfy the
+same requirement. After the retry budget is exhausted, the run returns an
+explicit `missing_required_tool_call` error output.
+
+The same defaults can be configured in YAML:
+
+```yaml
+tools:
+  required_tool_names:
+    - update_vulnerability
+  required_tool_call_attempts: 3
 ```
 
 ## Quick Start From YAML
