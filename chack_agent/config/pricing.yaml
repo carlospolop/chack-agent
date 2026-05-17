@@ -383,9 +383,9 @@ models:
     cache_read: 0.06
     output: 0.12
   google/gemma-4-26b-a4b-it:
-    input: 0.06
-    cache_read: 0.06
-    output: 0.33
+    input: 0.07
+    cache_read: 0.07
+    output: 0.34
   google/gemma-4-26b-a4b-it:free:
     input: 0
     cache_read: 0
@@ -625,7 +625,7 @@ models:
   mistralai/mistral-nemo:
     input: 0.02
     cache_read: 0.02
-    output: 0.03
+    output: 0.04
   mistralai/mistral-saba:
     input: 0.2
     cache_read: 0.02
@@ -731,9 +731,9 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3-super-120b-a12b:
-    input: 0.09
-    cache_read: 0.09
-    output: 0.45
+    input: 0.1
+    cache_read: 0.1
+    output: 0.5
   nvidia/nemotron-3-super-120b-a12b:free:
     input: 0
     cache_read: 0
@@ -953,7 +953,7 @@ models:
   openai/gpt-oss-120b:
     input: 0.039
     cache_read: 0.039
-    output: 0.18
+    output: 0.19
   openai/gpt-oss-120b:free:
     input: 0
     cache_read: 0
