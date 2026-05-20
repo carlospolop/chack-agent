@@ -362,6 +362,11 @@ models:
     cache_read: 0.2
     cache_write: 0.375
     output: 12
+  google/gemini-3.5-flash:
+    input: 1.5
+    cache_read: 0.15
+    cache_write: 0.08333333333333334
+    output: 9
   google/gemma-2-27b-it:
     input: 0.65
     cache_read: 0.65
@@ -1217,8 +1222,8 @@ models:
     cache_read: 0.195
     output: 1.56
   qwen/qwen3.5-35b-a3b:
-    input: 0.14
-    cache_read: 0.05
+    input: 0.139
+    cache_read: 0.139
     output: 1
   qwen/qwen3.5-397b-a17b:
     input: 0.39
@@ -1422,9 +1427,9 @@ models:
     cache_read: 0.24
     output: 4
   z-ai/glm-5.1:
-    input: 0.98
-    cache_read: 0.182
-    output: 3.08
+    input: 0
+    cache_read: 0
+    output: 0
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
@@ -1445,10 +1450,10 @@ models:
     cache_write: 3.75
     output: 15
   ~google/gemini-flash-latest:
-    input: 0.5
-    cache_read: 0.05
+    input: 1.5
+    cache_read: 0.15
     cache_write: 0.08333333333333334
-    output: 3
+    output: 9
   ~google/gemini-pro-latest:
     input: 2
     cache_read: 0.2
