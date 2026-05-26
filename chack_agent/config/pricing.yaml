@@ -23,10 +23,6 @@ models:
     input: 0.8
     cache_read: 0.8
     output: 1.2
-  alibaba/tongyi-deepresearch-30b-a3b:
-    input: 0.09
-    cache_read: 0.09
-    output: 0.45
   allenai/olmo-3-32b-think:
     input: 0.15
     cache_read: 0.15
@@ -221,9 +217,9 @@ models:
     cache_read: 1.25
     output: 1.25
   deepseek/deepseek-chat:
-    input: 0.32
-    cache_read: 0.32
-    output: 0.89
+    input: 0.2288
+    cache_read: 0.2288
+    output: 0.9144
   deepseek/deepseek-chat-v3-0324:
     input: 0.2
     cache_read: 0.135
