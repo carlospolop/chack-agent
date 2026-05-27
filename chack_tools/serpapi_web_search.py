@@ -19,6 +19,11 @@ from .telemetry import log_tool_started, log_tool_executed, log_tool_error
 from .serpapi_keys import is_serpapi_rate_limited, shuffled_serpapi_keys
 
 
+SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS = 45
+SERPAPI_WEB_TIMEOUT_MIN_SECONDS = 45
+SERPAPI_WEB_TIMEOUT_MAX_SECONDS = 120
+
+
 def _clamp(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
@@ -37,6 +42,14 @@ def _normalize_snippet(text: str, max_chars: int = 240) -> str:
     return clean[: max_chars - 3].rstrip() + "..."
 
 
+def _serpapi_web_timeout(value) -> int:
+    return _clamp(
+        _coerce_int(value, SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS),
+        SERPAPI_WEB_TIMEOUT_MIN_SECONDS,
+        SERPAPI_WEB_TIMEOUT_MAX_SECONDS,
+    )
+
+
 class SerpApiWebSearchTool:
     def __init__(self, config: ToolsConfig):
         self.config = config
@@ -51,10 +64,11 @@ class SerpApiWebSearchTool:
             return _clamp(default_max, 1, 10)
         return _clamp(_coerce_int(requested, default_max), 1, 10)
 
-    def _request_payload(self, params: dict, timeout_seconds: int = 20):
+    def _request_payload(self, params: dict, timeout_seconds: int = SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS):
         api_keys = shuffled_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
         if not api_keys:
             return "ERROR: SerpAPI key not configured."
+        timeout_seconds = _serpapi_web_timeout(timeout_seconds)
         last_error = "ERROR: SerpAPI request failed"
         for idx, api_key in enumerate(api_keys):
             req_params = dict(params)
@@ -89,7 +103,12 @@ class SerpApiWebSearchTool:
             return payload
         return last_error
 
-    def _request(self, params: dict, timeout_seconds: int = 20, max_results: Optional[int] = None) -> str:
+    def _request(
+        self,
+        params: dict,
+        timeout_seconds: int = SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS,
+        max_results: Optional[int] = None,
+    ) -> str:
         payload = self._request_payload(params, timeout_seconds=timeout_seconds)
         if isinstance(payload, str):
             return payload
@@ -215,7 +234,7 @@ class SerpApiWebSearchTool:
         query: str,
         page: int = 1,
         num: Optional[int] = None,
-        timeout_seconds: int = 20,
+        timeout_seconds: int = SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS,
     ) -> str:
         if not query.strip():
             return "ERROR: Query cannot be empty"
@@ -237,7 +256,7 @@ class SerpApiWebSearchTool:
         query: str,
         page: int = 1,
         count: Optional[int] = None,
-        timeout_seconds: int = 20,
+        timeout_seconds: int = SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS,
     ) -> str:
         if not query.strip():
             return "ERROR: Query cannot be empty"
@@ -294,7 +313,7 @@ def get_google_web_search_tool(helper: SerpApiWebSearchTool):
         query: str,
         page: int = 1,
         num: Optional[int] = None,
-        timeout_seconds: int = 20,
+        timeout_seconds: int = SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS,
     ) -> str:
         """Search Google web results via SerpAPI.
 
@@ -359,7 +378,7 @@ def get_bing_web_search_tool(helper: SerpApiWebSearchTool):
         query: str,
         page: int = 1,
         count: Optional[int] = None,
-        timeout_seconds: int = 20,
+        timeout_seconds: int = SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS,
     ) -> str:
         """Search Bing web results via SerpAPI.
 
