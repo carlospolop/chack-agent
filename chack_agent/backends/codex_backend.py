@@ -1206,31 +1206,41 @@ def build_executor(
             names.append(name)
         return names
 
-    allowed_tool_names: list[str] | None = None
     serialized_tools_override_b64 = serialize_tools_payload(tools_override)
     serialized_tools_append_b64 = serialize_tools_payload(tools_append)
     model_provider = str(config.model.provider or "").strip()
     if not model_provider:
         raise ValueError("model.provider must be defined in config")
+
+    configured_tools: list[Any] | None = None
+
+    def _configured_base_tools() -> list[Any]:
+        nonlocal configured_tools
+        if configured_tools is None:
+            base_toolset = AgentsToolset(
+                config.tools,
+                model_provider=model_provider,
+                default_model=config.model.primary,
+                social_network_model=config.model.social_network,
+                scientific_model=config.model.scientific,
+                websearcher_model=config.model.websearcher,
+                tester_model=config.model.tester,
+                subchack_model=config.model.subchack,
+                social_network_max_turns=config.model.social_network_max_turns,
+                scientific_max_turns=config.model.scientific_max_turns,
+                websearcher_max_turns=config.model.websearcher_max_turns,
+                tester_max_turns=config.model.tester_max_turns,
+                subchack_max_turns=config.model.subchack_max_turns,
+            )
+            configured_tools = list(base_toolset.tools)
+        return list(configured_tools)
+
     if tools_override is not None:
         allowed_tool_names = _extract_tool_names(list(tools_override))
     elif tools_append:
-        base_toolset = AgentsToolset(
-            config.tools,
-            model_provider=model_provider,
-            default_model=config.model.primary,
-            social_network_model=config.model.social_network,
-            scientific_model=config.model.scientific,
-            websearcher_model=config.model.websearcher,
-            tester_model=config.model.tester,
-            subchack_model=config.model.subchack,
-            social_network_max_turns=config.model.social_network_max_turns,
-            scientific_max_turns=config.model.scientific_max_turns,
-            websearcher_max_turns=config.model.websearcher_max_turns,
-            tester_max_turns=config.model.tester_max_turns,
-            subchack_max_turns=config.model.subchack_max_turns,
-        )
-        allowed_tool_names = _extract_tool_names(list(base_toolset.tools) + list(tools_append))
+        allowed_tool_names = _extract_tool_names(_configured_base_tools() + list(tools_append))
+    else:
+        allowed_tool_names = _extract_tool_names(_configured_base_tools())
 
     has_task_steps_manager_tool = (
         "task_steps_manager" in allowed_tool_names

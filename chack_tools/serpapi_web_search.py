@@ -50,6 +50,11 @@ def _serpapi_web_timeout(value) -> int:
     )
 
 
+def _is_no_results_error(error_text: str) -> bool:
+    text = " ".join(str(error_text or "").lower().split())
+    return "returned any results" in text or "no results" in text
+
+
 class SerpApiWebSearchTool:
     def __init__(self, config: ToolsConfig):
         self.config = config
@@ -97,6 +102,8 @@ class SerpApiWebSearchTool:
 
             if isinstance(payload, dict) and payload.get("error"):
                 error_text = str(payload.get("error") or "")
+                if _is_no_results_error(error_text):
+                    return {"organic_results": []}
                 if is_serpapi_rate_limited(response.status_code, error_text) and idx < len(api_keys) - 1:
                     continue
                 return f"ERROR: SerpAPI error ({error_text})"
