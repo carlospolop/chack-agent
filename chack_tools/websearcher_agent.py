@@ -183,7 +183,7 @@ class WebSearcherAgentTool:
         return result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
 
     def run(self, prompt: str | list[str]) -> str:
-        prompts, error = normalize_subagent_prompts(prompt, min_chars=500, max_prompts=3)
+        prompts, error = normalize_subagent_prompts(prompt, min_chars=300, max_prompts=3)
         if error:
             return error
         ctx = current_log_context()
@@ -207,7 +207,7 @@ def get_websearcher_research_tool(
         The sub-agent uses Brave + Google + Bing (including AI-mode endpoints) to cross-validate.
 
         Args:
-            prompt: A detailed web research request (string) or a list of up to 3 detailed requests. Each request must be at least 500 characters indicating all the details of the goals and objetives of the subagent, suggested process to obtain proper results, example expected output or relevant information to gather... the more detailed is each instruction to the sub agent, the better.
+            prompt: A detailed web research request (string) or a list of up to 3 detailed requests. Each request must be at least 300 characters indicating the goals of the subagent, suggested process to obtain proper results, expected output, and relevant information to gather.
         """
         tool_input = {"prompt": prompt}
         try:

@@ -106,10 +106,10 @@ def subagent_launch_block_reason(
 def validate_subagent_instruction_length(prompt: str, *, min_chars: int = 500) -> str | None:
     text = str(prompt or "").strip()
     if not text:
-        return "ERROR: prompt cannot be empty"
+        return "INPUT_REJECTED: prompt cannot be empty"
     if len(text) < int(min_chars):
         return (
-            "ERROR: delegated sub-agent launch blocked. "
+            "INPUT_REJECTED: delegated sub-agent launch blocked. "
             f"Provide at least {int(min_chars)} characters of detailed instructions "
             f"(received {len(text)})."
             f"Use the extra chars to indicate more details on the goals of the agents, expected example responses/information, or any other relevant data. The more specific you are, the better."
@@ -131,10 +131,10 @@ def normalize_subagent_prompts(
 
     prompts = [item for item in prompts if item]
     if not prompts:
-        return [], "ERROR: prompt cannot be empty"
+        return [], "INPUT_REJECTED: prompt cannot be empty"
     if len(prompts) > int(max_prompts):
         return [], (
-            "ERROR: delegated sub-agent launch blocked. "
+            "INPUT_REJECTED: delegated sub-agent launch blocked. "
             f"You can provide at most {int(max_prompts)} prompts."
         )
 
