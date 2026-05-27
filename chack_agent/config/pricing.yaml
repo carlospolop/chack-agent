@@ -132,10 +132,6 @@ models:
     input: 0.22
     cache_read: 0.06
     output: 0.85
-  arcee-ai/trinity-large-thinking:free:
-    input: 0
-    cache_read: 0
-    output: 0
   arcee-ai/trinity-mini:
     input: 0.045
     cache_read: 0.045
@@ -1083,7 +1079,6 @@ models:
   qwen/qwen-plus-2025-07-28:
     input: 0.26
     cache_read: 0.26
-    cache_write: 0.325
     output: 0.78
   qwen/qwen-plus-2025-07-28:thinking:
     input: 0.26
@@ -1228,24 +1223,23 @@ models:
   qwen/qwen3.5-flash-02-23:
     input: 0.065
     cache_read: 0.065
-    cache_write: 0.08125
     output: 0.26
   qwen/qwen3.5-plus-02-15:
     input: 0.26
     cache_read: 0.26
-    cache_write: 0.325
     output: 1.56
   qwen/qwen3.5-plus-20260420:
     input: 0.3
     cache_read: 0.3
+    cache_write: 0.375
     output: 1.8
   qwen/qwen3.6-27b:
     input: 0.3
-    cache_read: 0.3
-    output: 3.2
+    cache_read: 0.15
+    output: 2
   qwen/qwen3.6-35b-a3b:
     input: 0.15
-    cache_read: 0.15
+    cache_read: 0.05
     output: 1
   qwen/qwen3.6-flash:
     input: 0.1875
@@ -1263,10 +1257,10 @@ models:
     cache_write: 0.40625
     output: 1.95
   qwen/qwen3.7-max:
-    input: 2.5
-    cache_read: 2.5
-    cache_write: 3.125
-    output: 7.5
+    input: 1.25
+    cache_read: 0.25
+    cache_write: 1.5625
+    output: 3.75
   rekaai/reka-edge:
     input: 0.1
     cache_read: 0.1
@@ -1376,13 +1370,13 @@ models:
     cache_read: 0.2
     output: 3
   xiaomi/mimo-v2.5:
-    input: 0.4
-    cache_read: 0.08
-    output: 2
+    input: 0.14
+    cache_read: 0.0028
+    output: 0.28
   xiaomi/mimo-v2.5-pro:
-    input: 1
-    cache_read: 0.2
-    output: 3
+    input: 0.435
+    cache_read: 0.0036
+    output: 0.87
   z-ai/glm-4-32b:
     input: 0.1
     cache_read: 0.1
@@ -1392,9 +1386,9 @@ models:
     cache_read: 0.11
     output: 2.2
   z-ai/glm-4.5-air:
-    input: 0.13
-    cache_read: 0.025
-    output: 0.85
+    input: 0.125
+    cache_read: 0.125
+    output: 0.84
   z-ai/glm-4.5-air:free:
     input: 0
     cache_read: 0
