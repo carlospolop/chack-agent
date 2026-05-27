@@ -46,6 +46,7 @@ class ToolsConfig:
     pdf_text_enabled: bool = False
 
     websearcher_enabled: bool = False
+    webresearcher_enabled: bool = False
     websearcher_brave_enabled: bool = False
     websearcher_google_web_enabled: bool = False
     websearcher_bing_web_enabled: bool = False

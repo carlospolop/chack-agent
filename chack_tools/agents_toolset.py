@@ -114,7 +114,7 @@ class AgentsToolset:
             web_helper = SerpApiWebSearchTool(self.config)
             tools.append(get_bing_web_search_tool(web_helper))
 
-        if self.config.websearcher_enabled:
+        if self.config.websearcher_enabled or self.config.webresearcher_enabled:
             websearcher_helper = WebSearcherAgentTool(
                 self.config,
                 model_name=self.websearcher_model,
