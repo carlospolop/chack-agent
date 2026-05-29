@@ -101,6 +101,16 @@ models:
     cache_read: 3
     cache_write: 37.5
     output: 150
+  anthropic/claude-opus-4.8:
+    input: 5
+    cache_read: 0.5
+    cache_write: 6.25
+    output: 25
+  anthropic/claude-opus-4.8-fast:
+    input: 10
+    cache_read: 1
+    cache_write: 12.5
+    output: 50
   anthropic/claude-sonnet-4:
     input: 3
     cache_read: 0.3
@@ -160,10 +170,6 @@ models:
     input: 0.42
     cache_read: 0.42
     output: 1.25
-  baidu/qianfan-ocr-fast:
-    input: 0.68
-    cache_read: 0.68
-    output: 2.81
   bytedance-seed/seed-1.6:
     input: 0.25
     cache_read: 0.25
@@ -248,10 +254,6 @@ models:
     input: 0.27
     cache_read: 0.27
     output: 0.41
-  deepseek/deepseek-v3.2-speciale:
-    input: 0.287
-    cache_read: 0.058
-    output: 0.431
   deepseek/deepseek-v4-flash:
     input: 0.1
     cache_read: 0.02
@@ -1301,6 +1303,10 @@ models:
     input: 0.09
     cache_read: 0.02
     output: 0.3
+  stepfun/step-3.7-flash:
+    input: 0.2
+    cache_read: 0.04
+    output: 1.15
   switchpoint/router:
     input: 0.85
     cache_read: 0.85
@@ -1310,9 +1316,9 @@ models:
     cache_read: 0.14
     output: 0.57
   tencent/hy3-preview:
-    input: 0.066
-    cache_read: 0.029
-    output: 0.26
+    input: 0.063
+    cache_read: 0.021
+    output: 0.21
   thedrummer/cydonia-24b-v4.1:
     input: 0.3
     cache_read: 0.15
@@ -1387,8 +1393,8 @@ models:
     output: 2.2
   z-ai/glm-4.5-air:
     input: 0.125
-    cache_read: 0.125
-    output: 0.84
+    cache_read: 0.06
+    output: 0.85
   z-ai/glm-4.5-air:free:
     input: 0
     cache_read: 0
