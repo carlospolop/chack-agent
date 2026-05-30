@@ -255,9 +255,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.1
-    cache_read: 0.02
-    output: 0.2
+    input: 0.0983
+    cache_read: 0.0197
+    output: 0.1966
   deepseek/deepseek-v4-flash:free:
     input: 0
     cache_read: 0
@@ -666,9 +666,9 @@ models:
     cache_read: 0.09
     output: 1.9
   moonshotai/kimi-k2.6:
-    input: 0.73
-    cache_read: 0.25
-    output: 3.49
+    input: 0.684
+    cache_read: 0.144
+    output: 3.42
   moonshotai/kimi-k2.6:free:
     input: 0
     cache_read: 0
@@ -808,10 +808,6 @@ models:
   openai/gpt-4o-2024-11-20:
     input: 2.5
     cache_read: 1.25
-    output: 10
-  openai/gpt-4o-audio-preview:
-    input: 2.5
-    cache_read: 2.5
     output: 10
   openai/gpt-4o-mini:
     input: 0.15
@@ -1461,9 +1457,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 0.73
-    cache_read: 0.25
-    output: 3.49
+    input: 0.684
+    cache_read: 0.144
+    output: 3.42
   ~openai/gpt-latest:
     input: 5
     cache_read: 0.5
