@@ -246,10 +246,6 @@ models:
     input: 0.0983
     cache_read: 0.0197
     output: 0.1966
-  deepseek/deepseek-v4-flash:free:
-    input: 0
-    cache_read: 0
-    output: 0
   deepseek/deepseek-v4-pro:
     input: 0.435
     cache_read: 0.003625
@@ -410,9 +406,9 @@ models:
     cache_read: 0.002
     output: 0.03
   inclusionai/ring-2.6-1t:
-    input: 0.075
-    cache_read: 0.015
-    output: 0.625
+    input: 0.3
+    cache_read: 0.06
+    output: 2.5
   inflection/inflection-3-pi:
     input: 2.5
     cache_read: 2.5
@@ -537,6 +533,10 @@ models:
     input: 0.26
     cache_read: 0.26
     output: 1.2
+  minimax/minimax-m3:
+    input: 0.3
+    cache_read: 0.06
+    output: 1.2
   mistralai/codestral-2508:
     input: 0.3
     cache_read: 0.03
@@ -545,14 +545,6 @@ models:
     input: 0.4
     cache_read: 0.04
     output: 2
-  mistralai/devstral-medium:
-    input: 0.4
-    cache_read: 0.04
-    output: 2
-  mistralai/devstral-small:
-    input: 0.1
-    cache_read: 0.01
-    output: 0.3
   mistralai/ministral-14b-2512:
     input: 0.2
     cache_read: 0.02
@@ -570,10 +562,6 @@ models:
     cache_read: 0.2
     output: 6
   mistralai/mistral-large-2407:
-    input: 2
-    cache_read: 0.2
-    output: 6
-  mistralai/mistral-large-2411:
     input: 2
     cache_read: 0.2
     output: 6
@@ -618,10 +606,6 @@ models:
     cache_read: 0.075
     output: 0.2
   mistralai/mixtral-8x22b-instruct:
-    input: 2
-    cache_read: 0.2
-    output: 6
-  mistralai/pixtral-large-2411:
     input: 2
     cache_read: 0.2
     output: 6
@@ -1315,6 +1299,10 @@ models:
     input: 0.45
     cache_read: 0.45
     output: 0.65
+  upstage/solar-pro-3:
+    input: 0.15
+    cache_read: 0.015
+    output: 0.6
   writer/palmyra-x5:
     input: 0.6
     cache_read: 0.6
@@ -1339,14 +1327,6 @@ models:
     input: 0.1
     cache_read: 0.01
     output: 0.3
-  xiaomi/mimo-v2-omni:
-    input: 0.4
-    cache_read: 0.08
-    output: 2
-  xiaomi/mimo-v2-pro:
-    input: 1
-    cache_read: 0.2
-    output: 3
   xiaomi/mimo-v2.5:
     input: 0.14
     cache_read: 0.0028
