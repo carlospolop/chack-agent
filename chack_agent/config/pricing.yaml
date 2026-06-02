@@ -203,9 +203,9 @@ models:
     cache_read: 1.25
     output: 1.25
   deepseek/deepseek-chat:
-    input: 0.2288
-    cache_read: 0.2288
-    output: 0.9144
+    input: 0.2002
+    cache_read: 0.2002
+    output: 0.8001
   deepseek/deepseek-chat-v3-0324:
     input: 0.2
     cache_read: 0.135
@@ -235,9 +235,9 @@ models:
     cache_read: 0.13
     output: 0.95
   deepseek/deepseek-v3.2:
-    input: 0.252
-    cache_read: 0.0252
-    output: 0.378
+    input: 0.2288
+    cache_read: 0.2288
+    output: 0.3432
   deepseek/deepseek-v3.2-exp:
     input: 0.27
     cache_read: 0.27
@@ -254,15 +254,6 @@ models:
     input: 0.15
     cache_read: 0.15
     output: 0.15
-  google/gemini-2.0-flash-001:
-    input: 0.1
-    cache_read: 0.025
-    cache_write: 0.08333333333333334
-    output: 0.4
-  google/gemini-2.0-flash-lite-001:
-    input: 0.075
-    cache_read: 0.075
-    output: 0.3
   google/gemini-2.5-flash:
     input: 0.3
     cache_read: 0.03
@@ -530,8 +521,8 @@ models:
     cache_read: 0.15
     output: 1.15
   minimax/minimax-m2.7:
-    input: 0.26
-    cache_read: 0.26
+    input: 0.279
+    cache_read: 0.279
     output: 1.2
   minimax/minimax-m3:
     input: 0.3
@@ -1072,9 +1063,9 @@ models:
     cache_read: 0.09
     output: 0.45
   qwen/qwen3-30b-a3b-instruct-2507:
-    input: 0.09
-    cache_read: 0.09
-    output: 0.3
+    input: 0.0428
+    cache_read: 0.0428
+    output: 0.1716
   qwen/qwen3-30b-a3b-thinking-2507:
     input: 0.08
     cache_read: 0.08
@@ -1374,7 +1365,7 @@ models:
   z-ai/glm-5:
     input: 0.6
     cache_read: 0.12
-    output: 1.92
+    output: 2.08
   z-ai/glm-5-turbo:
     input: 1.2
     cache_read: 0.24
