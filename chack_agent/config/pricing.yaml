@@ -146,10 +146,6 @@ models:
     input: 0.75
     cache_read: 0.75
     output: 1.2
-  baidu/ernie-4.5-300b-a47b:
-    input: 0.28
-    cache_read: 0.28
-    output: 1.1
   baidu/ernie-4.5-vl-28b-a3b:
     input: 0.14
     cache_read: 0.14
@@ -397,9 +393,9 @@ models:
     cache_read: 0.002
     output: 0.03
   inclusionai/ring-2.6-1t:
-    input: 0.3
-    cache_read: 0.06
-    output: 2.5
+    input: 0.075
+    cache_read: 0.015
+    output: 0.625
   inflection/inflection-3-pi:
     input: 2.5
     cache_read: 2.5
@@ -968,6 +964,10 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  openrouter/fusion:
+    input: -1000000
+    cache_read: -1000000
+    output: -1000000
   openrouter/owl-alpha:
     input: 0
     cache_read: 0
