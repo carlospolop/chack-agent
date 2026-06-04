@@ -716,10 +716,6 @@ models:
     input: 30
     cache_read: 30
     output: 60
-  openai/gpt-4-0314:
-    input: 30
-    cache_read: 30
-    output: 60
   openai/gpt-4-1106-preview:
     input: 10
     cache_read: 10
@@ -1214,6 +1210,11 @@ models:
     cache_read: 0.25
     cache_write: 1.5625
     output: 3.75
+  qwen/qwen3.7-plus:
+    input: 0.4
+    cache_read: 0.08
+    cache_write: 0.5
+    output: 1.6
   rekaai/reka-edge:
     input: 0.1
     cache_read: 0.1
@@ -1365,7 +1366,7 @@ models:
   z-ai/glm-5:
     input: 0.6
     cache_read: 0.12
-    output: 2.08
+    output: 1.92
   z-ai/glm-5-turbo:
     input: 1.2
     cache_read: 0.24
