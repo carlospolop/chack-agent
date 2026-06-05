@@ -439,7 +439,7 @@ models:
   meta-llama/llama-3.1-8b-instruct:
     input: 0.02
     cache_read: 0.02
-    output: 0.05
+    output: 0.03
   meta-llama/llama-3.2-11b-vision-instruct:
     input: 0.245
     cache_read: 0.245
@@ -681,6 +681,18 @@ models:
     cache_read: 0.09
     output: 0.45
   nvidia/nemotron-3-super-120b-a12b:free:
+    input: 0
+    cache_read: 0
+    output: 0
+  nvidia/nemotron-3-ultra-550b-a55b:
+    input: 0.5
+    cache_read: 0.15
+    output: 2.5
+  nvidia/nemotron-3-ultra-550b-a55b:free:
+    input: 0
+    cache_read: 0
+    output: 0
+  nvidia/nemotron-3.5-content-safety:free:
     input: 0
     cache_read: 0
     output: 0
@@ -1059,9 +1071,9 @@ models:
     cache_read: 0.09
     output: 0.45
   qwen/qwen3-30b-a3b-instruct-2507:
-    input: 0.0428
-    cache_read: 0.0428
-    output: 0.1716
+    input: 0.04815
+    cache_read: 0.04815
+    output: 0.19305
   qwen/qwen3-30b-a3b-thinking-2507:
     input: 0.08
     cache_read: 0.08
