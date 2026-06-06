@@ -354,8 +354,8 @@ models:
     output: 0
   google/gemma-4-31b-it:
     input: 0.12
-    cache_read: 0.12
-    output: 0.37
+    cache_read: 0.09
+    output: 0.36
   google/gemma-4-31b-it:free:
     input: 0
     cache_read: 0
@@ -636,10 +636,6 @@ models:
     input: 0.135
     cache_read: 0.135
     output: 0.5
-  nousresearch/hermes-2-pro-llama-3-8b:
-    input: 0.14
-    cache_read: 0.14
-    output: 0.14
   nousresearch/hermes-3-llama-3.1-405b:
     input: 1
     cache_read: 1
@@ -1243,10 +1239,6 @@ models:
     input: 1
     cache_read: 1
     output: 3
-  sao10k/l3-euryale-70b:
-    input: 1.48
-    cache_read: 1.48
-    output: 1.48
   sao10k/l3-lunaris-8b:
     input: 0.04
     cache_read: 0.04
