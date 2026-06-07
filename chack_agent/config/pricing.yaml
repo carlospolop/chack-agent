@@ -130,10 +130,6 @@ models:
     input: 0.9
     cache_read: 0.9
     output: 3.3
-  arcee-ai/spotlight:
-    input: 0.18
-    cache_read: 0.18
-    output: 0.18
   arcee-ai/trinity-large-thinking:
     input: 0.22
     cache_read: 0.06
@@ -146,10 +142,6 @@ models:
     input: 0.75
     cache_read: 0.75
     output: 1.2
-  baidu/ernie-4.5-vl-28b-a3b:
-    input: 0.14
-    cache_read: 0.14
-    output: 0.56
   baidu/ernie-4.5-vl-424b-a47b:
     input: 0.42
     cache_read: 0.42
@@ -429,9 +421,9 @@ models:
     cache_read: 0.51
     output: 0.74
   meta-llama/llama-3-8b-instruct:
-    input: 0.04
-    cache_read: 0.04
-    output: 0.04
+    input: 0.14
+    cache_read: 0.14
+    output: 0.14
   meta-llama/llama-3.1-70b-instruct:
     input: 0.4
     cache_read: 0.4
@@ -724,10 +716,6 @@ models:
     input: 30
     cache_read: 30
     output: 60
-  openai/gpt-4-1106-preview:
-    input: 10
-    cache_read: 10
-    output: 30
   openai/gpt-4-turbo:
     input: 10
     cache_read: 10
@@ -1191,9 +1179,9 @@ models:
     cache_write: 0.375
     output: 1.8
   qwen/qwen3.6-27b:
-    input: 0.29
-    cache_read: 0.29
-    output: 3.2
+    input: 0.289
+    cache_read: 0.289
+    output: 2.4
   qwen/qwen3.6-35b-a3b:
     input: 0.14
     cache_read: 0.14
