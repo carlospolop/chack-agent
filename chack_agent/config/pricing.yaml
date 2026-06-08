@@ -321,17 +321,17 @@ models:
     cache_read: 0.65
     output: 0.65
   google/gemma-3-12b-it:
-    input: 0.04
-    cache_read: 0.04
-    output: 0.13
+    input: 0.05
+    cache_read: 0.05
+    output: 0.15
   google/gemma-3-27b-it:
     input: 0.08
     cache_read: 0.08
     output: 0.16
   google/gemma-3-4b-it:
-    input: 0.04
-    cache_read: 0.04
-    output: 0.08
+    input: 0.05
+    cache_read: 0.05
+    output: 0.1
   google/gemma-3n-e4b-it:
     input: 0.06
     cache_read: 0.06
@@ -433,9 +433,9 @@ models:
     cache_read: 0.02
     output: 0.03
   meta-llama/llama-3.2-11b-vision-instruct:
-    input: 0.245
-    cache_read: 0.245
-    output: 0.245
+    input: 0.345
+    cache_read: 0.345
+    output: 0.345
   meta-llama/llama-3.2-1b-instruct:
     input: 0.027
     cache_read: 0.027
@@ -461,8 +461,8 @@ models:
     cache_read: 0.15
     output: 0.6
   meta-llama/llama-4-scout:
-    input: 0.08
-    cache_read: 0.08
+    input: 0.1
+    cache_read: 0.1
     output: 0.3
   meta-llama/llama-guard-3-8b:
     input: 0.484
@@ -637,9 +637,9 @@ models:
     cache_read: 0
     output: 0
   nousresearch/hermes-3-llama-3.1-70b:
-    input: 0.3
-    cache_read: 0.3
-    output: 0.3
+    input: 0.7
+    cache_read: 0.7
+    output: 0.7
   nousresearch/hermes-4-405b:
     input: 1
     cache_read: 1
@@ -649,8 +649,8 @@ models:
     cache_read: 0.13
     output: 0.4
   nvidia/llama-3.3-nemotron-super-49b-v1.5:
-    input: 0.1
-    cache_read: 0.1
+    input: 0.4
+    cache_read: 0.4
     output: 0.4
   nvidia/nemotron-3-nano-30b-a3b:
     input: 0.05
@@ -1043,17 +1043,17 @@ models:
     cache_read: 0.455
     output: 1.82
   qwen/qwen3-235b-a22b-2507:
-    input: 0.071
-    cache_read: 0.071
+    input: 0.09
+    cache_read: 0.09
     output: 0.1
   qwen/qwen3-235b-a22b-thinking-2507:
     input: 0.1
     cache_read: 0.1
     output: 0.1
   qwen/qwen3-30b-a3b:
-    input: 0.09
-    cache_read: 0.09
-    output: 0.45
+    input: 0.12
+    cache_read: 0.12
+    output: 0.5
   qwen/qwen3-30b-a3b-instruct-2507:
     input: 0.04815
     cache_read: 0.04815
@@ -1162,8 +1162,8 @@ models:
     cache_read: 0.39
     output: 2.34
   qwen/qwen3.5-9b:
-    input: 0.04
-    cache_read: 0.04
+    input: 0.1
+    cache_read: 0.1
     output: 0.15
   qwen/qwen3.5-flash-02-23:
     input: 0.065
