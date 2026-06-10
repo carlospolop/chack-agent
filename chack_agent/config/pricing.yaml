@@ -57,6 +57,11 @@ models:
     cache_read: 0.08
     cache_write: 1
     output: 4
+  anthropic/claude-fable-5:
+    input: 10
+    cache_read: 1
+    cache_write: 12.5
+    output: 50
   anthropic/claude-haiku-4.5:
     input: 1
     cache_read: 0.1
@@ -126,10 +131,6 @@ models:
     input: 0.5
     cache_read: 0.5
     output: 0.8
-  arcee-ai/maestro-reasoning:
-    input: 0.9
-    cache_read: 0.9
-    output: 3.3
   arcee-ai/trinity-large-thinking:
     input: 0.22
     cache_read: 0.06
@@ -506,12 +507,12 @@ models:
     output: 0.95
   minimax/minimax-m2.5:
     input: 0.15
-    cache_read: 0.15
-    output: 1.15
+    cache_read: 0.05
+    output: 0.9
   minimax/minimax-m2.7:
-    input: 0.279
-    cache_read: 0.279
-    output: 1.2
+    input: 0.27
+    cache_read: 0.054
+    output: 1.08
   minimax/minimax-m3:
     input: 0.3
     cache_read: 0.06
@@ -1319,10 +1320,6 @@ models:
     input: 0.435
     cache_read: 0.0036
     output: 0.87
-  z-ai/glm-4-32b:
-    input: 0.1
-    cache_read: 0.1
-    output: 0.1
   z-ai/glm-4.5:
     input: 0.6
     cache_read: 0.11
@@ -1331,10 +1328,6 @@ models:
     input: 0.125
     cache_read: 0.06
     output: 0.85
-  z-ai/glm-4.5-air:free:
-    input: 0
-    cache_read: 0
-    output: 0
   z-ai/glm-4.5v:
     input: 0.6
     cache_read: 0.11
@@ -1345,7 +1338,7 @@ models:
     output: 1.74
   z-ai/glm-4.6v:
     input: 0.3
-    cache_read: 0.05
+    cache_read: 0.055
     output: 0.9
   z-ai/glm-4.7:
     input: 0.4
@@ -1367,10 +1360,11 @@ models:
     input: 0.98
     cache_read: 0.182
     output: 3.08
-  z-ai/glm-5v-turbo:
-    input: 1.2
-    cache_read: 0.24
-    output: 4
+  ~anthropic/claude-fable-latest:
+    input: 10
+    cache_read: 1
+    cache_write: 12.5
+    output: 50
   ~anthropic/claude-haiku-latest:
     input: 1
     cache_read: 0.1
