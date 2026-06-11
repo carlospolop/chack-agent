@@ -613,10 +613,6 @@ models:
     input: 0.68
     cache_read: 0.34
     output: 3.41
-  moonshotai/kimi-k2.6:free:
-    input: 0
-    cache_read: 0
-    output: 0
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
