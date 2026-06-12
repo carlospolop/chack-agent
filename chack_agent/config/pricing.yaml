@@ -212,8 +212,8 @@ models:
     cache_read: 0.35
     output: 2.15
   deepseek/deepseek-r1-distill-llama-70b:
-    input: 0.7
-    cache_read: 0.7
+    input: 0.8
+    cache_read: 0.8
     output: 0.8
   deepseek/deepseek-r1-distill-qwen-32b:
     input: 0.29
@@ -232,9 +232,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.0983
-    cache_read: 0.0197
-    output: 0.1966
+    input: 0.098
+    cache_read: 0.02
+    output: 0.196
   deepseek/deepseek-v4-pro:
     input: 0.435
     cache_read: 0.003625
@@ -348,7 +348,7 @@ models:
   google/gemma-4-31b-it:
     input: 0.12
     cache_read: 0.09
-    output: 0.36
+    output: 0.35
   google/gemma-4-31b-it:free:
     input: 0
     cache_read: 0
@@ -510,9 +510,9 @@ models:
     cache_read: 0.05
     output: 0.9
   minimax/minimax-m2.7:
-    input: 0.27
-    cache_read: 0.054
-    output: 1.08
+    input: 0.25
+    cache_read: 0.05
+    output: 1
   minimax/minimax-m3:
     input: 0.3
     cache_read: 0.06
@@ -610,9 +610,9 @@ models:
     cache_read: 0.09
     output: 1.9
   moonshotai/kimi-k2.6:
-    input: 0.68
-    cache_read: 0.34
-    output: 3.41
+    input: 0.67
+    cache_read: 0.14
+    output: 3.39
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
@@ -685,10 +685,6 @@ models:
     input: 0
     cache_read: 0
     output: 0
-  nvidia/nemotron-nano-9b-v2:
-    input: 0.04
-    cache_read: 0.04
-    output: 0.16
   nvidia/nemotron-nano-9b-v2:free:
     input: 0
     cache_read: 0
@@ -1028,9 +1024,9 @@ models:
     cache_write: 0.325
     output: 0.78
   qwen/qwen2.5-vl-72b-instruct:
-    input: 0.25
-    cache_read: 0.25
-    output: 0.75
+    input: 0.8
+    cache_read: 0.4
+    output: 1
   qwen/qwen3-14b:
     input: 0.1
     cache_read: 0.1
@@ -1180,8 +1176,8 @@ models:
     cache_read: 0.289
     output: 2.4
   qwen/qwen3.6-35b-a3b:
-    input: 0.14
-    cache_read: 0.14
+    input: 0.15
+    cache_read: 0.05
     output: 1
   qwen/qwen3.6-flash:
     input: 0.1875
@@ -1204,10 +1200,10 @@ models:
     cache_write: 1.5625
     output: 3.75
   qwen/qwen3.7-plus:
-    input: 0.4
-    cache_read: 0.08
-    cache_write: 0.5
-    output: 1.6
+    input: 0.32
+    cache_read: 0.064
+    cache_write: 0.4
+    output: 1.28
   rekaai/reka-edge:
     input: 0.1
     cache_read: 0.1
@@ -1387,9 +1383,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 0.68
-    cache_read: 0.34
-    output: 3.41
+    input: 0.67
+    cache_read: 0.14
+    output: 3.39
   ~openai/gpt-latest:
     input: 5
     cache_read: 0.5
