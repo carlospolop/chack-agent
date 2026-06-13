@@ -465,10 +465,6 @@ models:
     input: 0.1
     cache_read: 0.1
     output: 0.3
-  meta-llama/llama-guard-3-8b:
-    input: 0.484
-    cache_read: 0.484
-    output: 0.03
   meta-llama/llama-guard-4-12b:
     input: 0.18
     cache_read: 0.18
@@ -606,13 +602,17 @@ models:
     cache_read: 0.6
     output: 2.5
   moonshotai/kimi-k2.5:
-    input: 0.4
-    cache_read: 0.09
-    output: 1.9
+    input: 0.375
+    cache_read: 0.375
+    output: 2.025
   moonshotai/kimi-k2.6:
-    input: 0.67
-    cache_read: 0.14
-    output: 3.39
+    input: 0.68
+    cache_read: 0.34
+    output: 3.41
+  moonshotai/kimi-k2.7-code:
+    input: 0.95
+    cache_read: 0.19
+    output: 4
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
@@ -1172,9 +1172,9 @@ models:
     cache_write: 0.375
     output: 1.8
   qwen/qwen3.6-27b:
-    input: 0.289
-    cache_read: 0.289
-    output: 2.4
+    input: 0.2885
+    cache_read: 0.2885
+    output: 3.17
   qwen/qwen3.6-35b-a3b:
     input: 0.15
     cache_read: 0.05
@@ -1383,9 +1383,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 0.67
-    cache_read: 0.14
-    output: 3.39
+    input: 0.68
+    cache_read: 0.34
+    output: 3.41
   ~openai/gpt-latest:
     input: 5
     cache_read: 0.5
