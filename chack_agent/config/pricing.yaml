@@ -232,9 +232,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.098
+    input: 0.09
     cache_read: 0.02
-    output: 0.196
+    output: 0.18
   deepseek/deepseek-v4-pro:
     input: 0.435
     cache_read: 0.003625
@@ -610,9 +610,9 @@ models:
     cache_read: 0.34
     output: 3.41
   moonshotai/kimi-k2.7-code:
-    input: 0.95
-    cache_read: 0.19
-    output: 4
+    input: 0.75
+    cache_read: 0.16
+    output: 3.5
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
