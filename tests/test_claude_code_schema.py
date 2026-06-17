@@ -52,6 +52,8 @@ def test_claude_command_forces_configured_output_schema() -> None:
 
     assert "--json-schema" in command
     assert command[command.index("--json-schema") + 1] == schema_json
+    assert command.index("--json-schema") < len(command) - 1
+    assert command[-1] == prompt
     assert "Use schema name: attack_surface_entrypoints" in prompt
     assert "Your response must strictly match the JSON schema." in prompt
 

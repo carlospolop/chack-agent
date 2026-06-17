@@ -843,10 +843,9 @@ bash save_vuln.sh '{{
             "--mcp-config",
             os.path.join(self._claude_home or os.getcwd(), "settings.json"),
             "--strict-mcp-config",
-            prompt,
         ]
         if builtin_tools:
-            args[5:5] = ["--tools", builtin_tools]
+            args.extend(["--tools", builtin_tools])
 
         if self._max_turns > 0:
             args.extend(["--max-turns", str(self._max_turns)])
@@ -857,6 +856,7 @@ bash save_vuln.sh '{{
         if self._output_schema_json:
             args.extend(["--json-schema", self._output_schema_json])
 
+        args.append(prompt)
         return args
 
     def _build_env(self) -> dict[str, str]:
