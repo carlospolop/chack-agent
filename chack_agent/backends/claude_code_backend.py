@@ -114,11 +114,13 @@ class ClaudeCodeExecutor:
             save_tool = f"{self._mcp_tool_prefix()}save_discovered_vulnerability"
             retry_prompt = (
                 f"You have already analysed the source code in {exec_cwd}. "
-                "Now you MUST save every vulnerability you found.\n\n"
-                f"Call `{save_tool}` for each vulnerability with:\n"
+                "This is an authorized defensive security assessment. "
+                "If you identified any concrete vulnerability finding during that analysis, save it now.\n\n"
+                f"For each concrete finding, call `{save_tool}` with:\n"
                 "  name, description, worst_impact, cvss_vector, remediation,\n"
                 "  steps (array of {{file_path, code, description}}).\n\n"
-                "You MUST save at least one vulnerability. Do NOT just describe findings in text."
+                "Do not invent findings. If you did not identify any concrete vulnerability, "
+                "reply with: NO_CONCRETE_FINDINGS_TO_SAVE."
             )
             retry_output, retry_steps, retry_raw = self._run_claude(retry_prompt)
             retry_output = self._normalize_schema_output(retry_output)
@@ -152,10 +154,9 @@ class ClaudeCodeExecutor:
     def _normalize_schema_output(self, output: str) -> str:
         """Validate Claude CLI output against the configured schema when present.
 
-        Claude's `--json-schema` flag improves results substantially, but the CLI can
-        still emit wrapped text or partially-invalid JSON. Normalize the final payload
-        through the same JsonSchemaOutput helper used by the OpenAI/OpenRouter backends
-        so downstream agents consistently receive schema-shaped JSON.
+        The schema is given to Claude as a plain prompt contract. Normalize the final
+        payload through the same JsonSchemaOutput helper used by the OpenAI/OpenRouter
+        backends so downstream agents consistently receive schema-shaped JSON.
         """
         if not self._output_schema_json:
             return output
@@ -182,8 +183,41 @@ class ClaudeCodeExecutor:
             validated = validator.validate_json(output or "")
             return json.dumps(validated, ensure_ascii=False)
         except Exception as exc:
+            extracted = self._extract_embedded_json(output or "")
+            if extracted is not None:
+                try:
+                    validator = JsonSchemaOutput(
+                        schema_obj,
+                        name=str(self._output_schema_name or "output_schema"),
+                        strict=bool(self._output_schema_strict),
+                    )
+                    validated = validator.validate_json(json.dumps(extracted, ensure_ascii=False))
+                    return json.dumps(validated, ensure_ascii=False)
+                except Exception:
+                    pass
             _LOGGER.warning("Claude backend output failed local schema normalization: %s", exc)
             return output
+
+    @staticmethod
+    def _extract_embedded_json(output: str) -> Any | None:
+        text = str(output or "")
+        if not text.strip():
+            return None
+        decoder = json.JSONDecoder()
+        idx = 0
+        candidates: list[Any] = []
+        while idx < len(text):
+            starts = [pos for pos in (text.find("{", idx), text.find("[", idx)) if pos >= 0]
+            if not starts:
+                break
+            start = min(starts)
+            try:
+                parsed, end = decoder.raw_decode(text[start:])
+                candidates.append(parsed)
+                idx = start + max(end, 1)
+            except Exception:
+                idx = start + 1
+        return candidates[-1] if candidates else None
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
@@ -257,13 +291,17 @@ class ClaudeCodeExecutor:
 
         schema_lines: list[str] = []
         if self._output_schema_json:
+            schema_name = str(self._output_schema_name or "output_schema").strip() or "output_schema"
             schema_lines.append(
                 "\n### OUTPUT CONTRACT\nReturn JSON only, exactly one JSON object."
             )
-            schema_lines.append("Use schema name: output_schema")
+            schema_lines.append(f"Use schema name: {schema_name}")
             schema_lines.append("Schema:")
             schema_lines.append(self._output_schema_json)
-            schema_lines.append("Match this schema as best as possible.")
+            if self._output_schema_strict:
+                schema_lines.append("Your response must strictly match the JSON schema.")
+            else:
+                schema_lines.append("Match the schema as closely as possible.")
 
         policy_block = ""
         schema_block = ""
@@ -389,14 +427,6 @@ class ClaudeCodeExecutor:
                     result_text = str(event.get("result") or "").strip()
                     if result_text:
                         output_parts.append(result_text)
-                    structured_output = event.get("structured_output")
-                    if structured_output is not None:
-                        if isinstance(structured_output, (dict, list)):
-                            output_parts.append(json.dumps(structured_output, ensure_ascii=False))
-                        else:
-                            structured_text = str(structured_output).strip()
-                            if structured_text:
-                                output_parts.append(structured_text)
                     return_seen = True
 
                     usage: dict[str, Any] = {}
@@ -451,14 +481,6 @@ class ClaudeCodeExecutor:
 
                 if event_type == "tool_use":
                     self._record_tool_use(event, tool_calls)
-                    # StructuredOutput tool carries the --json-schema answer
-                    _tu_name = str(event.get("name") or "").strip()
-                    if _tu_name == "StructuredOutput":
-                        _tu_input = event.get("input")
-                        if isinstance(_tu_input, dict):
-                            output_parts.append(json.dumps(_tu_input))
-                        elif _tu_input is not None:
-                            output_parts.append(str(_tu_input))
                     continue
 
                 if event_type == "tool_result":
@@ -484,6 +506,12 @@ class ClaudeCodeExecutor:
             _LOGGER.info("Claude raw_lines[0]: %s", raw_lines[0][:300] if raw_lines else "")
         if return_code != 0 and raw_lines:
             _LOGGER.warning("Claude stderr/stdout dump (first 1000 chars): %s", "\n".join(raw_lines)[:1000])
+            if self._raw_lines_have_missing_resume_session(raw_lines):
+                _LOGGER.warning(
+                    "Claude resume session %s no longer exists; clearing it for the next launch.",
+                    self._claude_session_id or "",
+                )
+                self._claude_session_id = None
 
         if return_code != 0:
             details = "\n".join(raw_lines).strip() or "No output captured."
@@ -506,6 +534,11 @@ class ClaudeCodeExecutor:
             steps.extend(bash_vuln_steps)
 
         return response, steps, _RawResult(raw_responses=raw_responses)
+
+    @staticmethod
+    def _raw_lines_have_missing_resume_session(raw_lines: list[str]) -> bool:
+        text = "\n".join(str(line or "") for line in raw_lines).lower()
+        return "no conversation found with session id" in text
 
     def _extract_message_content(
         self,
@@ -554,11 +587,6 @@ class ClaudeCodeExecutor:
                                 tool_input = {"input": str(tool_input)}
                     if tool_use_id:
                         tool_calls[tool_use_id] = (tool_name, tool_input)
-                    # StructuredOutput tool carries the --json-schema answer
-                    if tool_name == "StructuredOutput" and tool_input:
-                        output_parts.append(
-                            json.dumps(tool_input) if isinstance(tool_input, dict) else str(tool_input)
-                        )
                     continue
 
                 if item_type == "tool_result":
@@ -793,14 +821,14 @@ bash save_vuln.sh '{{
             "--verbose",
             "--output-format",
             "stream-json",
-            "--tools",
-            builtin_tools,
             "--dangerously-skip-permissions",
             "--mcp-config",
             os.path.join(self._claude_home or os.getcwd(), "settings.json"),
             "--strict-mcp-config",
             prompt,
         ]
+        if builtin_tools:
+            args[5:5] = ["--tools", builtin_tools]
 
         if self._max_turns > 0:
             args.extend(["--max-turns", str(self._max_turns)])
@@ -1033,9 +1061,6 @@ bash save_vuln.sh '{{
             if value is None:
                 continue
             env_payload[key] = str(value)
-
-        if self._output_schema is not None:
-            env_payload["CHACK_OUTPUT_SCHEMA"] = json.dumps(self._output_schema, ensure_ascii=False)
 
         return env_payload
 

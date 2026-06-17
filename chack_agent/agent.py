@@ -247,11 +247,23 @@ class Chack:
     @staticmethod
     def _tool_name(step) -> str:
         if isinstance(step, dict):
-            return str(step.get("tool", "") or step.get("name", "") or "")
+            raw_name = str(step.get("tool", "") or step.get("name", "") or "")
+            return Chack._canonical_tool_name(raw_name)
         action = step[0] if isinstance(step, tuple) and step else step
         if isinstance(action, dict):
-            return str(action.get("tool", "") or action.get("name", "") or "")
-        return str(getattr(action, "tool", "") or getattr(action, "name", "") or "")
+            raw_name = str(action.get("tool", "") or action.get("name", "") or "")
+            return Chack._canonical_tool_name(raw_name)
+        raw_name = str(getattr(action, "tool", "") or getattr(action, "name", "") or "")
+        return Chack._canonical_tool_name(raw_name)
+
+    @staticmethod
+    def _canonical_tool_name(name: str) -> str:
+        text = str(name or "").strip()
+        if text.startswith("mcp__"):
+            parts = [part for part in text.split("__") if part]
+            if len(parts) >= 3:
+                return parts[-1]
+        return text
 
     @staticmethod
     def _available_tool_names(executor: Any) -> list[str]:
@@ -349,6 +361,14 @@ class Chack:
                 args = payload.get("arguments")
                 if isinstance(args, dict):
                     action = str(args.get("action", "")).strip().lower()
+            if not action:
+                nested = payload.get("tool_input")
+                if isinstance(nested, dict):
+                    action = str(nested.get("action", "")).strip().lower()
+                    if not action:
+                        args = nested.get("arguments")
+                        if isinstance(args, dict):
+                            action = str(args.get("action", "")).strip().lower()
             return action == "init"
         return False
 
