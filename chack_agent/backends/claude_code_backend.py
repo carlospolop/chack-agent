@@ -427,6 +427,9 @@ class ClaudeCodeExecutor:
                     result_text = str(event.get("result") or "").strip()
                     if result_text:
                         output_parts.append(result_text)
+                    structured_output = event.get("structured_output")
+                    if structured_output is not None:
+                        self._append_structured_output(output_parts, structured_output)
                     return_seen = True
 
                     usage: dict[str, Any] = {}
@@ -481,6 +484,8 @@ class ClaudeCodeExecutor:
 
                 if event_type == "tool_use":
                     self._record_tool_use(event, tool_calls)
+                    if str(event.get("name") or "").strip() == "StructuredOutput":
+                        self._append_structured_output(output_parts, event.get("input"))
                     continue
 
                 if event_type == "tool_result":
@@ -540,6 +545,17 @@ class ClaudeCodeExecutor:
         text = "\n".join(str(line or "") for line in raw_lines).lower()
         return "no conversation found with session id" in text
 
+    @staticmethod
+    def _append_structured_output(output_parts: list[str], value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, (dict, list)):
+            output_parts.append(json.dumps(value, ensure_ascii=False))
+            return
+        text = str(value).strip()
+        if text:
+            output_parts.append(text)
+
     def _extract_message_content(
         self,
         message: dict[str, Any],
@@ -587,6 +603,8 @@ class ClaudeCodeExecutor:
                                 tool_input = {"input": str(tool_input)}
                     if tool_use_id:
                         tool_calls[tool_use_id] = (tool_name, tool_input)
+                    if tool_name == "StructuredOutput" and tool_input:
+                        self._append_structured_output(output_parts, tool_input)
                     continue
 
                 if item_type == "tool_result":
