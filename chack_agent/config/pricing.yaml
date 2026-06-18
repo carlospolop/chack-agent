@@ -187,6 +187,10 @@ models:
     input: 0.0375
     cache_read: 0.0375
     output: 0.15
+  cohere/north-mini-code:free:
+    input: 0
+    cache_read: 0
+    output: 0
   deepcogito/cogito-v2.1-671b:
     input: 1.25
     cache_read: 1.25
@@ -279,11 +283,20 @@ models:
     cache_read: 0.05
     cache_write: 0.08333333333333334
     output: 3
+  google/gemini-3-pro-image:
+    input: 2
+    cache_read: 0.2
+    cache_write: 0.375
+    output: 12
   google/gemini-3-pro-image-preview:
     input: 2
     cache_read: 0.2
     cache_write: 0.375
     output: 12
+  google/gemini-3.1-flash-image:
+    input: 0.5
+    cache_read: 0.5
+    output: 3
   google/gemini-3.1-flash-image-preview:
     input: 0.5
     cache_read: 0.5
@@ -1296,10 +1309,6 @@ models:
     input: 1
     cache_read: 0.2
     output: 2
-  xiaomi/mimo-v2-flash:
-    input: 0.1
-    cache_read: 0.01
-    output: 0.3
   xiaomi/mimo-v2.5:
     input: 0.14
     cache_read: 0.0028
