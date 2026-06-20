@@ -426,10 +426,6 @@ models:
     input: 0.75
     cache_read: 0.75
     output: 1
-  meta-llama/llama-3-70b-instruct:
-    input: 0.51
-    cache_read: 0.51
-    output: 0.74
   meta-llama/llama-3-8b-instruct:
     input: 0.14
     cache_read: 0.14
@@ -619,9 +615,9 @@ models:
     cache_read: 0.2
     output: 3.5
   moonshotai/kimi-k2.7-code:
-    input: 0.74
-    cache_read: 0.15
-    output: 3.5
+    input: 0.612
+    cache_read: 0.1296
+    output: 3.069
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
