@@ -132,9 +132,9 @@ models:
     cache_read: 0.5
     output: 0.8
   arcee-ai/trinity-large-thinking:
-    input: 0.22
+    input: 0.25
     cache_read: 0.06
-    output: 0.85
+    output: 0.8
   arcee-ai/trinity-mini:
     input: 0.045
     cache_read: 0.045
@@ -611,8 +611,8 @@ models:
     cache_read: 0.375
     output: 2.025
   moonshotai/kimi-k2.6:
-    input: 0.67
-    cache_read: 0.2
+    input: 0.66
+    cache_read: 0.33
     output: 3.5
   moonshotai/kimi-k2.7-code:
     input: 0.612
@@ -1266,9 +1266,9 @@ models:
     cache_read: 0.14
     output: 0.57
   tencent/hy3-preview:
-    input: 0.066
-    cache_read: 0.029
-    output: 0.26
+    input: 0.063
+    cache_read: 0.021
+    output: 0.21
   thedrummer/cydonia-24b-v4.1:
     input: 0.3
     cache_read: 0.15
@@ -1359,7 +1359,7 @@ models:
     output: 4
   z-ai/glm-5.1:
     input: 0.98
-    cache_read: 0.182
+    cache_read: 0.49
     output: 3.08
   z-ai/glm-5.2:
     input: 1.2
@@ -1396,8 +1396,8 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 0.67
-    cache_read: 0.2
+    input: 0.66
+    cache_read: 0.33
     output: 3.5
   ~openai/gpt-latest:
     input: 5
