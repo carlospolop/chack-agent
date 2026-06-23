@@ -607,8 +607,8 @@ models:
     output: 2.025
   moonshotai/kimi-k2.6:
     input: 0.66
-    cache_read: 0.33
-    output: 3.5
+    cache_read: 0.144
+    output: 3.41
   moonshotai/kimi-k2.7-code:
     input: 0.612
     cache_read: 0.1296
@@ -625,10 +625,6 @@ models:
     input: 0.5
     cache_read: 0.25
     output: 2.5
-  nex-agi/nex-n2-pro:free:
-    input: 0
-    cache_read: 0
-    output: 0
   nousresearch/hermes-3-llama-3.1-405b:
     input: 1
     cache_read: 1
@@ -1361,8 +1357,12 @@ models:
     cache_read: 0.49
     output: 3.08
   z-ai/glm-5.2:
-    input: 1
-    cache_read: 0.18
+    input: 0.98
+    cache_read: 0.182
+    output: 3.08
+  z-ai/glm-5v-turbo:
+    input: 1.2
+    cache_read: 0.24
     output: 4
   ~anthropic/claude-fable-latest:
     input: 10
@@ -1396,8 +1396,8 @@ models:
     output: 12
   ~moonshotai/kimi-latest:
     input: 0.66
-    cache_read: 0.33
-    output: 3.5
+    cache_read: 0.144
+    output: 3.41
   ~openai/gpt-latest:
     input: 5
     cache_read: 0.5
