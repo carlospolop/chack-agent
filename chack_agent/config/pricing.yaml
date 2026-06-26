@@ -227,9 +227,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.089
-    cache_read: 0.0266
-    output: 0.224
+    input: 0.09
+    cache_read: 0.02
+    output: 0.18
   deepseek/deepseek-v4-pro:
     input: 0.435
     cache_read: 0.003625
@@ -498,13 +498,13 @@ models:
     cache_read: 0.03
     output: 0.95
   minimax/minimax-m2.5:
-    input: 0.15
-    cache_read: 0.05
-    output: 0.9
+    input: 0.12
+    cache_read: 0.12
+    output: 0.48
   minimax/minimax-m2.7:
-    input: 0.24
-    cache_read: 0.24
-    output: 0.96
+    input: 0.18
+    cache_read: 0.18
+    output: 0.72
   minimax/minimax-m3:
     input: 0.3
     cache_read: 0.06
@@ -658,9 +658,9 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3-super-120b-a12b:
-    input: 0.09
-    cache_read: 0.09
-    output: 0.45
+    input: 0.085
+    cache_read: 0.085
+    output: 0.4
   nvidia/nemotron-3-super-120b-a12b:free:
     input: 0
     cache_read: 0
@@ -874,9 +874,9 @@ models:
     cache_read: 0.5
     output: 30
   openai/gpt-oss-120b:
-    input: 0.039
-    cache_read: 0.039
-    output: 0.18
+    input: 0.03
+    cache_read: 0.03
+    output: 0.15
   openai/gpt-oss-120b:free:
     input: 0
     cache_read: 0
