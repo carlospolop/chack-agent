@@ -220,7 +220,7 @@ models:
     output: 0.95
   deepseek/deepseek-v3.2:
     input: 0.2288
-    cache_read: 0.2288
+    cache_read: 0.02288
     output: 0.3432
   deepseek/deepseek-v3.2-exp:
     input: 0.27
@@ -1174,7 +1174,7 @@ models:
   qwen/qwen3.6-27b:
     input: 0.2885
     cache_read: 0.2885
-    output: 3.17
+    output: 2.65
   qwen/qwen3.6-35b-a3b:
     input: 0.14
     cache_read: 0.14
