@@ -602,9 +602,9 @@ models:
     cache_read: 0.375
     output: 2.025
   moonshotai/kimi-k2.6:
-    input: 0.66
-    cache_read: 0.144
-    output: 3.41
+    input: 0.55
+    cache_read: 0.11
+    output: 3.2
   moonshotai/kimi-k2.7-code:
     input: 0.74
     cache_read: 0.15
@@ -1391,9 +1391,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 0.66
-    cache_read: 0.144
-    output: 3.41
+    input: 0.55
+    cache_read: 0.11
+    output: 3.2
   ~openai/gpt-latest:
     input: 5
     cache_read: 0.5
