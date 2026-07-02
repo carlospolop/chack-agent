@@ -195,9 +195,9 @@ models:
     cache_read: 0.2002
     output: 0.8001
   deepseek/deepseek-chat-v3-0324:
-    input: 0.2
+    input: 0.24
     cache_read: 0.135
-    output: 0.77
+    output: 0.9
   deepseek/deepseek-chat-v3.1:
     input: 0.21
     cache_read: 0.13
@@ -227,9 +227,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.098
-    cache_read: 0.02
-    output: 0.196
+    input: 0.09
+    cache_read: 0.018
+    output: 0.18
   deepseek/deepseek-v4-pro:
     input: 0.435
     cache_read: 0.003625
@@ -487,16 +487,16 @@ models:
     output: 2.2
   minimax/minimax-m2:
     input: 0.255
-    cache_read: 0.03
-    output: 1
+    cache_read: 0.255
+    output: 1.02
   minimax/minimax-m2-her:
     input: 0.3
     cache_read: 0.03
     output: 1.2
   minimax/minimax-m2.1:
-    input: 0.29
+    input: 0.3
     cache_read: 0.03
-    output: 0.95
+    output: 1.2
   minimax/minimax-m2.5:
     input: 0.12
     cache_read: 0.12
@@ -595,7 +595,7 @@ models:
     output: 2.5
   moonshotai/kimi-k2-thinking:
     input: 0.6
-    cache_read: 0.6
+    cache_read: 0.15
     output: 2.5
   moonshotai/kimi-k2.5:
     input: 0.375
@@ -1048,17 +1048,17 @@ models:
     cache_read: 0.04815
     output: 0.19305
   qwen/qwen3-30b-a3b-thinking-2507:
-    input: 0.08
-    cache_read: 0.08
-    output: 0.4
+    input: 0.13
+    cache_read: 0.13
+    output: 1.56
   qwen/qwen3-32b:
     input: 0.08
     cache_read: 0.08
     output: 0.28
   qwen/qwen3-8b:
-    input: 0.05
-    cache_read: 0.05
-    output: 0.4
+    input: 0.117
+    cache_read: 0.117
+    output: 0.455
   qwen/qwen3-coder:
     input: 0.22
     cache_read: 0.22
