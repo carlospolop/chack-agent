@@ -602,9 +602,9 @@ models:
     cache_read: 0.375
     output: 2.025
   moonshotai/kimi-k2.6:
-    input: 0.55
-    cache_read: 0.11
-    output: 3.2
+    input: 0.66
+    cache_read: 0.14
+    output: 3.41
   moonshotai/kimi-k2.7-code:
     input: 0.74
     cache_read: 0.15
@@ -985,6 +985,14 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  poolside/laguna-xs-2.1:
+    input: 0.06
+    cache_read: 0.03
+    output: 0.12
+  poolside/laguna-xs-2.1:free:
+    input: 0
+    cache_read: 0
+    output: 0
   poolside/laguna-xs.2:
     input: 0.1
     cache_read: 0.05
@@ -1127,9 +1135,9 @@ models:
     cache_read: 0.104
     output: 0.416
   qwen/qwen3-vl-8b-instruct:
-    input: 0.08
-    cache_read: 0.08
-    output: 0.5
+    input: 0.117
+    cache_read: 0.117
+    output: 0.455
   qwen/qwen3-vl-8b-thinking:
     input: 0.117
     cache_read: 0.117
@@ -1345,9 +1353,9 @@ models:
     cache_read: 0.24
     output: 4
   z-ai/glm-5.1:
-    input: 0.975
-    cache_read: 0.975
-    output: 4.3
+    input: 0.966
+    cache_read: 0.1794
+    output: 3.036
   z-ai/glm-5.2:
     input: 0.93
     cache_read: 0.18
@@ -1387,9 +1395,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 0.55
-    cache_read: 0.11
-    output: 3.2
+    input: 0.66
+    cache_read: 0.14
+    output: 3.41
   ~openai/gpt-latest:
     input: 5
     cache_read: 0.5
