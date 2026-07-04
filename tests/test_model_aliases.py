@@ -172,6 +172,31 @@ class ModelAliasResolutionTests(unittest.TestCase):
         self.assertEqual(config.model.provider, "claude")
         self.assertEqual(config.model.primary, "claude-sonnet-4-6")
 
+    def test_chack_resolves_aliases_when_initialized_with_config_object(self) -> None:
+        config_yaml = textwrap.dedent(
+            """
+            system_prompt: test system prompt
+            agent:
+              primary: OPENAI_CHEAP_BUT_QUALITY
+              provider: openai
+              main_action: test
+              sub_action: run
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(config_yaml)
+            path = handle.name
+
+        config = load_config(path)
+        config.model.primary = "OPENAI_CHEAP_BUT_QUALITY"
+
+        with patch("chack_agent.agent.load_pricing", return_value={}), patch(
+            "chack_agent.agent.resolve_pricing_path", return_value="pricing.yaml"
+        ), patch("chack_agent.agent.export_env"):
+            chack = Chack(config, config_path=path)
+
+        self.assertEqual(chack.config.model.primary, "gpt-5.4-mini")
+
     def test_resolve_api_key_type_prefers_codex_token_for_codex_provider(self) -> None:
         config_yaml = textwrap.dedent(
             """

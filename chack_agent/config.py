@@ -225,6 +225,59 @@ def _load_section(data: Dict[str, Any], key: str, cls):
     return cls(**filtered)
 
 
+def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
+    credentials = getattr(config, "credentials", CredentialsConfig())
+    model_cfg = config.model
+
+    provider = resolve_backend_alias(
+        model_cfg.provider,
+        credentials=credentials,
+    ).strip().lower()
+    if not provider:
+        raise ValueError("agent.provider could not be resolved from config")
+    model_cfg.provider = provider
+    model_cfg.primary = resolve_model_alias(
+        model_cfg.primary,
+        provider=provider,
+        credentials=credentials,
+    )
+    if not str(model_cfg.social_network or "").strip():
+        model_cfg.social_network = "CHEAP_BUT_QUALITY"
+    if not str(model_cfg.scientific or "").strip():
+        model_cfg.scientific = "CHEAP_BUT_QUALITY"
+    if not str(model_cfg.websearcher or "").strip():
+        model_cfg.websearcher = "CHEAP_BUT_QUALITY"
+    if not str(model_cfg.tester or "").strip():
+        model_cfg.tester = "CHEAP_BUT_QUALITY"
+    model_cfg.social_network = resolve_model_alias(
+        model_cfg.social_network,
+        provider=provider,
+        credentials=credentials,
+    )
+    model_cfg.scientific = resolve_model_alias(
+        model_cfg.scientific,
+        provider=provider,
+        credentials=credentials,
+    )
+    model_cfg.websearcher = resolve_model_alias(
+        model_cfg.websearcher,
+        provider=provider,
+        credentials=credentials,
+    )
+    model_cfg.tester = resolve_model_alias(
+        model_cfg.tester,
+        provider=provider,
+        credentials=credentials,
+    )
+    if str(model_cfg.subchack or "").strip():
+        model_cfg.subchack = resolve_model_alias(
+            model_cfg.subchack,
+            provider=provider,
+            credentials=credentials,
+        )
+    return config
+
+
 def load_config(path: str) -> ChackConfig:
     with open(path, "r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
@@ -323,47 +376,6 @@ def load_config(path: str) -> ChackConfig:
         with open(schema_path, "r", encoding="utf-8") as handle:
             agent.output_schema_json = yaml.safe_load(handle) or {}
 
-    provider = resolve_backend_alias(
-        model_cfg.provider,
-        credentials=credentials,
-    ).strip().lower()
-    if not provider:
-        raise ValueError("agent.provider could not be resolved from config")
-    model_cfg.provider = provider
-    model_cfg.primary = resolve_model_alias(
-        model_cfg.primary,
-        provider=provider,
-    )
-    if not str(model_cfg.social_network or "").strip():
-        model_cfg.social_network = "CHEAP_BUT_QUALITY"
-    if not str(model_cfg.scientific or "").strip():
-        model_cfg.scientific = "CHEAP_BUT_QUALITY"
-    if not str(model_cfg.websearcher or "").strip():
-        model_cfg.websearcher = "CHEAP_BUT_QUALITY"
-    if not str(model_cfg.tester or "").strip():
-        model_cfg.tester = "CHEAP_BUT_QUALITY"
-    model_cfg.social_network = resolve_model_alias(
-        model_cfg.social_network,
-        provider=provider,
-    )
-    model_cfg.scientific = resolve_model_alias(
-        model_cfg.scientific,
-        provider=provider,
-    )
-    model_cfg.websearcher = resolve_model_alias(
-        model_cfg.websearcher,
-        provider=provider,
-    )
-    model_cfg.tester = resolve_model_alias(
-        model_cfg.tester,
-        provider=provider,
-    )
-    if str(model_cfg.subchack or "").strip():
-        model_cfg.subchack = resolve_model_alias(
-            model_cfg.subchack,
-            provider=provider,
-        )
-
     config = ChackConfig(
         model=model_cfg,
         agent=agent,
@@ -377,4 +389,4 @@ def load_config(path: str) -> ChackConfig:
         env=raw.get("env", {}) or {},
     )
 
-    return config
+    return resolve_config_aliases(config)

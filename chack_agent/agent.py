@@ -21,7 +21,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency / analysis fallback
     MaxTurnsExceeded = None
 
-from .config import ChackConfig, load_config, resolve_api_key_type, resolve_backend_type
+from .config import ChackConfig, load_config, resolve_api_key_type, resolve_backend_type, resolve_config_aliases
 from .env_utils import export_env
 from .backends import build_executor
 from .long_term_memory import (
@@ -201,6 +201,7 @@ class Chack:
             resolved_config = load_config(resolved_path)
         else:
             resolved_config = config
+        resolved_config = resolve_config_aliases(resolved_config)
         self.config = resolved_config
         self.config_path = resolved_path or os.path.join(os.getcwd(), "chack.yaml")
         self.logger = logging.getLogger("chack.agent")
