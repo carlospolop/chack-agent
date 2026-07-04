@@ -658,9 +658,9 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3-super-120b-a12b:
-    input: 0.085
-    cache_read: 0.085
-    output: 0.4
+    input: 0.08
+    cache_read: 0.08
+    output: 0.45
   nvidia/nemotron-3-super-120b-a12b:free:
     input: 0
     cache_read: 0
@@ -1177,7 +1177,7 @@ models:
     output: 1.8
   qwen/qwen3.6-27b:
     input: 0.285
-    cache_read: 0.285
+    cache_read: 0.15
     output: 2.4
   qwen/qwen3.6-35b-a3b:
     input: 0.14
@@ -1357,9 +1357,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.93
-    cache_read: 0.18
-    output: 3
+    input: 0.91
+    cache_read: 0.169
+    output: 2.86
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
