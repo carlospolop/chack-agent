@@ -1357,9 +1357,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.91
-    cache_read: 0.169
-    output: 2.86
+    input: 0.728
+    cache_read: 0.1352
+    output: 2.288
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
