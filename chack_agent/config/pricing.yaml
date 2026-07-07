@@ -442,9 +442,9 @@ models:
     cache_read: 0.027
     output: 0.201
   meta-llama/llama-3.2-3b-instruct:
-    input: 0.0509
-    cache_read: 0.0509
-    output: 0.335
+    input: 0.05
+    cache_read: 0.05
+    output: 0.33
   meta-llama/llama-3.2-3b-instruct:free:
     input: 0
     cache_read: 0
@@ -599,7 +599,7 @@ models:
     output: 2.5
   moonshotai/kimi-k2.5:
     input: 0.375
-    cache_read: 0.375
+    cache_read: 0.203
     output: 2.025
   moonshotai/kimi-k2.6:
     input: 0.66
@@ -617,6 +617,10 @@ models:
     input: 0.9
     cache_read: 0.9
     output: 1.9
+  nex-agi/nex-n2-mini:
+    input: 0.025
+    cache_read: 0.0025
+    output: 0.1
   nex-agi/nex-n2-pro:
     input: 0.25
     cache_read: 0.025
@@ -1156,7 +1160,7 @@ models:
     output: 1
   qwen/qwen3.5-397b-a17b:
     input: 0.385
-    cache_read: 0.385
+    cache_read: 0.111
     output: 2.45
   qwen/qwen3.5-9b:
     input: 0.1
@@ -1260,10 +1264,18 @@ models:
     input: 0.14
     cache_read: 0.14
     output: 0.57
+  tencent/hy3:
+    input: 0.2
+    cache_read: 0.5
+    output: 0.8
   tencent/hy3-preview:
     input: 0.063
     cache_read: 0.021
     output: 0.21
+  tencent/hy3:free:
+    input: 0
+    cache_read: 0
+    output: 0
   thedrummer/cydonia-24b-v4.1:
     input: 0.3
     cache_read: 0.15
@@ -1310,7 +1322,7 @@ models:
     output: 2
   xiaomi/mimo-v2.5:
     input: 0.105
-    cache_read: 0.105
+    cache_read: 0.028
     output: 0.28
   xiaomi/mimo-v2.5-pro:
     input: 0.435
@@ -1357,9 +1369,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.686
-    cache_read: 0.1274
-    output: 2.156
+    input: 0.9086
+    cache_read: 0.16874
+    output: 2.8556
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
