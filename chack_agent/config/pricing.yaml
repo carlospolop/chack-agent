@@ -3,18 +3,18 @@ models:
     input: 2
     cache_read: 2
     output: 8
-  aion-labs/aion-1.0:
-    input: 4
-    cache_read: 4
-    output: 8
-  aion-labs/aion-1.0-mini:
-    input: 0.7
-    cache_read: 0.7
-    output: 1.4
   aion-labs/aion-2.0:
     input: 0.8
     cache_read: 0.2
     output: 1.6
+  aion-labs/aion-3.0:
+    input: 3
+    cache_read: 0.75
+    output: 6
+  aion-labs/aion-3.0-mini:
+    input: 0.7
+    cache_read: 0.18
+    output: 1.4
   aion-labs/aion-rp-llama-3.1-8b:
     input: 0.8
     cache_read: 0.8
@@ -1369,9 +1369,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.9086
-    cache_read: 0.16874
-    output: 2.8556
+    input: 0.93
+    cache_read: 0.18
+    output: 3
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
