@@ -741,6 +741,19 @@ class CodexExecutor:
             path_env_key=CHACK_TOOLS_APPEND_B64_PATH_ENV,
             prefix="chack_tools_append_",
         )
+        # Shared-MCP routing: when every agent points at one HTTP MCP server
+        # (CHACK_CODEX_MCP_URL), give THIS subprocess a per-run bearer token (its
+        # session id) under the configured env var so the shared server can route this
+        # agent's tool calls to the right identity. Set per-subprocess (not inherited)
+        # so parallel same-process agents don't collide on one os.environ value.
+        if str(os.environ.get("CHACK_CODEX_MCP_URL", "") or "").strip():
+            bearer_env_name = (
+                str(os.environ.get("CHACK_CODEX_MCP_BEARER_TOKEN_ENV", "") or "").strip()
+                or "CHACK_CODEX_MCP_BEARER_TOKEN"
+            )
+            bearer_token = str(current_session_id() or self._thread_id or "").strip()
+            if bearer_token:
+                env[bearer_env_name] = bearer_token
         env["CHACK_MODEL_PROVIDER"] = self._model_provider
         env["CHACK_DEFAULT_MODEL"] = self._default_model
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
@@ -980,9 +993,11 @@ class CodexExecutor:
                 '[mcp_servers.chack_tools]',
                 f"url = {_toml_string(chack_shared_mcp_url)}",
             ]
-            bearer_env = str(os.environ.get("CHACK_CODEX_MCP_BEARER_TOKEN_ENV", "") or "").strip()
-            if bearer_env:
-                shared_mcp_lines.append(f"bearer_token_env_var = {_toml_string(bearer_env)}")
+            bearer_env = (
+                str(os.environ.get("CHACK_CODEX_MCP_BEARER_TOKEN_ENV", "") or "").strip()
+                or "CHACK_CODEX_MCP_BEARER_TOKEN"
+            )
+            shared_mcp_lines.append(f"bearer_token_env_var = {_toml_string(bearer_env)}")
             shared_mcp_lines.extend(
                 [
                     "required = true",
