@@ -969,18 +969,41 @@ class CodexExecutor:
             if header_entries:
                 config_lines.extend(["[model_providers.openrouter.env_http_headers]"])
                 config_lines.extend(header_entries)
-        config_lines.extend(
-            [
+        chack_mcp_tool_timeout = int(os.environ.get("CHACK_MCP_TOOL_TIMEOUT_SECONDS", "3600") or "3600")
+        chack_shared_mcp_url = str(os.environ.get("CHACK_CODEX_MCP_URL", "") or "").strip()
+        if chack_shared_mcp_url:
+            # Point every codex agent at ONE shared streamable-HTTP MCP server (e.g. a
+            # host-process server that holds a shared queue / board), instead of each
+            # agent spawning its own stdio server. Custom tools then live on that server.
+            shared_mcp_lines = [
                 "",
                 '[mcp_servers.chack_tools]',
-                f"command = {_toml_string(python_cmd)}",
-                f"args = {args_toml}",
-                f"env_vars = {env_vars_toml}",
-                "required = true",
-                f"startup_timeout_sec = {chack_mcp_startup_timeout}",
-                f"tool_timeout_sec = {int(os.environ.get('CHACK_MCP_TOOL_TIMEOUT_SECONDS', '3600') or '3600')}",
+                f"url = {_toml_string(chack_shared_mcp_url)}",
             ]
-        )
+            bearer_env = str(os.environ.get("CHACK_CODEX_MCP_BEARER_TOKEN_ENV", "") or "").strip()
+            if bearer_env:
+                shared_mcp_lines.append(f"bearer_token_env_var = {_toml_string(bearer_env)}")
+            shared_mcp_lines.extend(
+                [
+                    "required = true",
+                    f"startup_timeout_sec = {chack_mcp_startup_timeout}",
+                    f"tool_timeout_sec = {chack_mcp_tool_timeout}",
+                ]
+            )
+            config_lines.extend(shared_mcp_lines)
+        else:
+            config_lines.extend(
+                [
+                    "",
+                    '[mcp_servers.chack_tools]',
+                    f"command = {_toml_string(python_cmd)}",
+                    f"args = {args_toml}",
+                    f"env_vars = {env_vars_toml}",
+                    "required = true",
+                    f"startup_timeout_sec = {chack_mcp_startup_timeout}",
+                    f"tool_timeout_sec = {chack_mcp_tool_timeout}",
+                ]
+            )
         if self._playwright_mcp_enabled():
             playwright_server = playwright_mcp_server_config()
             playwright_args_toml = "[" + ", ".join(
