@@ -153,6 +153,8 @@ def get_brave_search_tool(helper: BraveSearchTool):
             ui_lang: Optional UI language (e.g., "en-US").
             freshness: Optional freshness filter (pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD).
             timeout_seconds: Request timeout in seconds.
+
+        Output: Returns SUCCESS/ERROR text with ranked Brave web results, including title, URL, and snippet for each result.
         """
         tool_input = {
             "query": query,
@@ -200,4 +202,9 @@ def get_brave_search_tool(helper: BraveSearchTool):
                 error=error,
             )
 
+    brave_search.description = (
+        f"{brave_search.description}\n\n"
+        "Parameters: Provide query plus optional count, country, language, freshness, and timeout filters described in the schema.\n"
+        "Output: Returns SUCCESS/ERROR text with ranked Brave web results, including title, URL, and snippet for each result."
+    )
     return brave_search

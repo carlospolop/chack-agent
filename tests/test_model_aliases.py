@@ -25,6 +25,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
               provider: codex
               main_action: test
               sub_action: run
+              self_critique_rounds: 2
             credentials:
               codex_access_token: codex-access-token
             """
@@ -37,6 +38,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
 
         self.assertEqual(config.model.provider, "codex")
         self.assertEqual(config.model.primary, "gpt-5.4-mini")
+        self.assertEqual(config.agent.self_critique_rounds, 2)
         self.assertEqual(config.credentials.codex_access_token, "codex-access-token")
 
     def test_resolve_backend_alias_prefers_codex_access_then_openai_then_anthropic_then_openrouter(self) -> None:

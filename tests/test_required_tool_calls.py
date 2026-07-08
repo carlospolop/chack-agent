@@ -18,9 +18,11 @@ class _Executor:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = 0
+        self.inputs = []
 
     def invoke(self, payload, context=None):
-        del payload, context
+        del context
+        self.inputs.append(str(payload.get("input", "") or ""))
         self.calls += 1
         if self.responses:
             return self.responses.pop(0)
@@ -104,3 +106,81 @@ def test_required_tool_call_returns_error_after_retry_budget():
     assert executor.calls == 2
     assert result.output == "ERROR: Agent finished without calling required tool(s): update_vulnerability"
     assert result.run1_output == result.output
+
+
+def test_self_critique_reuses_same_executor_session_without_repeating_previous_answer():
+    executor = _Executor([
+        {"output": "first answer", "intermediate_steps": [], "raw_result": None},
+        {"output": "improved answer", "intermediate_steps": [], "raw_result": None},
+    ])
+    config = _config()
+    config.agent.self_critique_enabled = True
+    agent = _TestChack(executor, config)
+
+    result = agent.run(
+        "self-critique-session-reuse",
+        "original request",
+        enable_self_critique=True,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert executor.calls == 2
+    assert result.run1_output == "first answer"
+    assert result.run2_output == "improved answer"
+    assert result.output == "improved answer"
+    assert executor.inputs[0] == "original request"
+    assert "original request" in executor.inputs[1]
+    assert "Previous answer:" not in executor.inputs[1]
+    assert "first answer" not in executor.inputs[1]
+    assert "Is this the best you can do?" in executor.inputs[1]
+
+
+def test_self_critique_is_disabled_by_default():
+    executor = _Executor([
+        {"output": "first answer", "intermediate_steps": [], "raw_result": None},
+        {"output": "should not be used", "intermediate_steps": [], "raw_result": None},
+    ])
+    config = _config()
+    agent = _TestChack(executor, config)
+
+    result = agent.run(
+        "self-critique-default-off",
+        "original request",
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert executor.calls == 1
+    assert result.output == "first answer"
+    assert result.run2_output == ""
+
+
+def test_self_critique_rounds_override_runs_try_harder_multiple_times():
+    executor = _Executor([
+        {"output": "first answer", "intermediate_steps": [], "raw_result": None},
+        {"output": "second answer", "intermediate_steps": [], "raw_result": None},
+        {"output": "third answer", "intermediate_steps": [], "raw_result": None},
+        {"output": "fourth answer", "intermediate_steps": [], "raw_result": None},
+    ])
+    config = _config()
+    config.agent.self_critique_rounds = 3
+    agent = _TestChack(executor, config)
+
+    result = agent.run(
+        "self-critique-multi-round",
+        "original request",
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert executor.calls == 4
+    assert result.run1_output == "first answer"
+    assert result.run2_output == "fourth answer"
+    assert result.output == "fourth answer"
+    assert "Previous answer:" not in executor.inputs[1]
+    assert "Previous answer:" not in executor.inputs[2]
+    assert "Previous answer:" not in executor.inputs[3]
+    assert "first answer" not in executor.inputs[1]
+    assert "second answer" not in executor.inputs[2]
+    assert "third answer" not in executor.inputs[3]
+    assert "original request" in executor.inputs[1]
+    assert "original request" in executor.inputs[2]
+    assert "original request" in executor.inputs[3]

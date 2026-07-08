@@ -1,9 +1,704 @@
 from __future__ import annotations
 
+import json
+import os
+import re
+import contextvars
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
+from pathlib import Path
+from time import time
 from typing import Any, Callable, List, Mapping
+from uuid import uuid4
 
 from .config import ToolsConfig as BaseToolsConfig
+from .research_artifacts import research_artifacts_master_root
+
+
+_ACTIVE_RESEARCHER_RESPONSE_COLLECTOR: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
+    "chack_active_researcher_response_collector",
+    default=None,
+)
+
+
+RESEARCHER_COMMON_SYSTEM_PROMPT = """### RESEARCHER SPECIALIZATION
+You are an expert objective researcher. You will be asked to research a topic, and you must use the available tools as many times as needed to find all relevant data about that topic.
+You are objective and only looking for the real truth. Treat social norms and common sense as hypotheses to test, never as proof.
+
+- Stay source-first. Treat search results, snippets, summaries, model-generated answers, and social claims as discovery leads until supported by inspectable evidence.
+    - Be careful with duplicate sources: if five sources repeat the same hypothesis but all trace back to one study, count that as one underlying source.
+- Do not use common sense, social normality, reputational assumptions, or institutional familiarity as filters for what deserves investigation. Use them only as hypotheses to test against evidence.
+- Preserve the full evidentiary trail whenever tooling allows it. Search/list tools are discovery aids; content/detail/fetch/download/transcript tools should create inspectable artifacts while the run is active.
+- Prefer primary, original, or directly inspectable sources. When using secondary sources, label them as such and keep their provenance.
+- Clearly separate observed facts, source claims, inferences, uncertainty, contradictions, and missing evidence.
+- The final answer must be useful to the parent agent: concise findings, caveats, enough provenance to audit the reasoning, and artifact filenames only when artifacts are preserved.
+- Strong evidence survives serious attempts to disprove it. Actively look for disconfirming evidence, opposing sources, methodological weaknesses, and alternative explanations before concluding.
+- Return only the configured JSON output object. When research succeeds, make `final_research_review` at least 2000 characters if the evidence reasonably supports that much detail.
+"""
+
+
+RESEARCHER_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "research_worked": {
+            "type": "boolean",
+            "description": "True when the delegated research completed enough to provide a useful evidence-backed review; false when blocked or failed.",
+        },
+        "failure_reason": {
+            "type": "string",
+            "description": "Empty when research_worked is true. If false, explain the blocker or failure clearly.",
+        },
+        "final_research_review": {
+            "type": "string",
+            "description": "The final evidence-backed research review. When research_worked is true, write at least 2000 characters if possible.",
+        },
+        "evidence_data_path": {
+            "type": "string",
+            "description": "Absolute local path to the evidence directory when artifacts were preserved; empty string when the run was configured to delete temporary artifacts.",
+        },
+        "key_artifacts": {
+            "type": "array",
+            "description": "Every preserved evidence file that remains useful for the review. If a saved file was not useful, delete it before finalizing instead of omitting it.",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Saved artifact filename relative to evidence_data_path. Do not use an absolute path.",
+                    },
+                    "source_url": {
+                        "type": "string",
+                        "description": "Original source URL or API/query provenance, if available.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "minLength": 100,
+                        "maxLength": 300,
+                        "description": "100-300 characters explaining what evidence this file contains and how it was used in the review.",
+                    },
+                },
+                "required": ["filename", "source_url", "description"],
+            },
+        },
+    },
+    "required": [
+        "research_worked",
+        "failure_reason",
+        "final_research_review",
+        "evidence_data_path",
+        "key_artifacts",
+    ],
+}
+
+
+RESEARCHER_OUTPUT_SCHEMA_NO_ARTIFACTS = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "research_worked": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["research_worked"]),
+        "failure_reason": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["failure_reason"]),
+        "final_research_review": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["final_research_review"]),
+    },
+    "required": [
+        "research_worked",
+        "failure_reason",
+        "final_research_review",
+    ],
+}
+
+
+ARTIFACT_RECONCILIATION_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "key_artifacts": {
+            "type": "array",
+            "description": "Only artifact records requested by the reconciliation prompt. Include missing files and replacements for listed files with invalid metadata.",
+            "items": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["key_artifacts"]["items"]),
+        },
+        "delete_artifacts": {
+            "type": "array",
+            "description": "Relative filenames of saved artifacts that were not useful and should be deleted from the evidence folder.",
+            "items": {"type": "string"},
+        },
+    },
+    "required": ["key_artifacts", "delete_artifacts"],
+}
+
+
+def researcher_output_schema(*, preserve_artifacts: bool) -> dict[str, Any]:
+    return deepcopy(RESEARCHER_OUTPUT_SCHEMA if preserve_artifacts else RESEARCHER_OUTPUT_SCHEMA_NO_ARTIFACTS)
+
+
+def _compact_counter(counter: Mapping[str, Any] | None) -> dict[str, int]:
+    rows: dict[str, int] = {}
+    for key, value in (counter or {}).items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        try:
+            count = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            rows[name] = rows.get(name, 0) + count
+    return dict(sorted(rows.items()))
+
+
+def _json_dumps_compact(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def append_research_tool_usage(output: str, tool_counts: Mapping[str, Any] | None) -> str:
+    """Append tool-call counts to a researcher JSON result without asking the model to write them."""
+    payload = _json_from_research_output(output)
+    if payload is None:
+        return output
+    counts = _compact_counter(tool_counts)
+    payload["tool_call_counts"] = counts
+    payload["total_tool_calls"] = int(sum(counts.values()))
+    return _json_dumps_compact(payload)
+
+
+def begin_researcher_response_collection():
+    collector: list[dict[str, Any]] = []
+    token = _ACTIVE_RESEARCHER_RESPONSE_COLLECTOR.set(collector)
+    return token, collector
+
+
+def end_researcher_response_collection(token) -> None:
+    _ACTIVE_RESEARCHER_RESPONSE_COLLECTOR.reset(token)
+
+
+def record_researcher_response(researcher_tool: str, output: str) -> None:
+    collector = _ACTIVE_RESEARCHER_RESPONSE_COLLECTOR.get()
+    if collector is None:
+        return
+    responses = researcher_responses_from_output(researcher_tool, output)
+    if responses:
+        collector.extend(responses)
+        return
+    collector.append(
+        {
+            "research_worked": False,
+            "failure_reason": "Researcher did not return parseable JSON.",
+            "final_research_review": str(output or "").strip(),
+            "researcher_tool": str(researcher_tool or "").strip(),
+        }
+    )
+
+
+def researcher_responses_from_output(researcher_tool: str, output: Any) -> list[dict[str, Any]]:
+    text = str(output or "").strip()
+    if not text:
+        return []
+    payload = _json_from_research_output(output)
+    if payload is not None:
+        if "result" in payload and not any(
+            key in payload
+            for key in (
+                "research_worked",
+                "failure_reason",
+                "final_research_review",
+                "evidence_data_path",
+                "key_artifacts",
+                "tool_call_counts",
+            )
+        ):
+            inner = _json_from_research_output(payload.get("result"))
+            if inner is None:
+                return []
+            payload = inner
+        payload = deepcopy(payload)
+        payload.setdefault("researcher_tool", str(researcher_tool or "").strip())
+        return [payload]
+
+    responses: list[dict[str, Any]] = []
+    matches = list(
+        re.finditer(
+            r"SUBAGENT_RESULT_(\d+):\s*(.*?)(?=\n\s*SUBAGENT_RESULT_\d+:|\Z)",
+            text,
+            flags=re.DOTALL,
+        )
+    )
+    for match in matches:
+        parsed = _json_from_research_output(match.group(2))
+        if parsed is None:
+            continue
+        parsed = deepcopy(parsed)
+        parsed.setdefault("researcher_tool", str(researcher_tool or "").strip())
+        parsed.setdefault("batch_result_index", int(match.group(1)))
+        responses.append(parsed)
+    return responses
+
+
+def researcher_response_from_output(researcher_tool: str, output: Any) -> dict[str, Any] | None:
+    responses = researcher_responses_from_output(researcher_tool, output)
+    return responses[0] if responses else None
+
+
+def aggregate_tool_call_counts(responses: list[dict[str, Any]]) -> dict[str, int]:
+    total: Counter[str] = Counter()
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        counts = response.get("tool_call_counts")
+        if not isinstance(counts, dict):
+            continue
+        total.update(_compact_counter(counts))
+    return dict(sorted((name, int(count)) for name, count in total.items() if int(count) > 0))
+
+
+OBJECTIVE_EVIDENCE_RULES = """### OBJECTIVITY AND EVIDENCE RULES
+- Stay strictly objective and use critical thinking. Do not dismiss, down-rank, or ignore a lead because it feels unlikely, socially abnormal, counterintuitive, fringe, embarrassing, or "impossible".
+- Give every relevant claim a chance until the evidence shows otherwise. Treat common sense and social normality as hypotheses, not filters.
+- Prioritize only by evidence quality: primary sources, reproducible artifacts, direct observations, timestamps, provenance, and corroboration. Never prioritize a source type, institution, community, or narrative without proof.
+- Preserve surprising or contradictory evidence. If a lead is weak, label it as weak; do not erase it.
+- Download or save every relevant content/detail source artifact you rely on when tooling allows it: PDFs, rendered pages, HTML, text extracts, JSON/CSV data, logs, screenshots, transcripts, and command outputs. Search/list outputs do not need durable files unless they are the primary evidence.
+- Use the `CHACK_RESEARCH_DATA_DIR` environment variable as the root evidence directory when it is available. Keep downloaded or generated artifacts there, organized in subdirectories if useful.
+- Use the artifact list/read/grep tools to inspect saved evidence before concluding.
+- If you use command execution or another non-artifact-aware method to create/download a file, call `register_research_artifact` for each useful file with its source URL/provenance so the manifest can be audited.
+- When artifacts are preserved and the configured schema includes `key_artifacts`, your final `key_artifacts` must account for every useful file left in the evidence directory, using filenames relative to `evidence_data_path` rather than full paths. If a file was downloaded/generated but was not actually useful, delete it with `delete_research_artifact` before finalizing instead of leaving it unlisted. For each retained file, include source_url/provenance and a 100-300 character description explaining what evidence the file contains and how you used it.
+- Your final JSON must include evidence directory/artifact metadata only when the configured schema asks for those fields. If artifacts are temporary for this run, do not spend output on file paths, source URLs, or artifact descriptions.
+- You have access to several tools, use all them as much as you need to find all the useful data. Even if they don't look useful for something give them a chance and see if you find unexpected data in unexpected places.
+"""
+
+
+def researcher_system_prompt(specific_prompt: str) -> str:
+    return f"{RESEARCHER_COMMON_SYSTEM_PROMPT.rstrip()}\n\n{str(specific_prompt or '').strip()}"
+
+
+def _safe_path_part(value: str, fallback: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "")).strip("._")
+    return text or fallback
+
+
+def research_master_dir() -> str:
+    """Root evidence folder created by a running researcher_administrator.
+
+    When set, every researcher launched underneath the administrator groups its
+    downloads under ``<master>/<kind>`` so several researchers of the same type
+    share one folder and can see what the others already found.
+    """
+    return research_artifacts_master_root()
+
+
+def create_research_master_dir(session_id: str = "") -> str:
+    """Create the top-level master evidence folder owned by an administrator run."""
+    safe_session = _safe_path_part(session_id, "session")
+    path = os.path.join(
+        "/tmp",
+        "chack-research-data",
+        safe_session,
+        f"administrator-{int(time() * 1000)}-{uuid4().hex[:8]}",
+    )
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def create_subagent_evidence_dir(kind: str, session_id: str = "") -> str:
+    safe_kind = _safe_path_part(kind, "subagent")
+    master = research_master_dir()
+    if master:
+        # Under a researcher_administrator run, all researchers of the same type
+        # share one per-type folder so siblings see each other's downloads.
+        path = os.path.join(master, safe_kind)
+        os.makedirs(path, exist_ok=True)
+        return path
+    safe_session = _safe_path_part(session_id, "session")
+    path = os.path.join(
+        "/tmp",
+        "chack-research-data",
+        safe_session,
+        f"{safe_kind}-{int(time() * 1000)}-{uuid4().hex[:8]}",
+    )
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def create_subagent_session_id(kind: str, parent_session_id: str = "") -> str:
+    """Create an isolated backend session id for one delegated researcher run.
+
+    Retry-hard and artifact-reconciliation followups inside that researcher reuse
+    this id, but sibling researchers must not share it or they can leak context,
+    tools, or artifacts across specialist boundaries.
+    """
+    safe_kind = _safe_path_part(kind, "subagent")
+    safe_parent = _safe_path_part(parent_session_id, "session")
+    return f"{safe_parent}:{safe_kind}:{int(time() * 1000)}:{uuid4().hex[:8]}"
+
+
+def append_evidence_dir_instruction(
+    prompt: str,
+    evidence_dir: str,
+    start_sentence: str,
+    *,
+    save_artifacts: bool = False,
+    request_artifact_metadata: bool | None = None,
+) -> str:
+    master = research_master_dir()
+    # A master folder still preserves files during an administrator run so
+    # sibling researchers can inspect them. Final artifact metadata is only
+    # requested when save_artifacts is true.
+    effective_save = bool(save_artifacts)
+    metadata_requested = bool(effective_save if request_artifact_metadata is None else request_artifact_metadata)
+    if effective_save and metadata_requested:
+        persistence = "The caller requested preserved evidence files. Keep all important content/detail artifacts in this directory and return the directory in `evidence_data_path` with key artifact filenames in `key_artifacts`."
+    elif effective_save:
+        persistence = "The caller requested preserved evidence files. Keep all important content/detail artifacts in this directory, but do not include artifact metadata in the final JSON unless the configured schema asks for it."
+    else:
+        persistence = "This evidence directory is temporary and will be deleted after the run. Use it during the run to inspect artifacts, but do not include evidence paths, artifact source URLs, or artifact descriptions in the final JSON."
+    shared_note = ""
+    if master:
+        shared_note = (
+            "You are running under a research administrator. This evidence folder is shared by every "
+            "researcher of your type for this run, so it may already contain artifacts downloaded by "
+            "sibling researchers. Inspect the existing files with the artifact list/read/grep tools before "
+            "duplicating work, and keep adding any new artifacts you collect here.\n"
+        )
+    preserved_finalization = (
+        (
+            "Before finalizing with preserved artifacts, ensure every useful file left in the directory appears in `key_artifacts` with filename relative to evidence_data_path, source_url/provenance, and description. "
+            "If a file was saved but not useful, delete it with `delete_research_artifact` rather than leaving unlisted evidence behind.\n"
+        )
+        if metadata_requested
+        else ""
+    )
+    return (
+        f"{str(prompt or '').rstrip()}\n\n"
+        "### Evidence collection\n"
+        f"Use this evidence data path for this delegated run: {evidence_dir}\n"
+        f"{shared_note}"
+        "Content/detail/fetch/download/transcript tools should save relevant source artifacts there when tooling allows it. "
+        "Do not base final claims on memory, search snippets, or bare result lists when a content/detail/fetch/download/transcript tool can retrieve the underlying source; fetch the underlying source first and inspect the saved artifact. "
+        "Search/list tools are discovery aids and do not need durable files unless the search response itself is primary evidence. "
+        "Use the artifact list/read/grep tools to inspect files in that directory. "
+        "If you create/download files with exec or any non-artifact-aware tool, call register_research_artifact for each useful file with source URL/provenance.\n"
+        f"{preserved_finalization}"
+        f"{persistence}\n\n"
+        f"{start_sentence}"
+    )
+
+
+def _json_from_research_output(output: str) -> dict[str, Any] | None:
+    text = str(output or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            return None
+        try:
+            obj = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _relative_evidence_files(evidence_dir: str) -> list[tuple[str, int]]:
+    from .research_artifacts import ARTIFACT_MANIFEST_FILENAME
+
+    root = Path(str(evidence_dir or "")).expanduser()
+    if not root.is_dir():
+        return []
+    resolved_root = root.resolve()
+    rows: list[tuple[str, int]] = []
+    for path in sorted(resolved_root.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            rel = str(path.relative_to(resolved_root))
+        except ValueError:
+            continue
+        if rel == ARTIFACT_MANIFEST_FILENAME:
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        rows.append((rel, int(size)))
+    return rows
+
+
+def _covered_artifact_files(payload: dict[str, Any], evidence_dir: str) -> set[str]:
+    root = Path(str(evidence_dir or "")).expanduser().resolve()
+    covered: set[str] = set()
+    items = payload.get("key_artifacts")
+    if not isinstance(items, list):
+        return covered
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get("filename") or item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if resolved.is_file():
+            covered.add(str(resolved.relative_to(root)))
+        elif resolved.is_dir():
+            for path in resolved.rglob("*"):
+                if path.is_file():
+                    try:
+                        covered.add(str(path.resolve().relative_to(root)))
+                    except (OSError, ValueError):
+                        continue
+    return covered
+
+
+def _fill_artifact_sources(payload: dict[str, Any], evidence_dir: str) -> dict[str, Any]:
+    from .research_artifacts import research_artifact_manifest
+
+    metadata = research_artifact_manifest(evidence_dir)
+    if not metadata:
+        return payload
+    items = payload.get("key_artifacts")
+    if not isinstance(items, list):
+        return payload
+    root = Path(str(evidence_dir or "")).expanduser().resolve()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("source_url") or "").strip():
+            continue
+        raw_path = str(item.get("filename") or item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            rel = str(candidate.resolve().relative_to(root))
+        except (OSError, ValueError):
+            rel = raw_path
+        meta = metadata.get(rel) or {}
+        source = str(meta.get("source_url") or meta.get("provenance") or "").strip()
+        if source:
+            item["source_url"] = source
+    return payload
+
+
+def _artifact_metadata_issues(payload: dict[str, Any], evidence_dir: str) -> list[str]:
+    root = Path(str(evidence_dir or "")).expanduser().resolve()
+    rows: list[str] = []
+    items = payload.get("key_artifacts")
+    if not isinstance(items, list):
+        return rows
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get("filename") or item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            rel = str(candidate.resolve().relative_to(root))
+        except (OSError, ValueError):
+            rel = raw_path
+        description = " ".join(str(item.get("description") or "").split())
+        source = str(item.get("source_url") or "").strip()
+        if not source:
+            rows.append(f"- {rel}: source_url/provenance is empty.")
+        if len(description) < 100 or len(description) > 300:
+            rows.append(f"- {rel}: description is {len(description)} characters; required 100-300.")
+    return rows
+
+
+def _json_with_filled_artifact_sources(output: str, evidence_dir: str) -> str:
+    payload = _json_from_research_output(output)
+    if payload is None:
+        return output
+    filled = _fill_artifact_sources(payload, evidence_dir)
+    return _json_dumps_compact(filled)
+
+
+def _delete_artifact_file(evidence_dir: str, filename: str) -> bool:
+    root = Path(str(evidence_dir or "")).expanduser().resolve()
+    raw = str(filename or "").strip()
+    if not raw:
+        return False
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return False
+    if not resolved.is_file():
+        return False
+    try:
+        resolved.unlink()
+        try:
+            from .research_artifacts import remove_research_artifact_manifest_entry
+
+            remove_research_artifact_manifest_entry(root, str(resolved.relative_to(root)))
+        except Exception:
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def _merge_artifact_reconciliation_patch(
+    output: str,
+    patch_output: str,
+    evidence_dir: str,
+) -> str:
+    payload = _json_from_research_output(output)
+    patch = _json_from_research_output(patch_output)
+    if payload is None or patch is None:
+        return output
+    payload = _fill_artifact_sources(payload, evidence_dir)
+    root = Path(str(evidence_dir or "")).expanduser().resolve()
+    delete_set: set[str] = set()
+    for raw in patch.get("delete_artifacts") or []:
+        raw_text = str(raw or "").strip()
+        if not raw_text:
+            continue
+        candidate = Path(raw_text).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            rel = str(candidate.resolve().relative_to(root))
+        except (OSError, ValueError):
+            rel = raw_text
+        if _delete_artifact_file(evidence_dir, rel):
+            delete_set.add(rel)
+    existing: dict[str, dict[str, Any]] = {}
+    for item in payload.get("key_artifacts") or []:
+        if not isinstance(item, dict):
+            continue
+        filename = str(item.get("filename") or item.get("path") or "").strip()
+        if filename and filename not in delete_set:
+            existing[filename] = dict(item)
+    patch_records = patch.get("key_artifacts") if isinstance(patch.get("key_artifacts"), list) else []
+    for item in patch_records:
+        if not isinstance(item, dict):
+            continue
+        filename = str(item.get("filename") or item.get("path") or "").strip()
+        if not filename or filename in delete_set:
+            continue
+        record = {
+            "filename": filename,
+            "source_url": str(item.get("source_url") or "").strip(),
+            "description": " ".join(str(item.get("description") or "").split()),
+        }
+        existing[filename] = record
+    payload["key_artifacts"] = list(existing.values())
+    return _json_with_filled_artifact_sources(_json_dumps_compact(payload), evidence_dir)
+
+
+def artifact_reconciliation_prompt(
+    *,
+    output: str,
+    evidence_dir: str,
+    max_missing_files: int = 300,
+) -> str:
+    payload = _json_from_research_output(output)
+    if payload is None:
+        return ""
+    payload = _fill_artifact_sources(payload, evidence_dir)
+    files = _relative_evidence_files(evidence_dir)
+    if not files:
+        return ""
+    covered = _covered_artifact_files(payload, evidence_dir)
+    missing = [(rel, size) for rel, size in files if rel not in covered]
+    metadata_issues = _artifact_metadata_issues(payload, evidence_dir)
+    if not missing and not metadata_issues:
+        return ""
+    from .research_artifacts import ARTIFACT_MANIFEST_FILENAME, research_artifact_manifest
+
+    metadata = research_artifact_manifest(evidence_dir)
+    limit = max(1, int(max_missing_files or 300))
+    shown = missing[:limit]
+    omitted = len(missing) - len(shown)
+    missing_rows: list[str] = []
+    for rel, size in shown:
+        meta = metadata.get(rel) or {}
+        source = str(meta.get("source_url") or meta.get("provenance") or "").strip()
+        tool = str(meta.get("tool") or meta.get("kind") or "").strip()
+        hint = ""
+        if source and tool:
+            hint = f" source/provenance={source}; tool={tool}"
+        elif source:
+            hint = f" source/provenance={source}"
+        elif tool:
+            hint = f" tool={tool}"
+        missing_rows.append(f"- {rel} ({size} bytes){hint}")
+    missing_lines = "\n".join(missing_rows)
+    if omitted > 0:
+        missing_lines += f"\n- ... {omitted} additional unlisted files; use list_research_artifacts to inspect them."
+    issue_lines = "\n".join(metadata_issues)
+    if not missing_lines:
+        missing_lines = "- No missing files; fix the metadata issues below."
+    issues_block = (
+        f"These listed artifacts have invalid metadata:\n{issue_lines}\n\n"
+        if issue_lines
+        else ""
+    )
+    return (
+        "Continue the same researcher session. Do not redo broad research.\n\n"
+        "### Artifact reconciliation required\n"
+        f"Evidence directory: {evidence_dir}\n"
+        f"The directory currently contains {len(files)} file(s), but the previous final JSON accounts for "
+        f"{len(covered)} file(s) in `key_artifacts`.\n\n"
+        f"Ignore `{ARTIFACT_MANIFEST_FILENAME}` if present; it is runtime metadata, not evidence to list.\n"
+        "These saved files are not accounted for:\n"
+        f"{missing_lines}\n\n"
+        f"{issues_block}"
+        "For each unaccounted file or invalid artifact metadata entry, do exactly one of these:\n"
+        "1. If it was useful evidence, inspect it as needed and include it in `key_artifacts` with `filename` relative to the evidence directory, source_url/provenance, and a 100-300 character description explaining what the file contains and how it was used. Use the source/provenance hints above when present. Do not include full file paths.\n"
+        "2. If it was not actually useful for the research, put its relative filename in `delete_artifacts`; the runtime will delete it. You may also call `delete_research_artifact` if you need to inspect/delete immediately.\n\n"
+        "Return only the artifact reconciliation JSON object requested by the schema: `key_artifacts` for the missing/replacement artifact records and `delete_artifacts` for useless files. "
+        "Do not repeat the full research review, do not rewrite the complete researcher result, and do not include files that already had valid metadata."
+    )
+
+
+def reconcile_research_artifacts(
+    output: str,
+    *,
+    evidence_dir: str,
+    save_artifacts: bool,
+    run_followup: Callable[[str], str],
+) -> str:
+    if not save_artifacts:
+        return output
+    try:
+        from .research_artifacts import register_untracked_research_artifacts
+
+        register_untracked_research_artifacts(evidence_dir)
+    except Exception:
+        pass
+    output = _json_with_filled_artifact_sources(output, evidence_dir)
+    prompt = artifact_reconciliation_prompt(output=output, evidence_dir=evidence_dir)
+    if not prompt:
+        return output
+    try:
+        try:
+            revised = run_followup(prompt, output_schema_json=ARTIFACT_RECONCILIATION_OUTPUT_SCHEMA)
+        except TypeError:
+            revised = run_followup(prompt)
+    except Exception:
+        return output
+    revised_text = str(revised or "").strip() or output
+    return _merge_artifact_reconciliation_patch(output, revised_text, evidence_dir)
 
 
 def enforce_prompt_str_or_list_schema(tool: Any) -> Any:
@@ -52,6 +747,9 @@ def inherit_subagent_limits(
     parent_max_turns: int,
     parent_remaining_runtime_minutes: float,
     parent_remaining_cost_usd: float,
+    runtime_ratio: float = 1.0 / 3.0,
+    runtime_cap_minutes: int = 4,
+    cost_ratio: float = 1.0 / 3.0,
 ) -> tuple[int, int, float]:
     # Child turns cap: 1/2 of parent max turns.
     parent_turns_cap = _scaled_limit_int(parent_max_turns, 0.5, minimum=2)
@@ -59,13 +757,18 @@ def inherit_subagent_limits(
     if parent_turns_cap > 0:
         effective_max_turns = min(effective_max_turns, parent_turns_cap)
 
-    # Child runtime/cost cap: 2/3 of parent's remaining runtime/cost.
+    # Child runtime/cost cap: keep enough parent budget for polling,
+    # cross-pollination, cancellation, and final synthesis. In-process
+    # administrator runs serialize child researchers for artifact isolation, so
+    # one child must not consume most of the parent runtime.
     effective_runtime_minutes = _scaled_limit_int(
         parent_remaining_runtime_minutes,
-        2.0 / 3.0,
+        runtime_ratio,
         minimum=1,
     )
-    effective_cost_usd = _scaled_limit_float(parent_remaining_cost_usd, 2.0 / 3.0)
+    if effective_runtime_minutes > 0 and int(runtime_cap_minutes or 0) > 0:
+        effective_runtime_minutes = min(effective_runtime_minutes, int(runtime_cap_minutes))
+    effective_cost_usd = _scaled_limit_float(parent_remaining_cost_usd, cost_ratio)
     return effective_max_turns, effective_runtime_minutes, effective_cost_usd
 
 
@@ -205,6 +908,8 @@ def build_subagent_config(
 
     overrides = dict(overrides or {})
     prompt = str(overrides.get("system_prompt") or system_prompt).strip() or system_prompt
+    if "### RESEARCHER SPECIALIZATION" not in prompt:
+        prompt = researcher_system_prompt(prompt)
 
     model_overrides = overrides.get("model") or {}
     provider = str(model_overrides.get("provider") or model_provider or "").strip()
@@ -233,8 +938,43 @@ def build_subagent_config(
             provider=provider,
             fallback="CHEAP_BUT_QUALITY",
         ),
-        tester=_resolve_alias(
-            str(model_overrides.get("tester") or ""),
+        business=_resolve_alias(
+            str(model_overrides.get("business") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
+        product=_resolve_alias(
+            str(model_overrides.get("product") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
+        legal=_resolve_alias(
+            str(model_overrides.get("legal") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
+        data_statistics=_resolve_alias(
+            str(model_overrides.get("data_statistics") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
+        news_media=_resolve_alias(
+            str(model_overrides.get("news_media") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
+        knowledge_graph=_resolve_alias(
+            str(model_overrides.get("knowledge_graph") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
+        religious=_resolve_alias(
+            str(model_overrides.get("religious") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
+        cli=_resolve_alias(
+            str(model_overrides.get("cli") or ""),
             provider=provider,
             fallback="CHEAP_BUT_QUALITY",
         ),
@@ -243,22 +983,48 @@ def build_subagent_config(
             provider=provider,
             fallback="",
         ),
+        researcher_administrator=_resolve_alias(
+            str(model_overrides.get("researcher_administrator") or ""),
+            provider=provider,
+            fallback="",
+        ),
         social_network_max_turns=int(model_overrides.get("social_network_max_turns") or 30),
         scientific_max_turns=int(model_overrides.get("scientific_max_turns") or 30),
         websearcher_max_turns=int(model_overrides.get("websearcher_max_turns") or 30),
-        tester_max_turns=int(model_overrides.get("tester_max_turns") or 30),
+        business_max_turns=int(model_overrides.get("business_max_turns") or 30),
+        product_max_turns=int(model_overrides.get("product_max_turns") or 30),
+        legal_max_turns=int(model_overrides.get("legal_max_turns") or 30),
+        data_statistics_max_turns=int(model_overrides.get("data_statistics_max_turns") or 30),
+        news_media_max_turns=int(model_overrides.get("news_media_max_turns") or 30),
+        knowledge_graph_max_turns=int(model_overrides.get("knowledge_graph_max_turns") or 30),
+        religious_max_turns=int(model_overrides.get("religious_max_turns") or 30),
+        cli_max_turns=int(model_overrides.get("cli_max_turns") or 30),
         subchack_max_turns=int(model_overrides.get("subchack_max_turns") or 30),
+        researcher_administrator_max_turns=int(model_overrides.get("researcher_administrator_max_turns") or 100),
     )
+
+    env_overrides = overrides.get("env") or {}
+    preserve_artifacts = str(env_overrides.get("CHACK_RESEARCH_SAVE_ARTIFACTS") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    default_output_schema = researcher_output_schema(preserve_artifacts=preserve_artifacts)
 
     agent_overrides = overrides.get("agent") or {}
     agent = AgentConfig(
         self_critique_enabled=bool(agent_overrides.get("self_critique_enabled", False)),
+        self_critique_rounds=int(agent_overrides.get("self_critique_rounds") or 0),
         max_runtime_minutes=int(agent_overrides.get("max_runtime_minutes") or 0),
         max_cost_usd=float(agent_overrides.get("max_cost_usd") or 0.0),
         compaction_threshold_ratio=float(agent_overrides.get("compaction_threshold_ratio") or 0.75),
         compaction_model=str(agent_overrides.get("compaction_model") or ""),
         main_action=str(agent_overrides.get("main_action") or ""),
         sub_action=str(agent_overrides.get("sub_action") or ""),
+        output_schema_json=deepcopy(agent_overrides.get("output_schema_json") or default_output_schema),
+        output_schema_name=str(agent_overrides.get("output_schema_name") or "researcher_result"),
+        output_schema_strict=bool(agent_overrides.get("output_schema_strict", True)),
     )
 
     session_overrides = overrides.get("session") or {}
@@ -275,7 +1041,7 @@ def build_subagent_config(
     tools = _build_tools_config(base_tools, overrides.get("tools") or {})
     logging_overrides = overrides.get("logging") or {}
     logging = LoggingConfig(level=str(logging_overrides.get("level") or "INFO"))
-    env = overrides.get("env") or {}
+    env = env_overrides
 
     return ChackConfig(
         model=model,

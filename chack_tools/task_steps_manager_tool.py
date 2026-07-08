@@ -90,6 +90,8 @@ def get_task_steps_manager_tool(helper: TaskStepsManagerTool):
 
         Status values:
         - `todo`, `doing`, `done`.
+
+        Output: Returns SUCCESS/ERROR text or the current rendered task board after applying the requested plan action.
         """
         tool_input = {
             "action": action,

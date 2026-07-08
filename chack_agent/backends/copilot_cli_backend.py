@@ -70,12 +70,16 @@ class CopilotCliExecutor:
         social_network_model: str,
         scientific_model: str,
         websearcher_model: str,
-        tester_model: str,
+        business_model: str,
+        product_model: str,
+        cli_model: str,
         subchack_model: str,
         social_network_max_turns: int,
         scientific_max_turns: int,
         websearcher_max_turns: int,
-        tester_max_turns: int,
+        business_max_turns: int,
+        product_max_turns: int,
+        cli_max_turns: int,
         subchack_max_turns: int,
         min_tools_used: int,
         max_tools_used: int,
@@ -99,12 +103,16 @@ class CopilotCliExecutor:
         self._social_network_model = social_network_model
         self._scientific_model = scientific_model
         self._websearcher_model = websearcher_model
-        self._tester_model = tester_model
+        self._business_model = business_model
+        self._product_model = product_model
+        self._cli_model = cli_model
         self._subchack_model = subchack_model
         self._social_network_max_turns = social_network_max_turns
         self._scientific_max_turns = scientific_max_turns
         self._websearcher_max_turns = websearcher_max_turns
-        self._tester_max_turns = tester_max_turns
+        self._business_max_turns = business_max_turns
+        self._product_max_turns = product_max_turns
+        self._cli_max_turns = cli_max_turns
         self._subchack_max_turns = subchack_max_turns
         self._min_tools_used = max(0, int(min_tools_used or 0))
         self._max_tools_used = max(0, int(max_tools_used or 0))
@@ -476,12 +484,16 @@ class CopilotCliExecutor:
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
         env["CHACK_SCIENTIFIC_MODEL"] = self._scientific_model
         env["CHACK_WEBSEARCHER_MODEL"] = self._websearcher_model
-        env["CHACK_TESTER_MODEL"] = self._tester_model
+        env["CHACK_BUSINESS_MODEL"] = self._business_model
+        env["CHACK_PRODUCT_MODEL"] = self._product_model
+        env["CHACK_CLI_MODEL"] = self._cli_model
         env["CHACK_SUBCHACK_MODEL"] = self._subchack_model
         env["CHACK_SOCIAL_NETWORK_MAX_TURNS"] = str(self._social_network_max_turns)
         env["CHACK_SCIENTIFIC_MAX_TURNS"] = str(self._scientific_max_turns)
         env["CHACK_WEBSEARCHER_MAX_TURNS"] = str(self._websearcher_max_turns)
-        env["CHACK_TESTER_MAX_TURNS"] = str(self._tester_max_turns)
+        env["CHACK_BUSINESS_MAX_TURNS"] = str(self._business_max_turns)
+        env["CHACK_PRODUCT_MAX_TURNS"] = str(self._product_max_turns)
+        env["CHACK_CLI_MAX_TURNS"] = str(self._cli_max_turns)
         env["CHACK_SUBCHACK_MAX_TURNS"] = str(self._subchack_max_turns)
         env["CHACK_MIN_TOOLS_USED"] = str(self._min_tools_used)
         env["CHACK_MAX_TOOLS_USED"] = str(self._max_tools_used)
@@ -550,17 +562,24 @@ class CopilotCliExecutor:
             "CHACK_SOCIAL_NETWORK_MODEL",
             "CHACK_SCIENTIFIC_MODEL",
             "CHACK_WEBSEARCHER_MODEL",
-            "CHACK_TESTER_MODEL",
+            "CHACK_BUSINESS_MODEL",
+            "CHACK_PRODUCT_MODEL",
+            "CHACK_CLI_MODEL",
             "CHACK_SUBCHACK_MODEL",
             "CHACK_SOCIAL_NETWORK_MAX_TURNS",
             "CHACK_SCIENTIFIC_MAX_TURNS",
             "CHACK_WEBSEARCHER_MAX_TURNS",
-            "CHACK_TESTER_MAX_TURNS",
+            "CHACK_BUSINESS_MAX_TURNS",
+            "CHACK_PRODUCT_MAX_TURNS",
+            "CHACK_CLI_MAX_TURNS",
             "CHACK_SUBCHACK_MAX_TURNS",
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
             "CHACK_DISABLE_STDOUT_EVENTS",
+            "CHACK_RESEARCH_MASTER_DIR",
+            "CHACK_RESEARCH_DATA_DIR",
+            "CHACK_RESEARCH_SAVE_ARTIFACTS",
             "CHACK_MIN_TOOLS_USED",
             "CHACK_MAX_TOOLS_USED",
             "AISEC_LOCAL_VULN_STORE_PATH",
@@ -752,16 +771,36 @@ def build_executor(
             toolset_kwargs["websearcher_model"] = config.model.websearcher
         if "websearcher_max_turns" in init_params:
             toolset_kwargs["websearcher_max_turns"] = config.model.websearcher_max_turns
-        if "tester_model" in init_params:
-            toolset_kwargs["tester_model"] = config.model.tester
-        if "tester_max_turns" in init_params:
-            toolset_kwargs["tester_max_turns"] = config.model.tester_max_turns
+        if "business_model" in init_params:
+            toolset_kwargs["business_model"] = config.model.business
+        if "business_max_turns" in init_params:
+            toolset_kwargs["business_max_turns"] = config.model.business_max_turns
+        if "product_model" in init_params:
+            toolset_kwargs["product_model"] = config.model.product
+        if "product_max_turns" in init_params:
+            toolset_kwargs["product_max_turns"] = config.model.product_max_turns
+        if "cli_model" in init_params:
+            toolset_kwargs["cli_model"] = config.model.cli
+        if "cli_max_turns" in init_params:
+            toolset_kwargs["cli_max_turns"] = config.model.cli_max_turns
         if "subchack_model" in init_params:
             toolset_kwargs["subchack_model"] = config.model.subchack
         if "subchack_max_turns" in init_params:
             toolset_kwargs["subchack_max_turns"] = config.model.subchack_max_turns
+        if "researcher_administrator_model" in init_params:
+            toolset_kwargs["researcher_administrator_model"] = config.model.researcher_administrator
+        if "researcher_administrator_max_turns" in init_params:
+            toolset_kwargs["researcher_administrator_max_turns"] = config.model.researcher_administrator_max_turns
         if "model_provider" in init_params:
             toolset_kwargs["model_provider"] = model_provider
+        if "self_critique_enabled" in init_params:
+            toolset_kwargs["self_critique_enabled"] = bool(
+                getattr(config.agent, "self_critique_enabled", False)
+            )
+        if "self_critique_rounds" in init_params:
+            toolset_kwargs["self_critique_rounds"] = int(
+                getattr(config.agent, "self_critique_rounds", 0) or 0
+            )
         return toolset_kwargs
 
     if tools_override is not None:
@@ -815,12 +854,16 @@ def build_executor(
         social_network_model=str(config.model.social_network or ""),
         scientific_model=str(config.model.scientific or ""),
         websearcher_model=str(config.model.websearcher or ""),
-        tester_model=str(config.model.tester or ""),
+        business_model=str(config.model.business or ""),
+        product_model=str(config.model.product or ""),
+        cli_model=str(config.model.cli or ""),
         subchack_model=str(config.model.subchack or ""),
         social_network_max_turns=int(config.model.social_network_max_turns or 30),
         scientific_max_turns=int(config.model.scientific_max_turns or 30),
         websearcher_max_turns=int(config.model.websearcher_max_turns or 30),
-        tester_max_turns=int(config.model.tester_max_turns or 30),
+        business_max_turns=int(config.model.business_max_turns or 30),
+        product_max_turns=int(config.model.product_max_turns or 30),
+        cli_max_turns=int(config.model.cli_max_turns or 30),
         subchack_max_turns=int(config.model.subchack_max_turns or 30),
         min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
         max_tools_used=max(0, int(config.tools.max_tools_used or 0)),

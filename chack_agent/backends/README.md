@@ -12,7 +12,7 @@ This folder contains 6 runtime backends:
 
 - `agent.memory_max_messages`: `50`
 - `agent.memory_reset_to_messages`: `20`
-- Specialized tool models (`agent.social_network`, `agent.scientific`, `agent.websearcher`, `agent.tester`) default to `CHEAP_BUT_QUALITY`.
+- Specialized tool models (`agent.social_network`, `agent.scientific`, `agent.websearcher`, `agent.cli`) default to `CHEAP_BUT_QUALITY`.
 
 ## Shared Architecture
 

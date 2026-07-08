@@ -834,16 +834,36 @@ def build_executor(
             toolset_kwargs["websearcher_model"] = config.model.websearcher
         if "websearcher_max_turns" in init_params:
             toolset_kwargs["websearcher_max_turns"] = config.model.websearcher_max_turns
-        if "tester_model" in init_params:
-            toolset_kwargs["tester_model"] = config.model.tester
-        if "tester_max_turns" in init_params:
-            toolset_kwargs["tester_max_turns"] = config.model.tester_max_turns
+        if "business_model" in init_params:
+            toolset_kwargs["business_model"] = config.model.business
+        if "business_max_turns" in init_params:
+            toolset_kwargs["business_max_turns"] = config.model.business_max_turns
+        if "product_model" in init_params:
+            toolset_kwargs["product_model"] = config.model.product
+        if "product_max_turns" in init_params:
+            toolset_kwargs["product_max_turns"] = config.model.product_max_turns
+        if "cli_model" in init_params:
+            toolset_kwargs["cli_model"] = config.model.cli
+        if "cli_max_turns" in init_params:
+            toolset_kwargs["cli_max_turns"] = config.model.cli_max_turns
         if "subchack_model" in init_params:
             toolset_kwargs["subchack_model"] = config.model.subchack
         if "subchack_max_turns" in init_params:
             toolset_kwargs["subchack_max_turns"] = config.model.subchack_max_turns
+        if "researcher_administrator_model" in init_params:
+            toolset_kwargs["researcher_administrator_model"] = config.model.researcher_administrator
+        if "researcher_administrator_max_turns" in init_params:
+            toolset_kwargs["researcher_administrator_max_turns"] = config.model.researcher_administrator_max_turns
         if "model_provider" in init_params:
             toolset_kwargs["model_provider"] = str(config.model.provider or "")
+        if "self_critique_enabled" in init_params:
+            toolset_kwargs["self_critique_enabled"] = bool(
+                getattr(config.agent, "self_critique_enabled", False)
+            )
+        if "self_critique_rounds" in init_params:
+            toolset_kwargs["self_critique_rounds"] = int(
+                getattr(config.agent, "self_critique_rounds", 0) or 0
+            )
         toolset = AgentsToolset(config.tools, **toolset_kwargs)
         tools = toolset.tools
         if tools_append:

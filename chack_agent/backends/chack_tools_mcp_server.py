@@ -166,8 +166,16 @@ def _load_toolset() -> list[Any]:
     social_network_model = os.environ.get("CHACK_SOCIAL_NETWORK_MODEL", "")
     scientific_model = os.environ.get("CHACK_SCIENTIFIC_MODEL", "")
     websearcher_model = os.environ.get("CHACK_WEBSEARCHER_MODEL", "")
-    tester_model = os.environ.get("CHACK_TESTER_MODEL", "")
+    business_model = os.environ.get("CHACK_BUSINESS_MODEL", "")
+    product_model = os.environ.get("CHACK_PRODUCT_MODEL", "")
+    legal_model = os.environ.get("CHACK_LEGAL_MODEL", "")
+    data_statistics_model = os.environ.get("CHACK_DATA_STATISTICS_MODEL", "")
+    news_media_model = os.environ.get("CHACK_NEWS_MEDIA_MODEL", "")
+    knowledge_graph_model = os.environ.get("CHACK_KNOWLEDGE_GRAPH_MODEL", "")
+    religious_model = os.environ.get("CHACK_RELIGIOUS_MODEL", "")
+    cli_model = os.environ.get("CHACK_CLI_MODEL", "")
     subchack_model = os.environ.get("CHACK_SUBCHACK_MODEL", "")
+    researcher_administrator_model = os.environ.get("CHACK_RESEARCHER_ADMINISTRATOR_MODEL", "")
 
     def _to_int(name: str, default: int) -> int:
         raw = os.environ.get(name, str(default)).strip()
@@ -194,13 +202,31 @@ def _load_toolset() -> list[Any]:
         social_network_model=social_network_model,
         scientific_model=scientific_model,
         websearcher_model=websearcher_model,
-        tester_model=tester_model,
+        business_model=business_model,
+        product_model=product_model,
+        legal_model=legal_model,
+        data_statistics_model=data_statistics_model,
+        news_media_model=news_media_model,
+        knowledge_graph_model=knowledge_graph_model,
+        religious_model=religious_model,
+        cli_model=cli_model,
         subchack_model=subchack_model,
+        researcher_administrator_model=researcher_administrator_model,
         social_network_max_turns=_to_int("CHACK_SOCIAL_NETWORK_MAX_TURNS", 50),
         scientific_max_turns=_to_int("CHACK_SCIENTIFIC_MAX_TURNS", 50),
         websearcher_max_turns=_to_int("CHACK_WEBSEARCHER_MAX_TURNS", 50),
-        tester_max_turns=_to_int("CHACK_TESTER_MAX_TURNS", 50),
+        self_critique_enabled=os.environ.get("CHACK_SELF_CRITIQUE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"},
+        self_critique_rounds=_to_int("CHACK_SELF_CRITIQUE_ROUNDS", 0),
+        business_max_turns=_to_int("CHACK_BUSINESS_MAX_TURNS", 50),
+        product_max_turns=_to_int("CHACK_PRODUCT_MAX_TURNS", 50),
+        legal_max_turns=_to_int("CHACK_LEGAL_MAX_TURNS", 50),
+        data_statistics_max_turns=_to_int("CHACK_DATA_STATISTICS_MAX_TURNS", 50),
+        news_media_max_turns=_to_int("CHACK_NEWS_MEDIA_MAX_TURNS", 50),
+        knowledge_graph_max_turns=_to_int("CHACK_KNOWLEDGE_GRAPH_MAX_TURNS", 50),
+        religious_max_turns=_to_int("CHACK_RELIGIOUS_MAX_TURNS", 50),
+        cli_max_turns=_to_int("CHACK_CLI_MAX_TURNS", 50),
         subchack_max_turns=_to_int("CHACK_SUBCHACK_MAX_TURNS", 100),
+        researcher_administrator_max_turns=_to_int("CHACK_RESEARCHER_ADMINISTRATOR_MAX_TURNS", 100),
     )
     allowed_tools_raw = read_payload_from_env_or_file(
         os.environ.get("CHACK_ALLOWED_TOOLS_JSON", ""),
@@ -347,7 +373,21 @@ def main() -> None:
             STORE.ensure_run(session_id, run_label)
             set_active_context(session_id, run_label)
 
-        mcp = FastMCP("chack_tools")
+        # Transport: stdio per-agent by default; run as a single long-lived
+        # streamable-http/sse service (CHACK_MCP_TRANSPORT=http) so many external
+        # agents connect to one process and share the in-memory researcher queue.
+        transport = (
+            str(os.environ.get("CHACK_MCP_TRANSPORT", "stdio") or "stdio")
+            .strip()
+            .lower()
+            .replace("_", "-")
+        )
+        mcp = FastMCP(
+            "chack_tools",
+            host=str(os.environ.get("CHACK_MCP_HOST", "127.0.0.1") or "127.0.0.1"),
+            port=_as_int(os.environ.get("CHACK_MCP_PORT", "8000"), 8000),
+            stateless_http=_as_bool(os.environ.get("CHACK_MCP_STATELESS_HTTP", "1"), default=True),
+        )
         tools = _load_toolset()
         state = _ServerPolicyState(
             require_task_steps_manager_init_first=_as_bool(
@@ -370,7 +410,12 @@ def main() -> None:
         async def _check_budget_status() -> str:
             return budget_status_from_env()
 
-        mcp.run(transport="stdio")
+        if transport in {"http", "streamable-http"}:
+            mcp.run(transport="streamable-http")
+        elif transport == "sse":
+            mcp.run(transport="sse")
+        else:
+            mcp.run(transport="stdio")
     except Exception:
         trace = traceback.format_exc()
         try:

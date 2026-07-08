@@ -22,6 +22,7 @@ except ImportError:
 
 from .config import ToolsConfig
 from .formatting import _truncate
+from .research_artifacts import record_research_artifact, research_artifacts_root
 from .telemetry import run_with_tool_logging
 
 
@@ -119,7 +120,12 @@ class PlaywrightFetchTool:
         if not main_text:
             main_text = "(page body text was empty)"
 
-        output_dir = Path("/tmp/chack-playwright")
+        evidence_root = research_artifacts_root()
+        output_dir = (
+            Path(evidence_root) / "playwright"
+            if evidence_root
+            else Path("/tmp/chack-playwright")
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
         url_label = _sanitize_filename(
             os.path.basename(urlparse(final_url).path or "") or title,
@@ -130,6 +136,22 @@ class PlaywrightFetchTool:
         html_path = output_dir / f"{url_label}_{token}.html"
         text_path.write_text(main_text, encoding="utf-8")
         html_path.write_text(html, encoding="utf-8")
+        record_research_artifact(
+            text_path,
+            source_url=final_url,
+            provenance=f"playwright_fetch requested={target}; title={title}",
+            tool="playwright_fetch",
+            kind="playwright",
+            label=final_url,
+        )
+        record_research_artifact(
+            html_path,
+            source_url=final_url,
+            provenance=f"playwright_fetch requested={target}; title={title}",
+            tool="playwright_fetch",
+            kind="playwright",
+            label=final_url,
+        )
 
         excerpt = _truncate(main_text, output_limit)
         lines = [
@@ -171,6 +193,15 @@ def get_playwright_fetch_tool(helper: PlaywrightFetchTool):
         Use this when normal search results are not enough or when a site relies on JavaScript.
         Prefer it for reading a specific page, verifying dynamic content, and saving the rendered
         page text/HTML for later inspection.
+
+        Args:
+            url: Absolute HTTP/HTTPS URL to open in the browser.
+            wait_until: Browser navigation wait condition such as load, domcontentloaded, networkidle, or commit.
+            wait_for_selector: Optional CSS selector that must appear before extraction.
+            timeout_seconds: Optional browser navigation timeout; defaults to tool configuration.
+            max_chars: Optional maximum number of extracted text characters to return inline.
+
+        Output: Returns SUCCESS/ERROR text with page title, final URL, extracted rendered text, and local artifact paths for saved HTML/text when available.
         """
         tool_input = {
             "url": url,

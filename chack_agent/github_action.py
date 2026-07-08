@@ -228,8 +228,16 @@ def main() -> None:
                 os.environ.get("INPUT_MODEL_WEBSEARCHER", "CHEAP_BUT_QUALITY"),
                 provider=provider,
             ),
-            tester=resolve_model_alias(
-                os.environ.get("INPUT_MODEL_TESTER", "CHEAP_BUT_QUALITY"),
+            business=resolve_model_alias(
+                os.environ.get("INPUT_MODEL_BUSINESS", "CHEAP_BUT_QUALITY"),
+                provider=provider,
+            ),
+            product=resolve_model_alias(
+                os.environ.get("INPUT_MODEL_PRODUCT", "CHEAP_BUT_QUALITY"),
+                provider=provider,
+            ),
+            cli=resolve_model_alias(
+                os.environ.get("INPUT_MODEL_CLI", "CHEAP_BUT_QUALITY"),
                 provider=provider,
             ),
         )

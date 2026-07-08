@@ -124,6 +124,7 @@ def log_event(event_type: str, payload: Optional[Dict[str, Any]] = None, **conte
         return False
 
     base_context = current_log_context()
+    base_context.pop("_chack_tool_progress_callback", None)
     for key, value in context.items():
         if value is None:
             continue

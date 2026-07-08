@@ -12,6 +12,14 @@ from chack_tools.config import ToolsConfig as BaseToolsConfig
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
+# Codex and Claude Code run as CLI backends that manage their own context
+# window. When they are used we guarantee a minimum context budget of 250k
+# tokens: if the yaml configures a smaller (non-zero) window, bump it up.
+CLI_BACKEND_MIN_CONTEXT_TOKENS = 250_000
+_MIN_CONTEXT_TOKEN_PROVIDERS = frozenset(
+    {"codex", "claude", "claude-code", "claude_code", "anthropic"}
+)
+
 
 def _interpolate_env(value: Any) -> Any:
     if isinstance(value, str):
@@ -37,18 +45,35 @@ class ModelConfig:
     social_network: str = "CHEAP_BUT_QUALITY"
     scientific: str = "CHEAP_BUT_QUALITY"
     websearcher: str = "CHEAP_BUT_QUALITY"
-    tester: str = "CHEAP_BUT_QUALITY"
+    business: str = "CHEAP_BUT_QUALITY"
+    product: str = "CHEAP_BUT_QUALITY"
+    legal: str = "CHEAP_BUT_QUALITY"
+    data_statistics: str = "CHEAP_BUT_QUALITY"
+    news_media: str = "CHEAP_BUT_QUALITY"
+    knowledge_graph: str = "CHEAP_BUT_QUALITY"
+    religious: str = "CHEAP_BUT_QUALITY"
+    cli: str = "CHEAP_BUT_QUALITY"
     subchack: str = ""
+    researcher_administrator: str = ""
     social_network_max_turns: int = 50
     scientific_max_turns: int = 50
     websearcher_max_turns: int = 50
-    tester_max_turns: int = 50
+    business_max_turns: int = 50
+    product_max_turns: int = 50
+    legal_max_turns: int = 50
+    data_statistics_max_turns: int = 50
+    news_media_max_turns: int = 50
+    knowledge_graph_max_turns: int = 50
+    religious_max_turns: int = 50
+    cli_max_turns: int = 50
     subchack_max_turns: int = 100
+    researcher_administrator_max_turns: int = 100
 
 
 @dataclass
 class AgentConfig:
-    self_critique_enabled: bool = True
+    self_critique_enabled: bool = False
+    self_critique_rounds: int = 0
     max_runtime_minutes: int = 0
     max_cost_usd: float = 0.0
     require_task_steps_manager_init_first: bool = True
@@ -236,6 +261,13 @@ def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
     if not provider:
         raise ValueError("agent.provider could not be resolved from config")
     model_cfg.provider = provider
+    # Enforce the minimum context window for the Codex / Claude Code backends.
+    # Only bump an explicitly configured (non-zero) value that sits below the
+    # floor; leaving 0 unchanged preserves "use the model's native window".
+    if provider in _MIN_CONTEXT_TOKEN_PROVIDERS:
+        configured_context = int(getattr(model_cfg, "max_context_tokens", 0) or 0)
+        if 0 < configured_context < CLI_BACKEND_MIN_CONTEXT_TOKENS:
+            model_cfg.max_context_tokens = CLI_BACKEND_MIN_CONTEXT_TOKENS
     model_cfg.primary = resolve_model_alias(
         model_cfg.primary,
         provider=provider,
@@ -247,8 +279,8 @@ def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
         model_cfg.scientific = "CHEAP_BUT_QUALITY"
     if not str(model_cfg.websearcher or "").strip():
         model_cfg.websearcher = "CHEAP_BUT_QUALITY"
-    if not str(model_cfg.tester or "").strip():
-        model_cfg.tester = "CHEAP_BUT_QUALITY"
+    if not str(model_cfg.cli or "").strip():
+        model_cfg.cli = "CHEAP_BUT_QUALITY"
     model_cfg.social_network = resolve_model_alias(
         model_cfg.social_network,
         provider=provider,
@@ -264,14 +296,20 @@ def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
         provider=provider,
         credentials=credentials,
     )
-    model_cfg.tester = resolve_model_alias(
-        model_cfg.tester,
+    model_cfg.cli = resolve_model_alias(
+        model_cfg.cli,
         provider=provider,
         credentials=credentials,
     )
     if str(model_cfg.subchack or "").strip():
         model_cfg.subchack = resolve_model_alias(
             model_cfg.subchack,
+            provider=provider,
+            credentials=credentials,
+        )
+    if str(model_cfg.researcher_administrator or "").strip():
+        model_cfg.researcher_administrator = resolve_model_alias(
+            model_cfg.researcher_administrator,
             provider=provider,
             credentials=credentials,
         )

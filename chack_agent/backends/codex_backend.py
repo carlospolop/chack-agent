@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ from chack_tools.task_steps_manager_state import (
     current_session_id,
 )
 from chack_tools.telemetry import log_event
+from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
 
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
@@ -39,6 +41,52 @@ from .tool_payloads import (
 
 
 _LOGGER = logging.getLogger("chack.codex_backend")
+
+
+def _descendant_pids(pid: int) -> list[int]:
+    found: list[int] = []
+    stack = [int(pid)]
+    while stack:
+        current = stack.pop()
+        try:
+            proc = subprocess.run(
+                ["pgrep", "-P", str(current)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+        except Exception:
+            continue
+        children = []
+        for raw in str(proc.stdout or "").splitlines():
+            try:
+                child = int(raw.strip())
+            except Exception:
+                continue
+            children.append(child)
+        found.extend(children)
+        stack.extend(children)
+    return found
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    pids = list(reversed(_descendant_pids(int(process.pid)))) + [int(process.pid)]
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                continue
+            except Exception:
+                try:
+                    if pid == process.pid:
+                        process.kill()
+                except Exception:
+                    pass
+        time.sleep(1 if sig == signal.SIGTERM else 0)
+        if process.poll() is not None:
+            break
 
 
 def _log_timestamp() -> str:
@@ -94,17 +142,34 @@ class CodexExecutor:
     _social_network_model: str
     _scientific_model: str
     _websearcher_model: str
-    _tester_model: str
+    _business_model: str
+    _product_model: str
+    _legal_model: str
+    _data_statistics_model: str
+    _news_media_model: str
+    _knowledge_graph_model: str
+    _religious_model: str
+    _cli_model: str
     _subchack_model: str
     _social_network_max_turns: int
     _scientific_max_turns: int
     _websearcher_max_turns: int
-    _tester_max_turns: int
+    _business_max_turns: int
+    _product_max_turns: int
+    _legal_max_turns: int
+    _data_statistics_max_turns: int
+    _news_media_max_turns: int
+    _knowledge_graph_max_turns: int
+    _religious_max_turns: int
+    _cli_max_turns: int
     _subchack_max_turns: int
+    _self_critique_enabled: bool
+    _self_critique_rounds: int
     _min_tools_used: int
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
+    _max_context_tokens: int = 0
     _uses_openrouter_route: bool = False
     _openrouter_base_url: str = ""
     _openrouter_http_referer: str = ""
@@ -114,6 +179,12 @@ class CodexExecutor:
     _codex_home: Optional[str] = None
     _disable_native_shell: bool = False
     _disable_native_web_search: bool = False
+    _researcher_administrator_model: str = ""
+    _researcher_administrator_max_turns: int = 100
+    _prompt_only_next_invocation: bool = False
+
+    def suppress_system_prompt_for_next_invocation(self) -> None:
+        self._prompt_only_next_invocation = True
 
     def _disabled_native_tool_args(self) -> list[str]:
         args: list[str] = []
@@ -131,10 +202,6 @@ class CodexExecutor:
                 [
                     "-c",
                     'web_search="disabled"',
-                    "--disable",
-                    "web_search_request",
-                    "--disable",
-                    "web_search_cached",
                 ]
             )
         return args
@@ -167,6 +234,9 @@ class CodexExecutor:
         return list(self._conversation)
 
     def _compose_prompt(self, user_input: str) -> str:
+        if self._prompt_only_next_invocation:
+            self._prompt_only_next_invocation = False
+            return str(user_input or "")
         base = str(self._base_system_prompt or "").strip()
         policy_lines: list[str] = []
         if self._require_task_steps_manager_init_first:
@@ -223,6 +293,7 @@ class CodexExecutor:
                 bufsize=1,
                 env=env,
                 cwd=exec_cwd or None,
+                start_new_session=True,
             )
         except FileNotFoundError:
             self._log_codex_failure(
@@ -259,6 +330,7 @@ class CodexExecutor:
                 _RawResult(raw_responses=[]),
             )
 
+        cancel_registration = register_process(process, _terminate_process_tree)
         steps: list[tuple[ToolAction, Any]] = []
         output_parts: list[str] = []
         usage_payload: dict[str, Any] | None = None
@@ -274,8 +346,24 @@ class CodexExecutor:
                 pass
 
         while True:
+            if cancellation_requested():
+                _terminate_process_tree(process)
+                unregister_process(cancel_registration)
+                self._log_codex_failure(
+                    "codex_cli_cancelled",
+                    command=command,
+                    cwd=exec_cwd,
+                    details="\n".join(combined_output_lines).strip()
+                    or "Cancelled before Codex produced captured output.",
+                )
+                return (
+                    "ERROR: Codex execution cancelled.",
+                    steps,
+                    _RawResult(raw_responses=[]),
+                )
             if (time.monotonic() - started_at) > timeout_seconds:
-                process.kill()
+                _terminate_process_tree(process)
+                unregister_process(cancel_registration)
                 self._log_codex_failure(
                     "codex_cli_timeout",
                     command=command,
@@ -395,6 +483,7 @@ class CodexExecutor:
 
         output = "\n".join(part for part in output_parts if part).strip()
         return_code = process.wait()
+        unregister_process(cancel_registration)
         if return_code != 0:
             details = "\n".join(combined_output_lines).strip() or "No error output captured."
             self._log_codex_failure(
@@ -554,6 +643,9 @@ class CodexExecutor:
     def _build_command(self) -> list[str]:
         exec_cwd = _resolve_codex_exec_cwd()
         if self._thread_id:
+            output_schema_args: list[str] = []
+            if self._output_schema_path:
+                output_schema_args = ["--output-schema", self._output_schema_path]
             args = [
                 self._codex_path,
                 "exec",
@@ -563,6 +655,8 @@ class CodexExecutor:
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
             args.extend(self._disabled_native_tool_args())
+            if output_schema_args:
+                args.extend(output_schema_args)
             args.extend(
                 [
                 "--model",
@@ -652,13 +746,31 @@ class CodexExecutor:
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
         env["CHACK_SCIENTIFIC_MODEL"] = self._scientific_model
         env["CHACK_WEBSEARCHER_MODEL"] = self._websearcher_model
-        env["CHACK_TESTER_MODEL"] = self._tester_model
+        env["CHACK_BUSINESS_MODEL"] = self._business_model
+        env["CHACK_PRODUCT_MODEL"] = self._product_model
+        env["CHACK_LEGAL_MODEL"] = self._legal_model
+        env["CHACK_DATA_STATISTICS_MODEL"] = self._data_statistics_model
+        env["CHACK_NEWS_MEDIA_MODEL"] = self._news_media_model
+        env["CHACK_KNOWLEDGE_GRAPH_MODEL"] = self._knowledge_graph_model
+        env["CHACK_RELIGIOUS_MODEL"] = self._religious_model
+        env["CHACK_CLI_MODEL"] = self._cli_model
         env["CHACK_SUBCHACK_MODEL"] = self._subchack_model
+        env["CHACK_RESEARCHER_ADMINISTRATOR_MODEL"] = self._researcher_administrator_model
         env["CHACK_SOCIAL_NETWORK_MAX_TURNS"] = str(self._social_network_max_turns)
         env["CHACK_SCIENTIFIC_MAX_TURNS"] = str(self._scientific_max_turns)
         env["CHACK_WEBSEARCHER_MAX_TURNS"] = str(self._websearcher_max_turns)
-        env["CHACK_TESTER_MAX_TURNS"] = str(self._tester_max_turns)
+        env["CHACK_BUSINESS_MAX_TURNS"] = str(self._business_max_turns)
+        env["CHACK_PRODUCT_MAX_TURNS"] = str(self._product_max_turns)
+        env["CHACK_LEGAL_MAX_TURNS"] = str(self._legal_max_turns)
+        env["CHACK_DATA_STATISTICS_MAX_TURNS"] = str(self._data_statistics_max_turns)
+        env["CHACK_NEWS_MEDIA_MAX_TURNS"] = str(self._news_media_max_turns)
+        env["CHACK_KNOWLEDGE_GRAPH_MAX_TURNS"] = str(self._knowledge_graph_max_turns)
+        env["CHACK_RELIGIOUS_MAX_TURNS"] = str(self._religious_max_turns)
+        env["CHACK_CLI_MAX_TURNS"] = str(self._cli_max_turns)
         env["CHACK_SUBCHACK_MAX_TURNS"] = str(self._subchack_max_turns)
+        env["CHACK_RESEARCHER_ADMINISTRATOR_MAX_TURNS"] = str(self._researcher_administrator_max_turns)
+        env["CHACK_SELF_CRITIQUE_ENABLED"] = "1" if self._self_critique_enabled else "0"
+        env["CHACK_SELF_CRITIQUE_ROUNDS"] = str(self._self_critique_rounds)
         env["CHACK_MIN_TOOLS_USED"] = str(self._min_tools_used)
         env["CHACK_MAX_TOOLS_USED"] = str(self._max_tools_used)
         env["CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST"] = (
@@ -723,17 +835,24 @@ class CodexExecutor:
             "CHACK_SOCIAL_NETWORK_MODEL",
             "CHACK_SCIENTIFIC_MODEL",
             "CHACK_WEBSEARCHER_MODEL",
-            "CHACK_TESTER_MODEL",
+            "CHACK_BUSINESS_MODEL",
+            "CHACK_PRODUCT_MODEL",
+            "CHACK_CLI_MODEL",
             "CHACK_SUBCHACK_MODEL",
             "CHACK_SOCIAL_NETWORK_MAX_TURNS",
             "CHACK_SCIENTIFIC_MAX_TURNS",
             "CHACK_WEBSEARCHER_MAX_TURNS",
-            "CHACK_TESTER_MAX_TURNS",
+            "CHACK_BUSINESS_MAX_TURNS",
+            "CHACK_PRODUCT_MAX_TURNS",
+            "CHACK_CLI_MAX_TURNS",
             "CHACK_SUBCHACK_MAX_TURNS",
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
             "CHACK_DISABLE_STDOUT_EVENTS",
+            "CHACK_RESEARCH_MASTER_DIR",
+            "CHACK_RESEARCH_DATA_DIR",
+            "CHACK_RESEARCH_SAVE_ARTIFACTS",
             "AISEC_LOCAL_VULN_STORE_PATH",
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
@@ -794,6 +913,16 @@ class CodexExecutor:
 
         config_lines = [f"model = {_toml_string(self._model_name)}"]
 
+        # Trigger Codex's auto-compaction at the configured token budget instead
+        # of the model's native window. This is the compaction threshold, NOT a
+        # hard cap: Codex summarizes/compacts the conversation when it is reached
+        # so the session keeps going rather than being killed. Left unset means
+        # Codex keeps auto-detecting the native window for the model.
+        if self._max_context_tokens > 0:
+            config_lines.append(
+                f"model_auto_compact_token_limit = {int(self._max_context_tokens)}"
+            )
+
         # System-level instructions to prevent the model from calling
         # non-existent built-in tools like `report_intent` instead of the
         # real MCP tools.
@@ -808,6 +937,16 @@ class CodexExecutor:
             "explicit task tools listed in the prompt."
         )
         config_lines.append(f"instructions = {_toml_string(instructions_text)}")
+        chack_mcp_startup_timeout = int(
+            os.environ.get("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "120") or "120"
+        )
+        playwright_mcp_startup_timeout = int(
+            os.environ.get(
+                "CHACK_CODEX_PLAYWRIGHT_MCP_STARTUP_TIMEOUT_SECONDS",
+                str(chack_mcp_startup_timeout),
+            )
+            or str(chack_mcp_startup_timeout)
+        )
         if self._uses_openrouter_route:
             config_lines.extend(
                 [
@@ -838,7 +977,7 @@ class CodexExecutor:
                 f"args = {args_toml}",
                 f"env_vars = {env_vars_toml}",
                 "required = true",
-                "startup_timeout_sec = 30",
+                f"startup_timeout_sec = {chack_mcp_startup_timeout}",
                 f"tool_timeout_sec = {int(os.environ.get('CHACK_MCP_TOOL_TIMEOUT_SECONDS', '3600') or '3600')}",
             ]
         )
@@ -853,7 +992,7 @@ class CodexExecutor:
                     "[mcp_servers.playwright]",
                     f"command = {_toml_string(str(playwright_server['command']))}",
                     f"args = {playwright_args_toml}",
-                    "startup_timeout_sec = 30",
+                    f"startup_timeout_sec = {playwright_mcp_startup_timeout}",
                     "tool_timeout_sec = 180",
                 ]
             )
@@ -1224,13 +1363,31 @@ def build_executor(
                 social_network_model=config.model.social_network,
                 scientific_model=config.model.scientific,
                 websearcher_model=config.model.websearcher,
-                tester_model=config.model.tester,
+                business_model=config.model.business,
+                product_model=config.model.product,
+                legal_model=config.model.legal,
+                data_statistics_model=config.model.data_statistics,
+                news_media_model=config.model.news_media,
+                knowledge_graph_model=config.model.knowledge_graph,
+                religious_model=config.model.religious,
+                cli_model=config.model.cli,
                 subchack_model=config.model.subchack,
+                researcher_administrator_model=config.model.researcher_administrator,
                 social_network_max_turns=config.model.social_network_max_turns,
                 scientific_max_turns=config.model.scientific_max_turns,
                 websearcher_max_turns=config.model.websearcher_max_turns,
-                tester_max_turns=config.model.tester_max_turns,
+                business_max_turns=config.model.business_max_turns,
+                product_max_turns=config.model.product_max_turns,
+                legal_max_turns=config.model.legal_max_turns,
+                data_statistics_max_turns=config.model.data_statistics_max_turns,
+                news_media_max_turns=config.model.news_media_max_turns,
+                knowledge_graph_max_turns=config.model.knowledge_graph_max_turns,
+                religious_max_turns=config.model.religious_max_turns,
+                cli_max_turns=config.model.cli_max_turns,
                 subchack_max_turns=config.model.subchack_max_turns,
+                researcher_administrator_max_turns=config.model.researcher_administrator_max_turns,
+                self_critique_enabled=bool(getattr(config.agent, "self_critique_enabled", False)),
+                self_critique_rounds=int(getattr(config.agent, "self_critique_rounds", 0) or 0),
             )
             configured_tools = list(base_toolset.tools)
         return list(configured_tools)
@@ -1255,8 +1412,10 @@ def build_executor(
     disable_native_web_search = False
     if allowed_tool_names is not None:
         allowed_set = set(allowed_tool_names)
-        disable_native_shell = "exec" not in allowed_set
+        disable_native_shell = True
         disable_native_web_search = "search_google_web" not in allowed_set
+    if str(os.environ.get("CHACK_DISABLE_CODEX_NATIVE_WEB", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        disable_native_web_search = True
 
     route = get_openrouter_route(config)
     uses_openrouter_route = route is not None
@@ -1306,13 +1465,31 @@ def build_executor(
         _social_network_model=str(config.model.social_network or ""),
         _scientific_model=str(config.model.scientific or ""),
         _websearcher_model=str(config.model.websearcher or ""),
-        _tester_model=str(config.model.tester or ""),
+        _business_model=str(config.model.business or ""),
+        _product_model=str(config.model.product or ""),
+        _legal_model=str(config.model.legal or ""),
+        _data_statistics_model=str(config.model.data_statistics or ""),
+        _news_media_model=str(config.model.news_media or ""),
+        _knowledge_graph_model=str(config.model.knowledge_graph or ""),
+        _religious_model=str(config.model.religious or ""),
+        _cli_model=str(config.model.cli or ""),
         _subchack_model=str(config.model.subchack or ""),
+        _researcher_administrator_model=str(config.model.researcher_administrator or ""),
         _social_network_max_turns=int(config.model.social_network_max_turns or 30),
         _scientific_max_turns=int(config.model.scientific_max_turns or 30),
         _websearcher_max_turns=int(config.model.websearcher_max_turns or 30),
-        _tester_max_turns=int(config.model.tester_max_turns or 30),
+        _business_max_turns=int(config.model.business_max_turns or 30),
+        _product_max_turns=int(config.model.product_max_turns or 30),
+        _legal_max_turns=int(config.model.legal_max_turns or 30),
+        _data_statistics_max_turns=int(config.model.data_statistics_max_turns or 30),
+        _news_media_max_turns=int(config.model.news_media_max_turns or 30),
+        _knowledge_graph_max_turns=int(config.model.knowledge_graph_max_turns or 30),
+        _religious_max_turns=int(config.model.religious_max_turns or 30),
+        _cli_max_turns=int(config.model.cli_max_turns or 30),
         _subchack_max_turns=int(config.model.subchack_max_turns or 30),
+        _researcher_administrator_max_turns=int(config.model.researcher_administrator_max_turns or 100),
+        _self_critique_enabled=bool(getattr(config.agent, "self_critique_enabled", False)),
+        _self_critique_rounds=int(getattr(config.agent, "self_critique_rounds", 0) or 0),
         _min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
         _max_tools_used=max(0, int(config.tools.max_tools_used or 0)),
         _require_task_steps_manager_init_first=require_task_steps_manager_init_first,
@@ -1321,6 +1498,7 @@ def build_executor(
             if getattr(config.agent, "output_schema_json", None)
             else ""
         ),
+        _max_context_tokens=int(getattr(config.model, "max_context_tokens", 0) or 0),
         _uses_openrouter_route=uses_openrouter_route,
         _openrouter_base_url=str(route.base_url if route is not None else ""),
         _openrouter_http_referer=str((route.headers.get("HTTP-Referer", "") if route else "")),

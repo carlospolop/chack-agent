@@ -685,13 +685,21 @@ def build_executor(
             social_network_model=config.model.social_network,
             scientific_model=config.model.scientific,
             websearcher_model=config.model.websearcher,
-            tester_model=config.model.tester,
+            business_model=config.model.business,
+            product_model=config.model.product,
+            cli_model=config.model.cli,
             subchack_model=config.model.subchack,
+            researcher_administrator_model=config.model.researcher_administrator,
             social_network_max_turns=config.model.social_network_max_turns,
             scientific_max_turns=config.model.scientific_max_turns,
             websearcher_max_turns=config.model.websearcher_max_turns,
-            tester_max_turns=config.model.tester_max_turns,
+            business_max_turns=config.model.business_max_turns,
+            product_max_turns=config.model.product_max_turns,
+            cli_max_turns=config.model.cli_max_turns,
             subchack_max_turns=config.model.subchack_max_turns,
+            researcher_administrator_max_turns=config.model.researcher_administrator_max_turns,
+            self_critique_enabled=bool(getattr(config.agent, "self_critique_enabled", False)),
+            self_critique_rounds=int(getattr(config.agent, "self_critique_rounds", 0) or 0),
         )
         tools = list(toolset.tools)
         if tools_append:

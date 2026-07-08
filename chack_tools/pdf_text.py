@@ -14,7 +14,25 @@ import requests
 from pypdf import PdfReader
 
 from .config import ToolsConfig
+from .research_artifacts import record_research_artifact, research_artifacts_root
 from .telemetry import run_with_tool_logging
+
+
+def _set_param_descriptions(tool, descriptions: dict[str, str]):
+    schema = getattr(tool, "params_json_schema", None)
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if isinstance(properties, dict):
+        for name, description in descriptions.items():
+            if isinstance(properties.get(name), dict):
+                properties[name]["description"] = description
+    current = str(getattr(tool, "description", "") or "").strip()
+    if current and "Output:" not in current:
+        tool.description = (
+            f"{current}\n\n"
+            "Parameters: Use the schema descriptions to provide the PDF URL, optional inline character cap, and request timeout.\n"
+            "Output: Returns SUCCESS/ERROR text. On success it reports extracted character count plus local paths for the saved PDF and full extracted text file."
+        )
+    return tool
 
 
 
@@ -74,22 +92,48 @@ class PdfTextTool:
         if not full_text:
             return "ERROR: No extractable text found in PDF"
 
-        output_dir = "/tmp/chack-pdf-text"
+        evidence_root = research_artifacts_root()
+        output_dir = (
+            os.path.join(evidence_root, "pdf-text")
+            if evidence_root
+            else "/tmp/chack-pdf-text"
+        )
         os.makedirs(output_dir, exist_ok=True)
         parsed = urlparse(url)
         base_name = os.path.basename(parsed.path or "").strip() or "document.pdf"
         base_name = re.sub(r"[^A-Za-z0-9._-]", "_", base_name)
         if base_name.lower().endswith(".pdf"):
             base_name = base_name[:-4]
-        file_path = os.path.join(output_dir, f"{base_name}_{uuid4().hex}.txt")
+        token = uuid4().hex
+        pdf_path = os.path.join(output_dir, f"{base_name}_{token}.pdf")
+        file_path = os.path.join(output_dir, f"{base_name}_{token}.txt")
+        with open(pdf_path, "wb") as handle:
+            handle.write(response.content)
         with open(file_path, "w", encoding="utf-8") as handle:
             handle.write(full_text)
+        record_research_artifact(
+            pdf_path,
+            source_url=url,
+            provenance=f"download_pdf_as_text PDF source={url}",
+            tool="download_pdf_as_text",
+            kind="pdf-text",
+            label=url,
+        )
+        record_research_artifact(
+            file_path,
+            source_url=url,
+            provenance=f"download_pdf_as_text extracted text source={url}",
+            tool="download_pdf_as_text",
+            kind="pdf-text",
+            label=url,
+        )
 
         return (
             "SUCCESS: Extracted PDF text and saved to filesystem.\n"
             f"URL: {url}\n"
             f"Characters: {len(full_text)}\n\n"
-            f"Saved file: {file_path}\n"
+            f"Saved PDF: {pdf_path}\n"
+            f"Saved text: {file_path}\n"
             "Use exec tool with grep/sed/cat on this file to locate relevant data."
         )
 
@@ -126,4 +170,8 @@ def get_pdf_text_tool(helper: PdfTextTool):
         except Exception as exc:
             return f"ERROR: PDF extraction failed ({exc})"
 
-    return download_pdf_as_text
+    return _set_param_descriptions(download_pdf_as_text, {
+        "url": "Absolute HTTP/HTTPS URL expected to return a PDF file to download and extract as text.",
+        "max_chars": "Optional maximum number of extracted text characters to return inline; the saved text file still contains the full extraction.",
+        "timeout_seconds": "Maximum seconds to wait for the PDF download and text extraction.",
+    })

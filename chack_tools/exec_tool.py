@@ -47,25 +47,31 @@ class ExecTool:
         return _truncate(output, max_chars)
 
 
-def get_exec_tool(helper: ExecTool):
+def _build_exec_tool(helper: ExecTool, *, name: str):
     if function_tool is None:
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
-    @function_tool(name_override="exec")
+    @function_tool(name_override=name)
     def exec_tool(command: str, cwd: str = "") -> str:
         """Execute a shell command locally and return combined output.
 
         Use this to access local CLIs, curl/wget endpoints, and inspect files using tools like rg, find, ls, cat, head...
         If the output is large or truncated, re-run with grep/jq/sed to narrow it.
         Ideal for gathering evidence or checking system state; avoid destructive commands unless asked.
+        This synchronous command has a hard timeout from tools.exec_timeout_seconds (default 60s).
+        For long-running processes, start them in the background with explicit log/output files,
+        then monitor them with quick follow-up commands such as ps, tail, grep, or cat.
 
         Args:
             command: The shell command to execute.
             cwd: Optional working directory for this command. If omitted, the tool falls back to
                 `tools.exec_cwd`, then `CHACK_EXEC_CWD`.
+
+        Output: Returns SUCCESS/ERROR-style text with the command exit code and combined stdout/stderr.
+        Large output may be truncated, so narrow follow-up commands with rg/jq/sed/head/tail when needed.
         """
         tool_input = {"command": command, "cwd": cwd}
-        start_ts = log_tool_started("exec", tool_input)
+        start_ts = log_tool_started(name, tool_input)
         start_time = time.time()
         error = None
         try:
@@ -74,7 +80,7 @@ def get_exec_tool(helper: ExecTool):
             error = f"{type(exc).__name__}: {exc}"
             try:
                 log_tool_error(
-                    "exec",
+                    name,
                     tool_input,
                     error=error,
                     trace=traceback.format_exc(),
@@ -86,7 +92,7 @@ def get_exec_tool(helper: ExecTool):
             end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
             duration_ms = int((time.time() - start_time) * 1000)
             log_tool_executed(
-                "exec",
+                name,
                 tool_input,
                 start_ts=start_ts,
                 end_ts=end_ts,
@@ -94,4 +100,24 @@ def get_exec_tool(helper: ExecTool):
                 error=error,
             )
 
+    exec_tool.description = (
+        f"{exec_tool.description}\n\n"
+        "Parameters: Provide command as the local shell command to run and cwd only when it should run from a specific directory.\n"
+        "Timeout: Synchronous commands are limited by tools.exec_timeout_seconds (default 60s); run long processes in the background and monitor logs/files with short follow-up commands.\n"
+        "Output: Returns SUCCESS/ERROR-style text with the command exit code and combined stdout/stderr. Large output may be truncated; narrow follow-ups with rg/jq/sed/head/tail."
+    )
     return exec_tool
+
+
+def get_exec_tool(helper: ExecTool):
+    return _build_exec_tool(helper, name="exec")
+
+
+def get_controlled_shell_command_tool(helper: ExecTool):
+    tool = _build_exec_tool(helper, name="run_shell_command")
+    tool.description = (
+        f"{tool.description}\n\n"
+        "Use this controlled command-execution tool instead of any native shell. "
+        "It is the researcher-safe command path with Chack timeouts and tool logging."
+    )
+    return tool

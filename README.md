@@ -31,11 +31,11 @@ config = ChackConfig(
         social_network="CHEAP_BUT_QUALITY",
         scientific="CHEAP_BUT_QUALITY",
         websearcher="CHEAP_BUT_QUALITY",
-        tester="CHEAP_BUT_QUALITY",
+        cli="CHEAP_BUT_QUALITY",
         provider="openai",  # use "openrouter", "codex", "gemini", "claude", or "langgraph"
     ),
     agent=AgentConfig(
-        self_critique_enabled=True,  # Agent critiques its own plan before acting
+        self_critique_rounds=1,  # Optional try-harder passes; default 0 disables them
         max_runtime_minutes=120,  # Optional runtime limit (minutes), 0 means unlimited
         max_cost_usd=12.50,  # Optional spend limit (USD), 0 means unlimited
     ),
@@ -95,7 +95,7 @@ database row:
 
 ```python
 result = agent.run(
-  session_id="tester-123",
+  session_id="cli-123",
   text="Test this vulnerability and save the verdict.",
   required_tool_names=["update_vulnerability"],
   required_tool_call_attempts=3,
@@ -132,7 +132,7 @@ agent:
   social_network: CHEAP_BUT_QUALITY
   scientific: CHEAP_BUT_QUALITY
   websearcher: CHEAP_BUT_QUALITY
-  tester: CHEAP_BUT_QUALITY
+  cli: CHEAP_BUT_QUALITY
   max_turns: 50
   memory_max_messages: 20
   memory_reset_to_messages: 10
@@ -193,6 +193,48 @@ The agent can delegate to specialized sub‑agents. Sub‑agents run with restri
 * **Web Research**: Brave + SerpAPI (Google/Bing + AI‑mode endpoints if enabled).
 * **Scientific**: arXiv, Europe PMC, Semantic Scholar, OpenAlex, PLOS, Google Scholar/Patents, YouTube transcripts, PDF text.
 * **Social Network**: ForumScout + SerpAPI forums/news.
+* **Business / Product / Legal / Data & Statistics / News & Media / Knowledge Graph / Religious / CLI**: additional domain researchers.
+
+#### Research Administrator
+As the number of `*_research` researchers grows, you can expose a single **`researcher_administrator`** tool instead of every researcher. The administrator is itself a Chack sub‑agent whose only tools are the researchers you enable for it. Given one research request it:
+
+* decomposes the problem and launches the relevant researchers — as many runs as needed, including several runs of the same type with more focused prompts;
+* reviews every returned review and **cross‑pollinates** leads between researchers (e.g. relaunches the scientific researcher with papers the web researcher surfaced), since each researcher runs blind to the others;
+* keeps launching follow‑ups until coverage stops producing new findings, then returns **its own conclusions, every researcher's conclusions, and the path to a master evidence folder**.
+
+The administrator creates one master temp folder with **one subfolder per researcher type**; every researcher of a given type writes its downloads into the shared type subfolder, so same‑type researchers can see and build on what earlier runs already found.
+
+Enable and scope it via config:
+
+```yaml
+tools:
+  researcher_administrator_enabled: true
+  # Which researchers the administrator may launch. Accepts short names or
+  # aliases (e.g. "web" == "websearcher"). Empty = every researcher enabled above.
+  researcher_administrator_researchers: ["scientific", "websearcher", "business"]
+  researcher_administrator_max_tools_used: 60
+  # Manage, from the yaml, the model used by the administrator itself AND by the
+  # researchers it launches. This block works on every backend and takes
+  # precedence over the model.* keys below.
+  researcher_administrator_agent:
+    model: CHEAP_BUT_QUALITY          # the administrator's own model
+    max_turns: 120
+    researcher_models:                # per-researcher models for the runs it launches
+      scientific: SMART
+      websearcher: CHEAP_BUT_QUALITY
+      business: CHEAP_BUT_QUALITY
+    researcher_max_turns:
+      scientific: 40
+agent:
+  # Simpler alternative to researcher_administrator_agent.model (in-process /
+  # Codex backends). Defaults to the agent's primary model when empty.
+  researcher_administrator: ""
+  researcher_administrator_max_turns: 100
+```
+
+Researchers listed in `researcher_administrator_researchers` are force‑enabled for the administrator even if they are not exposed at the top level, so you can hide the individual researcher tools and surface only `researcher_administrator`. When `researcher_administrator_agent.researcher_models` omits a researcher, that researcher inherits the top‑level `model.<researcher>` value.
+
+**Evidence retention.** When the administrator is called with `save_artifacts=false`, the researchers it launches still **do not delete their own data mid‑run** — the per‑type subfolders persist so later researchers of the same type can inspect what earlier runs already downloaded. Only the administrator itself removes the master folder, once, when the whole run finishes. Call it with `save_artifacts=true` to keep the master folder afterwards.
 
 ### 2. Tool Ecosystem
 `ToolsConfig` allows granular control over every tool. Note: tools are **disabled by default**.
@@ -248,7 +290,7 @@ For MCP-capable CLI backends (`codex`, `claude`, `gemini`), enabling `tools.play
 
 * **`agent`** (`ModelConfig` + `SessionConfig` + `AgentConfig`):
   * `primary`, `provider`: Main agent model settings.
-  * `social_network`, `scientific`, `websearcher`, `tester`: Sub‑agent models (fallback to `primary`).
+  * `social_network`, `scientific`, `websearcher`, `cli`: Sub‑agent models (fallback to `primary`).
   * `max_turns`, `memory_max_messages`, `memory_reset_to_messages`, `memory_summary_max_chars`: Session behavior.
   * `max_runtime_minutes`: Maximum runtime in minutes for the run. Set to `0` to disable.
   * If the budget is reached, the run raises `TimeoutError` and stops.

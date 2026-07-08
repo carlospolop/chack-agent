@@ -478,13 +478,29 @@ def _make_stub_claude_executor():
         _social_network_model="",
         _scientific_model="",
         _websearcher_model="",
-        _tester_model="",
+        _business_model="",
+        _product_model="",
+        _legal_model="",
+        _data_statistics_model="",
+        _news_media_model="",
+        _knowledge_graph_model="",
+        _religious_model="",
+        _cli_model="",
         _subchack_model="",
+        _researcher_administrator_model="",
         _social_network_max_turns=10,
         _scientific_max_turns=10,
         _websearcher_max_turns=10,
-        _tester_max_turns=10,
+        _business_max_turns=10,
+        _product_max_turns=10,
+        _legal_max_turns=10,
+        _data_statistics_max_turns=10,
+        _news_media_max_turns=10,
+        _knowledge_graph_max_turns=10,
+        _religious_max_turns=10,
+        _cli_max_turns=10,
         _subchack_max_turns=10,
+        _researcher_administrator_max_turns=10,
         _min_tools_used=0,
         _max_tools_used=0,
         _require_task_steps_manager_init_first=False,
@@ -511,12 +527,26 @@ def _make_stub_codex_executor():
         _social_network_model="",
         _scientific_model="",
         _websearcher_model="",
-        _tester_model="",
+        _business_model="",
+        _product_model="",
+        _legal_model="",
+        _data_statistics_model="",
+        _news_media_model="",
+        _knowledge_graph_model="",
+        _religious_model="",
+        _cli_model="",
         _subchack_model="",
         _social_network_max_turns=10,
         _scientific_max_turns=10,
         _websearcher_max_turns=10,
-        _tester_max_turns=10,
+        _business_max_turns=10,
+        _product_max_turns=10,
+        _legal_max_turns=10,
+        _data_statistics_max_turns=10,
+        _news_media_max_turns=10,
+        _knowledge_graph_max_turns=10,
+        _religious_max_turns=10,
+        _cli_max_turns=10,
         _subchack_max_turns=10,
         _min_tools_used=0,
         _max_tools_used=0,
@@ -528,6 +558,8 @@ def _make_stub_codex_executor():
         _use_codex_access_token=False,
         _use_existing_codex_auth_file=False,
         _existing_codex_auth_file="",
+        _self_critique_enabled=False,
+        _self_critique_rounds=0,
     )
 
 
@@ -538,13 +570,51 @@ def test_codex_build_command_can_disable_native_shell_and_web_search():
 
     command = executor._build_command()
 
-    assert command.count("--disable") == 4
+    assert "--dangerously-bypass-approvals-and-sandbox" in command
+    assert command.count("--disable") == 2
     assert "-c" in command
     assert 'web_search="disabled"' in command
     assert "shell_tool" in command
     assert "unified_exec" in command
-    assert "web_search_request" in command
-    assert "web_search_cached" in command
+
+
+def test_codex_build_command_resumes_captured_thread_for_followup_prompt():
+    executor = _make_stub_codex_executor()
+    executor._thread_id = "11111111-2222-3333-4444-555555555555"
+    executor._output_schema_path = "/tmp/chack-output-schema.json"
+
+    command = executor._build_command()
+
+    assert command[:3] == ["codex", "exec", "resume"]
+    assert "--cd" not in command
+    assert "--dangerously-bypass-approvals-and-sandbox" in command
+    assert "--output-schema" in command
+    assert command[command.index("--output-schema") + 1] == "/tmp/chack-output-schema.json"
+    assert "11111111-2222-3333-4444-555555555555" in command
+    assert command[-1] == "-"
+
+
+def test_codex_mcp_startup_timeout_is_configurable(monkeypatch, tmp_path):
+    executor = _make_stub_codex_executor()
+
+    monkeypatch.setenv("CHACK_CODEX_HOME_BASE", str(tmp_path))
+    monkeypatch.setenv("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "180")
+    executor._ensure_codex_home_and_config()
+
+    config_path = os.path.join(executor._codex_home, "config.toml")
+    body = open(config_path, "r", encoding="utf-8").read()
+    assert "startup_timeout_sec = 180" in body
+
+
+def test_codex_followup_prompt_only_suppresses_system_once():
+    executor = _make_stub_codex_executor()
+    executor.suppress_system_prompt_for_next_invocation()
+
+    prompt = executor._compose_prompt("original request\n\ntry harder")
+
+    assert prompt == "original request\n\ntry harder"
+    assert "You are a helpful assistant." not in prompt
+    assert "You are a helpful assistant." in executor._compose_prompt("normal")
 
 
 def _make_stub_copilot_executor():
@@ -567,12 +637,16 @@ def _make_stub_copilot_executor():
         social_network_model="",
         scientific_model="",
         websearcher_model="",
-        tester_model="",
+        business_model="",
+        product_model="",
+        cli_model="",
         subchack_model="",
         social_network_max_turns=10,
         scientific_max_turns=10,
         websearcher_max_turns=10,
-        tester_max_turns=10,
+        business_max_turns=10,
+        product_max_turns=10,
+        cli_max_turns=10,
         subchack_max_turns=10,
         min_tools_used=0,
         max_tools_used=0,

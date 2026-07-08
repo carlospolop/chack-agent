@@ -27,6 +27,8 @@ from chack_agent.config import AgentConfig
 
 def test_agent_config_budget_defaults():
     cfg = AgentConfig()
+    assert cfg.self_critique_enabled is False
+    assert cfg.self_critique_rounds == 0
     assert cfg.budget_warning_ratio == 0.6
     assert cfg.budget_critical_ratio == 0.9
     assert cfg.budget_tool_injection_enabled is True

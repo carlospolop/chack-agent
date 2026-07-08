@@ -21,8 +21,8 @@ inputs:
     description: "Websearcher model (optional)"
     required: false
     default: "CHEAP_BUT_QUALITY"
-  model_tester:
-    description: "Tester model (optional)"
+  model_cli:
+    description: "CLI researcher model (optional)"
     required: false
     default: "CHEAP_BUT_QUALITY"
   system_prompt:
@@ -158,7 +158,7 @@ runs:
         INPUT_MODEL_SOCIAL: ${{ inputs.model_social_network }}
         INPUT_MODEL_SCIENTIFIC: ${{ inputs.model_scientific }}
         INPUT_MODEL_WEBSEARCHER: ${{ inputs.model_websearcher }}
-        INPUT_MODEL_TESTER: ${{ inputs.model_tester }}
+        INPUT_MODEL_CLI: ${{ inputs.model_cli }}
         INPUT_SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         INPUT_USER_PROMPT: ${{ inputs.user_prompt }}
         INPUT_PROMPT_FILE: ${{ inputs.prompt_file }}

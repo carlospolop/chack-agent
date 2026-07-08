@@ -6,6 +6,7 @@ import os
 import inspect
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -19,6 +20,7 @@ from chack_tools.task_steps_manager_state import (
     current_session_id,
 )
 from chack_tools.telemetry import log_event
+from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
 
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
@@ -33,6 +35,60 @@ from .tool_payloads import (
 
 
 _LOGGER = logging.getLogger("chack.claude_code_backend")
+
+
+def _descendant_pids(pid: int) -> list[int]:
+    found: list[int] = []
+    stack = [int(pid)]
+    while stack:
+        current = stack.pop()
+        try:
+            proc = subprocess.run(
+                ["pgrep", "-P", str(current)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+        except Exception:
+            continue
+        children = []
+        for raw in str(proc.stdout or "").splitlines():
+            try:
+                child = int(raw.strip())
+            except Exception:
+                continue
+            children.append(child)
+        found.extend(children)
+        stack.extend(children)
+    return found
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    pids = list(reversed(_descendant_pids(int(process.pid)))) + [int(process.pid)]
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                continue
+            except Exception:
+                try:
+                    if pid == process.pid:
+                        process.kill()
+                except Exception:
+                    pass
+        time.sleep(1 if sig == signal.SIGTERM else 0)
+        if process.poll() is not None:
+            break
+
+
+# Claude models cap at a 200k-token context window by default. Opus 4.6 and
+# Sonnet 4.6 can extend to 1M tokens, but only when the request carries the
+# `context-1m-2025-08-07` beta header, which the CLI exposes via `--betas`.
+# So whenever a larger context budget is configured we opt into that beta.
+_CLAUDE_DEFAULT_CONTEXT_WINDOW = 200_000
+_CLAUDE_1M_CONTEXT_BETA = "context-1m-2025-08-07"
 
 
 @dataclass
@@ -64,19 +120,36 @@ class ClaudeCodeExecutor:
     _social_network_model: str
     _scientific_model: str
     _websearcher_model: str
-    _tester_model: str
+    _business_model: str
+    _product_model: str
+    _legal_model: str
+    _data_statistics_model: str
+    _news_media_model: str
+    _knowledge_graph_model: str
+    _religious_model: str
+    _cli_model: str
     _subchack_model: str
+    _researcher_administrator_model: str
     _social_network_max_turns: int
     _scientific_max_turns: int
     _websearcher_max_turns: int
-    _tester_max_turns: int
+    _business_max_turns: int
+    _product_max_turns: int
+    _legal_max_turns: int
+    _data_statistics_max_turns: int
+    _news_media_max_turns: int
+    _knowledge_graph_max_turns: int
+    _religious_max_turns: int
+    _cli_max_turns: int
     _subchack_max_turns: int
+    _researcher_administrator_max_turns: int
     _min_tools_used: int
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
     _output_schema_name: str = "output_schema"
     _output_schema_strict: bool = True
+    _max_context_tokens: int = 0
     _uses_openrouter_route: bool = False
     _anthropic_api_key: str = ""
     _claude_access_token: str = ""
@@ -86,6 +159,10 @@ class ClaudeCodeExecutor:
     _claude_home: str | None = None
     _claude_session_id: str | None = None
     _output_schema: str | None = None
+    _prompt_only_next_invocation: bool = False
+
+    def suppress_system_prompt_for_next_invocation(self) -> None:
+        self._prompt_only_next_invocation = True
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
@@ -258,6 +335,9 @@ class ClaudeCodeExecutor:
         return False
 
     def _compose_prompt(self, user_input: str) -> str:
+        if self._prompt_only_next_invocation:
+            self._prompt_only_next_invocation = False
+            return str(user_input or "")
         base = str(self._base_system_prompt or "").strip()
 
         policy_lines: list[str] = []
@@ -342,6 +422,7 @@ class ClaudeCodeExecutor:
                 bufsize=1,
                 env=env,
                 cwd=exec_cwd,
+                start_new_session=True,
             )
         except FileNotFoundError:
             return (
@@ -359,6 +440,7 @@ class ClaudeCodeExecutor:
                 _RawResult(raw_responses=[]),
             )
 
+        cancel_registration = register_process(process, _terminate_process_tree)
         output_parts: list[str] = []
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
@@ -376,8 +458,15 @@ class ClaudeCodeExecutor:
                     pass
 
             while True:
+                if cancellation_requested():
+                    _terminate_process_tree(process)
+                    return (
+                        "ERROR: Claude execution cancelled.",
+                        steps,
+                        _RawResult(raw_responses=raw_responses),
+                    )
                 if timeout_seconds > 0 and (time.monotonic() - started_at) > timeout_seconds:
-                    process.kill()
+                    _terminate_process_tree(process)
                     return (
                         f"ERROR: Claude execution timed out after {timeout_seconds}s.",
                         steps,
@@ -492,6 +581,7 @@ class ClaudeCodeExecutor:
                     self._record_tool_result(event, tool_calls, steps)
                     continue
         finally:
+            unregister_process(cancel_registration)
             try:
                 if process.stdout is not None:
                     process.stdout.close()
@@ -839,6 +929,7 @@ bash save_vuln.sh '{{
             "--verbose",
             "--output-format",
             "stream-json",
+            "--allow-dangerously-skip-permissions",
             "--dangerously-skip-permissions",
             "--mcp-config",
             os.path.join(self._claude_home or os.getcwd(), "settings.json"),
@@ -849,6 +940,17 @@ bash save_vuln.sh '{{
 
         if self._max_turns > 0:
             args.extend(["--max-turns", str(self._max_turns)])
+        # Opt into the 1M-token context beta when the configured budget exceeds
+        # the default 200k window. This only raises the model's window so the
+        # auto-compaction trigger (CLAUDE_CODE_AUTO_COMPACT_WINDOW, set in the
+        # env) can be placed above 200k; the compaction threshold itself keeps
+        # the session alive rather than killing it. Skipped on the OpenRouter
+        # route: the Anthropic beta header does not apply and betas are disabled.
+        if (
+            self._max_context_tokens > _CLAUDE_DEFAULT_CONTEXT_WINDOW
+            and not self._uses_openrouter_route
+        ):
+            args.extend(["--betas", _CLAUDE_1M_CONTEXT_BETA])
         if self._model_name:
             args.extend(["--model", self._model_name])
         if self._claude_session_id:
@@ -874,13 +976,29 @@ bash save_vuln.sh '{{
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
         env["CHACK_SCIENTIFIC_MODEL"] = self._scientific_model
         env["CHACK_WEBSEARCHER_MODEL"] = self._websearcher_model
-        env["CHACK_TESTER_MODEL"] = self._tester_model
+        env["CHACK_BUSINESS_MODEL"] = self._business_model
+        env["CHACK_PRODUCT_MODEL"] = self._product_model
+        env["CHACK_LEGAL_MODEL"] = self._legal_model
+        env["CHACK_DATA_STATISTICS_MODEL"] = self._data_statistics_model
+        env["CHACK_NEWS_MEDIA_MODEL"] = self._news_media_model
+        env["CHACK_KNOWLEDGE_GRAPH_MODEL"] = self._knowledge_graph_model
+        env["CHACK_RELIGIOUS_MODEL"] = self._religious_model
+        env["CHACK_CLI_MODEL"] = self._cli_model
         env["CHACK_SUBCHACK_MODEL"] = self._subchack_model
+        env["CHACK_RESEARCHER_ADMINISTRATOR_MODEL"] = self._researcher_administrator_model
         env["CHACK_SOCIAL_NETWORK_MAX_TURNS"] = str(self._social_network_max_turns)
         env["CHACK_SCIENTIFIC_MAX_TURNS"] = str(self._scientific_max_turns)
         env["CHACK_WEBSEARCHER_MAX_TURNS"] = str(self._websearcher_max_turns)
-        env["CHACK_TESTER_MAX_TURNS"] = str(self._tester_max_turns)
+        env["CHACK_BUSINESS_MAX_TURNS"] = str(self._business_max_turns)
+        env["CHACK_PRODUCT_MAX_TURNS"] = str(self._product_max_turns)
+        env["CHACK_LEGAL_MAX_TURNS"] = str(self._legal_max_turns)
+        env["CHACK_DATA_STATISTICS_MAX_TURNS"] = str(self._data_statistics_max_turns)
+        env["CHACK_NEWS_MEDIA_MAX_TURNS"] = str(self._news_media_max_turns)
+        env["CHACK_KNOWLEDGE_GRAPH_MAX_TURNS"] = str(self._knowledge_graph_max_turns)
+        env["CHACK_RELIGIOUS_MAX_TURNS"] = str(self._religious_max_turns)
+        env["CHACK_CLI_MAX_TURNS"] = str(self._cli_max_turns)
         env["CHACK_SUBCHACK_MAX_TURNS"] = str(self._subchack_max_turns)
+        env["CHACK_RESEARCHER_ADMINISTRATOR_MAX_TURNS"] = str(self._researcher_administrator_max_turns)
         env["CHACK_MIN_TOOLS_USED"] = str(self._min_tools_used)
         env["CHACK_MAX_TOOLS_USED"] = str(self._max_tools_used)
         env["CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST"] = (
@@ -915,6 +1033,14 @@ bash save_vuln.sh '{{
                 )
                 if _api_key:
                     env["ANTHROPIC_API_KEY"] = _api_key
+
+        # Drive auto-compaction at the configured token budget. This caps the
+        # effective context window used for the compaction calculation (it only
+        # ever lowers it), so Claude Code summarizes/compacts the conversation
+        # when the budget is approached instead of ending the session. Paired
+        # with the 1M-context beta above when the budget exceeds 200k.
+        if self._max_context_tokens > 0:
+            env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(int(self._max_context_tokens))
 
         # Allow --dangerously-skip-permissions when running as root inside Docker/CI.
         env.setdefault("IS_SANDBOX", "1")
@@ -1008,17 +1134,36 @@ bash save_vuln.sh '{{
             "CHACK_SOCIAL_NETWORK_MODEL",
             "CHACK_SCIENTIFIC_MODEL",
             "CHACK_WEBSEARCHER_MODEL",
-            "CHACK_TESTER_MODEL",
+            "CHACK_BUSINESS_MODEL",
+            "CHACK_PRODUCT_MODEL",
+            "CHACK_LEGAL_MODEL",
+            "CHACK_DATA_STATISTICS_MODEL",
+            "CHACK_NEWS_MEDIA_MODEL",
+            "CHACK_KNOWLEDGE_GRAPH_MODEL",
+            "CHACK_RELIGIOUS_MODEL",
+            "CHACK_CLI_MODEL",
             "CHACK_SUBCHACK_MODEL",
+            "CHACK_RESEARCHER_ADMINISTRATOR_MODEL",
             "CHACK_SOCIAL_NETWORK_MAX_TURNS",
             "CHACK_SCIENTIFIC_MAX_TURNS",
             "CHACK_WEBSEARCHER_MAX_TURNS",
-            "CHACK_TESTER_MAX_TURNS",
+            "CHACK_BUSINESS_MAX_TURNS",
+            "CHACK_PRODUCT_MAX_TURNS",
+            "CHACK_LEGAL_MAX_TURNS",
+            "CHACK_DATA_STATISTICS_MAX_TURNS",
+            "CHACK_NEWS_MEDIA_MAX_TURNS",
+            "CHACK_KNOWLEDGE_GRAPH_MAX_TURNS",
+            "CHACK_RELIGIOUS_MAX_TURNS",
+            "CHACK_CLI_MAX_TURNS",
             "CHACK_SUBCHACK_MAX_TURNS",
+            "CHACK_RESEARCHER_ADMINISTRATOR_MAX_TURNS",
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
             "CHACK_DISABLE_STDOUT_EVENTS",
+            "CHACK_RESEARCH_MASTER_DIR",
+            "CHACK_RESEARCH_DATA_DIR",
+            "CHACK_RESEARCH_SAVE_ARTIFACTS",
             "CHACK_MIN_TOOLS_USED",
             "CHACK_MAX_TOOLS_USED",
             "CHACK_EXEC_CWD",
@@ -1210,16 +1355,56 @@ def build_executor(
             toolset_kwargs["websearcher_model"] = config.model.websearcher
         if "websearcher_max_turns" in init_params:
             toolset_kwargs["websearcher_max_turns"] = config.model.websearcher_max_turns
-        if "tester_model" in init_params:
-            toolset_kwargs["tester_model"] = config.model.tester
-        if "tester_max_turns" in init_params:
-            toolset_kwargs["tester_max_turns"] = config.model.tester_max_turns
+        if "business_model" in init_params:
+            toolset_kwargs["business_model"] = config.model.business
+        if "business_max_turns" in init_params:
+            toolset_kwargs["business_max_turns"] = config.model.business_max_turns
+        if "product_model" in init_params:
+            toolset_kwargs["product_model"] = config.model.product
+        if "product_max_turns" in init_params:
+            toolset_kwargs["product_max_turns"] = config.model.product_max_turns
+        if "legal_model" in init_params:
+            toolset_kwargs["legal_model"] = config.model.legal
+        if "legal_max_turns" in init_params:
+            toolset_kwargs["legal_max_turns"] = config.model.legal_max_turns
+        if "data_statistics_model" in init_params:
+            toolset_kwargs["data_statistics_model"] = config.model.data_statistics
+        if "data_statistics_max_turns" in init_params:
+            toolset_kwargs["data_statistics_max_turns"] = config.model.data_statistics_max_turns
+        if "news_media_model" in init_params:
+            toolset_kwargs["news_media_model"] = config.model.news_media
+        if "news_media_max_turns" in init_params:
+            toolset_kwargs["news_media_max_turns"] = config.model.news_media_max_turns
+        if "knowledge_graph_model" in init_params:
+            toolset_kwargs["knowledge_graph_model"] = config.model.knowledge_graph
+        if "knowledge_graph_max_turns" in init_params:
+            toolset_kwargs["knowledge_graph_max_turns"] = config.model.knowledge_graph_max_turns
+        if "religious_model" in init_params:
+            toolset_kwargs["religious_model"] = config.model.religious
+        if "religious_max_turns" in init_params:
+            toolset_kwargs["religious_max_turns"] = config.model.religious_max_turns
+        if "cli_model" in init_params:
+            toolset_kwargs["cli_model"] = config.model.cli
+        if "cli_max_turns" in init_params:
+            toolset_kwargs["cli_max_turns"] = config.model.cli_max_turns
         if "subchack_model" in init_params:
             toolset_kwargs["subchack_model"] = config.model.subchack
         if "subchack_max_turns" in init_params:
             toolset_kwargs["subchack_max_turns"] = config.model.subchack_max_turns
+        if "researcher_administrator_model" in init_params:
+            toolset_kwargs["researcher_administrator_model"] = config.model.researcher_administrator
+        if "researcher_administrator_max_turns" in init_params:
+            toolset_kwargs["researcher_administrator_max_turns"] = config.model.researcher_administrator_max_turns
         if "model_provider" in init_params:
             toolset_kwargs["model_provider"] = model_provider
+        if "self_critique_enabled" in init_params:
+            toolset_kwargs["self_critique_enabled"] = bool(
+                getattr(config.agent, "self_critique_enabled", False)
+            )
+        if "self_critique_rounds" in init_params:
+            toolset_kwargs["self_critique_rounds"] = int(
+                getattr(config.agent, "self_critique_rounds", 0) or 0
+            )
         return toolset_kwargs
 
     if tools_override is not None:
@@ -1260,13 +1445,29 @@ def build_executor(
         _social_network_model=str(config.model.social_network or ""),
         _scientific_model=str(config.model.scientific or ""),
         _websearcher_model=str(config.model.websearcher or ""),
-        _tester_model=str(config.model.tester or ""),
+        _business_model=str(config.model.business or ""),
+        _product_model=str(config.model.product or ""),
+        _legal_model=str(config.model.legal or ""),
+        _data_statistics_model=str(config.model.data_statistics or ""),
+        _news_media_model=str(config.model.news_media or ""),
+        _knowledge_graph_model=str(config.model.knowledge_graph or ""),
+        _religious_model=str(config.model.religious or ""),
+        _cli_model=str(config.model.cli or ""),
         _subchack_model=str(config.model.subchack or ""),
+        _researcher_administrator_model=str(config.model.researcher_administrator or ""),
         _social_network_max_turns=int(config.model.social_network_max_turns or 30),
         _scientific_max_turns=int(config.model.scientific_max_turns or 30),
         _websearcher_max_turns=int(config.model.websearcher_max_turns or 30),
-        _tester_max_turns=int(config.model.tester_max_turns or 30),
+        _business_max_turns=int(config.model.business_max_turns or 30),
+        _product_max_turns=int(config.model.product_max_turns or 30),
+        _legal_max_turns=int(config.model.legal_max_turns or 30),
+        _data_statistics_max_turns=int(config.model.data_statistics_max_turns or 30),
+        _news_media_max_turns=int(config.model.news_media_max_turns or 30),
+        _knowledge_graph_max_turns=int(config.model.knowledge_graph_max_turns or 30),
+        _religious_max_turns=int(config.model.religious_max_turns or 30),
+        _cli_max_turns=int(config.model.cli_max_turns or 30),
         _subchack_max_turns=int(config.model.subchack_max_turns or 30),
+        _researcher_administrator_max_turns=int(config.model.researcher_administrator_max_turns or 100),
         _min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
         _max_tools_used=max(0, int(config.tools.max_tools_used or 0)),
         _require_task_steps_manager_init_first=require_task_steps_manager_init_first,
@@ -1277,6 +1478,7 @@ def build_executor(
         ),
         _output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
         _output_schema_strict=bool(getattr(config.agent, "output_schema_strict", True)),
+        _max_context_tokens=int(getattr(config.model, "max_context_tokens", 0) or 0),
         _uses_openrouter_route=route is not None,
         _anthropic_api_key=str(
             route.api_key
