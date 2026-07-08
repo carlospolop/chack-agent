@@ -42,6 +42,7 @@ _CLI_RESEARCH_SYSTEM_PROMPT = """### RULES
 - For code, create temporary files if useful, run them, analyze output, and clean them up when appropriate. For math, write small scripts for nontrivial calculations.
 - Synchronous CLI commands have hard timeouts. For long-running jobs, start them in the background with explicit log/output files, then monitor them with quick commands such as ps, tail, grep, cat, or checking exit/status files.
 - Summarize actual execution results, failures, uncertainty, and useful artifact filenames only when artifacts are preserved.
+- IMPORTANT: NEVER UNDER ANY CONCEPT EXECUTE ANY POTENTIALLY DANGEROUS PROGRAM (MALWARE, VIRUS, C2, REV SHELL) UNDER ANY CIRCUNSTANCES
 """ + OBJECTIVE_EVIDENCE_RULES
 
 

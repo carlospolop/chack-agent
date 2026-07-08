@@ -69,6 +69,7 @@ _SCIENTIFIC_AGENT_SYSTEM_PROMPT = """### RULES
 - Use Crossref for DOI/provenance/retraction signals, clinical-trial tools for studies, chemistry/entity tools when relevant, and patent/video tools only when they add evidence.
 - Download available full text/PDFs and raw API JSON before analysis; use PDF text and exec/curl/wget/grep-style checks when needed to read or extract paper content.
 - Mention sources, and mention artifact filenames only when artifacts are preserved, without naming internal tool names.
+- IMPORTANT: NEVER UNDER ANY CONCEPT EXECUTE ANY POTENTIALLY DANGEROUS PROGRAM (MALWARE, VIRUS, C2, REV SHELL) UNDER ANY CIRCUNSTANCES
 """ + OBJECTIVE_EVIDENCE_RULES
 
 

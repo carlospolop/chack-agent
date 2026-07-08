@@ -92,6 +92,7 @@ _DATA_STATS_PROMPT = """### RULES
 - Synchronous command execution has hard timeouts. For long-running fetches/parsers/calculations, start them in the background with explicit log/output files, then monitor them with quick commands such as ps, tail, grep, cat, or checking exit/status files.
 - Preserve conflicting datasets instead of smoothing them over; report differences, gaps, and likely causes only when evidence supports them.
 - Mention sources, and mention artifact filenames only when artifacts are preserved, without naming internal tool names.
+- IMPORTANT: NEVER UNDER ANY CONCEPT EXECUTE ANY POTENTIALLY DANGEROUS PROGRAM (MALWARE, VIRUS, C2, REV SHELL) UNDER ANY CIRCUNSTANCES
 """ + OBJECTIVE_EVIDENCE_RULES
 
 

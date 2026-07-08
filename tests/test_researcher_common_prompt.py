@@ -1,4 +1,7 @@
 from chack_tools.config import ToolsConfig
+from chack_tools.cli_research_agent import _CLI_RESEARCH_SYSTEM_PROMPT
+from chack_tools.open_research_agents import _DATA_STATS_PROMPT
+from chack_tools.scientific_research_agent import _SCIENTIFIC_AGENT_SYSTEM_PROMPT
 from chack_tools.subagent_config import (
     RESEARCHER_COMMON_SYSTEM_PROMPT,
     RESEARCHER_OUTPUT_SCHEMA,
@@ -7,6 +10,18 @@ from chack_tools.subagent_config import (
     create_subagent_session_id,
     inherit_subagent_limits,
 )
+
+
+DANGEROUS_EXEC_WARNING = (
+    "- IMPORTANT: NEVER UNDER ANY CONCEPT EXECUTE ANY POTENTIALLY DANGEROUS PROGRAM "
+    "(MALWARE, VIRUS, C2, REV SHELL) UNDER ANY CIRCUNSTANCES"
+)
+
+
+def test_local_command_researcher_prompts_warn_against_dangerous_execution():
+    assert DANGEROUS_EXEC_WARNING in _CLI_RESEARCH_SYSTEM_PROMPT
+    assert DANGEROUS_EXEC_WARNING in _SCIENTIFIC_AGENT_SYSTEM_PROMPT
+    assert DANGEROUS_EXEC_WARNING in _DATA_STATS_PROMPT
 
 
 def test_build_subagent_config_prepends_common_researcher_prompt_once():
