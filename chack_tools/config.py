@@ -165,6 +165,7 @@ class ToolsConfig:
     researcher_queue_expected_participants: int = 0     # >0 flushes early once N callers have joined
     researcher_queue_max_requests_per_call: int = 5     # research prompts allowed per single call
     researcher_queue_max_batch_requests: int = 20       # hard ceiling of prompts per batch (0 = no ceiling)
+    researcher_queue_max_parallel_researches: int = 0   # concurrent admin researches per batch (0 = one per merged request, all at once)
     researcher_queue_max_wait_seconds: int = 5400       # safety cap on the blocking call (90 min)
     researcher_queue_max_runtime_minutes: int = 60      # fixed runtime cap for each queued admin research (0 = no cap)
     researcher_queue_max_cost_usd: float = 5.0          # fixed cost cap for each queued admin research (0 = no cap)

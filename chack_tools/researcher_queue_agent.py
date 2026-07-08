@@ -16,6 +16,7 @@ Sharing works in two ways with the exact same in-memory queue:
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import shutil
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -709,7 +711,7 @@ class ResearcherQueueAgentTool:
                 "save_artifacts": bool(save_artifacts),
             },
         )
-        for index, group in enumerate(groups):
+        def _run_one_cluster(index: int, group: Any) -> dict[str, Any]:
             merged_prompt, members, merge_reason = self._normalize_group(group)
             research_id = f"research-{index:03d}-{uuid.uuid4().hex[:8]}"
             research_dir = os.path.join(queue_root, "researches", research_id)
@@ -731,16 +733,6 @@ class ResearcherQueueAgentTool:
             }
             if merge_reason:
                 entry["merge_reason"] = merge_reason
-            if progress:
-                progress(
-                    {
-                        "latest_action": f"running administrator research {index + 1}/{len(groups)}",
-                        "current_research_index": index + 1,
-                        "current_research_count": len(groups),
-                        "current_research_id": research_id,
-                        "current_research_topic": entry["topic"],
-                    }
-                )
             run_ctx = dict(ctx)
             run_ctx["research_master_dir"] = research_dir
             if batch_id:
@@ -789,15 +781,43 @@ class ResearcherQueueAgentTool:
                 entry["conclusions"] = str(admin_result or "").strip()
             if save_artifacts:
                 entry.setdefault("evidence_data_path", research_dir)
-            researches.append(entry)
-            if progress:
-                progress(
-                    {
-                        "latest_action": f"finished administrator research {index + 1}/{len(groups)}",
-                        "current_research_index": index + 1,
-                        "current_research_count": len(groups),
-                    }
-                )
+            return entry
+
+        # Launch ONE administrator per merged research request, all in parallel. Each
+        # administrator isolates its own evidence dir via contextvars, so concurrent
+        # clusters never interfere. researcher_queue_max_parallel_researches caps the
+        # fan-out (0 => no cap: run every cluster at once).
+        configured_cap = int(getattr(self.config, "researcher_queue_max_parallel_researches", 0) or 0)
+        max_parallel = max(1, len(groups) if configured_cap <= 0 else min(configured_cap, len(groups)))
+        if progress:
+            progress(
+                {
+                    "latest_action": f"launching {len(groups)} administrator research(es) in parallel",
+                    "current_research_index": 0,
+                    "current_research_count": len(groups),
+                }
+            )
+        results_by_index: dict[int, dict[str, Any]] = {}
+        if len(groups) <= 1:
+            for index, group in enumerate(groups):
+                results_by_index[index] = _run_one_cluster(index, group)
+        else:
+            with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+                futures = {}
+                for index, group in enumerate(groups):
+                    ctx_copy = contextvars.copy_context()
+                    futures[executor.submit(ctx_copy.run, _run_one_cluster, index, group)] = index
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        results_by_index[index] = future.result()
+                    except Exception as exc:
+                        results_by_index[index] = {
+                            "topic": "",
+                            "research_id": "",
+                            "conclusions": f"Research failed ({type(exc).__name__}: {exc})",
+                        }
+        researches = [results_by_index[i] for i in sorted(results_by_index)]
         result = _compact(
             {
                 "queue_evidence_data_path": queue_root if save_artifacts else "",
