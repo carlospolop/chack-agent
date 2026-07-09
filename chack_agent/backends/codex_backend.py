@@ -42,6 +42,49 @@ from .tool_payloads import (
 
 _LOGGER = logging.getLogger("chack.codex_backend")
 
+# Per-run codex process timeout, selected by the agent's sub_action so different roles
+# (verifiers vs research administrators vs sub-researchers) get different wall-clock caps.
+# CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION is a JSON map {sub_action: seconds, "default": n};
+# falls back to the global CHACK_CODEX_EXEC_TIMEOUT_SECONDS, then 900.
+def _resolve_codex_exec_timeout(sub_action: str) -> int:
+    default = int(os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "900") or "900")
+    raw = str(os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION", "") or "").strip()
+    if raw:
+        try:
+            m = json.loads(raw)
+            if isinstance(m, dict):
+                v = m.get(str(sub_action or "").strip())
+                if v is None:
+                    v = m.get("default")
+                if v is not None:
+                    return max(1, int(v))
+        except Exception:
+            pass
+    return default
+
+
+# Optional host-process callback invoked whenever a codex process times out, so the
+# application (e.g. the factchecker) can alert Discord. Called with a dict describing the
+# timed-out agent. Runs in the same process/thread that monitors the codex subprocess.
+_CODEX_TIMEOUT_HOOK = None
+
+
+def set_codex_timeout_hook(fn) -> None:
+    """Register a callback fired on every codex process timeout. fn receives a dict:
+    {sub_action, model, provider, session_id, timeout_seconds}. Errors are swallowed."""
+    global _CODEX_TIMEOUT_HOOK
+    _CODEX_TIMEOUT_HOOK = fn
+
+
+def _notify_codex_timeout(info: dict) -> None:
+    hook = _CODEX_TIMEOUT_HOOK
+    if hook is None:
+        return
+    try:
+        hook(info)
+    except Exception:
+        pass
+
 
 def _descendant_pids(pid: int) -> list[int]:
     found: list[int] = []
@@ -180,6 +223,7 @@ class CodexExecutor:
     _disable_native_shell: bool = False
     _disable_native_web_search: bool = False
     _researcher_administrator_model: str = ""
+    _sub_action: str = ""
     _researcher_administrator_max_turns: int = 100
     _prompt_only_next_invocation: bool = False
 
@@ -273,7 +317,7 @@ class CodexExecutor:
     ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         command = self._build_command()
         env = self._build_env()
-        timeout_seconds = int(os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "900") or "900")
+        timeout_seconds = _resolve_codex_exec_timeout(self._sub_action)
         exec_cwd = _resolve_codex_exec_cwd()
         _LOGGER.info(
             "Starting Codex CLI process: model=%s timeout_seconds=%s thread_id=%s cwd=%s ts=%s",
@@ -370,6 +414,15 @@ class CodexExecutor:
                     cwd=exec_cwd,
                     details="\n".join(combined_output_lines).strip()
                     or f"Timed out after {timeout_seconds}s with no captured output.",
+                )
+                _notify_codex_timeout(
+                    {
+                        "sub_action": str(self._sub_action or ""),
+                        "model": str(self._model_name or ""),
+                        "provider": str(self._model_provider or ""),
+                        "session_id": str(current_session_id() or ""),
+                        "timeout_seconds": int(timeout_seconds),
+                    }
                 )
                 return (
                     f"ERROR: Codex execution timed out after {timeout_seconds}s.",
@@ -1513,6 +1566,7 @@ def build_executor(
         _cli_model=str(config.model.cli or ""),
         _subchack_model=str(config.model.subchack or ""),
         _researcher_administrator_model=str(config.model.researcher_administrator or ""),
+        _sub_action=str(getattr(config.agent, "sub_action", "") or ""),
         _social_network_max_turns=int(config.model.social_network_max_turns or 30),
         _scientific_max_turns=int(config.model.scientific_max_turns or 30),
         _websearcher_max_turns=int(config.model.websearcher_max_turns or 30),
