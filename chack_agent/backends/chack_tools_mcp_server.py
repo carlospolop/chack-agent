@@ -32,8 +32,13 @@ from .tool_payloads import (
 )
 
 
+# Tools blocked from MCP exposure even if they are present in the Python
+# toolset. Historically `exec` was included here as a conservative default,
+# but Chack deployments now intentionally use the controlled ExecTool as the
+# local command path (with Chack timeouts, output limits, and telemetry). If a
+# deployment does not want local command execution it must set
+# tools.exec_enabled=false instead of relying on this transport-level denylist.
 _MCP_DENYLIST_TOOL_NAMES = {
-    "exec",
     "shell_command",
     "run_terminal_cmd",
     "command_execution",
