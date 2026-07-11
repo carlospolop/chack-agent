@@ -130,10 +130,6 @@ models:
     input: 0.25
     cache_read: 0.06
     output: 0.8
-  arcee-ai/trinity-mini:
-    input: 0.045
-    cache_read: 0.045
-    output: 0.15
   arcee-ai/virtuoso-large:
     input: 0.75
     cache_read: 0.75
@@ -231,9 +227,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.09
-    cache_read: 0.018
-    output: 0.18
+    input: 0.084
+    cache_read: 0.0168
+    output: 0.168
   deepseek/deepseek-v4-pro:
     input: 0.435
     cache_read: 0.003625
@@ -416,10 +412,6 @@ models:
     input: 0.75
     cache_read: 0.75
     output: 1
-  meta-llama/llama-3-8b-instruct:
-    input: 0.14
-    cache_read: 0.14
-    output: 0.14
   meta-llama/llama-3.1-70b-instruct:
     input: 0.4
     cache_read: 0.4
@@ -1386,9 +1378,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.54
-    cache_read: 0.1
-    output: 1.76
+    input: 0.42
+    cache_read: 0.078
+    output: 1.32
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
