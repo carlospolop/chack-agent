@@ -478,10 +478,18 @@ def test_codex_backend_passes_effort_on_new_and_resumed_commands() -> None:
     assert expected in executor._build_command()
 
 
-def test_claude_backend_passes_native_effort_flag() -> None:
-    from chack_agent.backends.claude_code_backend import build_executor
+def test_claude_backend_passes_native_effort_flag(monkeypatch) -> None:
+    import chack_agent.backends.claude_code_backend as backend
 
-    executor = build_executor(
+    # Keep this test hermetic: the host may have a newer Claude CLI that
+    # advertises xhigh. This case intentionally verifies the legacy CLI mapping.
+    monkeypatch.setattr(
+        backend,
+        "_claude_supported_effort_levels",
+        lambda _path: frozenset({"low", "medium", "high", "max"}),
+    )
+
+    executor = backend.build_executor(
         _config("claude", "extra high"),
         system_prompt="test",
         max_turns=3,
