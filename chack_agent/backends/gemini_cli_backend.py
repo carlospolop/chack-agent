@@ -23,6 +23,7 @@ from chack_tools.telemetry import log_event
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
+from ..thinking_effort import gemini_thinking_config, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
@@ -115,6 +116,7 @@ class GeminiCliExecutor:
         output_schema_json: str,
         output_schema_name: str,
         output_schema_strict: bool,
+        thinking_effort: str = "high",
     ) -> None:
         self._conversation = conversation
         self._memory_limit = memory_max_messages
@@ -152,6 +154,7 @@ class GeminiCliExecutor:
         self._output_schema_json = output_schema_json or ""
         self._output_schema_name = output_schema_name or "output_schema"
         self._output_schema_strict = bool(output_schema_strict)
+        self._thinking_effort = normalize_thinking_effort(thinking_effort)
 
         self._gemini_home: str | None = None
         self._gemini_session_id: str | None = None
@@ -477,6 +480,21 @@ class GeminiCliExecutor:
             "model": {
                 "name": self._model_name,
                 "maxSessionTurns": self._max_turns if self._max_turns > 0 else -1,
+            },
+            "modelConfigs": {
+                "overrides": [
+                    {
+                        "match": {"model": self._model_name},
+                        "modelConfig": {
+                            "generateContentConfig": {
+                                "thinkingConfig": gemini_thinking_config(
+                                    self._thinking_effort,
+                                    self._model_name,
+                                )
+                            }
+                        },
+                    }
+                ]
             },
             "tools": {
                 "core": [],
@@ -857,4 +875,5 @@ def build_executor(
         ),
         output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
         output_schema_strict=bool(getattr(config.agent, "output_schema_strict", False)),
+        thinking_effort=normalize_thinking_effort(config.agent.thinking_effort),
     )

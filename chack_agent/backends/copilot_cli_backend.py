@@ -23,6 +23,7 @@ from chack_tools.telemetry import log_event
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
+from ..thinking_effort import copilot_thinking_effort, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
@@ -85,6 +86,7 @@ class CopilotCliExecutor:
         max_tools_used: int,
         require_task_steps_manager_init_first: bool,
         output_schema_json: str,
+        thinking_effort: str = "high",
     ) -> None:
         self._conversation = conversation
         self._memory_limit = memory_max_messages
@@ -120,6 +122,7 @@ class CopilotCliExecutor:
             require_task_steps_manager_init_first
         )
         self._output_schema_json = output_schema_json or ""
+        self._thinking_effort = normalize_thinking_effort(thinking_effort)
 
         self._copilot_home: str | None = None
         self._copilot_session_id: str | None = None
@@ -443,6 +446,9 @@ class CopilotCliExecutor:
         ]
         if self._model_name:
             args.extend(["--model", self._model_name])
+        args.extend(
+            ["--reasoning-effort", copilot_thinking_effort(self._thinking_effort)]
+        )
         if self._copilot_session_id:
             args.extend(["--resume", self._copilot_session_id])
         if self._copilot_home:
@@ -873,4 +879,5 @@ def build_executor(
             if getattr(config.agent, "output_schema_json", None)
             else ""
         ),
+        thinking_effort=normalize_thinking_effort(config.agent.thinking_effort),
     )

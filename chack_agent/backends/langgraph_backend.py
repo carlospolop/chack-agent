@@ -23,6 +23,7 @@ from chack_tools.telemetry import log_event
 from chack_tools.tool_usage_state import current_max_tools_used
 
 from ..config import ChackConfig
+from ..thinking_effort import normalize_thinking_effort
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
@@ -760,6 +761,7 @@ def build_executor(
         base_url=base_url,
         timeout=timeout,
         default_headers=default_headers or None,
+        reasoning_effort=normalize_thinking_effort(config.agent.thinking_effort),
     )
     model_with_tools = model.bind_tools(tool_schemas) if tool_schemas else model
 

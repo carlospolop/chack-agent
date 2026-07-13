@@ -5,19 +5,29 @@ import threading
 import os
 
 try:
-    from agents import Agent, Runner
+    from agents import Agent, ModelSettings, Runner
 except ImportError:  # pragma: no cover
     Agent = None
+    ModelSettings = None
     Runner = None
 
 from .tool_usage_state import STORE
 
 
 class SubAgentRunner:
-    def __init__(self, model_name: str = "", env_var_name: str = "", max_turns: int = 30):
+    def __init__(
+        self,
+        model_name: str = "",
+        env_var_name: str = "",
+        max_turns: int = 30,
+        thinking_effort: str = "high",
+    ):
+        from chack_agent.thinking_effort import openai_thinking_effort
+
         self.model_name = model_name
         self.env_var_name = env_var_name
         self.max_turns = max_turns
+        self.thinking_effort = openai_thinking_effort(thinking_effort)
 
     def _resolved_model(self) -> Optional[str]:
         configured = (self.model_name or "").strip()
@@ -45,6 +55,9 @@ class SubAgentRunner:
             "name": agent_name,
             "instructions": system_prompt,
             "tools": tools,
+            "model_settings": ModelSettings(
+                reasoning={"effort": self.thinking_effort}
+            ),
         }
         model_name = self._resolved_model()
         if model_name:

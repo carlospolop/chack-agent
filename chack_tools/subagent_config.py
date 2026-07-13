@@ -1013,7 +1013,41 @@ def build_subagent_config(
     default_output_schema = researcher_output_schema(preserve_artifacts=preserve_artifacts)
 
     agent_overrides = overrides.get("agent") or {}
+    sub_action = str(agent_overrides.get("sub_action") or "").strip().lower()
+    role_agent_fields = {
+        "social": "social_network_agent",
+        "social_network": "social_network_agent",
+        "scientific": "scientific_agent",
+        "webresearcher": "websearcher_agent",
+        "websearcher": "websearcher_agent",
+        "business": "business_agent",
+        "product": "product_agent",
+        "legal": "legal_agent",
+        "data_statistics": "data_statistics_agent",
+        "news_media": "news_media_agent",
+        "knowledge_graph": "knowledge_graph_agent",
+        "religious": "religious_agent",
+        "cli": "cli_agent",
+        "subchack": "subchack_agent",
+        "researcher_administrator": "researcher_administrator_agent",
+        "researcher_queue_merge": "researcher_queue_agent",
+    }
+    role_settings = getattr(
+        base_tools,
+        role_agent_fields.get(sub_action, ""),
+        {},
+    )
+    if not isinstance(role_settings, Mapping):
+        role_settings = {}
+    from chack_agent.thinking_effort import normalize_thinking_effort
+
+    thinking_effort = normalize_thinking_effort(
+        agent_overrides.get("thinking_effort")
+        or role_settings.get("thinking_effort")
+        or "high"
+    )
     agent = AgentConfig(
+        thinking_effort=thinking_effort,
         self_critique_enabled=bool(agent_overrides.get("self_critique_enabled", False)),
         self_critique_rounds=int(agent_overrides.get("self_critique_rounds") or 0),
         max_runtime_minutes=int(agent_overrides.get("max_runtime_minutes") or 0),

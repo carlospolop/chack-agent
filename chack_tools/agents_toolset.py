@@ -741,6 +741,12 @@ class AgentsToolset:
                 researcher_administrator_enabled=True,
                 researcher_administrator_researchers=queue_researchers,
                 researcher_administrator_max_tools_used=queue_admin_budget,
+                researcher_administrator_agent={
+                    **dict(
+                        getattr(self.config, "researcher_administrator_agent", {}) or {}
+                    ),
+                    **queue_agent_cfg,
+                },
             )
             queue_admin = ResearcherAdministratorAgentTool(
                 queue_admin_config,

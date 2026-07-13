@@ -196,6 +196,9 @@ def main() -> None:
             agent_overrides["max_cost_usd"] = float(agent_cost_raw)
         except ValueError:
             raise SystemExit("agent_max_cost_usd must be a number")
+    thinking_effort_raw = os.environ.get("INPUT_THINKING_EFFORT", "").strip()
+    if thinking_effort_raw:
+        agent_overrides.setdefault("thinking_effort", thinking_effort_raw)
 
     output_schema, output_schema_name, output_schema_strict = _load_output_schema()
     if output_schema is not None:

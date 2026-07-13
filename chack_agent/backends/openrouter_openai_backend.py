@@ -31,6 +31,7 @@ from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
 from ..output_schema import JsonSchemaOutput
+from ..thinking_effort import openai_thinking_effort
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
 from chack_tools.telemetry import log_event, log_tool_started, log_tool_executed, log_tool_error
@@ -1238,7 +1239,11 @@ def build_executor(
         tools=tools,
         mcp_servers=_build_mcp_servers(config),
         model=model,
-        model_settings=ModelSettings(),
+        model_settings=ModelSettings(
+            reasoning={
+                "effort": openai_thinking_effort(config.agent.thinking_effort)
+            }
+        ),
         output_type=output_schema,
     )
 
@@ -1250,7 +1255,11 @@ def build_executor(
         ),
         tools=[],
         model=model,
-        model_settings=ModelSettings(),
+        model_settings=ModelSettings(
+            reasoning={
+                "effort": openai_thinking_effort(config.agent.thinking_effort)
+            }
+        ),
         output_type=None,
     )
 

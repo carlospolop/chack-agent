@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from .model_aliases import resolve_backend_alias, resolve_model_alias
+from .thinking_effort import normalize_thinking_effort
 
 from chack_tools.config import ToolsConfig as BaseToolsConfig
 
@@ -55,6 +56,20 @@ class ModelConfig:
     cli: str = "CHEAP_BUT_QUALITY"
     subchack: str = ""
     researcher_administrator: str = ""
+    social_network_thinking_effort: str = "high"
+    scientific_thinking_effort: str = "high"
+    websearcher_thinking_effort: str = "high"
+    business_thinking_effort: str = "high"
+    product_thinking_effort: str = "high"
+    legal_thinking_effort: str = "high"
+    data_statistics_thinking_effort: str = "high"
+    news_media_thinking_effort: str = "high"
+    knowledge_graph_thinking_effort: str = "high"
+    religious_thinking_effort: str = "high"
+    cli_thinking_effort: str = "high"
+    subchack_thinking_effort: str = "high"
+    researcher_administrator_thinking_effort: str = "high"
+    researcher_queue_thinking_effort: str = "high"
     social_network_max_turns: int = 50
     scientific_max_turns: int = 50
     websearcher_max_turns: int = 50
@@ -72,6 +87,7 @@ class ModelConfig:
 
 @dataclass
 class AgentConfig:
+    thinking_effort: str = "high"
     self_critique_enabled: bool = False
     self_critique_rounds: int = 0
     max_runtime_minutes: int = 0
@@ -253,6 +269,32 @@ def _load_section(data: Dict[str, Any], key: str, cls):
 def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
     credentials = getattr(config, "credentials", CredentialsConfig())
     model_cfg = config.model
+    config.agent.thinking_effort = normalize_thinking_effort(
+        getattr(config.agent, "thinking_effort", "high")
+    )
+    role_effort_fields = {
+        "social_network": "social_network_agent",
+        "scientific": "scientific_agent",
+        "websearcher": "websearcher_agent",
+        "business": "business_agent",
+        "product": "product_agent",
+        "legal": "legal_agent",
+        "data_statistics": "data_statistics_agent",
+        "news_media": "news_media_agent",
+        "knowledge_graph": "knowledge_graph_agent",
+        "religious": "religious_agent",
+        "cli": "cli_agent",
+        "subchack": "subchack_agent",
+        "researcher_administrator": "researcher_administrator_agent",
+        "researcher_queue": "researcher_queue_agent",
+    }
+    for role, tools_field in role_effort_fields.items():
+        effort_field = f"{role}_thinking_effort"
+        effort = normalize_thinking_effort(getattr(model_cfg, effort_field, "high"))
+        setattr(model_cfg, effort_field, effort)
+        role_settings = dict(getattr(config.tools, tools_field, {}) or {})
+        role_settings.setdefault("thinking_effort", effort)
+        setattr(config.tools, tools_field, role_settings)
 
     provider = resolve_backend_alias(
         model_cfg.provider,

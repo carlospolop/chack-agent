@@ -26,6 +26,7 @@ from chack_tools.cancellation import cancellation_requested, register_process, u
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..openrouter_routing import get_openrouter_route
+from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
@@ -225,6 +226,7 @@ class CodexExecutor:
     _researcher_administrator_model: str = ""
     _sub_action: str = ""
     _researcher_administrator_max_turns: int = 100
+    _thinking_effort: str = "high"
     _prompt_only_next_invocation: bool = False
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
@@ -695,6 +697,10 @@ class CodexExecutor:
 
     def _build_command(self) -> list[str]:
         exec_cwd = _resolve_codex_exec_cwd()
+        effort_args = [
+            "--config",
+            f'model_reasoning_effort="{codex_thinking_effort(self._thinking_effort)}"',
+        ]
         if self._thread_id:
             output_schema_args: list[str] = []
             if self._output_schema_path:
@@ -708,6 +714,7 @@ class CodexExecutor:
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
             args.extend(self._disabled_native_tool_args())
+            args.extend(effort_args)
             if output_schema_args:
                 args.extend(output_schema_args)
             args.extend(
@@ -732,6 +739,7 @@ class CodexExecutor:
             exec_cwd,
         ]
         args.extend(self._disabled_native_tool_args())
+        args.extend(effort_args)
         args.extend(
             [
                 "--model",
@@ -1580,6 +1588,7 @@ def build_executor(
         _cli_max_turns=int(config.model.cli_max_turns or 30),
         _subchack_max_turns=int(config.model.subchack_max_turns or 30),
         _researcher_administrator_max_turns=int(config.model.researcher_administrator_max_turns or 100),
+        _thinking_effort=normalize_thinking_effort(config.agent.thinking_effort),
         _self_critique_enabled=bool(getattr(config.agent, "self_critique_enabled", False)),
         _self_critique_rounds=int(getattr(config.agent, "self_critique_rounds", 0) or 0),
         _min_tools_used=max(0, int(config.tools.min_tools_used or 0)),
