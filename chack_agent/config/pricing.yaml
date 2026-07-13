@@ -445,9 +445,9 @@ models:
     cache_read: 0
     output: 0
   meta-llama/llama-4-maverick:
-    input: 0.15
-    cache_read: 0.15
-    output: 0.6
+    input: 0.2
+    cache_read: 0.2
+    output: 0.8
   meta-llama/llama-4-scout:
     input: 0.1
     cache_read: 0.1
@@ -1055,7 +1055,7 @@ models:
   qwen/qwen3-235b-a22b-2507:
     input: 0.09
     cache_read: 0.09
-    output: 0.1
+    output: 0.55
   qwen/qwen3-235b-a22b-thinking-2507:
     input: 0.1495
     cache_read: 0.1495
@@ -1352,7 +1352,7 @@ models:
   z-ai/glm-4.6:
     input: 0.43
     cache_read: 0.08
-    output: 1.74
+    output: 1.75
   z-ai/glm-4.6v:
     input: 0.3
     cache_read: 0.055
@@ -1378,9 +1378,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.42
-    cache_read: 0.078
-    output: 1.32
+    input: 0.85
+    cache_read: 0.1
+    output: 2.5
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
