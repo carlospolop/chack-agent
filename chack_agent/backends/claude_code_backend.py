@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from chack_tools.agents_toolset import AgentsToolset
@@ -26,6 +27,7 @@ from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from ..output_schema import JsonSchemaOutput
+from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
@@ -89,6 +91,41 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
 # So whenever a larger context budget is configured we opt into that beta.
 _CLAUDE_DEFAULT_CONTEXT_WINDOW = 200_000
 _CLAUDE_1M_CONTEXT_BETA = "context-1m-2025-08-07"
+
+
+@lru_cache(maxsize=8)
+def _claude_supported_effort_levels(cli_path: str) -> frozenset[str]:
+    """Discover effort levels exposed by this Claude Code installation."""
+    fallback = frozenset({"low", "medium", "high", "max"})
+    try:
+        result = subprocess.run(
+            [cli_path, "--help"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return fallback
+
+    output = str(result.stdout or "")
+    lines = output.splitlines()
+    effort_index = next(
+        (index for index, line in enumerate(lines) if "--effort" in line),
+        -1,
+    )
+    effort_line = (
+        " ".join(lines[effort_index : effort_index + 3])
+        if effort_index >= 0
+        else ""
+    )
+    levels = frozenset(
+        level
+        for level in ("low", "medium", "high", "xhigh", "max")
+        if re.search(rf"\b{level}\b", effort_line, flags=re.IGNORECASE)
+    )
+    return levels or fallback
 
 
 @dataclass
@@ -160,6 +197,7 @@ class ClaudeCodeExecutor:
     _claude_session_id: str | None = None
     _output_schema: str | None = None
     _prompt_only_next_invocation: bool = False
+    _thinking_effort: str = "high"
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
         self._prompt_only_next_invocation = True
@@ -940,6 +978,15 @@ bash save_vuln.sh '{{
 
         if self._max_turns > 0:
             args.extend(["--max-turns", str(self._max_turns)])
+        args.extend(
+            [
+                "--effort",
+                claude_thinking_effort(
+                    self._thinking_effort,
+                    _claude_supported_effort_levels(self._claude_cli_path),
+                ),
+            ]
+        )
         # Opt into the 1M-token context beta when the configured budget exceeds
         # the default 200k window. This only raises the model's window so the
         # auto-compaction trigger (CLAUDE_CODE_AUTO_COMPACT_WINDOW, set in the
@@ -1479,6 +1526,7 @@ def build_executor(
         _output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
         _output_schema_strict=bool(getattr(config.agent, "output_schema_strict", True)),
         _max_context_tokens=int(getattr(config.model, "max_context_tokens", 0) or 0),
+        _thinking_effort=normalize_thinking_effort(config.agent.thinking_effort),
         _uses_openrouter_route=route is not None,
         _anthropic_api_key=str(
             route.api_key

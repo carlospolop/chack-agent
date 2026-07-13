@@ -9,6 +9,10 @@ inputs:
     description: "Primary model (e.g., gpt-4o, gpt-5.2-codex)"
     required: false
     default: "BEST_QUALITY"
+  thinking_effort:
+    description: "Thinking/reasoning effort: none, minimal, low, medium, high, xhigh (extra high), or max"
+    required: false
+    default: "high"
   model_social_network:
     description: "Social network model (optional)"
     required: false
@@ -155,6 +159,7 @@ runs:
       env:
         INPUT_PROVIDER: ${{ inputs.provider }}
         INPUT_MODEL_PRIMARY: ${{ inputs.model_primary }}
+        INPUT_THINKING_EFFORT: ${{ inputs.thinking_effort }}
         INPUT_MODEL_SOCIAL: ${{ inputs.model_social_network }}
         INPUT_MODEL_SCIENTIFIC: ${{ inputs.model_scientific }}
         INPUT_MODEL_WEBSEARCHER: ${{ inputs.model_websearcher }}

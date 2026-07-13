@@ -20,6 +20,7 @@ from chack_tools.config import ToolsConfig
 from chack_tools.task_steps_manager_state import STORE, set_active_context
 from chack_agent.limit_event_state import emit_limit_reached
 from chack_agent.budget_warning_state import budget_status_from_env, inject_budget_warning_from_env
+from chack_agent.thinking_effort import normalize_thinking_effort
 from .tool_payloads import (
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_TOOLS_APPEND_B64_ENV,
@@ -43,6 +44,53 @@ _MCP_DENYLIST_TOOL_NAMES = {
     "run_terminal_cmd",
     "command_execution",
 }
+
+_MCP_ROLE_AGENT_FIELDS = {
+    "social_network": "social_network_agent",
+    "scientific": "scientific_agent",
+    "websearcher": "websearcher_agent",
+    "business": "business_agent",
+    "product": "product_agent",
+    "legal": "legal_agent",
+    "data_statistics": "data_statistics_agent",
+    "news_media": "news_media_agent",
+    "knowledge_graph": "knowledge_graph_agent",
+    "religious": "religious_agent",
+    "cli": "cli_agent",
+    "subchack": "subchack_agent",
+    "researcher_administrator": "researcher_administrator_agent",
+    "researcher_queue": "researcher_queue_agent",
+}
+
+
+def _mcp_tools_config(tools_cfg_data: dict[str, Any]) -> ToolsConfig:
+    """Load MCP tool config with explicit, normalized researcher effort.
+
+    Normal backend launches carry per-role settings inside
+    ``CHACK_TOOLS_CONFIG_JSON``. Standalone/shared MCP servers can instead set
+    ``CHACK_THINKING_EFFORT`` for every role or
+    ``CHACK_<ROLE>_THINKING_EFFORT`` for one role. With no configuration, all
+    MCP-created agents are explicitly set to ``high``.
+    """
+    allowed_keys = set(getattr(ToolsConfig, "__dataclass_fields__", {}).keys())
+    compatible_data = {
+        key: value for key, value in tools_cfg_data.items() if key in allowed_keys
+    }
+    config = ToolsConfig(**compatible_data)
+    global_raw = str(os.environ.get("CHACK_THINKING_EFFORT", "") or "").strip()
+
+    for role, field_name in _MCP_ROLE_AGENT_FIELDS.items():
+        role_env = f"CHACK_{role.upper()}_THINKING_EFFORT"
+        role_raw = str(os.environ.get(role_env, "") or "").strip()
+        settings = dict(getattr(config, field_name, {}) or {})
+        configured_raw = settings.get("thinking_effort")
+        # Environment values are explicit MCP-process overrides. Otherwise,
+        # preserve serialized per-role configuration and finally default high.
+        selected = role_raw or global_raw or configured_raw or "high"
+        settings["thinking_effort"] = normalize_thinking_effort(selected)
+        setattr(config, field_name, settings)
+
+    return config
 
 
 def _safe_identifier(name: str, used: set[str]) -> str:
@@ -201,7 +249,7 @@ def _load_toolset() -> list[Any]:
     append_tools = deserialize_tools_payload(serialized_tools_append_b64)
 
     toolset = AgentsToolset(
-        ToolsConfig(**tools_cfg_data),
+        _mcp_tools_config(tools_cfg_data),
         model_provider=model_provider,
         default_model=default_model,
         social_network_model=social_network_model,

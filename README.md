@@ -129,10 +129,17 @@ For YAML files, keep all agent settings inside a single top-level `agent` sectio
 agent:
   primary: gpt-5
   provider: openai
+  # Defaults to high for the main agent and every nested agent on every backend.
+  thinking_effort: high
   social_network: CHEAP_BUT_QUALITY
   scientific: CHEAP_BUT_QUALITY
   websearcher: CHEAP_BUT_QUALITY
   cli: CHEAP_BUT_QUALITY
+  # Optional independent effort per nested agent type.
+  scientific_thinking_effort: extra_high
+  websearcher_thinking_effort: medium
+  subchack_thinking_effort: high
+  researcher_administrator_thinking_effort: high
   max_turns: 50
   memory_max_messages: 20
   memory_reset_to_messages: 10
@@ -154,6 +161,42 @@ result = agent.run(
 )
 print(result.output)
 ```
+
+`thinking_effort` accepts `none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`/`extra_high`, and `max`. The default is `high` everywhere. Per-agent
+keys follow `<role>_thinking_effort`; supported roles are `social_network`,
+`scientific`, `websearcher`, `business`, `product`, `legal`,
+`data_statistics`, `news_media`, `knowledge_graph`, `religious`, `cli`,
+`subchack`, `researcher_administrator`, and `researcher_queue`.
+
+You can also keep a setting beside a role's other advanced options. This form
+takes precedence over the flat per-role key:
+
+```yaml
+tools:
+  scientific_agent:
+    thinking_effort: low
+  researcher_administrator_agent:
+    thinking_effort: max
+  researcher_queue_agent:
+    thinking_effort: medium
+```
+
+The runtime translates the common vocabulary to each backend's native control:
+OpenAI/OpenRouter model settings, Codex CLI config, Claude Code `--effort`,
+Copilot CLI `--reasoning-effort`, Gemini CLI model generation config, and
+LangGraph/OpenRouter request parameters. Where a backend has fewer levels,
+the nearest native level is used. Claude Code capabilities are detected from
+the installed CLI, and Gemini 2.5/3 receive their respective `thinkingBudget`
+or `thinkingLevel` control (never both).
+
+MCP-launched researchers receive the same per-role settings through the
+serialized tools configuration. A standalone/shared MCP server can set
+`CHACK_THINKING_EFFORT` for every MCP-created agent, or a role-specific value
+such as `CHACK_SCIENTIFIC_THINKING_EFFORT` or
+`CHACK_RESEARCHER_ADMINISTRATOR_THINKING_EFFORT`. Role-specific environment
+values take precedence; when nothing is configured, every MCP-created agent
+uses `high`.
 
 Optional: include `user_prompt` in YAML and let `agent.run(text="")` render it automatically.
 Template values can come from:
