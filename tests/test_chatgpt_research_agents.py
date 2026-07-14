@@ -99,3 +99,18 @@ def test_source_links_are_not_repeated_when_already_rendered_in_text():
         [{"label": "Study", "url": url}],
     )
     assert answer == f"Evidence: {url}"
+
+
+def test_running_state_accepts_stop_answering_label():
+    class Locator:
+        def __init__(self, count):
+            self._count = count
+
+        def count(self):
+            return self._count
+
+    class Page:
+        def get_by_role(self, _role, name):
+            return Locator(1 if name.search("Stop answering") else 0)
+
+    assert ChatGPTWebResearchAgentTool._is_running(Page()) is True

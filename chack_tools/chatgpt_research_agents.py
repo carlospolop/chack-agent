@@ -285,8 +285,8 @@ class ChatGPTWebResearchAgentTool:
     @staticmethod
     def _is_running(page) -> bool:
         running_patterns = (
-            re.compile(r"stop (generating|research|thinking)", re.I),
-            re.compile(r"detener (la )?(generaci[oó]n|investigaci[oó]n)", re.I),
+            re.compile(r"stop (generating|research|thinking|answering)", re.I),
+            re.compile(r"detener (la )?(generaci[oó]n|investigaci[oó]n|respuesta)", re.I),
         )
         for pattern in running_patterns:
             if page.get_by_role("button", name=pattern).count():
