@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Literal
@@ -188,12 +189,69 @@ class ChatGPTWebResearchAgentTool:
         return False
 
     @staticmethod
-    def _longest_answer(page) -> str:
+    def _clean_source_url(url: str) -> str:
+        raw = str(url or "").strip()
+        if not re.match(r"^https?://", raw, re.I):
+            return ""
+        try:
+            parts = urllib.parse.urlsplit(raw)
+            query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+            query = [(key, value) for key, value in query if key.lower() not in {"utm_source", "utm_medium", "utm_campaign"}]
+            return urllib.parse.urlunsplit(
+                (parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(query, doseq=True), parts.fragment)
+            )
+        except Exception:
+            return raw
+
+    @classmethod
+    def _append_source_links(cls, text: str, links: list[dict[str, str]]) -> str:
+        answer = str(text or "").strip()
+        sources: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for item in links or []:
+            url = cls._clean_source_url(str(item.get("url") or item.get("href") or ""))
+            if not url or url in seen or url in answer:
+                continue
+            seen.add(url)
+            label = " ".join(str(item.get("label") or item.get("text") or "Source").split())
+            sources.append((label or "Source", url))
+        if not sources:
+            return answer
+        source_block = "Source links:\n" + "\n".join(f"- {label}: {url}" for label, url in sources)
+        lines = answer.rstrip().splitlines()
+        terminal_marker = ""
+        if lines and re.fullmatch(r"[A-Z][A-Z0-9_]{5,}", lines[-1].strip()):
+            terminal_marker = lines.pop().strip()
+        combined = "\n".join(lines).rstrip() + "\n\n" + source_block
+        if terminal_marker:
+            combined += "\n\n" + terminal_marker
+        return combined.strip()
+
+    @classmethod
+    def _element_text_with_links(cls, element) -> str:
+        text = element.inner_text(timeout=3000).strip()
+        links: list[dict[str, str]] = []
+        anchors = element.locator("a[href]")
+        for index in range(anchors.count()):
+            try:
+                anchor = anchors.nth(index)
+                links.append(
+                    {
+                        "label": (anchor.inner_text(timeout=1000) or "").strip(),
+                        "url": str(anchor.get_attribute("href") or ""),
+                    }
+                )
+            except Exception:
+                continue
+        return cls._append_source_links(text, links)
+
+    @classmethod
+    def _longest_answer(cls, page) -> str:
         candidates: list[str] = []
         assistant = page.locator('[data-message-author-role="assistant"]')
         for index in range(assistant.count()):
             try:
-                text = assistant.nth(index).inner_text(timeout=3000).strip()
+                text = cls._element_text_with_links(assistant.nth(index))
                 if text:
                     candidates.append(text)
             except Exception:
@@ -217,7 +275,7 @@ class ChatGPTWebResearchAgentTool:
                     continue
                 body = frame.locator("body")
                 if body.count():
-                    text = body.inner_text(timeout=3000).strip()
+                    text = cls._element_text_with_links(body)
                     if text:
                         candidates.append(text)
             except Exception:
@@ -282,16 +340,17 @@ class ChatGPTWebResearchAgentTool:
 
         expression = r"""(()=>{
 const root=document.querySelector('#root'),doc=root?.contentDocument;
-if(!doc)return{text:'',textLen:0,buttons:[],hasStop:false,completed:false,planning:false,clickedStart:false};
+if(!doc)return{text:'',textLen:0,buttons:[],links:[],hasStop:false,completed:false,planning:false,clickedStart:false};
 const buttons=[...doc.querySelectorAll('button')];
 let clickedStart=false;
 if(CLICK_START){const start=buttons.find(b=>/^\s*(Start|Iniciar)\s*$/i.test((b.innerText||b.getAttribute('aria-label')||'')));if(start){start.click();clickedStart=true;}}
 const text=doc.body?.innerText||root?.innerText||'';
 const labels=buttons.map(b=>(b.innerText||b.getAttribute('aria-label')||'').trim()).filter(Boolean);
+const links=[...doc.querySelectorAll('a[href]')].map(a=>({label:(a.innerText||a.getAttribute('aria-label')||'Source').trim(),url:a.href||''}));
 const hasStop=labels.some(x=>/Stop research|Detener.*investigaci/i.test(x));
 const completed=/Research completed|Investigaci[oó]n completada/i.test(text)||(/\bSources\b|\bFuentes\b/i.test(text)&&text.length>1200&&!hasStop);
 const planning=labels.some(x=>/^\s*(Start|Iniciar)\s*$/i.test(x));
-return{text,textLen:text.length,buttons:labels,hasStop,completed,planning,clickedStart};
+return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,clickedStart};
 })()""".replace("CLICK_START", "true" if click_start else "false")
         with connect(websocket_url, origin=None, open_timeout=10, close_timeout=5) as websocket:
             websocket.send(
@@ -316,7 +375,10 @@ return{text,textLen:text.length,buttons:labels,hasStop,completed,planning,clicke
         stable_polls = 0
         while time.monotonic() < deadline:
             state = self._deep_connector_state(websocket_url, click_start=True)
-            answer = str(state.get("text") or "").strip()
+            answer = self._append_source_links(
+                str(state.get("text") or "").strip(),
+                list(state.get("links") or []),
+            )
             if answer and answer == previous:
                 stable_polls += 1
             else:

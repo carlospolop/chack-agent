@@ -67,3 +67,35 @@ def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
         "chatgpt-run.json",
     }
     assert (evidence / "chatgpt-pro-response.md").read_text() == "A" * 2500
+
+
+def test_source_links_are_preserved_deduplicated_and_tracking_is_removed():
+    answer = ChatGPTWebResearchAgentTool._append_source_links(
+        "Clinical synthesis.\n\nLIPEDEMA_PRO_MCP_OK",
+        [
+            {
+                "label": "Wright et al., 2023",
+                "url": "https://pubmed.ncbi.nlm.nih.gov/36519532/?utm_source=chatgpt.com",
+            },
+            {
+                "label": "Duplicate",
+                "url": "https://pubmed.ncbi.nlm.nih.gov/36519532/?utm_source=chatgpt.com",
+            },
+            {"label": "Relative UI asset", "url": "/cdn/citation"},
+        ],
+    )
+
+    assert "Source links:" in answer
+    assert answer.count("https://pubmed.ncbi.nlm.nih.gov/36519532/") == 1
+    assert "utm_source" not in answer
+    assert "/cdn/citation" not in answer
+    assert answer.endswith("LIPEDEMA_PRO_MCP_OK")
+
+
+def test_source_links_are_not_repeated_when_already_rendered_in_text():
+    url = "https://example.org/study"
+    answer = ChatGPTWebResearchAgentTool._append_source_links(
+        f"Evidence: {url}",
+        [{"label": "Study", "url": url}],
+    )
+    assert answer == f"Evidence: {url}"
