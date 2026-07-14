@@ -18,6 +18,7 @@ from chack_tools.cancellation import (
     unregister_process,
 )
 from chack_tools.researcher_administrator_agent import (
+    _ADMINISTRATOR_SYSTEM_PROMPT,
     RESEARCHER_REGISTRY,
     ResearcherAdministratorAgentTool,
     normalize_researcher_name,
@@ -31,6 +32,14 @@ def _tool_names(tools):
         str(getattr(tool, "name", "") or getattr(tool, "__name__", "") or "")
         for tool in tools
     }
+
+
+def test_chatgpt_researchers_are_never_cancelled_for_elapsed_time():
+    prompt = _ADMINISTRATOR_SYSTEM_PROMPT
+    assert "Prefer `start_researchers_async`" in prompt
+    assert "Never use `wait(..., terminate=true)`" in prompt
+    assert "configured hard timeout" in prompt
+    assert "45-90 minutes" in prompt
 
 
 def test_administrator_registered_only_when_enabled():
