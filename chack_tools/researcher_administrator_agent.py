@@ -243,6 +243,8 @@ def _async_cancel_job(job_id: str) -> dict[str, Any]:
 # Canonical registry of the researchers the administrator can orchestrate.
 # short-name -> (ToolsConfig enable attribute, exposed research tool name)
 RESEARCHER_REGISTRY: dict[str, tuple[str, str]] = {
+    "deepchatgpt": ("deepchatgpt_enabled", "deepchatgpt_researcher"),
+    "prochatgpt": ("prochatgpt_enabled", "prochatgpt_researcher"),
     "scientific": ("scientific_enabled", "scientific_research"),
     "business": ("business_enabled", "business_research"),
     "product": ("product_enabled", "product_research"),
@@ -258,6 +260,10 @@ RESEARCHER_REGISTRY: dict[str, tuple[str, str]] = {
 
 # Friendly aliases the yaml/config may use for a researcher short-name.
 _RESEARCHER_ALIASES = {
+    "deep_chatgpt": "deepchatgpt",
+    "chatgpt_deep": "deepchatgpt",
+    "pro_chatgpt": "prochatgpt",
+    "chatgpt_pro": "prochatgpt",
     "web": "websearcher",
     "webresearcher": "websearcher",
     "websearch": "websearcher",
@@ -1180,7 +1186,13 @@ class ResearcherAdministratorAgentTool:
 
     def _build_capability_tools_for_researcher(self, short: str) -> list[Any]:
         """Build the actual internal tools a researcher would receive in this run."""
-        if short == "websearcher":
+        if short == "deepchatgpt":
+            # The exposed researcher is itself the browser-backed capability; it
+            # does not spin up another Chack subagent with internal tools.
+            return []
+        elif short == "prochatgpt":
+            return []
+        elif short == "websearcher":
             from .websearcher_agent import WebSearcherAgentTool
 
             helper = WebSearcherAgentTool(
@@ -1321,6 +1333,16 @@ class ResearcherAdministratorAgentTool:
         lines: list[str] = []
         for short in enabled_researchers:
             exposed_tool = RESEARCHER_REGISTRY[short][1]
+            if short == "deepchatgpt":
+                lines.append(
+                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Web Deep Research browser launch, terminal-state monitoring, full response extraction, and artifact preservation"
+                )
+                continue
+            if short == "prochatgpt":
+                lines.append(
+                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Web Pro-mode selection, terminal-state monitoring, full response extraction, and artifact preservation"
+                )
+                continue
             try:
                 tools = self._build_capability_tools_for_researcher(short)
                 seen: set[str] = set()

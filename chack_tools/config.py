@@ -138,6 +138,14 @@ class ToolsConfig:
     cli_google_web_enabled: bool = False
     cli_agent: dict = field(default_factory=dict)
 
+    # Authenticated ChatGPT Web researchers. Both attach to the same user-managed
+    # Chrome CDP profile; each request runs in its own clean tab.
+    deepchatgpt_enabled: bool = False
+    prochatgpt_enabled: bool = False
+    chatgpt_cdp_url: str = ""
+    chatgpt_research_timeout_seconds: int = 0
+    chatgpt_research_poll_seconds: int = 15
+
     subchack_enabled: bool = False
     subchack_agent: dict = field(default_factory=dict)
 

@@ -172,6 +172,8 @@ def test_new_endpoint_tools_have_emojis():
         "search_yelp_businesses": "🍽️",
         "search_tripadvisor": "🧭",
         "cli_research": "🧪",
+        "deepchatgpt_researcher": "🔭",
+        "prochatgpt_researcher": "🧠",
         "list_research_artifacts": "📁",
         "read_research_artifact": "📄",
         "grep_research_artifacts": "🔍",

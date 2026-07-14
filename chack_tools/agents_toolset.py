@@ -163,6 +163,10 @@ from .social_network_agent import SocialNetworkAgentTool, get_social_network_res
 from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
 from .websearcher_agent import WebSearcherAgentTool, get_websearcher_research_tool
 from .cli_research_agent import CliResearchAgentTool, get_cli_research_tool
+from .chatgpt_research_agents import (
+    get_deepchatgpt_researcher_tool,
+    get_prochatgpt_researcher_tool,
+)
 from .subchack_research_agent import SubChackResearchAgentTool, get_subchack_research_tool
 from .serpapi_keys import has_serpapi_keys
 
@@ -630,6 +634,12 @@ class AgentsToolset:
                 self_critique_rounds=self.self_critique_rounds,
             )
             tools.append(get_cli_research_tool(cli_helper))
+
+        if self.config.deepchatgpt_enabled:
+            tools.append(get_deepchatgpt_researcher_tool(self.config))
+
+        if self.config.prochatgpt_enabled:
+            tools.append(get_prochatgpt_researcher_tool(self.config))
 
         if self.config.subchack_enabled:
             subchack_helper = SubChackResearchAgentTool(

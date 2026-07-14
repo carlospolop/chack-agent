@@ -297,6 +297,8 @@ class Chack:
             "religious_research": "📜",
             "subchack_researcher": "🧩",
             "cli_research": "🧪",
+            "deepchatgpt_researcher": "🔭",
+            "prochatgpt_researcher": "🧠",
             "researcher_queue_create": "🗂️",
             "researcher_queue": "📥",
             "researcher_queue_status": "📡",
