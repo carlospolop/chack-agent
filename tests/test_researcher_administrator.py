@@ -54,6 +54,29 @@ def test_administrator_registered_only_when_enabled():
     assert "researcher_administrator" in _tool_names(on.tools)
 
 
+def test_chatgpt_researchers_are_structurally_async_only():
+    cfg = ToolsConfig(
+        researcher_administrator_enabled=True,
+        deepchatgpt_enabled=True,
+        prochatgpt_enabled=True,
+        chatgpt_cdp_url="http://127.0.0.1:9226",
+    )
+    helper = ResearcherAdministratorAgentTool(
+        cfg,
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["deepchatgpt", "prochatgpt"],
+    )
+
+    inner = _tool_names(helper._build_subagent_tools(helper._enabled_researchers()))
+    assert "start_researchers_async" in inner
+    assert "poll_researchers_async" in inner
+    assert "deepchatgpt_researcher" not in inner
+    assert "prochatgpt_researcher" not in inner
+    assert "run_researchers_batch" not in inner
+    assert "cancel_researchers_async" not in inner
+
+
 def test_administrator_allowlist_force_enables_researchers():
     # business is not globally enabled but the allowlist must still grant it.
     cfg = ToolsConfig(

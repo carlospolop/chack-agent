@@ -1916,17 +1916,42 @@ class ResearcherAdministratorAgentTool:
         keep = {RESEARCHER_REGISTRY[short][1] for short in enabled_researchers}
         keep.add("task_steps_manager")
         tool_to_short = {RESEARCHER_REGISTRY[short][1]: short for short in enabled_researchers}
-        tools = []
+        all_tools = []
         for tool in (getattr(toolset, "tools", []) or []):
             name = self._name_of_tool(tool)
             if name not in keep:
                 continue
             if name in tool_to_short:
                 tool = self._guard_researcher_tool(tool, tool_to_short[name])
-            tools.append(tool)
-        tools_by_name = {self._name_of_tool(tool): tool for tool in tools}
-        tools.append(self._build_batch_tool(tools_by_name, enabled_researchers))
-        tools.extend(self._build_async_tools(tools_by_name, enabled_researchers))
+            all_tools.append(tool)
+
+        tools_by_name = {self._name_of_tool(tool): tool for tool in all_tools}
+        long_browser_researchers = {"deepchatgpt", "prochatgpt"}.intersection(enabled_researchers)
+        synchronous_researchers = [short for short in enabled_researchers if short not in long_browser_researchers]
+        synchronous_tool_names = {RESEARCHER_REGISTRY[short][1] for short in synchronous_researchers}
+
+        # ChatGPT Pro/Deep can run for 45-90 minutes. Never expose those direct
+        # blocking tools (or a synchronous batch containing them) to the Codex
+        # administrator, because Codex execution cells can be manually terminated
+        # before the researcher reaches terminal output. Keep the direct tools
+        # private inside the async wrapper and expose only start + poll. Also omit
+        # cancellation for a job containing browser researchers; the outer user or
+        # configured hard timeout remains the authoritative cancellation boundary.
+        tools = [
+            tool for tool in all_tools
+            if self._name_of_tool(tool) == "task_steps_manager"
+            or self._name_of_tool(tool) in synchronous_tool_names
+        ]
+        if synchronous_researchers:
+            synchronous_tools = {
+                name: tool for name, tool in tools_by_name.items()
+                if name in synchronous_tool_names
+            }
+            tools.append(self._build_batch_tool(synchronous_tools, synchronous_researchers))
+        async_tools = self._build_async_tools(tools_by_name, enabled_researchers)
+        if long_browser_researchers:
+            async_tools = [tool for tool in async_tools if self._name_of_tool(tool) != "cancel_researchers_async"]
+        tools.extend(async_tools)
         add_research_artifact_tools(tools, self.config)
         return tools
 
@@ -1978,18 +2003,7 @@ class ResearcherAdministratorAgentTool:
             subfolder = os.path.join(master_dir, short)
             os.makedirs(subfolder, exist_ok=True)
             layout_lines.append(f"- {short}: {subfolder}")
-        available_line = ", ".join(
-            [RESEARCHER_REGISTRY[s][1] for s in enabled_researchers]
-            + [
-                "run_researchers_batch",
-                "start_researchers_async",
-                "poll_researchers_async",
-                "cancel_researchers_async",
-                "list_research_artifacts",
-                "read_research_artifact",
-                "grep_research_artifacts",
-            ]
-        )
+        available_line = ", ".join(self._name_of_tool(tool) for tool in tools)
         capability_lines = self._researcher_capability_lines(enabled_researchers)
         admin_tool_budget = max(0, int(getattr(self.config, "researcher_administrator_max_tools_used", 0) or 0))
         admin_runtime_tool_cap = (admin_tool_budget * 4 + 8) if admin_tool_budget > 0 else 0
