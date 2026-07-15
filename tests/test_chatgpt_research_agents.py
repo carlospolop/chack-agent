@@ -51,7 +51,7 @@ def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(
         helper,
         "_browser_research",
-        lambda _prompt: (
+        lambda _prompt, **_kwargs: (
             "A" * 2500,
             "https://chatgpt.com/c/test-conversation",
             {"mode": "pro", "terminal_state": "extracted", "answer_chars": 2500},
@@ -162,3 +162,82 @@ def test_running_state_accepts_stop_answering_label():
             return Locator(1 if name.search("Stop answering") else 0)
 
     assert ChatGPTWebResearchAgentTool._is_running(Page()) is True
+
+
+def test_running_state_accepts_answer_now_label():
+    class Locator:
+        def count(self):
+            return 1
+
+    class Page:
+        def get_by_role(self, _role, name):
+            return Locator() if name.search("Answer now") else type("Empty", (), {"count": lambda self: 0})()
+
+    assert ChatGPTWebResearchAgentTool._is_running(Page()) is True
+
+
+def test_pro_timeout_forces_answer_now_and_extracts_stable_result(monkeypatch, tmp_path):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(
+            chatgpt_research_timeout_seconds=60,
+            chatgpt_research_poll_seconds=2,
+            chatgpt_force_answer_grace_seconds=60,
+        ),
+        mode="pro",
+    )
+    ticks = iter([0.0, 61.0, 61.0, 62.0, 62.0, 63.0, 63.0])
+    clicked = []
+
+    class Page:
+        url = "https://chatgpt.com/c/forced-answer"
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: clicked.append(True) or True)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: "R" * 300)
+    monkeypatch.setattr(helper, "_is_running", lambda _page: False)
+    run_state = tmp_path / "chatgpt-run.json"
+    partial = tmp_path / "partial.md"
+
+    answer = helper._wait_and_extract(Page(), partial_path=partial, run_state_path=run_state)
+
+    assert answer == "R" * 300
+    assert clicked == [True]
+    assert partial.read_text() == "R" * 300
+    assert json.loads(run_state.read_text())["forced_answer"] is True
+
+
+def test_failed_run_preserves_partial_response_and_conversation_url(monkeypatch, tmp_path):
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="pro")
+    evidence = tmp_path / "evidence"
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.create_subagent_evidence_dir",
+        lambda *_args, **_kwargs: str(evidence),
+    )
+
+    def fail_after_partial(_prompt, *, run_state_path, partial_path):
+        helper._write_json(
+            run_state_path,
+            {
+                "mode": "pro",
+                "terminal_state": "timeout",
+                "conversation_url": "https://chatgpt.com/c/recoverable",
+            },
+        )
+        partial_path.write_text("Recovered partial evidence", encoding="utf-8")
+        raise RuntimeError("browser deadline")
+
+    monkeypatch.setattr(helper, "_browser_research", fail_after_partial)
+    payload = json.loads(helper._run_single("P" * 500, save_artifacts=True))
+
+    assert payload["research_worked"] is False
+    assert payload["partial_result"] is True
+    assert payload["final_research_review"] == "Recovered partial evidence"
+    assert {row["filename"] for row in payload["key_artifacts"]} == {
+        "chatgpt-run.json",
+        "chatgpt-request.md",
+        "chatgpt-pro-partial.md",
+    }
+    assert all(row["source_url"] == "https://chatgpt.com/c/recoverable" for row in payload["key_artifacts"])

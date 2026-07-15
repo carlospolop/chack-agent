@@ -145,6 +145,7 @@ class ToolsConfig:
     chatgpt_cdp_url: str = ""
     chatgpt_research_timeout_seconds: int = 0
     chatgpt_research_poll_seconds: int = 15
+    chatgpt_force_answer_grace_seconds: int = 300
 
     subchack_enabled: bool = False
     subchack_agent: dict = field(default_factory=dict)

@@ -73,6 +73,63 @@ class ChatGPTWebResearchAgentTool:
         configured = int(getattr(self.config, "chatgpt_research_poll_seconds", 0) or 0)
         return max(2, configured or 15)
 
+    def _force_answer_grace_seconds(self) -> int:
+        configured = int(getattr(self.config, "chatgpt_force_answer_grace_seconds", 0) or 0)
+        return max(60, configured or 300)
+
+    @staticmethod
+    def _write_json(path: Path | None, payload: dict[str, Any]) -> None:
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            merged: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    existing = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(existing, dict):
+                        merged.update(existing)
+                except Exception:
+                    pass
+            merged.update(payload)
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _write_partial(path: Path | None, text: str) -> None:
+        if path is None or not text:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(text, encoding="utf-8")
+            temporary.replace(path)
+        except Exception:
+            pass
+
+    def _emit_progress(self, stage: str, *, answer_chars: int = 0, running: bool = True, forced_answer: bool = False) -> None:
+        """Refresh async-job activity without counting a new researcher tool call."""
+        callback = current_log_context().get("_chack_tool_progress_callback")
+        if not callable(callback):
+            return
+        try:
+            callback(
+                "research_progress",
+                {
+                    "tool": self.tool_name,
+                    "tool_start_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "stage": stage,
+                    "answer_chars": int(answer_chars or 0),
+                    "running": bool(running),
+                    "forced_answer": bool(forced_answer),
+                },
+            )
+        except Exception:
+            pass
+
     @staticmethod
     def _composer(page):
         selectors = (
@@ -310,10 +367,31 @@ class ChatGPTWebResearchAgentTool:
         return max(candidates, key=len, default="").strip()
 
     @staticmethod
+    def _click_answer_now_if_present(page) -> bool:
+        patterns = (
+            re.compile(r"^\s*Answer now\s*$", re.I),
+            re.compile(r"^\s*Responder ahora\s*$", re.I),
+            re.compile(r"^\s*Answer with current findings\s*$", re.I),
+        )
+        for pattern in patterns:
+            buttons = page.get_by_role("button", name=pattern)
+            for index in range(buttons.count()):
+                try:
+                    button = buttons.nth(index)
+                    if button.is_visible() and button.is_enabled():
+                        button.click(timeout=5000)
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    @staticmethod
     def _is_running(page) -> bool:
         running_patterns = (
             re.compile(r"stop (generating|research|thinking|answering)", re.I),
             re.compile(r"detener (la )?(generaci[oó]n|investigaci[oó]n|respuesta)", re.I),
+            re.compile(r"^\s*Answer now\s*$", re.I),
+            re.compile(r"^\s*Responder ahora\s*$", re.I),
         )
         for pattern in running_patterns:
             if page.get_by_role("button", name=pattern).count():
@@ -395,11 +473,18 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         except (KeyError, TypeError) as exc:
             raise ChatGPTWebResearchError(f"Could not evaluate the Deep Research connector target: {raw}") from exc
 
-    def _wait_and_extract_deep(self, connector: dict[str, Any]) -> str:
+    def _wait_and_extract_deep(
+        self,
+        connector: dict[str, Any],
+        *,
+        partial_path: Path | None = None,
+        run_state_path: Path | None = None,
+    ) -> str:
         websocket_url = str(connector.get("webSocketDebuggerUrl") or "")
         deadline = time.monotonic() + self._timeout_seconds()
         previous = ""
         stable_polls = 0
+        last_progress_at = 0.0
         while time.monotonic() < deadline:
             state = self._deep_connector_state(websocket_url, click_start=True)
             answer = self._append_source_links(
@@ -411,6 +496,24 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             else:
                 previous = answer
                 stable_polls = 0
+                self._write_partial(partial_path, answer)
+            now = time.monotonic()
+            if now - last_progress_at >= 60:
+                self._emit_progress(
+                    "waiting_for_deep_research",
+                    answer_chars=len(answer),
+                    running=bool(state.get("hasStop") or not state.get("completed")),
+                )
+                last_progress_at = now
+            self._write_json(
+                run_state_path,
+                {
+                    "mode": self.mode,
+                    "terminal_state": "running",
+                    "updated_at": time.time(),
+                    "answer_chars": len(answer),
+                },
+            )
             if bool(state.get("completed")) and not bool(state.get("hasStop")) and len(answer) >= 1200 and stable_polls >= 1:
                 return answer
             time.sleep(self._poll_seconds())
@@ -418,11 +521,48 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             f"ChatGPT deep request did not reach an extractable terminal state within {self._timeout_seconds()} seconds."
         )
 
-    def _wait_and_extract(self, page) -> str:
+    def _wait_and_extract(
+        self,
+        page,
+        *,
+        partial_path: Path | None = None,
+        run_state_path: Path | None = None,
+    ) -> str:
         deadline = time.monotonic() + self._timeout_seconds()
         previous = ""
         stable_polls = 0
-        while time.monotonic() < deadline:
+        last_progress_at = 0.0
+        forced_answer = False
+        force_baseline = ""
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                if self.mode == "pro" and not forced_answer and self._click_answer_now_if_present(page):
+                    forced_answer = True
+                    force_baseline = previous
+                    stable_polls = 0
+                    deadline = now + self._force_answer_grace_seconds()
+                    self._emit_progress(
+                        "forced_answer_requested",
+                        answer_chars=len(previous),
+                        running=True,
+                        forced_answer=True,
+                    )
+                    self._write_json(
+                        run_state_path,
+                        {
+                            "mode": self.mode,
+                            "terminal_state": "forcing_answer",
+                            "updated_at": time.time(),
+                            "answer_chars": len(previous),
+                            "forced_answer": True,
+                        },
+                    )
+                else:
+                    raise ChatGPTWebResearchError(
+                        f"ChatGPT {self.mode} request did not reach an extractable terminal state within "
+                        f"{self._timeout_seconds()} seconds plus a {self._force_answer_grace_seconds() if forced_answer else 0}-second answer grace period."
+                    )
             if self.mode == "deep":
                 self._click_deep_start_if_present(page)
             answer = self._longest_answer(page)
@@ -432,23 +572,62 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             else:
                 stable_polls = 0
                 previous = answer
-            # Two identical polls plus no stop control avoids saving a streaming
-            # partial answer. Deep reports need a larger minimum than Pro answers.
+                self._write_partial(partial_path, answer)
+            now = time.monotonic()
+            if now - last_progress_at >= 60:
+                self._emit_progress(
+                    "waiting_for_forced_answer" if forced_answer else "waiting_for_chatgpt",
+                    answer_chars=len(answer),
+                    running=running,
+                    forced_answer=forced_answer,
+                )
+                last_progress_at = now
+            self._write_json(
+                run_state_path,
+                {
+                    "mode": self.mode,
+                    "terminal_state": "forcing_answer" if forced_answer else "running",
+                    "conversation_url": str(getattr(page, "url", "") or ""),
+                    "updated_at": time.time(),
+                    "answer_chars": len(answer),
+                    "running": running,
+                    "forced_answer": forced_answer,
+                },
+            )
+            # Two identical polls plus no running control avoids saving a streaming
+            # partial answer. After forcing, require material growth beyond the
+            # pre-force acknowledgement before accepting a stable terminal answer.
             min_chars = 1200 if self.mode == "deep" else 200
-            if len(answer) >= min_chars and not running and stable_polls >= 2:
+            changed_after_force = (
+                not forced_answer
+                or (answer != force_baseline and len(answer) >= max(min_chars, len(force_baseline) + 100))
+            )
+            if len(answer) >= min_chars and changed_after_force and not running and stable_polls >= 2:
                 return answer
             page.wait_for_timeout(self._poll_seconds() * 1000)
-        raise ChatGPTWebResearchError(
-            f"ChatGPT {self.mode} request did not reach an extractable terminal state within {self._timeout_seconds()} seconds."
-        )
 
-    def _browser_research(self, prompt: str) -> tuple[str, str, dict[str, Any]]:
+    def _browser_research(
+        self,
+        prompt: str,
+        *,
+        run_state_path: Path | None = None,
+        partial_path: Path | None = None,
+    ) -> tuple[str, str, dict[str, Any]]:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:  # pragma: no cover - packaging error
             raise ChatGPTWebResearchError("Playwright is required for ChatGPT Web researchers.") from exc
 
         started_at = time.time()
+        self._write_json(
+            run_state_path,
+            {
+                "mode": self.mode,
+                "started_at": started_at,
+                "terminal_state": "launching",
+                "answer_chars": 0,
+            },
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(self._cdp_url(), timeout=30000)
             if not browser.contexts:
@@ -480,6 +659,20 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     self._select_pro(page)
                 self._send(page, prompt)
                 page.wait_for_timeout(1000)
+                try:
+                    page.wait_for_url(re.compile(r"https://chatgpt\.com/c/"), timeout=30000)
+                except Exception:
+                    pass
+                conversation_url = str(page.url or "")
+                self._write_json(
+                    run_state_path,
+                    {
+                        "terminal_state": "running",
+                        "conversation_url": conversation_url,
+                        "updated_at": time.time(),
+                    },
+                )
+                self._emit_progress("browser_research_started", running=True)
                 if self.mode == "deep":
                     cdp_session = page.context.new_cdp_session(page)
                     try:
@@ -487,20 +680,45 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     finally:
                         cdp_session.detach()
                     connector = self._deep_connector_target(str(target_info.get("targetId") or ""))
-                    answer = self._wait_and_extract_deep(connector)
                     conversation_url = self._target_url(str(connector.get("parentId") or ""), page.url)
+                    self._write_json(run_state_path, {"conversation_url": conversation_url})
+                    answer = self._wait_and_extract_deep(
+                        connector,
+                        partial_path=partial_path,
+                        run_state_path=run_state_path,
+                    )
                 else:
-                    answer = self._wait_and_extract(page)
+                    answer = self._wait_and_extract(
+                        page,
+                        partial_path=partial_path,
+                        run_state_path=run_state_path,
+                    )
                     conversation_url = page.url
-                url = conversation_url
-                return answer, url, {
+                metadata = {
                     "mode": self.mode,
-                    "conversation_url": url,
+                    "conversation_url": conversation_url,
                     "started_at": started_at,
                     "finished_at": time.time(),
                     "answer_chars": len(answer),
                     "terminal_state": "extracted",
                 }
+                self._write_json(run_state_path, metadata)
+                self._emit_progress("answer_extracted", answer_chars=len(answer), running=False)
+                return answer, conversation_url, metadata
+            except Exception as exc:
+                state = "timeout" if "did not reach an extractable terminal state" in str(exc) else "error"
+                self._write_json(
+                    run_state_path,
+                    {
+                        "mode": self.mode,
+                        "conversation_url": str(getattr(page, "url", "") or ""),
+                        "finished_at": time.time(),
+                        "terminal_state": state,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+                self._emit_progress(state, running=False)
+                raise
             finally:
                 try:
                     page.close()
@@ -512,13 +730,24 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         evidence_dir = create_subagent_evidence_dir(self.tool_name, str(ctx.get("session_id") or current_session_id() or ""))
         root = Path(evidence_dir)
         root.mkdir(parents=True, exist_ok=True)
+        run_state_path = root / "chatgpt-run.json"
+        partial_path = root / f"chatgpt-{self.mode}-partial.md"
+        request_path = root / "chatgpt-request.md"
+        request_path.write_text(prompt, encoding="utf-8")
         metadata: dict[str, Any] = {"mode": self.mode, "terminal_state": "error"}
         try:
-            answer, conversation_url, metadata = self._browser_research(prompt)
+            answer, conversation_url, metadata = self._browser_research(
+                prompt,
+                run_state_path=run_state_path,
+                partial_path=partial_path,
+            )
             filename = f"chatgpt-{self.mode}-response.md"
             (root / filename).write_text(answer, encoding="utf-8")
-            (root / "chatgpt-request.md").write_text(prompt, encoding="utf-8")
-            (root / "chatgpt-run.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+            try:
+                partial_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            self._write_json(run_state_path, metadata)
             payload: dict[str, Any] = {
                 "research_worked": True,
                 "failure_reason": "",
@@ -548,22 +777,54 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 ]
             return _compact(payload)
         except Exception as exc:
-            metadata.update({"finished_at": time.time(), "error": f"{type(exc).__name__}: {exc}"})
             try:
-                root.mkdir(parents=True, exist_ok=True)
-                (root / "chatgpt-run.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+                existing = json.loads(run_state_path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    metadata.update(existing)
             except Exception:
                 pass
+            metadata.update({"finished_at": time.time(), "error": f"{type(exc).__name__}: {exc}"})
+            if str(metadata.get("terminal_state") or "") not in {"timeout", "forcing_answer"}:
+                metadata["terminal_state"] = "error"
+            self._write_json(run_state_path, metadata)
+            partial_review = ""
+            try:
+                if partial_path.exists():
+                    partial_review = partial_path.read_text(encoding="utf-8").strip()
+            except Exception:
+                partial_review = ""
+            source_url = str(metadata.get("conversation_url") or "")
+            failure_artifacts: list[dict[str, str]] = []
+            if save_artifacts:
+                failure_artifacts.extend(
+                    [
+                        {
+                            "filename": "chatgpt-run.json",
+                            "source_url": source_url,
+                            "description": "Terminal failure metadata including the recoverable ChatGPT conversation URL, timestamps, last progress state, and extraction error.",
+                        },
+                        {
+                            "filename": "chatgpt-request.md",
+                            "source_url": source_url,
+                            "description": "Exact prompt submitted before browser launch, retained even if the browser worker times out.",
+                        },
+                    ]
+                )
+                if partial_review:
+                    failure_artifacts.append(
+                        {
+                            "filename": partial_path.name,
+                            "source_url": source_url,
+                            "description": "Latest incrementally saved ChatGPT response text recovered before the terminal failure.",
+                        }
+                    )
             payload = {
                 "research_worked": False,
                 "failure_reason": str(exc),
-                "final_research_review": "",
+                "final_research_review": partial_review,
+                "partial_result": bool(partial_review),
                 "evidence_data_path": evidence_dir if save_artifacts else "",
-                "key_artifacts": ([{
-                    "filename": "chatgpt-run.json",
-                    "source_url": "",
-                    "description": "Terminal failure metadata for the ChatGPT Web research attempt, retained so the launch or extraction problem can be audited and retried.",
-                }] if save_artifacts else []),
+                "key_artifacts": failure_artifacts,
                 "tool_call_counts": {"chatgpt_web": 1},
                 "total_tool_calls": 1,
             }

@@ -317,7 +317,7 @@ def test_administrator_prompt_includes_compact_tool_map_and_usage_audit(monkeypa
     assert "try-harder self-critique for 2 round(s)" in sent_prompt
     assert "start_researchers_async" in sent_prompt
     assert "poll_researchers_async" in sent_prompt
-    assert "wait_seconds=30-60" in sent_prompt
+    assert "ChatGPT Pro/Deep use 300-600 seconds" in sent_prompt
     assert "recent_events" in sent_prompt
     assert "idle_seconds" in sent_prompt
     assert "cancel_researchers_async" in sent_prompt
@@ -618,20 +618,18 @@ def test_administrator_async_research_tools_start_and_poll():
     assert "one at a time" in started["next_step"]
     job_id = started["job_id"]
 
-    payload = {}
-    for _ in range(20):
-        polled = helper._invoke_tool_sync(
-            by_name["poll_researchers_async"],
-            {"job_id": job_id, "include_outputs": False, "wait_seconds": 0},
-        )
-        payload = json.loads(polled)
-        if payload.get("complete"):
-            break
-        time.sleep(0.05)
+    poll_started = time.monotonic()
+    polled = helper._invoke_tool_sync(
+        by_name["poll_researchers_async"],
+        {"job_id": job_id, "include_outputs": False, "wait_seconds": 900},
+    )
+    poll_elapsed = time.monotonic() - poll_started
+    payload = json.loads(polled)
 
     assert payload["complete"] is True
+    assert poll_elapsed < 2
     assert "next_step" in payload
-    assert payload["waited_seconds"] == 0
+    assert payload["waited_seconds"] == 900
     task = payload["tasks"][0]
     assert task["status"] == "done"
     assert "idle_seconds" in task

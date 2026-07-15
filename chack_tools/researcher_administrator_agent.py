@@ -79,6 +79,16 @@ def _async_job_snapshot(job_id: str) -> dict[str, Any] | None:
         }
 
 
+def _async_wait_for_completion(job_id: str, timeout_seconds: int) -> bool:
+    """Wait for a whole async job, returning early when every task is terminal."""
+    with _ASYNC_RESEARCH_LOCK:
+        job = _ASYNC_RESEARCH_JOBS.get(str(job_id or "").strip())
+        event = (job or {}).get("completion_event")
+    if not isinstance(event, threading.Event):
+        return False
+    return event.wait(timeout=max(0, int(timeout_seconds or 0)))
+
+
 def _async_submit(fn, *args):
     return _ASYNC_RESEARCH_EXECUTOR.submit(fn, *args)
 
@@ -179,6 +189,7 @@ def _async_mark_task_done(job_id: str, task_id: str, future: Any) -> None:
         error = f"{type(exc).__name__}: {exc}"
     evidence_dir = ""
     tool_name = ""
+    completion_event = None
     with _ASYNC_RESEARCH_LOCK:
         job = _ASYNC_RESEARCH_JOBS.get(job_id)
         task = job["tasks"].get(task_id) if job else None
@@ -193,6 +204,13 @@ def _async_mark_task_done(job_id: str, task_id: str, future: Any) -> None:
                 task["error"] = error
             if result:
                 task["result"] = result
+        if job and (job.get("tasks") or {}) and all(
+            str(row.get("status") or "") in {"done", "error", "cancelled"}
+            for row in (job.get("tasks") or {}).values()
+        ):
+            completion_event = job.get("completion_event")
+    if isinstance(completion_event, threading.Event):
+        completion_event.set()
     if status == "done" and result:
         _persist_async_researcher_output(evidence_dir, task_id, tool_name, result)
 
@@ -328,7 +346,7 @@ _ADMINISTRATOR_SYSTEM_PROMPT = """### RULES
 - Only launch researcher tools that are actually available in this run's capability map. If the user requested a source family whose researcher is not enabled, record it as a coverage gap instead of attempting an unavailable tool.
 - Do not launch researchers that are not materially related to the topic. For example, a normal question about a famous football player likely needs web/news/social/business/entity research, not scientific or religious research unless the user specifically asks for those angles.
 - In that first wave, prefer breadth over repeating one researcher type: normally run 3-5 different relevant researcher types before relaunching the same type, unless the request is genuinely narrow.
-- `run_researchers_batch` and `start_researchers_async` can queue several relevant researchers, but this in-process tool server executes them one at a time to keep evidence folders isolated and auditable. Use async when a researcher may take a long time and you want to poll progress, cross-pollinate leads, or cancel stalled/no-longer-useful work. After any async launch, immediately poll once, then use `poll_researchers_async(wait_seconds=30-60)` between follow-up decisions instead of rapid-polling. Queued async tasks may need a few minutes to start because child Codex/Claude sessions and MCP tools initialize; do not declare research failure merely because tasks are still queued/running for only a minute or two unless runtime is nearly exhausted. Reserve the final third of runtime for synthesis: cancel or stop waiting on slow tasks once enough evidence exists to answer with explicit gaps.
+- `run_researchers_batch` and `start_researchers_async` can queue several relevant researchers, but this in-process tool server executes them one at a time to keep evidence folders isolated and auditable. Use async when a researcher may take a long time and you want to poll progress, cross-pollinate leads, or cancel stalled/no-longer-useful work. After any async launch, immediately poll once. For ordinary researchers use `poll_researchers_async(wait_seconds=30-120)`; for ChatGPT Pro/Deep browser jobs use completion-aware long polls of 300-600 seconds. The wait returns early when the job completes, so never burn one tool call per minute for an hour. Queued async tasks may need a few minutes to start because child Codex/Claude sessions and MCP tools initialize; do not declare research failure merely because tasks are still queued/running for only a minute or two unless runtime is nearly exhausted. Reserve the final third of runtime for synthesis: cancel or stop waiting on slow tasks once enough evidence exists to answer with explicit gaps.
 - ChatGPT `deepchatgpt_researcher` and `prochatgpt_researcher` are an exception to the normal "reserve the final third" rule because they are legitimately long-running browser jobs. Prefer `start_researchers_async` plus `poll_researchers_async` for them. If a direct invocation is already running in an execution cell, keep waiting in long intervals until it returns, reports a terminal error, or reaches the configured hard runtime limit. Never use `wait(..., terminate=true)`, `cancel_researchers_async`, or any process-kill action merely because a ChatGPT researcher has run for many minutes or appears to be finalizing; Pro and Deep Research may take 45-90 minutes. Cancellation is only valid after an explicit user cancellation, a proven terminal browser/tool error, or the configured hard timeout. A running job with an enabled stop control or continuing progress is not stalled.
 - You may launch as many researcher runs as needed, including several runs of the same researcher type with different or more focused prompts, so that no source or angle is missed.
 - Every sub-researcher runs blind to the others. After each batch returns, review the conclusions and cross-pollinate: if one researcher surfaced leads that belong to another domain (e.g. the web researcher found papers the scientific researcher never checked, or a company the business researcher should verify), launch that other researcher again with the new leads. When you suggest a researcher lean harder on specific tools/sources, say so explicitly in its prompt.
@@ -1604,7 +1622,7 @@ class ResearcherAdministratorAgentTool:
                 input_keys = sorted(str(key) for key in tool_input.keys())
             else:
                 input_keys = []
-            event = {
+            event: dict[str, Any] = {
                 "event": str(event_type or ""),
                 "tool": str(payload.get("tool") or ""),
                 "ts": str(payload.get("tool_start_ts") or payload.get("tool_end_ts") or ""),
@@ -1615,6 +1633,9 @@ class ResearcherAdministratorAgentTool:
                 event["duration_ms"] = int(payload.get("duration_ms") or 0)
             if payload.get("error"):
                 event["error"] = str(payload.get("error") or "")[:300]
+            for key in ("stage", "answer_chars", "running", "forced_answer"):
+                if payload.get(key) is not None:
+                    event[key] = payload.get(key)
             return event
 
         def _record_progress(job_id: str, task_id: str, event_type: str, payload: dict[str, Any]) -> None:
@@ -1716,6 +1737,7 @@ class ResearcherAdministratorAgentTool:
                 "max_parallel": parallel_limit,
                 "evidence_dir": os.environ.get("CHACK_RESEARCH_MASTER_DIR", "").strip()
                 or os.environ.get("CHACK_RESEARCH_DATA_DIR", "").strip(),
+                "completion_event": threading.Event(),
                 "tasks": {},
             }
             task_rows: list[dict[str, str]] = []
@@ -1761,8 +1783,9 @@ class ResearcherAdministratorAgentTool:
                     "errors": errors,
                     "max_parallel": parallel_limit,
                     "next_step": (
-                        "Call poll_researchers_async with this job_id immediately, then poll with "
-                        "wait_seconds=30-60 while planning. Tasks run one at a time in this process "
+                        "Call poll_researchers_async with this job_id immediately. Then use completion-aware "
+                        "wait_seconds=300-600 for ChatGPT Pro/Deep jobs, or 30-120 for ordinary researchers. "
+                        "The wait returns early on completion. Tasks run one at a time in this process "
                         "to keep evidence folders isolated; queued/running for 1-2 minutes can be normal. "
                         "Cancel only when stale, irrelevant, or near the runtime limit."
                     ),
@@ -1777,19 +1800,19 @@ class ResearcherAdministratorAgentTool:
                 job_id: The id returned by start_researchers_async.
                 include_outputs: If true, include raw output/parsed JSON for completed tasks.
                     If false, return only compact status, tool counts, errors, and timings.
-                wait_seconds: Optional seconds to wait before polling, clamped to 0-120.
-                    Use 30-60 seconds when tasks are queued/starting/running and you need
-                    to give child Codex/Claude sessions time to initialize or progress
-                    without spending many rapid-poll LLM turns.
+                wait_seconds: Optional completion-aware seconds to wait before polling,
+                    clamped to 0-900. Use 300-600 for ChatGPT Pro/Deep browser jobs and
+                    30-120 for ordinary researchers. The call returns early when every
+                    task reaches a terminal state.
 
             Output: Compact JSON with job status, per-task status/latest_action/timing, and
             elapsed_seconds, idle_seconds since the last observed event, recent tool
             events/live call counts while running, plus completed researcher
             results/tool_call_counts when available.
             """
-            wait = max(0, min(int(wait_seconds or 0), 120))
+            wait = max(0, min(int(wait_seconds or 0), 900))
             if wait:
-                time.sleep(wait)
+                _async_wait_for_completion(str(job_id or "").strip(), wait)
             job = _async_job_snapshot(str(job_id or "").strip())
             if not job:
                 return _compact_json({"job_found": False, "job_id": job_id, "error": "Unknown async researcher job id."})
@@ -1825,15 +1848,23 @@ class ResearcherAdministratorAgentTool:
                     row["recent_events"] = recent_events[-10:]
                 tasks.append(row)
             statuses = [str(t.get("status") or "") for t in tasks]
+            has_browser_researcher = any(
+                str(t.get("researcher_tool") or "") in {"deepchatgpt_researcher", "prochatgpt_researcher"}
+                for t in tasks
+            )
             complete = bool(tasks) and all(s in {"done", "error", "cancelled"} for s in statuses)
             if complete:
                 next_step = "Review completed researcher outputs/tool counts, then synthesize or launch focused follow-ups if material gaps remain."
             elif any(s == "running" for s in statuses):
-                next_step = "Some researchers are running. Continue polling with wait_seconds=30-60; cancel only duplicated, clearly stalled, or no-longer-useful tasks."
+                next_step = (
+                    "Some researchers are running. Continue with completion-aware wait_seconds=300-600; cancel only duplicated, clearly stalled, or no-longer-useful tasks."
+                    if has_browser_researcher else
+                    "Some researchers are running. Continue polling with wait_seconds=30-120; cancel only duplicated, clearly stalled, or no-longer-useful tasks."
+                )
             elif any(s == "queued" for s in statuses):
-                next_step = "Researchers are still queued/starting. This can take a few minutes while Codex/Claude child sessions and MCP tools initialize; keep polling with wait_seconds=30-60 unless runtime is nearly exhausted."
+                next_step = "Researchers are still queued/starting. This can take a few minutes while child sessions initialize; use completion-aware waiting unless runtime is nearly exhausted."
             else:
-                next_step = "No completed outputs yet. Keep polling with wait_seconds=30-60 or cancel failed/stale tasks if runtime is nearly exhausted."
+                next_step = "No completed outputs yet. Keep using completion-aware polling or cancel failed/stale tasks if runtime is nearly exhausted."
             return _compact_json(
                 {
                     "job_found": True,
@@ -2031,7 +2062,7 @@ class ResearcherAdministratorAgentTool:
             + "\n".join(capability_lines)
             + "\nUse run_researchers_batch only for small, obviously short queued batches where waiting for every researcher is acceptable. "
             "This in-process server executes child researchers one at a time to keep evidence folders isolated. For broad, slow, multi-domain, or preserved-artifact runs, prefer start_researchers_async plus poll_researchers_async so you can monitor progress, cross-pollinate partial leads, and cancel stalled or no-longer-useful work. "
-            "After any async launch, immediately poll once, then use poll_researchers_async(wait_seconds=30-60) between decisions instead of rapid-polling. Queued async tasks may need a few minutes to start because child Codex/Claude sessions and MCP tools initialize; do not declare failure merely because all tasks are still queued/running for only a minute or two unless runtime is nearly exhausted. Reserve the final third of runtime for synthesis: cancel unfinished slow tasks once completed evidence is sufficient, and answer with explicit gaps rather than timing out without conclusions. "
+            "After any async launch, immediately poll once. For ordinary researchers use completion-aware waits of 30-120 seconds; for ChatGPT Pro/Deep use 300-600 seconds. The poll returns early on completion, so never spend one management tool call per minute for a long browser job. Queued async tasks may need a few minutes to start because child sessions and MCP tools initialize; do not declare failure merely because all tasks are still queued/running for only a minute or two unless runtime is nearly exhausted. Reserve the final third of runtime for synthesis: cancel unfinished slow tasks once completed evidence is sufficient, and answer with explicit gaps rather than timing out without conclusions. "
             "When artifacts are preserved, inspect the master folder with list_research_artifacts, grep_research_artifacts, or read_research_artifact before declaring that no evidence was collected or that a researcher made no progress; files can appear even when live telemetry is sparse. "
             "For cost and latency control, start with the smallest set of clearly relevant researchers that can cover the task; because execution is serialized, the first wave should usually be 1-2 researchers, and 3 only for broad questions with enough runtime. "
             "Once half the runtime is gone, prefer synthesizing from completed results plus explicit gaps instead of launching more researchers. "
