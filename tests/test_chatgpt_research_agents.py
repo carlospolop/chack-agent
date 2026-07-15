@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from chack_tools.agents_toolset import AgentsToolset
@@ -67,6 +68,25 @@ def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
         "chatgpt-run.json",
     }
     assert (evidence / "chatgpt-pro-response.md").read_text() == "A" * 2500
+
+
+def test_deep_research_counter_noise_is_removed_without_touching_normal_numbered_answers():
+    noisy = (
+        "Research completed in 8m ·\n"
+        + "\n".join(str(i % 10) for i in range(30))
+        + "\n citations · \nsearches\nExecutive summary\nSubstantive evidence.\n1\n\n"
+        + "LIPEDEMA_DEEP_MCP_OK"
+    )
+    cleaned = ChatGPTWebResearchAgentTool._clean_extracted_text(noisy)
+    assert "Executive summary" in cleaned
+    assert "Substantive evidence." in cleaned
+    assert "LIPEDEMA_DEEP_MCP_OK" in cleaned
+    assert "citations ·" not in cleaned
+    assert "searches" not in cleaned
+    assert not re.search(r"(?m)^\d$", cleaned)
+
+    normal = "1\nFirst finding\n2\nSecond finding"
+    assert ChatGPTWebResearchAgentTool._clean_extracted_text(normal) == normal
 
 
 def test_source_links_are_preserved_deduplicated_and_tracking_is_removed():

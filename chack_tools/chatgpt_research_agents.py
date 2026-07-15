@@ -227,9 +227,36 @@ class ChatGPTWebResearchAgentTool:
             combined += "\n\n" + terminal_marker
         return combined.strip()
 
+    @staticmethod
+    def _clean_extracted_text(text: str) -> str:
+        """Remove ChatGPT Deep Research counter/citation UI noise from extracted prose.
+
+        The Deep Research iframe sometimes renders animated 0-9 counters and
+        citation superscripts as standalone lines. Only activate the cleanup when
+        many such lines are present so legitimate short numbered answers remain
+        untouched.
+        """
+        raw = str(text or "").strip()
+        lines = raw.splitlines()
+        digit_lines = sum(1 for line in lines if re.fullmatch(r"\s*\d\s*", line))
+        if digit_lines < 10:
+            return raw
+        ui_labels = {"citations ·", "searches", "text", "copy"}
+        cleaned = [
+            line for line in lines
+            if not re.fullmatch(r"\s*\d\s*", line)
+            and line.strip().lower() not in ui_labels
+        ]
+        normalized: list[str] = []
+        for line in cleaned:
+            if not line.strip() and normalized and not normalized[-1].strip():
+                continue
+            normalized.append(line)
+        return "\n".join(normalized).strip()
+
     @classmethod
     def _element_text_with_links(cls, element) -> str:
-        text = element.inner_text(timeout=3000).strip()
+        text = cls._clean_extracted_text(element.inner_text(timeout=3000))
         links: list[dict[str, str]] = []
         anchors = element.locator("a[href]")
         for index in range(anchors.count()):
