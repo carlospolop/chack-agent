@@ -74,16 +74,17 @@ def test_deep_research_counter_noise_is_removed_without_touching_normal_numbered
     noisy = (
         "Research completed in 8m ·\n"
         + "\n".join(str(i % 10) for i in range(30))
-        + "\n citations · \nsearches\nExecutive summary\nSubstantive evidence.\n1\n\n"
+        + "\n citations · \nsearches\n10\n11\n2008\nExecutive summary\nSubstantive evidence.\n1\n\n"
         + "LIPEDEMA_DEEP_MCP_OK"
     )
     cleaned = ChatGPTWebResearchAgentTool._clean_extracted_text(noisy)
     assert "Executive summary" in cleaned
     assert "Substantive evidence." in cleaned
+    assert "2008" in cleaned
     assert "LIPEDEMA_DEEP_MCP_OK" in cleaned
     assert "citations ·" not in cleaned
     assert "searches" not in cleaned
-    assert not re.search(r"(?m)^\d$", cleaned)
+    assert not re.search(r"(?m)^\d{1,2}$", cleaned)
 
     normal = "1\nFirst finding\n2\nSecond finding"
     assert ChatGPTWebResearchAgentTool._clean_extracted_text(normal) == normal
@@ -113,7 +114,7 @@ def test_deep_connector_wait_path_applies_counter_cleanup(monkeypatch):
     answer = helper._wait_and_extract_deep({"webSocketDebuggerUrl": "ws://test"})
     assert "FINAL_DEEP_BROWSER_EXTRACT_OK" in answer
     assert "https://example.org/trial" in answer
-    assert not re.search(r"(?m)^\d$", answer)
+    assert not re.search(r"(?m)^\d{1,2}$", answer)
 
 
 def test_source_links_are_preserved_deduplicated_and_tracking_is_removed():

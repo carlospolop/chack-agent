@@ -238,13 +238,13 @@ class ChatGPTWebResearchAgentTool:
         """
         raw = str(text or "").strip()
         lines = raw.splitlines()
-        digit_lines = sum(1 for line in lines if re.fullmatch(r"\s*\d\s*", line))
-        if digit_lines < 10:
+        short_number_lines = sum(1 for line in lines if re.fullmatch(r"\s*\d{1,2}\s*", line))
+        if short_number_lines < 10:
             return raw
         ui_labels = {"citations ·", "searches", "text", "copy"}
         cleaned = [
             line for line in lines
-            if not re.fullmatch(r"\s*\d\s*", line)
+            if not re.fullmatch(r"\s*\d{1,2}\s*", line)
             and line.strip().lower() not in ui_labels
         ]
         normalized: list[str] = []
