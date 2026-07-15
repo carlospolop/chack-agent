@@ -629,13 +629,174 @@ def test_administrator_async_research_tools_start_and_poll():
     assert payload["complete"] is True
     assert poll_elapsed < 2
     assert "next_step" in payload
-    assert payload["waited_seconds"] == 900
+    assert payload["requested_wait_seconds"] == 900
+    assert 0 <= payload["waited_seconds"] <= poll_elapsed + 0.1
     task = payload["tasks"][0]
     assert task["status"] == "done"
     assert "idle_seconds" in task
     assert task["tool_call_counts"] == {"search_arxiv": 1}
     assert task["total_tool_calls"] == 1
     assert any(event["tool"] == "search_arxiv" for event in task["recent_events"])
+
+
+def test_async_poll_unknown_job_returns_without_waiting():
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    tools = helper._build_async_tools({}, ["scientific"])
+    poll = {tool.name: tool for tool in tools}["poll_researchers_async"]
+
+    started = time.monotonic()
+    payload = json.loads(
+        helper._invoke_tool_sync(
+            poll,
+            {"job_id": "missing-job", "include_outputs": False, "wait_seconds": 900},
+        )
+    )
+
+    assert time.monotonic() - started < 0.5
+    assert payload["job_found"] is False
+
+
+def test_async_completion_waits_for_every_preregistered_task():
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    call_lock = threading.Lock()
+    second_started = threading.Event()
+    release_second = threading.Event()
+    calls = 0
+
+    class FakeResearchTool:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, ctx, raw_args):
+            nonlocal calls
+            with call_lock:
+                calls += 1
+                call_number = calls
+            if call_number == 2:
+                second_started.set()
+                release_second.wait(10)
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "final_research_review": f"review {call_number}",
+                    "tool_call_counts": {},
+                    "total_tool_calls": 0,
+                },
+                separators=(",", ":"),
+            )
+
+    tools = helper._build_async_tools({"scientific_research": FakeResearchTool()}, ["scientific"])
+    by_name = {tool.name: tool for tool in tools}
+    prompts = [
+        {"researcher": "scientific", "prompt": "First independent evidence review with primary sources and caveats. " * 12},
+        {"researcher": "scientific", "prompt": "Second independent evidence review with direct sources and limitations. " * 12},
+    ]
+    started = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {"requests_json": json.dumps(prompts, separators=(",", ":")), "save_artifacts": False},
+        )
+    )
+    assert second_started.wait(10)
+
+    wait_started = time.monotonic()
+    incomplete = json.loads(
+        helper._invoke_tool_sync(
+            by_name["poll_researchers_async"],
+            {"job_id": started["job_id"], "include_outputs": False, "wait_seconds": 1},
+        )
+    )
+    assert time.monotonic() - wait_started >= 0.8
+    assert incomplete["complete"] is False
+    assert sorted(task["status"] for task in incomplete["tasks"]) == ["done", "running"]
+
+    release_second.set()
+    final_started = time.monotonic()
+    complete = json.loads(
+        helper._invoke_tool_sync(
+            by_name["poll_researchers_async"],
+            {"job_id": started["job_id"], "include_outputs": False, "wait_seconds": 900},
+        )
+    )
+    assert time.monotonic() - final_started < 2
+    assert complete["complete"] is True
+
+
+def test_async_completion_is_signaled_after_result_persistence(monkeypatch):
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    persistence_started = threading.Event()
+    release_persistence = threading.Event()
+
+    def blocking_persist(*_args, **_kwargs):
+        persistence_started.set()
+        release_persistence.wait(10)
+
+    monkeypatch.setattr(
+        "chack_tools.researcher_administrator_agent._persist_async_researcher_output",
+        blocking_persist,
+    )
+
+    class FakeResearchTool:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, ctx, raw_args):
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "final_research_review": "durable review",
+                    "tool_call_counts": {},
+                    "total_tool_calls": 0,
+                },
+                separators=(",", ":"),
+            )
+
+    tools = helper._build_async_tools({"scientific_research": FakeResearchTool()}, ["scientific"])
+    by_name = {tool.name: tool for tool in tools}
+    prompt = "Research persistence ordering with direct evidence and explicit limitations. " * 12
+    started = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {
+                "requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}], separators=(",", ":")),
+                "save_artifacts": True,
+            },
+        )
+    )
+    assert persistence_started.wait(10)
+
+    while_persisting = json.loads(
+        helper._invoke_tool_sync(
+            by_name["poll_researchers_async"],
+            {"job_id": started["job_id"], "include_outputs": False, "wait_seconds": 0},
+        )
+    )
+    assert while_persisting["complete"] is False
+    assert while_persisting["tasks"][0]["status"] == "running"
+
+    release_persistence.set()
+    complete = json.loads(
+        helper._invoke_tool_sync(
+            by_name["poll_researchers_async"],
+            {"job_id": started["job_id"], "include_outputs": False, "wait_seconds": 900},
+        )
+    )
+    assert complete["complete"] is True
 
 
 def test_administrator_duplicate_researcher_guard_blocks_unjustified_repeat():

@@ -89,6 +89,18 @@ def _async_wait_for_completion(job_id: str, timeout_seconds: int) -> bool:
     return event.wait(timeout=max(0, int(timeout_seconds or 0)))
 
 
+def _async_jobs_have_nonterminal_tasks(job_ids: list[str]) -> bool:
+    """Return true while any administrator-owned async task can still write evidence."""
+    terminal = {"done", "error", "cancelled"}
+    with _ASYNC_RESEARCH_LOCK:
+        for job_id in job_ids:
+            job = _ASYNC_RESEARCH_JOBS.get(str(job_id or "").strip())
+            tasks = (job or {}).get("tasks") or {}
+            if tasks and any(str(task.get("status") or "") not in terminal for task in tasks.values()):
+                return True
+    return False
+
+
 def _async_submit(fn, *args):
     return _ASYNC_RESEARCH_EXECUTOR.submit(fn, *args)
 
@@ -189,13 +201,24 @@ def _async_mark_task_done(job_id: str, task_id: str, future: Any) -> None:
         error = f"{type(exc).__name__}: {exc}"
     evidence_dir = ""
     tool_name = ""
-    completion_event = None
     with _ASYNC_RESEARCH_LOCK:
         job = _ASYNC_RESEARCH_JOBS.get(job_id)
         task = job["tasks"].get(task_id) if job else None
         evidence_dir = str((job or {}).get("evidence_dir") or "")
         if task:
             tool_name = str(task.get("researcher_tool") or result.get("researcher_tool") or "")
+
+    # Persist successful output before publishing a terminal task state or waking
+    # completion-aware polls. Otherwise a poll can observe "done" while the
+    # durable result file is still absent.
+    if status == "done" and result:
+        _persist_async_researcher_output(evidence_dir, task_id, tool_name, result)
+
+    completion_event = None
+    with _ASYNC_RESEARCH_LOCK:
+        job = _ASYNC_RESEARCH_JOBS.get(job_id)
+        task = job["tasks"].get(task_id) if job else None
+        if task:
             task["status"] = status
             task["finished_at"] = time.time()
             task["last_activity_at"] = task["finished_at"]
@@ -204,15 +227,15 @@ def _async_mark_task_done(job_id: str, task_id: str, future: Any) -> None:
                 task["error"] = error
             if result:
                 task["result"] = result
-        if job and (job.get("tasks") or {}) and all(
+        tasks = (job or {}).get("tasks") or {}
+        expected = int((job or {}).get("expected_task_count") or 0)
+        if expected > 0 and len(tasks) == expected and all(
             str(row.get("status") or "") in {"done", "error", "cancelled"}
-            for row in (job.get("tasks") or {}).values()
+            for row in tasks.values()
         ):
-            completion_event = job.get("completion_event")
+            completion_event = (job or {}).get("completion_event")
     if isinstance(completion_event, threading.Event):
         completion_event.set()
-    if status == "done" and result:
-        _persist_async_researcher_output(evidence_dir, task_id, tool_name, result)
 
 
 def _async_cancel_job(job_id: str) -> dict[str, Any]:
@@ -1738,10 +1761,16 @@ class ResearcherAdministratorAgentTool:
                 "evidence_dir": os.environ.get("CHACK_RESEARCH_MASTER_DIR", "").strip()
                 or os.environ.get("CHACK_RESEARCH_DATA_DIR", "").strip(),
                 "completion_event": threading.Event(),
+                "expected_task_count": len(normalized),
                 "tasks": {},
             }
             task_rows: list[dict[str, str]] = []
+            prepared_tasks: list[tuple[str, dict[str, str], threading.Event]] = []
             _async_job_store(job_id, job)
+
+            # Register every task before submitting any future. A fast first future
+            # must never make a partially populated job appear complete and leave
+            # its completion event permanently set while later tasks still run.
             for index, row in enumerate(normalized):
                 task_id = f"task-{index}-{uuid.uuid4().hex[:6]}"
                 cancel_event = threading.Event()
@@ -1756,6 +1785,16 @@ class ResearcherAdministratorAgentTool:
                     "cancel_event": cancel_event,
                 }
                 _async_register_task(job_id, task_id, task)
+                prepared_tasks.append((task_id, row, cancel_event))
+                task_rows.append(
+                    {
+                        "task_id": task_id,
+                        "researcher": row["researcher"],
+                        "researcher_tool": row["tool_name"],
+                    }
+                )
+
+            for task_id, row, cancel_event in prepared_tasks:
                 future = _async_submit(
                     _run_one,
                     job_id,
@@ -1768,13 +1807,6 @@ class ResearcherAdministratorAgentTool:
                 )
                 _async_set_task_future(job_id, task_id, future)
                 future.add_done_callback(lambda fut, jid=job_id, tid=task_id: _task_done(jid, tid, fut))
-                task_rows.append(
-                    {
-                        "task_id": task_id,
-                        "researcher": row["researcher"],
-                        "researcher_tool": row["tool_name"],
-                    }
-                )
             return _compact_json(
                 {
                     "async_started": True,
@@ -1810,12 +1842,24 @@ class ResearcherAdministratorAgentTool:
             events/live call counts while running, plus completed researcher
             results/tool_call_counts when available.
             """
-            wait = max(0, min(int(wait_seconds or 0), 900))
-            if wait:
-                _async_wait_for_completion(str(job_id or "").strip(), wait)
-            job = _async_job_snapshot(str(job_id or "").strip())
+            job_key = str(job_id or "").strip()
+            job = _async_job_snapshot(job_key)
             if not job:
                 return _compact_json({"job_found": False, "job_id": job_id, "error": "Unknown async researcher job id."})
+            wait = max(0, min(int(wait_seconds or 0), 900))
+            wait_started = time.monotonic()
+            if wait:
+                initial_tasks = (job.get("tasks") or {}).values()
+                already_complete = bool(job.get("tasks")) and all(
+                    str(task.get("status") or "") in {"done", "error", "cancelled"}
+                    for task in initial_tasks
+                )
+                if not already_complete:
+                    _async_wait_for_completion(job_key, wait)
+            waited = round(time.monotonic() - wait_started, 3)
+            job = _async_job_snapshot(job_key)
+            if not job:
+                return _compact_json({"job_found": False, "job_id": job_id, "error": "Async researcher job disappeared while polling."})
             tasks = []
             now = time.time()
             for task_id, task in sorted((job.get("tasks") or {}).items()):
@@ -1871,7 +1915,8 @@ class ResearcherAdministratorAgentTool:
                     "job_id": job.get("job_id", job_id),
                     "complete": complete,
                     "tasks": tasks,
-                    "waited_seconds": wait,
+                    "requested_wait_seconds": wait,
+                    "waited_seconds": waited,
                     "next_step": next_step,
                 }
             )
@@ -2193,7 +2238,12 @@ class ResearcherAdministratorAgentTool:
             )
         finally:
             end_researcher_response_collection(collector_token)
-            cleanup_research_artifacts(master_dir, save_artifacts=save_artifacts)
+            # A timed-out administrator does not own the lifetime of executor
+            # threads it launched. Preserve their evidence root until every task is
+            # terminal instead of deleting a directory that a live browser worker
+            # is still updating.
+            if not _async_jobs_have_nonterminal_tasks(self._launched_async_job_ids):
+                cleanup_research_artifacts(master_dir, save_artifacts=save_artifacts)
             reset_research_artifact_context(artifact_context_tokens)
             # Restore the inherited master dir so standalone researchers launched
             # later in the same process are not accidentally nested under it.
