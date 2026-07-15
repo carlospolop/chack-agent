@@ -1241,10 +1241,6 @@ models:
     input: 0.04
     cache_read: 0.04
     output: 0.05
-  sao10k/l3.1-70b-hanami-x1:
-    input: 3
-    cache_read: 3
-    output: 3
   sao10k/l3.1-euryale-70b:
     input: 0.85
     cache_read: 0.85
@@ -1374,9 +1370,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.9296
-    cache_read: 0.17264
-    output: 2.9216
+    input: 0.903
+    cache_read: 0.1677
+    output: 2.838
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
