@@ -16,6 +16,8 @@ import os
 import time
 from typing import Optional
 
+from chack_tools.run_lifecycle import read_live_cost
+
 
 # ── Env-var names (used by subprocess MCP and backend _build_env) ─────
 
@@ -219,34 +221,43 @@ def inject_budget_warning(tool_output: str) -> str:
 # ── MCP subprocess injection (env vars) ───────────────────────────────
 
 def inject_budget_warning_from_env(tool_output: str) -> str:
-    """Append runtime budget warning using environment variables.
+    """Append live runtime/cost warnings for an MCP subprocess.
 
-    Used by the MCP subprocess which cannot access the parent's
-    contextvars.  Cost warnings are NOT injected here (MCP subprocess
-    has no token count visibility); they are handled at the agent.py
-    level between invocation rounds.
+    Static limits come from environment variables. Live cost is read from the
+    run-scoped shared state written by the parent agent, so it remains visible
+    even though an already-running subprocess cannot observe later env updates.
     """
     if os.environ.get("CHACK_BUDGET_INJECTION_ENABLED", "1").strip() not in ("1", "true", "yes"):
         return tool_output
 
-    max_runtime = float(os.environ.get("CHACK_BUDGET_MAX_RUNTIME_SECONDS", "0") or "0")
-    if max_runtime <= 0:
-        return tool_output
-
-    start = float(os.environ.get("CHACK_BUDGET_START_EPOCH", "0") or "0")
-    if start <= 0:
-        return tool_output
-
-    elapsed = time.time() - start
-    ratio = elapsed / max_runtime
     warning_ratio = float(os.environ.get("CHACK_BUDGET_WARNING_RATIO", "0.6") or "0.6")
     critical_ratio = float(os.environ.get("CHACK_BUDGET_CRITICAL_RATIO", "0.9") or "0.9")
+    parts: list[str] = []
 
-    if ratio >= critical_ratio:
-        return str(tool_output or "") + _runtime_warning_text(elapsed, max_runtime, is_critical=True)
-    if ratio >= warning_ratio:
-        return str(tool_output or "") + _runtime_warning_text(elapsed, max_runtime, is_critical=False)
-    return tool_output
+    max_runtime = float(os.environ.get("CHACK_BUDGET_MAX_RUNTIME_SECONDS", "0") or "0")
+    start = float(os.environ.get("CHACK_BUDGET_START_EPOCH", "0") or "0")
+    if max_runtime > 0 and start > 0:
+        elapsed = time.time() - start
+        ratio = elapsed / max_runtime
+        if ratio >= critical_ratio:
+            parts.append(_runtime_warning_text(elapsed, max_runtime, is_critical=True))
+        elif ratio >= warning_ratio:
+            parts.append(_runtime_warning_text(elapsed, max_runtime, is_critical=False))
+
+    max_cost = float(os.environ.get("CHACK_BUDGET_MAX_COST_USD", "0") or "0")
+    env_spent = float(os.environ.get("CHACK_BUDGET_SPENT_USD", "0") or "0")
+    shared_spent = read_live_cost()
+    spent = max(env_spent, float(shared_spent or 0.0))
+    if max_cost > 0 and spent > 0:
+        ratio = spent / max_cost
+        if ratio >= critical_ratio:
+            parts.append(_cost_warning_text(spent, max_cost, is_critical=True))
+        elif ratio >= warning_ratio:
+            parts.append(_cost_warning_text(spent, max_cost, is_critical=False))
+
+    if not parts:
+        return tool_output
+    return str(tool_output or "") + "".join(parts)
 
 
 # ── Export env vars (called from agent.py before executor.invoke) ─────
@@ -344,7 +355,9 @@ def budget_status_from_env() -> str:
         lines.append("Runtime: No limit configured.")
 
     max_cost = float(os.environ.get("CHACK_BUDGET_MAX_COST_USD", "0") or "0")
-    spent = float(os.environ.get("CHACK_BUDGET_SPENT_USD", "0") or "0")
+    env_spent = float(os.environ.get("CHACK_BUDGET_SPENT_USD", "0") or "0")
+    shared_spent = read_live_cost()
+    spent = max(env_spent, float(shared_spent or 0.0))
     if max_cost > 0:
         remaining_cost = max(0.0, max_cost - spent)
         ratio = spent / max_cost if max_cost > 0 else 0.0

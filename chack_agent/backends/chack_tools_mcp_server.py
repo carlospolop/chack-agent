@@ -18,6 +18,11 @@ from agents.usage import Usage
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
 from chack_tools.task_steps_manager_state import STORE, set_active_context
+from chack_tools.run_lifecycle import (
+    ToolBudgetClaim,
+    claim_non_task_tool_slot,
+    tool_budget_warning,
+)
 from chack_agent.limit_event_state import emit_limit_reached
 from chack_agent.budget_warning_state import budget_status_from_env, inject_budget_warning_from_env
 from chack_agent.thinking_effort import normalize_thinking_effort
@@ -163,6 +168,7 @@ async def _invoke_function_tool(tool: Any, args: dict[str, Any]) -> str:
 class _ServerPolicyState:
     require_task_steps_manager_init_first: bool
     max_non_task_tools: int
+    session_id: str = ""
     has_task_steps_manager_init: bool = False
     non_task_tool_calls: int = 0
 
@@ -376,24 +382,70 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                     _name == "task_steps_manager"
                     and str(payload.get("action", "")).strip().lower() == "init"
                 )
+                tool_claim = ToolBudgetClaim(
+                    allowed=True,
+                    used=state.non_task_tool_calls,
+                    max_tools=state.max_non_task_tools,
+                )
                 if not is_task_steps_manager_init and _name != "task_steps_manager":
-                    if state.max_non_task_tools > 0 and state.non_task_tool_calls >= state.max_non_task_tools:
+                    if state.session_id:
+                        try:
+                            warning_ratio = float(
+                                os.environ.get("CHACK_BUDGET_WARNING_RATIO", "0.6") or "0.6"
+                            )
+                        except (TypeError, ValueError):
+                            warning_ratio = 0.6
+                        try:
+                            critical_ratio = float(
+                                os.environ.get("CHACK_BUDGET_CRITICAL_RATIO", "0.9") or "0.9"
+                            )
+                        except (TypeError, ValueError):
+                            critical_ratio = 0.9
+                        tool_claim = claim_non_task_tool_slot(
+                            state.session_id,
+                            state.max_non_task_tools,
+                            warning_ratio=warning_ratio,
+                            critical_ratio=critical_ratio,
+                        )
+                        state.non_task_tool_calls = max(
+                            state.non_task_tool_calls,
+                            tool_claim.used,
+                        )
+                    else:
+                        if (
+                            state.max_non_task_tools > 0
+                            and state.non_task_tool_calls >= state.max_non_task_tools
+                        ):
+                            tool_claim = ToolBudgetClaim(
+                                allowed=False,
+                                used=state.non_task_tool_calls,
+                                max_tools=state.max_non_task_tools,
+                                milestone="limit",
+                            )
+                        else:
+                            state.non_task_tool_calls += 1
+                            tool_claim = ToolBudgetClaim(
+                                allowed=True,
+                                used=state.non_task_tool_calls,
+                                max_tools=state.max_non_task_tools,
+                            )
+                    if not tool_claim.allowed:
                         emit_limit_reached(
                             "tools",
                             {
                                 "max_tools_used": state.max_non_task_tools,
-                                "used": state.non_task_tool_calls,
+                                "used": tool_claim.used,
                                 "tool": _name,
                             },
                         )
                         raise RuntimeError(
                             f"Tool budget reached ({state.max_non_task_tools}). Finish using gathered context."
                         )
-                    state.non_task_tool_calls += 1
 
                 result = await _invoke_function_tool(_tool, payload)
                 if is_task_steps_manager_init and str(result).startswith("SUCCESS:"):
                     state.has_task_steps_manager_init = True
+                result = str(result) + tool_budget_warning(tool_claim)
                 result = inject_budget_warning_from_env(result)
                 return _truncate_tool_output(result)
             except Exception:
@@ -448,6 +500,7 @@ def main() -> None:
                 default=True,
             ),
             max_non_task_tools=max(0, _as_int(os.environ.get("CHACK_MAX_TOOLS_USED", "0"), 0)),
+            session_id=session_id,
         )
         _register_tools(mcp, tools, state)
 

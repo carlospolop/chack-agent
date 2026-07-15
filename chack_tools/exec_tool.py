@@ -11,6 +11,11 @@ except ImportError:
 
 from .config import ToolsConfig
 from .formatting import _truncate
+from .run_lifecycle import (
+    active_task_session_id,
+    register_process_group,
+    terminate_process_group,
+)
 from .telemetry import log_tool_started, log_tool_executed, log_tool_error
 
 class ExecTool:
@@ -33,16 +38,29 @@ class ExecTool:
         timeout = max(1, int(self.config.exec_timeout_seconds or 60))
         max_chars = max(1, int(self.config.exec_max_output_chars or 5000))
         resolved_cwd = self._resolve_cwd(cwd)
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             env=None,
             cwd=resolved_cwd,
+            start_new_session=True,
         )
-        output = (result.stdout or "") + (result.stderr or "")
+        register_process_group(active_task_session_id(), process.pid)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            terminate_process_group(process.pid, grace_seconds=0.2)
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(
+                process.args,
+                timeout,
+                output=stdout,
+                stderr=stderr,
+            )
+        output = (stdout or "") + (stderr or "")
         output = output.strip() or "(no output)"
         return _truncate(output, max_chars)
 

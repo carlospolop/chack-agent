@@ -52,6 +52,7 @@ from chack_tools.cancellation import (
     reset_cancellation_event,
     set_cancellation_event,
 )
+from chack_tools.run_lifecycle import cleanup_run_state, read_live_cost, write_live_cost
 from .live_cost_state import (
     LiveCostLimitExceeded,
     reset_active_live_cost_callback,
@@ -162,6 +163,33 @@ class RunResult:
 
 
 TaskStepsSnapshotCallback = Callable[[Dict[str, Any]], None]
+
+
+def _completed_task_limit_output(snapshot: Dict[str, Any], error: BaseException) -> str:
+    """Build a useful final response when work completed before a late limit."""
+    lines = [
+        "The requested work completed before this run reached its budget limit.",
+        "The normal final response was shortened, but the completed task results were preserved:",
+    ]
+    for run in snapshot.get("runs") or []:
+        for task in run.get("tasks") or []:
+            if str(task.get("status") or "").strip().lower() != "done":
+                continue
+            text = str(task.get("text") or "Completed task").strip()
+            note = str(task.get("notes") or "").strip()
+            item = f"- ✅ {text}"
+            if note:
+                item += f" — {note}"
+            lines.append(item)
+    error_text = str(error or "").strip()
+    if error_text:
+        lines.extend(("", f"⚠️ Finalization limit: {error_text}"))
+    return "\n".join(lines)
+
+
+def _task_snapshot_is_complete(snapshot: Dict[str, Any]) -> bool:
+    return bool(snapshot.get("completed")) and int(snapshot.get("tasks_total") or 0) > 0
+
 
 class Chack:
     def __init__(
@@ -1316,6 +1344,7 @@ class Chack:
         )
         task_session_id = ""
         telemetry_task_session_id = ""
+        task_listener: Optional[Callable[[str], None]] = None
         metrics_stop_event = threading.Event()
         metrics_thread: Optional[threading.Thread] = None
         inherited_cancel_event = current_cancellation_event()
@@ -1427,6 +1456,7 @@ class Chack:
             )
             STORE.create_session(task_session_id, title="Task Steps Manager")
             TOOL_USAGE_STORE.reset_session(task_session_id)
+            write_live_cost(task_session_id, 0.0)
             available_tool_names = self._available_tool_names(executor)
             update_log_context(available_tool_names=available_tool_names)
             require_task_steps_manager_init_first = bool(
@@ -1500,7 +1530,8 @@ class Chack:
                 on_task_steps_manager_update is not None
                 or on_task_steps_manager_snapshot_update is not None
             ):
-                STORE.register_listener(task_session_id, _listener)
+                task_listener = _listener
+                STORE.register_listener(task_session_id, task_listener)
 
             self.logger.info(
                 "Run start: session=%s task_session=%s min_tools=%s max_tools=%s required_tools=%s required_tool_attempts=%s self_critique=%s self_critique_rounds=%s require_task_steps_manager_init=%s ts=%s",
@@ -1765,6 +1796,7 @@ class Chack:
                             current_live_cost = _live_total_cost()
                             update_spent_usd(current_live_cost)
                             export_spent_usd_env(current_live_cost)
+                            write_live_cost(task_session_id, current_live_cost)
                             if max_cost_usd > 0 and current_live_cost >= max_cost_usd:
                                 self._emit_limit_reached_once(
                                     session_id=session_id,
@@ -1803,6 +1835,7 @@ class Chack:
                         while worker.is_alive():
                             current_elapsed = time.time() - run_started_at
                             live_total_cost = _live_total_cost()
+                            write_live_cost(task_session_id, live_total_cost)
                             self._emit_progress_milestones(
                                 session_id=session_id,
                                 task_session_id=telemetry_task_session_id or task_session_id,
@@ -1918,6 +1951,7 @@ class Chack:
                         if attempt_cost > 0.0:
                             estimated_cost_spent += attempt_cost
                             export_spent_usd_env(estimated_cost_spent)
+                        write_live_cost(task_session_id, estimated_cost_spent)
                         self._emit_progress_milestones(
                             session_id=session_id,
                             task_session_id=telemetry_task_session_id or task_session_id,
@@ -2361,6 +2395,49 @@ class Chack:
                 suffix=suffix,
             )
         except Exception as exc:
+            limit_text = str(exc or "").lower()
+            is_budget_limit = isinstance(exc, TimeoutError) and (
+                "max cost budget" in limit_text
+                or "max runtime" in limit_text
+                or "budget limit" in limit_text
+            )
+            if is_budget_limit and task_session_id:
+                try:
+                    completed_snapshot = STORE.snapshot(task_session_id)
+                except Exception:
+                    completed_snapshot = {}
+                if _task_snapshot_is_complete(completed_snapshot):
+                    fallback_output = _completed_task_limit_output(completed_snapshot, exc)
+                    log_event(
+                        "agent_completed_with_limit",
+                        payload={
+                            "session_id": session_id,
+                            "task_session_id": telemetry_task_session_id or task_session_id,
+                            "internal_task_session_id": task_session_id,
+                            "limit_error": str(exc),
+                            "tasklist_completed": True,
+                        },
+                    )
+                    return RunResult(
+                        output=fallback_output,
+                        steps=[],
+                        all_steps=[],
+                        tool_counts=Counter(),
+                        nested_tool_counts=Counter(),
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        cached_prompt_tokens=0,
+                        cache_write_prompt_tokens=0,
+                        rounds_used=0,
+                        tools_used=0,
+                        task_session_id=telemetry_task_session_id or task_session_id,
+                        nested_usage_by_model={},
+                        max_turns=int(self.config.session.max_turns or 0),
+                        total_cost=(
+                            read_live_cost(task_session_id)
+                            or float(locals().get("estimated_cost_spent", 0.0) or 0.0)
+                        ),
+                    )
             self.logger.exception(
                 "Run failed: session=%s task_session=%s ts=%s.",
                 session_id,
@@ -2391,4 +2468,24 @@ class Chack:
                     metrics_thread.join(timeout=1.0)
                 except Exception:
                     pass
+            if task_session_id:
+                if task_listener is not None:
+                    try:
+                        STORE.unregister_listener(task_session_id, task_listener)
+                    except Exception:
+                        pass
+                try:
+                    TOOL_USAGE_STORE.clear(task_session_id)
+                except Exception:
+                    pass
+                try:
+                    cleanup_run_state(task_session_id)
+                except Exception:
+                    self.logger.warning(
+                        "Run cleanup failed: session=%s task_session=%s ts=%s.",
+                        session_id,
+                        task_session_id,
+                        _log_timestamp(),
+                        exc_info=True,
+                    )
             reset_log_context(log_token)
