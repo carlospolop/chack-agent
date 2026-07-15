@@ -403,7 +403,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         while time.monotonic() < deadline:
             state = self._deep_connector_state(websocket_url, click_start=True)
             answer = self._append_source_links(
-                str(state.get("text") or "").strip(),
+                self._clean_extracted_text(str(state.get("text") or "")),
                 list(state.get("links") or []),
             )
             if answer and answer == previous:

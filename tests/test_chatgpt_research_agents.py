@@ -89,6 +89,33 @@ def test_deep_research_counter_noise_is_removed_without_touching_normal_numbered
     assert ChatGPTWebResearchAgentTool._clean_extracted_text(normal) == normal
 
 
+def test_deep_connector_wait_path_applies_counter_cleanup(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_research_timeout_seconds=60, chatgpt_research_poll_seconds=1),
+        mode="deep",
+    )
+    noisy = (
+        "Research completed in 8m ·\n"
+        + "\n".join(str(i % 10) for i in range(30))
+        + "\nExecutive summary\n"
+        + ("Substantive controlled-study evidence with limitations and direct interpretation. " * 30)
+        + "\nFINAL_DEEP_BROWSER_EXTRACT_OK"
+    )
+    state = {
+        "text": noisy,
+        "links": [{"label": "Trial", "url": "https://example.org/trial"}],
+        "completed": True,
+        "hasStop": False,
+    }
+    monkeypatch.setattr(helper, "_deep_connector_state", lambda *_args, **_kwargs: state)
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.sleep", lambda *_args: None)
+
+    answer = helper._wait_and_extract_deep({"webSocketDebuggerUrl": "ws://test"})
+    assert "FINAL_DEEP_BROWSER_EXTRACT_OK" in answer
+    assert "https://example.org/trial" in answer
+    assert not re.search(r"(?m)^\d$", answer)
+
+
 def test_source_links_are_preserved_deduplicated_and_tracking_is_removed():
     answer = ChatGPTWebResearchAgentTool._append_source_links(
         "Clinical synthesis.\n\nLIPEDEMA_PRO_MCP_OK",
