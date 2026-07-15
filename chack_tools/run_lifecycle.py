@@ -59,14 +59,18 @@ def _state_path(kind: str, session_id: str) -> Path | None:
     return _state_root() / f"{digest}.{kind}.json"
 
 
-def _read_locked_json(handle, default: Any) -> Any:
+def _read_locked_json(handle, default: Any, *, strict: bool = False) -> Any:
     handle.seek(0)
     raw = handle.read()
     if not raw.strip():
         return default
     try:
         return json.loads(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        if strict:
+            raise RuntimeError(
+                "Corrupt Chack run-state file; refusing to reset a finite budget"
+            ) from exc
         return default
 
 
@@ -92,8 +96,10 @@ def claim_non_task_tool_slot(
     """
     maximum = max(0, int(max_tools or 0))
     path = _state_path("tools", session_id)
-    if maximum <= 0 or path is None:
+    if maximum <= 0:
         return ToolBudgetClaim(True, 0, maximum)
+    if path is None:
+        return ToolBudgetClaim(False, 0, maximum, "limit")
 
     warning_at = max(1, int(math.ceil(maximum * max(0.0, float(warning_ratio)))))
     critical_at = max(warning_at, int(math.ceil(maximum * max(0.0, float(critical_ratio)))))
@@ -105,7 +111,11 @@ def claim_non_task_tool_slot(
         except OSError:
             pass
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        state = _read_locked_json(handle, {"used": 0, "milestone": 0})
+        state = _read_locked_json(
+            handle,
+            {"used": 0, "milestone": 0},
+            strict=True,
+        )
         used = max(0, int((state or {}).get("used", 0) or 0))
         emitted = max(0, int((state or {}).get("milestone", 0) or 0))
         if used >= maximum:
@@ -141,6 +151,35 @@ def tool_budget_warning(claim: ToolBudgetClaim) -> str:
         f"{guidance}\n"
         "-----------------------------"
     )
+
+
+def mark_task_manager_initialized(session_id: str) -> None:
+    """Persist init-first state so an MCP restart does not require a second init."""
+    path = _state_path("task-manager", session_id)
+    if path is None:
+        return
+    with path.open("a+", encoding="utf-8") as handle:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        _write_locked_json(handle, {"initialized": True})
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def task_manager_initialized(session_id: str) -> bool:
+    path = _state_path("task-manager", session_id)
+    if path is None or not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            state = _read_locked_json(handle, {})
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return bool((state or {}).get("initialized"))
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def write_live_cost(session_id: str, spent_usd: float) -> None:
@@ -244,7 +283,7 @@ def cleanup_process_groups(session_id: str, *, grace_seconds: float = 0.5) -> li
 
 def cleanup_run_state(session_id: str) -> None:
     cleanup_process_groups(session_id)
-    for kind in ("tools", "budget", "process-groups"):
+    for kind in ("tools", "budget", "process-groups", "task-manager"):
         path = _state_path(kind, session_id)
         if path is not None:
             try:

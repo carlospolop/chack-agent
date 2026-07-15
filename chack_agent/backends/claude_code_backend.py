@@ -22,6 +22,7 @@ from chack_tools.task_steps_manager_state import (
 )
 from chack_tools.telemetry import log_event
 from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
+from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
@@ -1047,7 +1048,7 @@ bash save_vuln.sh '{{
         env["CHACK_SUBCHACK_MAX_TURNS"] = str(self._subchack_max_turns)
         env["CHACK_RESEARCHER_ADMINISTRATOR_MAX_TURNS"] = str(self._researcher_administrator_max_turns)
         env["CHACK_MIN_TOOLS_USED"] = str(self._min_tools_used)
-        env["CHACK_MAX_TOOLS_USED"] = str(self._max_tools_used)
+        env["CHACK_MAX_TOOLS_USED"] = str(effective_max_tools_used(self._max_tools_used))
         env["CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST"] = (
             "1" if self._require_task_steps_manager_init_first else "0"
         )

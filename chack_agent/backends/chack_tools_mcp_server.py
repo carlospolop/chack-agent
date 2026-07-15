@@ -21,6 +21,8 @@ from chack_tools.task_steps_manager_state import STORE, set_active_context
 from chack_tools.run_lifecycle import (
     ToolBudgetClaim,
     claim_non_task_tool_slot,
+    mark_task_manager_initialized,
+    task_manager_initialized,
     tool_budget_warning,
 )
 from chack_agent.limit_event_state import emit_limit_reached
@@ -372,6 +374,11 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                     continue
                 payload[_mapping.get(py_name, py_name)] = value
             try:
+                has_persistent_init = bool(
+                    state.session_id and task_manager_initialized(state.session_id)
+                )
+                if has_persistent_init:
+                    state.has_task_steps_manager_init = True
                 if state.require_task_steps_manager_init_first and not state.has_task_steps_manager_init:
                     if _name != "task_steps_manager" or str(payload.get("action", "")).strip().lower() != "init":
                         raise RuntimeError(
@@ -388,7 +395,7 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                     max_tools=state.max_non_task_tools,
                 )
                 if not is_task_steps_manager_init and _name != "task_steps_manager":
-                    if state.session_id:
+                    if state.max_non_task_tools > 0:
                         try:
                             warning_ratio = float(
                                 os.environ.get("CHACK_BUDGET_WARNING_RATIO", "0.6") or "0.6"
@@ -412,23 +419,12 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                             tool_claim.used,
                         )
                     else:
-                        if (
-                            state.max_non_task_tools > 0
-                            and state.non_task_tool_calls >= state.max_non_task_tools
-                        ):
-                            tool_claim = ToolBudgetClaim(
-                                allowed=False,
-                                used=state.non_task_tool_calls,
-                                max_tools=state.max_non_task_tools,
-                                milestone="limit",
-                            )
-                        else:
-                            state.non_task_tool_calls += 1
-                            tool_claim = ToolBudgetClaim(
-                                allowed=True,
-                                used=state.non_task_tool_calls,
-                                max_tools=state.max_non_task_tools,
-                            )
+                        state.non_task_tool_calls += 1
+                        tool_claim = ToolBudgetClaim(
+                            allowed=True,
+                            used=state.non_task_tool_calls,
+                            max_tools=state.max_non_task_tools,
+                        )
                     if not tool_claim.allowed:
                         emit_limit_reached(
                             "tools",
@@ -445,6 +441,8 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                 result = await _invoke_function_tool(_tool, payload)
                 if is_task_steps_manager_init and str(result).startswith("SUCCESS:"):
                     state.has_task_steps_manager_init = True
+                    if state.session_id:
+                        mark_task_manager_initialized(state.session_id)
                 result = str(result) + tool_budget_warning(tool_claim)
                 result = inject_budget_warning_from_env(result)
                 return _truncate_tool_output(result)

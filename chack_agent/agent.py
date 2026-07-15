@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 import json
 import traceback
 import threading
@@ -1406,6 +1407,7 @@ class Chack:
             estimated_cost_spent = 0.0
             progress_state = {"runtime_percent": 0, "cost_percent": 0}
             limit_event_state = {"runtime": False, "cost": False, "tools": False}
+            completion_preserved_state = {"cost": False}
 
             # Export budget env vars for MCP subprocess backends
             export_budget_env(
@@ -1439,7 +1441,7 @@ class Chack:
             )
 
             # Internal bookkeeping/session key for TaskStepsManager state.
-            task_session_id = f"{session_id}:{int(time.time() * 1000)}"
+            task_session_id = f"{session_id}:{uuid.uuid4().hex}"
             # If this run was spawned by a tool (sub-agent), usage_session_id is the
             # parent run id; reuse it for telemetry so tool executions show under the
             # same run section in chacks.hacktricks.wiki.
@@ -1457,6 +1459,26 @@ class Chack:
             STORE.create_session(task_session_id, title="Task Steps Manager")
             TOOL_USAGE_STORE.reset_session(task_session_id)
             write_live_cost(task_session_id, 0.0)
+
+            def _tasklist_completed() -> bool:
+                snapshot = STORE.snapshot(task_session_id)
+                total = int(snapshot.get("tasks_total", 0) or 0)
+                done = int(snapshot.get("tasks_done", 0) or 0)
+                return bool(snapshot.get("completed") and total > 0 and done == total)
+
+            def _mark_cost_completion_preserved(result: dict[str, Any]) -> None:
+                completion_preserved_state["cost"] = True
+                result["completion_preserved_after_limit"] = True
+                result["limit_reached"] = "cost_after_completion"
+                base_output = str(result.get("output", "") or "").rstrip()
+                if "[Admin Notice] The cost limit was reached after all task steps completed" in base_output:
+                    return
+                result["output"] = (
+                    f"{base_output}\n\n======\n"
+                    "[Admin Notice] The cost limit was reached after all task steps completed; "
+                    "this final answer was preserved and no follow-up or self-critique run will start."
+                ).strip()
+
             available_tool_names = self._available_tool_names(executor)
             update_log_context(available_tool_names=available_tool_names)
             require_task_steps_manager_init_first = bool(
@@ -1806,8 +1828,12 @@ class Chack:
                                     payload={
                                         "max_cost_usd": max_cost_usd,
                                         "spent_usd": current_live_cost,
+                                        "completed_tasklist": _tasklist_completed(),
                                     },
                                 )
+                                if _tasklist_completed():
+                                    completion_preserved_state["cost"] = True
+                                    return
                                 raise LiveCostLimitExceeded(
                                     f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
                                 )
@@ -1851,8 +1877,22 @@ class Chack:
                                     runtime_exceeded = True
                                     break
                             if max_cost_usd > 0 and live_total_cost >= max_cost_usd:
-                                cost_exceeded = True
-                                break
+                                if _tasklist_completed():
+                                    completion_preserved_state["cost"] = True
+                                    self._emit_limit_reached_once(
+                                        session_id=session_id,
+                                        task_session_id=telemetry_task_session_id or task_session_id,
+                                        limit_state=limit_event_state,
+                                        limit_type="cost",
+                                        payload={
+                                            "max_cost_usd": max_cost_usd,
+                                            "spent_usd": live_total_cost,
+                                            "completed_tasklist": True,
+                                        },
+                                    )
+                                else:
+                                    cost_exceeded = True
+                                    break
                             worker.join(timeout=0.1)
                         if runtime_exceeded or cost_exceeded:
                             request_cancel(run_cancel_event)
@@ -1962,6 +2002,7 @@ class Chack:
                             max_cost_usd=max_cost_usd,
                         )
                         if estimated_cost_spent >= max_cost_usd:
+                            completed_tasklist = _tasklist_completed()
                             self._emit_limit_reached_once(
                                 session_id=session_id,
                                 task_session_id=telemetry_task_session_id or task_session_id,
@@ -1970,12 +2011,15 @@ class Chack:
                                 payload={
                                     "max_cost_usd": max_cost_usd,
                                     "spent_usd": estimated_cost_spent,
+                                    "completed_tasklist": completed_tasklist,
                                 },
                             )
-                            raise TimeoutError(
-                                f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
-                            )
-                        if cost_critical_threshold > 0 and estimated_cost_spent >= cost_critical_threshold:
+                            if not completed_tasklist:
+                                raise TimeoutError(
+                                    f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
+                                )
+                            _mark_cost_completion_preserved(result)
+                        elif cost_critical_threshold > 0 and estimated_cost_spent >= cost_critical_threshold:
                             output = result.get("output", "")
                             if output is not None:
                                 result["output"] = self._append_admin_cost_warning(
@@ -1995,6 +2039,13 @@ class Chack:
                                     estimated_cost_spent,
                                     max_cost_usd,
                                 )
+
+                    if (
+                        completion_preserved_state["cost"]
+                        and _tasklist_completed()
+                        and not result.get("completion_preserved_after_limit")
+                    ):
+                        _mark_cost_completion_preserved(result)
 
                     elapsed_runtime_seconds = time.time() - run_started_at
                     self._emit_progress_milestones(
@@ -2047,6 +2098,8 @@ class Chack:
 
                     current_steps = result.get("intermediate_steps", [])
                     all_steps.extend(current_steps)
+                    if result.get("completion_preserved_after_limit"):
+                        break
                     has_init = any(self._is_task_steps_manager_init_step(step) for step in all_steps)
                     non_task_tools = self._non_task_tool_count(all_steps)
                     missing_init = effective_require_init and not has_init
@@ -2184,7 +2237,11 @@ class Chack:
 
             run2_all_steps: list = []
             run2_output = ""
-            if self_critique_rounds > 0 and not _should_stop():
+            if (
+                self_critique_rounds > 0
+                and not _should_stop()
+                and not result.get("completion_preserved_after_limit")
+            ):
                 critique_prompt = self._require_self_critique_prompt()
                 for critique_round in range(1, self_critique_rounds + 1):
                     if _should_stop():

@@ -109,6 +109,22 @@ def current_max_tools_used() -> int:
     return int(_ACTIVE_MAX_TOOLS_USED.get() or 0)
 
 
+def active_max_tools_used() -> int | None:
+    """Return the per-run override/config value when a run context is active."""
+    value = _ACTIVE_MAX_TOOLS_USED.get()
+    if value is None:
+        return None
+    return max(0, int(value))
+
+
+def effective_max_tools_used(configured: int) -> int:
+    """Resolve the run-scoped tool maximum, preserving an explicit zero override."""
+    active = active_max_tools_used()
+    if active is None:
+        return max(0, int(configured or 0))
+    return active
+
+
 def non_task_tool_count(counter: Counter[str]) -> int:
     total = 0
     for tool_name, count in counter.items():
