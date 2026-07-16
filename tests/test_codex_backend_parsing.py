@@ -245,6 +245,6 @@ def test_claude_backend_keeps_structured_output_from_result_event():
 def test_claude_backend_prefers_claude_access_token_over_anthropic_env_vars():
     source = CLAUDE_MODULE_PATH.read_text()
 
-    assert 'env["CLAUDE_ACCESS_TOKEN"] = self._claude_access_token' in source
+    assert 'env["CLAUDE_CODE_OAUTH_TOKEN"] = self._claude_access_token' in source
     assert 'env.pop("ANTHROPIC_API_KEY", None)' in source
     assert 'env.pop("CLAUDE_API_KEY", None)' in source

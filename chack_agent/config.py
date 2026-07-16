@@ -203,7 +203,10 @@ def resolve_api_key_type(config: ChackConfig) -> str:
         or os.environ.get("ANTHROPIC_API_KEY", "").strip()
         or os.environ.get("CLAUDE_API_KEY", "").strip()
     )
-    claude_access_token = os.environ.get("CLAUDE_ACCESS_TOKEN", "").strip()
+    claude_access_token = (
+        os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+        or os.environ.get("CLAUDE_ACCESS_TOKEN", "")
+    ).strip()
     openrouter_api_key = (
         str(getattr(credentials, "openrouter_api_key", "") or "").strip()
         or os.environ.get("OPENROUTER_API_KEY", "").strip()

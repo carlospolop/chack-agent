@@ -1069,7 +1069,11 @@ bash save_vuln.sh '{{
                 env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
         else:
             if self._claude_access_token:
-                env["CLAUDE_ACCESS_TOKEN"] = self._claude_access_token
+                # Claude Code subscription tokens created by `claude setup-token`
+                # are consumed through CLAUDE_CODE_OAUTH_TOKEN. Keep accepting the
+                # legacy application variable at the configuration boundary, but
+                # always invoke the CLI with its canonical environment variable.
+                env["CLAUDE_CODE_OAUTH_TOKEN"] = self._claude_access_token
                 env.pop("ANTHROPIC_API_KEY", None)
                 env.pop("CLAUDE_API_KEY", None)
                 env.pop("ANTHROPIC_AUTH_TOKEN", None)
@@ -1536,7 +1540,14 @@ def build_executor(
                 os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("CLAUDE_API_KEY", "")
             )
         ),
-        _claude_access_token=str("" if route is not None else os.environ.get("CLAUDE_ACCESS_TOKEN", "")),
+        _claude_access_token=str(
+            ""
+            if route is not None
+            else (
+                os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+                or os.environ.get("CLAUDE_ACCESS_TOKEN", "")
+            )
+        ),
         _anthropic_base_url=str(route.anthropic_base_url if route is not None else ""),
         _openrouter_http_referer=str((route.headers.get("HTTP-Referer", "") if route else "")),
         _openrouter_app_name=str((route.headers.get("X-Title", "") if route else "")),
