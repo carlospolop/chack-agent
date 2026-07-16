@@ -212,6 +212,7 @@ class Chack:
         self.logger = logging.getLogger("chack.agent")
         self._executors: Dict[str, Any] = {}
         self._last_activity_at: Dict[str, float] = {}
+        self._session_started_at: Dict[str, float] = {}
         self._pricing = load_pricing(resolve_pricing_path())
         self._self_critique_prompt = _build_self_critique_prompt(
             mention_task_steps_manager=(
@@ -1189,6 +1190,53 @@ class Chack:
             )
         return executor
 
+    def has_session(self, session_id: str) -> bool:
+        """Return whether this process has a live executor for the logical session."""
+        prefix = f"{session_id}:"
+        return any(key.startswith(prefix) for key in self._executors)
+
+    def _prepare_session_for_run(self, session_id: str) -> Optional[str]:
+        """Rotate an expired native conversation before accepting the next run."""
+        now = time.time()
+        idle_minutes = max(
+            0,
+            int(getattr(self.config.session, "idle_reset_minutes", 0) or 0),
+        )
+        max_age_minutes = max(
+            0,
+            int(getattr(self.config.session, "max_age_minutes", 0) or 0),
+        )
+        started_at = self._session_started_at.get(session_id)
+        last_activity_at = self._last_activity_at.get(session_id)
+        reason: Optional[str] = None
+        if self.has_session(session_id):
+            if (
+                idle_minutes
+                and last_activity_at is not None
+                and now - last_activity_at >= idle_minutes * 60
+            ):
+                reason = "idle"
+            elif (
+                max_age_minutes
+                and started_at is not None
+                and now - started_at >= max_age_minutes * 60
+            ):
+                reason = "max_age"
+        if reason:
+            self.logger.info(
+                "Rotating session %s before next run "
+                "(reason=%s idle_minutes=%s max_age_minutes=%s ts=%s).",
+                session_id,
+                reason,
+                idle_minutes,
+                max_age_minutes,
+                _log_timestamp(),
+            )
+            self.reset_session(session_id, finalize_long_term_memory=True)
+        self._session_started_at.setdefault(session_id, now)
+        self._last_activity_at[session_id] = now
+        return reason
+
     async def _finalize_long_term_memory(self, session_id: str) -> None:
         if not self.config.session.long_term_memory_enabled:
             return
@@ -1265,6 +1313,7 @@ class Chack:
             k: v for k, v in self._executors.items() if not k.startswith(f"{session_id}:")
         }
         self._last_activity_at.pop(session_id, None)
+        self._session_started_at.pop(session_id, None)
 
     def reset_session(self, session_id: str, *, finalize_long_term_memory: bool = True) -> None:
         asyncio.run(self.areset_session(session_id, finalize_long_term_memory=finalize_long_term_memory))
@@ -1381,6 +1430,7 @@ class Chack:
                 require_task_steps_manager_init_first and task_steps_manager_enabled
             )
 
+            self._prepare_session_for_run(session_id)
             executor = self._get_executor(
                 session_id,
                 system_prompt_override=system_prompt_override,
@@ -2358,7 +2408,16 @@ class Chack:
                 STORE.unregister_listener(task_session_id, _listener)
             TOOL_USAGE_STORE.clear(task_session_id)
 
-            if self.config.session.long_term_memory_enabled:
+            if (
+                self.config.session.long_term_memory_enabled
+                and bool(
+                    getattr(
+                        self.config.session,
+                        "long_term_memory_update_every_run",
+                        True,
+                    )
+                )
+            ):
                 asyncio.run(self._finalize_long_term_memory(session_id))
 
             if result.get("error"):
@@ -2453,10 +2512,13 @@ class Chack:
             )
         except Exception as exc:
             limit_text = str(exc or "").lower()
-            is_budget_limit = isinstance(exc, TimeoutError) and (
+            is_budget_limit = isinstance(exc, (TimeoutError, RuntimeError)) and (
                 "max cost budget" in limit_text
                 or "max runtime" in limit_text
                 or "budget limit" in limit_text
+                or "tool-call limit" in limit_text
+                or "tool budget reached" in limit_text
+                or "tool limit" in limit_text
             )
             if is_budget_limit and task_session_id:
                 try:
@@ -2519,6 +2581,7 @@ class Chack:
             )
             raise
         finally:
+            self._last_activity_at[session_id] = time.time()
             metrics_stop_event.set()
             if metrics_thread is not None:
                 try:

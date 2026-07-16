@@ -103,18 +103,41 @@ class CodexContextWindowConfigTests(unittest.TestCase):
         ) as handle:
             return handle.read()
 
-    def test_writes_auto_compact_limit_when_configured(self) -> None:
+    def test_writes_hermes_style_auto_compact_limit_when_configured(self) -> None:
         with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(
             "chack_agent.model_aliases._get_backend_aliases", return_value={}
         ), tempfile.TemporaryDirectory() as tmpdir:
             with patch.dict(os.environ, {"CHACK_CODEX_HOME_BASE": tmpdir}):
                 body = self._build(100_000, tmpdir)
-        # Sub-minimum config was floored to 250k before reaching Codex, and it
-        # drives the auto-compaction trigger (not a hard context-window cap).
+        # Sub-minimum capacity is floored to 250k, while the default 50% policy
+        # triggers Codex's native summarizing compactor at 125k.
         self.assertIn(
-            f"model_auto_compact_token_limit = {CLI_BACKEND_MIN_CONTEXT_TOKENS}", body
+            f"model_auto_compact_token_limit = {CLI_BACKEND_MIN_CONTEXT_TOKENS // 2}", body
         )
         self.assertNotIn("model_context_window", body)
+
+    def test_honors_explicit_compaction_threshold_ratio(self) -> None:
+        with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(
+            "chack_agent.model_aliases._get_backend_aliases", return_value={}
+        ), tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"CHACK_CODEX_HOME_BASE": tmpdir}):
+                config = resolve_config_aliases(_make_config("codex", 250_000))
+                config.agent.compaction_threshold_ratio = 0.40
+                executor = build_codex_executor(
+                    config,
+                    system_prompt="system",
+                    max_turns=2,
+                    memory_max_messages=10,
+                    memory_reset_to_messages=5,
+                )
+                executor._ensure_codex_home_and_config()
+                assert executor._codex_home is not None
+                with open(
+                    os.path.join(executor._codex_home, "config.toml"),
+                    encoding="utf-8",
+                ) as handle:
+                    body = handle.read()
+        self.assertIn("model_auto_compact_token_limit = 100000", body)
 
     def test_omits_auto_compact_limit_when_unset(self) -> None:
         with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(

@@ -164,6 +164,8 @@ def test_exec_background_process_is_cleaned_at_run_end(isolated_run_state, monke
 
 
 class _CompletedThenLimitedExecutor:
+    limit_error: Exception = TimeoutError("Agent run exceeded max cost budget ($10.0000).")
+
     def invoke(self, payload, context=None):
         del payload, context
         session_id = current_session_id()
@@ -172,7 +174,15 @@ class _CompletedThenLimitedExecutor:
         STORE.apply(session_id, run_label, "init", tasks_text="Create artifact\nVerify artifact")
         STORE.apply(session_id, run_label, "update", task_id=1, status="done", notes="PR created")
         STORE.apply(session_id, run_label, "update", task_id=2, status="done", notes="PR verified")
-        raise TimeoutError("Agent run exceeded max cost budget ($10.0000).")
+        raise self.limit_error
+
+
+class _CompletedThenRuntimeLimitedExecutor(_CompletedThenLimitedExecutor):
+    limit_error = TimeoutError("Agent run exceeded max runtime (60 minutes).")
+
+
+class _CompletedThenToolLimitedExecutor(_CompletedThenLimitedExecutor):
+    limit_error = RuntimeError("Agent tool-call limit reached; finalize with completed work.")
 
 
 class _CompletedWithLiveCostExecutor:
@@ -221,6 +231,18 @@ class _TestChack(Chack):
         return _CompletedThenLimitedExecutor()
 
 
+class _RuntimeLimitChack(Chack):
+    def _get_executor(self, *args, **kwargs):
+        del args, kwargs
+        return _CompletedThenRuntimeLimitedExecutor()
+
+
+class _ToolLimitChack(Chack):
+    def _get_executor(self, *args, **kwargs):
+        del args, kwargs
+        return _CompletedThenToolLimitedExecutor()
+
+
 class _LiveCostChack(Chack):
     def _get_executor(self, *args, **kwargs):
         del args, kwargs
@@ -253,6 +275,24 @@ def _fallback_config() -> ChackConfig:
 
 def test_completed_task_result_survives_late_cost_timeout(isolated_run_state):
     result = _TestChack(_fallback_config()).run(
+        "completed-limit",
+        "do work",
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert "requested work completed" in result.output.lower()
+    assert "Create artifact — PR created" in result.output
+    assert "Verify artifact — PR verified" in result.output
+    assert "Finalization limit" in result.output
+
+
+@pytest.mark.parametrize("agent_type", [_RuntimeLimitChack, _ToolLimitChack])
+def test_completed_task_result_survives_other_late_limits(
+    isolated_run_state,
+    agent_type,
+):
+    result = agent_type(_fallback_config()).run(
         "completed-limit",
         "do work",
         enable_self_critique=False,

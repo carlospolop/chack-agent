@@ -215,6 +215,7 @@ class CodexExecutor:
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
     _max_context_tokens: int = 0
+    _compaction_threshold_ratio: float = 0.50
     _uses_openrouter_route: bool = False
     _openrouter_base_url: str = ""
     _openrouter_http_referer: str = ""
@@ -988,14 +989,17 @@ class CodexExecutor:
 
         config_lines = [f"model = {_toml_string(self._model_name)}"]
 
-        # Trigger Codex's auto-compaction at the configured token budget instead
-        # of the model's native window. This is the compaction threshold, NOT a
-        # hard cap: Codex summarizes/compacts the conversation when it is reached
-        # so the session keeps going rather than being killed. Left unset means
-        # Codex keeps auto-detecting the native window for the model.
+        # Keep the configured model capacity available, but trigger Codex's
+        # native summarizing compactor at the configured fraction of it. This is
+        # a compaction threshold, NOT a hard context-window cap.
         if self._max_context_tokens > 0:
+            ratio = min(
+                1.0,
+                max(0.05, float(self._compaction_threshold_ratio or 0.50)),
+            )
+            compact_at = max(1, int(self._max_context_tokens * ratio))
             config_lines.append(
-                f"model_auto_compact_token_limit = {int(self._max_context_tokens)}"
+                f"model_auto_compact_token_limit = {compact_at}"
             )
 
         # System-level instructions to prevent the model from calling
@@ -1601,6 +1605,9 @@ def build_executor(
             else ""
         ),
         _max_context_tokens=int(getattr(config.model, "max_context_tokens", 0) or 0),
+        _compaction_threshold_ratio=float(
+            getattr(config.agent, "compaction_threshold_ratio", 0.50) or 0.50
+        ),
         _uses_openrouter_route=uses_openrouter_route,
         _openrouter_base_url=str(route.base_url if route is not None else ""),
         _openrouter_http_referer=str((route.headers.get("HTTP-Referer", "") if route else "")),

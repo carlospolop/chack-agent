@@ -93,7 +93,10 @@ class AgentConfig:
     max_runtime_minutes: int = 0
     max_cost_usd: float = 0.0
     require_task_steps_manager_init_first: bool = True
-    compaction_threshold_ratio: float = 0.75
+    # Match Hermes's balanced context policy by default: keep full capacity,
+    # but compact once the active context reaches 50%.
+    compaction_threshold_ratio: float = 0.50
+    compaction_target_ratio: float = 0.20
     compaction_model: str = ""
     main_action: str = ""
     sub_action: str = ""
@@ -115,6 +118,13 @@ class SessionConfig:
     memory_summary_max_chars: int = 0
     long_term_memory_max_chars: int = 3000
     long_term_memory_dir: str = "longterm"
+    # Zero disables a boundary. Idle time is measured from the previous run;
+    # max age is measured from the first run in the native conversation.
+    idle_reset_minutes: int = 0
+    max_age_minutes: int = 0
+    # Applications may summarize only on reset/rotation to avoid an extra model
+    # call after every user message.
+    long_term_memory_update_every_run: bool = True
     system_prompt: str = ""  # Optional override for this session
 
 
