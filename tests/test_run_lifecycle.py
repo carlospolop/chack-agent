@@ -6,12 +6,16 @@ import subprocess
 import sys
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from chack_agent import Chack
+import chack_agent.agent as agent_module
+from chack_agent.agent import _task_snapshot_is_complete
 from chack_agent.budget_warning_state import inject_budget_warning_from_env
 from chack_agent.live_cost_state import report_live_usage
+from chack_agent.limit_event_state import emit_limit_reached
 from chack_agent.config import (
     AgentConfig,
     ChackConfig,
@@ -22,6 +26,7 @@ from chack_agent.config import (
     ToolsConfig,
 )
 from chack_tools.exec_tool import ExecTool
+from chack_tools.cancellation import current_cancellation_event
 from chack_tools.run_lifecycle import (
     claim_non_task_tool_slot,
     cleanup_run_state,
@@ -225,6 +230,112 @@ class _IncompleteWithLiveCostExecutor:
         return {"output": "must not escape", "intermediate_steps": [], "raw_result": None}
 
 
+class _DeadlineCrossingResult(dict):
+    def __init__(self, clock, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._clock = clock
+
+    def get(self, key, default=None):
+        if key == "error":
+            self._clock.now = 1061.0
+        return super().get(key, default)
+
+
+class _RuntimeCrossingExecutor:
+    def __init__(self, clock, *, complete: bool = True):
+        self.clock = clock
+        self.complete = complete
+        self.calls = 0
+
+    def invoke(self, payload, context=None):
+        del payload, context
+        self.calls += 1
+        session_id = current_session_id()
+        run_label = current_run_label()
+        assert session_id
+        STORE.apply(session_id, run_label, "init", tasks_text="Create artifact\nVerify artifact")
+        STORE.apply(session_id, run_label, "update", task_id=1, status="done", notes="created")
+        if self.complete:
+            STORE.apply(session_id, run_label, "update", task_id=2, status="done", notes="verified")
+        return _DeadlineCrossingResult(
+            self.clock,
+            output="ACTUAL_RUNTIME_FINAL_ANSWER",
+            intermediate_steps=[],
+            raw_result=None,
+        )
+
+
+class _ToolCapExecutor:
+    def __init__(self, *, complete: bool = True):
+        self.complete = complete
+        self.calls = 0
+
+    def invoke(self, payload, context=None):
+        del payload, context
+        self.calls += 1
+        session_id = current_session_id()
+        run_label = current_run_label()
+        assert session_id
+        STORE.apply(session_id, run_label, "init", tasks_text="Create artifact\nVerify artifact")
+        STORE.apply(session_id, run_label, "update", task_id=1, status="done", notes="created")
+        if self.complete:
+            STORE.apply(session_id, run_label, "update", task_id=2, status="done", notes="verified")
+        return {
+            "output": "ACTUAL_TOOL_CAP_FINAL_ANSWER",
+            "intermediate_steps": [
+                {"tool": "web_search", "output": "one"},
+                {"tool": "web_extract", "output": "two"},
+            ],
+            "raw_result": None,
+        }
+
+
+class _RuntimeWatchdogRaceExecutor:
+    def __init__(self, clock):
+        self.clock = clock
+        self.calls = 0
+
+    def invoke(self, payload, context=None):
+        del payload, context
+        self.calls += 1
+        session_id = current_session_id()
+        run_label = current_run_label()
+        assert session_id
+        STORE.apply(session_id, run_label, "init", tasks_text="Create artifact\nVerify artifact")
+        STORE.apply(session_id, run_label, "update", task_id=1, status="done", notes="created")
+        STORE.apply(session_id, run_label, "update", task_id=2, status="done", notes="verified")
+        cancel_event = current_cancellation_event()
+        assert cancel_event is not None
+        self.clock.now = 1061.0
+        assert cancel_event.wait(timeout=1.0)
+        return {
+            "output": "QUEUED_RUNTIME_FINAL_ANSWER",
+            "intermediate_steps": [],
+            "raw_result": None,
+        }
+
+
+class _ToolLimitEventExecutor:
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, payload, context=None):
+        del payload, context
+        self.calls += 1
+        session_id = current_session_id()
+        run_label = current_run_label()
+        assert session_id
+        STORE.apply(session_id, run_label, "init", tasks_text="Create artifact\nVerify artifact")
+        STORE.apply(session_id, run_label, "update", task_id=1, status="done", notes="created")
+        STORE.apply(session_id, run_label, "update", task_id=2, status="done", notes="verified")
+        emit_limit_reached("tools", {"used": 2, "max_tools_used": 2})
+        return {
+            "output": "TOOL_EVENT_FINAL_ANSWER",
+            "intermediate_steps": [],
+            "raw_result": None,
+        }
+
+
 class _TestChack(Chack):
     def _get_executor(self, *args, **kwargs):
         del args, kwargs
@@ -253,6 +364,14 @@ class _IncompleteLiveCostChack(Chack):
     def _get_executor(self, *args, **kwargs):
         del args, kwargs
         return _IncompleteWithLiveCostExecutor()
+
+
+class _InjectedExecutorChack(Chack):
+    executor: object | None = None
+
+    def _get_executor(self, *args, **kwargs):
+        del args, kwargs
+        return self.executor
 
 
 def _fallback_config() -> ChackConfig:
@@ -342,3 +461,137 @@ def test_incomplete_live_cost_crossing_still_raises(isolated_run_state):
             enable_self_critique=False,
             require_task_steps_manager_init_first=False,
         )
+
+
+def test_task_snapshot_completion_requires_all_tasks_done():
+    assert not _task_snapshot_is_complete({"completed": True, "tasks_total": 2, "tasks_done": 1})
+    assert not _task_snapshot_is_complete({"completed": True, "tasks_total": 0, "tasks_done": 0})
+    assert _task_snapshot_is_complete({"completed": True, "tasks_total": 2, "tasks_done": 2})
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_runtime_crossing_after_result_is_strict_and_skips_critique(
+    isolated_run_state,
+    monkeypatch,
+    complete,
+):
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(agent_module, "time", SimpleNamespace(time=lambda: clock.now))
+    config = _fallback_config()
+    config = replace(
+        config,
+        agent=replace(
+            config.agent,
+            max_runtime_minutes=1,
+            max_cost_usd=0,
+            self_critique_enabled=True,
+            self_critique_rounds=2,
+        ),
+    )
+    executor = _RuntimeCrossingExecutor(clock, complete=complete)
+    agent = _InjectedExecutorChack(config)
+    agent.executor = executor
+
+    if not complete:
+        with pytest.raises(TimeoutError, match="max runtime"):
+            agent.run(
+                "runtime-crossing-incomplete",
+                "do work",
+                self_critique_rounds_override=2,
+                require_task_steps_manager_init_first=False,
+            )
+    else:
+        result = agent.run(
+            "runtime-crossing-complete",
+            "do work",
+            self_critique_rounds_override=2,
+            require_task_steps_manager_init_first=False,
+        )
+        assert "ACTUAL_RUNTIME_FINAL_ANSWER" in result.output
+        assert "runtime limit was reached" in result.output
+    assert executor.calls == 1
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_exact_tool_cap_is_terminal_and_skips_critique(isolated_run_state, complete):
+    config = _fallback_config()
+    config = replace(
+        config,
+        agent=replace(
+            config.agent,
+            max_cost_usd=0,
+            self_critique_enabled=True,
+            self_critique_rounds=2,
+        ),
+        tools=replace(config.tools, min_tools_used=0, max_tools_used=2),
+    )
+    executor = _ToolCapExecutor(complete=complete)
+    agent = _InjectedExecutorChack(config)
+    agent.executor = executor
+
+    result = agent.run(
+        f"tool-cap-{'complete' if complete else 'incomplete'}",
+        "do work",
+        self_critique_rounds_override=2,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert "ACTUAL_TOOL_CAP_FINAL_ANSWER" in result.output
+    assert ("tool-call limit was reached" in result.output) is complete
+    assert executor.calls == 1
+
+
+def test_runtime_watchdog_preserves_success_queued_during_cancellation(
+    isolated_run_state,
+    monkeypatch,
+):
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(agent_module, "time", SimpleNamespace(time=lambda: clock.now))
+    config = _fallback_config()
+    config = replace(
+        config,
+        agent=replace(config.agent, max_runtime_minutes=1, max_cost_usd=0),
+    )
+    executor = _RuntimeWatchdogRaceExecutor(clock)
+    agent = _InjectedExecutorChack(config)
+    agent.executor = executor
+    monkeypatch.setattr(agent, "_stop_thread", lambda _worker: None)
+
+    result = agent.run(
+        "runtime-watchdog-race",
+        "do work",
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert "QUEUED_RUNTIME_FINAL_ANSWER" in result.output
+    assert "runtime limit was reached" in result.output
+    assert executor.calls == 1
+
+
+def test_tool_limit_event_is_terminal_when_denied_step_is_omitted(isolated_run_state):
+    config = _fallback_config()
+    config = replace(
+        config,
+        agent=replace(
+            config.agent,
+            max_runtime_minutes=1,
+            max_cost_usd=0,
+            self_critique_enabled=True,
+            self_critique_rounds=2,
+        ),
+        tools=replace(config.tools, min_tools_used=0, max_tools_used=2),
+    )
+    executor = _ToolLimitEventExecutor()
+    agent = _InjectedExecutorChack(config)
+    agent.executor = executor
+
+    result = agent.run(
+        "tool-limit-event",
+        "do work",
+        self_critique_rounds_override=2,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert "TOOL_EVENT_FINAL_ANSWER" in result.output
+    assert "tool-call limit was reached" in result.output
+    assert executor.calls == 1

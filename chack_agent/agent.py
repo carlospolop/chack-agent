@@ -189,7 +189,9 @@ def _completed_task_limit_output(snapshot: Dict[str, Any], error: BaseException)
 
 
 def _task_snapshot_is_complete(snapshot: Dict[str, Any]) -> bool:
-    return bool(snapshot.get("completed")) and int(snapshot.get("tasks_total") or 0) > 0
+    total = int(snapshot.get("tasks_total") or 0)
+    done = int(snapshot.get("tasks_done") or 0)
+    return bool(snapshot.get("completed")) and total > 0 and done == total
 
 
 class Chack:
@@ -1457,7 +1459,11 @@ class Chack:
             estimated_cost_spent = 0.0
             progress_state = {"runtime_percent": 0, "cost_percent": 0}
             limit_event_state = {"runtime": False, "cost": False, "tools": False}
-            completion_preserved_state = {"cost": False}
+            completion_preserved_state = {
+                "runtime": False,
+                "cost": False,
+                "tools": False,
+            }
 
             # Export budget env vars for MCP subprocess backends
             export_budget_env(
@@ -1511,21 +1517,28 @@ class Chack:
             write_live_cost(task_session_id, 0.0)
 
             def _tasklist_completed() -> bool:
-                snapshot = STORE.snapshot(task_session_id)
-                total = int(snapshot.get("tasks_total", 0) or 0)
-                done = int(snapshot.get("tasks_done", 0) or 0)
-                return bool(snapshot.get("completed") and total > 0 and done == total)
+                return _task_snapshot_is_complete(STORE.snapshot(task_session_id))
 
-            def _mark_cost_completion_preserved(result: dict[str, Any]) -> None:
-                completion_preserved_state["cost"] = True
+            def _mark_completion_preserved(
+                result: dict[str, Any],
+                limit_type: str,
+            ) -> None:
+                completion_preserved_state[limit_type] = True
                 result["completion_preserved_after_limit"] = True
-                result["limit_reached"] = "cost_after_completion"
+                result["limit_reached"] = f"{limit_type}_after_completion"
                 base_output = str(result.get("output", "") or "").rstrip()
-                if "[Admin Notice] The cost limit was reached after all task steps completed" in base_output:
+                labels = {
+                    "cost": "cost limit",
+                    "runtime": "runtime limit",
+                    "tools": "tool-call limit",
+                }
+                label = labels.get(limit_type, f"{limit_type} limit")
+                notice_start = f"[Admin Notice] The {label} was reached after all task steps completed"
+                if notice_start in base_output:
                     return
                 result["output"] = (
                     f"{base_output}\n\n======\n"
-                    "[Admin Notice] The cost limit was reached after all task steps completed; "
+                    f"{notice_start}; "
                     "this final answer was preserved and no follow-up or self-critique run will start."
                 ).strip()
 
@@ -1679,6 +1692,7 @@ class Chack:
                 for attempt in range(1, max_attempts + 1):
                     elapsed = time.time() - run_started_at
                     if max_runtime_seconds > 0 and elapsed >= max_runtime_seconds:
+                        completed_tasklist = _tasklist_completed()
                         self._emit_limit_reached_once(
                             session_id=session_id,
                             task_session_id=telemetry_task_session_id or task_session_id,
@@ -1687,8 +1701,15 @@ class Chack:
                             payload={
                                 "max_runtime_minutes": max_runtime_minutes,
                                 "elapsed_seconds": elapsed,
+                                "completed_tasklist": completed_tasklist,
                             },
                         )
+                        if (
+                            completed_tasklist
+                            and str(result.get("output", "") or "").strip()
+                        ):
+                            _mark_completion_preserved(result, "runtime")
+                            break
                         raise TimeoutError(
                             f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
                         )
@@ -1960,6 +1981,18 @@ class Chack:
                                     "Agent run exceeded max cost budget and the execution thread did not stop in time."
                                 )
                             if runtime_exceeded:
+                                queued_result = None
+                                try:
+                                    queued_status, queued_payload = result_queue.get_nowait()
+                                except queue.Empty:
+                                    pass
+                                else:
+                                    if (
+                                        queued_status == "ok"
+                                        and isinstance(queued_payload, dict)
+                                        and _tasklist_completed()
+                                    ):
+                                        queued_result = queued_payload
                                 self._emit_limit_reached_once(
                                     session_id=session_id,
                                     task_session_id=telemetry_task_session_id or task_session_id,
@@ -1968,8 +2001,12 @@ class Chack:
                                     payload={
                                         "max_runtime_minutes": max_runtime_minutes,
                                         "elapsed_seconds": time.time() - run_started_at,
+                                        "completed_tasklist": queued_result is not None,
                                     },
                                 )
+                                if queued_result is not None:
+                                    _mark_completion_preserved(queued_result, "runtime")
+                                    return queued_result
                                 raise TimeoutError(
                                     f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
                                 )
@@ -2068,7 +2105,7 @@ class Chack:
                                 raise TimeoutError(
                                     f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
                                 )
-                            _mark_cost_completion_preserved(result)
+                            _mark_completion_preserved(result, "cost")
                         elif cost_critical_threshold > 0 and estimated_cost_spent >= cost_critical_threshold:
                             output = result.get("output", "")
                             if output is not None:
@@ -2095,7 +2132,7 @@ class Chack:
                         and _tasklist_completed()
                         and not result.get("completion_preserved_after_limit")
                     ):
-                        _mark_cost_completion_preserved(result)
+                        _mark_completion_preserved(result, "cost")
 
                     elapsed_runtime_seconds = time.time() - run_started_at
                     self._emit_progress_milestones(
@@ -2108,6 +2145,27 @@ class Chack:
                         max_cost_usd=max_cost_usd,
                     )
                     if (
+                        max_runtime_seconds > 0
+                        and elapsed_runtime_seconds >= max_runtime_seconds
+                    ):
+                        completed_tasklist = _tasklist_completed()
+                        self._emit_limit_reached_once(
+                            session_id=session_id,
+                            task_session_id=telemetry_task_session_id or task_session_id,
+                            limit_state=limit_event_state,
+                            limit_type="runtime",
+                            payload={
+                                "max_runtime_minutes": max_runtime_minutes,
+                                "elapsed_seconds": elapsed_runtime_seconds,
+                                "completed_tasklist": completed_tasklist,
+                            },
+                        )
+                        if not completed_tasklist:
+                            raise TimeoutError(
+                                f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
+                            )
+                        _mark_completion_preserved(result, "runtime")
+                    elif (
                         runtime_critical_threshold_seconds > 0
                         and elapsed_runtime_seconds >= runtime_critical_threshold_seconds
                     ):
@@ -2159,7 +2217,9 @@ class Chack:
                         effective_required_tools,
                     )
                     missing_required = bool(missing_required_tools)
-                    max_tools_reached = effective_max_tools > 0 and non_task_tools >= effective_max_tools
+                    max_tools_reached = bool(limit_event_state["tools"]) or (
+                        effective_max_tools > 0 and non_task_tools >= effective_max_tools
+                    )
                     self.logger.info(
                         "%s: steps=%s non_task_tools=%s has_init=%s missing_tools=%s missing_required_tools=%s max_tools_reached=%s ts=%s.",
                         run_label,
@@ -2171,9 +2231,8 @@ class Chack:
                         max_tools_reached,
                         _log_timestamp(),
                     )
-                    if not missing_init and not missing_tools and not missing_required:
-                        break
                     if max_tools_reached:
+                        completed_tasklist = _tasklist_completed()
                         self._emit_limit_reached_once(
                             session_id=session_id,
                             task_session_id=telemetry_task_session_id or task_session_id,
@@ -2182,8 +2241,14 @@ class Chack:
                             payload={
                                 "max_tools_used": effective_max_tools,
                                 "used": non_task_tools,
+                                "completed_tasklist": completed_tasklist,
                             },
                         )
+                        result["limit_reached"] = "tools"
+                        if completed_tasklist:
+                            _mark_completion_preserved(result, "tools")
+                        break
+                    if not missing_init and not missing_tools and not missing_required:
                         break
                     if missing_required and missing_required_reminders_sent >= configured_required_tool_attempts:
                         result["error"] = "missing_required_tool_call"
@@ -2291,6 +2356,7 @@ class Chack:
                 self_critique_rounds > 0
                 and not _should_stop()
                 and not result.get("completion_preserved_after_limit")
+                and not result.get("limit_reached")
             ):
                 critique_prompt = self._require_self_critique_prompt()
                 for critique_round in range(1, self_critique_rounds + 1):
