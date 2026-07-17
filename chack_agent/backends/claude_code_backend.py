@@ -1062,7 +1062,6 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             _exec_enabled = bool(tools_cfg.get("exec_enabled", False))
         except Exception:
             _exec_enabled = False
-        builtin_tools = "Bash" if _exec_enabled else ""
 
         args: list[str] = [
             self._claude_cli_path,
@@ -1076,8 +1075,13 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             os.path.join(self._claude_home or os.getcwd(), "settings.json"),
             "--strict-mcp-config",
         ]
-        if builtin_tools:
-            args.extend(["--tools", builtin_tools])
+        # ``--tools Bash`` is a built-in-tool allowlist in Claude Code. Passing
+        # it hides every configured MCP tool, which made models attempt MCP
+        # names as shell commands. Leave the normal tool registry intact when
+        # execution is enabled; when it is disabled, deny only native Bash so
+        # MCP tools remain discoverable and callable.
+        if not _exec_enabled:
+            args.extend(["--disallowedTools", "Bash"])
 
         if self._max_turns > 0:
             args.extend(["--max-turns", str(self._max_turns)])

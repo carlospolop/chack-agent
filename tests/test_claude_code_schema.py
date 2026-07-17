@@ -86,6 +86,26 @@ def test_claude_command_omits_json_schema_when_unconfigured() -> None:
     assert "--json-schema" not in command
 
 
+def test_claude_exec_enabled_does_not_hide_mcp_tools() -> None:
+    executor = _build_executor("")
+    executor._tools_config_json = '{"exec_enabled": true}'
+
+    command = executor._build_command("use tools")
+
+    assert "--tools" not in command
+    assert "--disallowedTools" not in command
+
+
+def test_claude_exec_disabled_denies_bash_without_hiding_mcp_tools() -> None:
+    executor = _build_executor("")
+    executor._tools_config_json = '{"exec_enabled": false}'
+
+    command = executor._build_command("use tools")
+
+    assert "--tools" not in command
+    assert command[command.index("--disallowedTools") + 1] == "Bash"
+
+
 def test_claude_command_resumes_captured_session_for_followup_prompt() -> None:
     executor = _build_executor("")
     executor._claude_session_id = "11111111-2222-3333-4444-555555555555"
