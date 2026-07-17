@@ -1,4 +1,6 @@
 import json
+import pathlib
+import tempfile
 
 from chack_agent.backends.claude_code_backend import ClaudeCodeExecutor
 
@@ -132,3 +134,82 @@ def test_claude_task_manager_policy_uses_exact_mcp_name() -> None:
     prompt = executor._compose_prompt("audit checks")
 
     assert "call `mcp__chack_tools__task_steps_manager`" in prompt
+
+
+def test_claude_vulnerability_fallback_collects_only_new_files() -> None:
+    executor = _build_executor("")
+    payload = {
+        "name": "Fallback finding",
+        "description": "Validated fallback description",
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "steps": [
+            {
+                "file_path": "app.py",
+                "code": "eval(data)",
+                "description": "Attacker data reaches eval.",
+            }
+        ],
+    }
+
+    with tempfile.TemporaryDirectory(prefix="claude_fallback_") as root:
+        executor._claude_home = str(pathlib.Path(root, "session-a"))
+        vulns_dir = pathlib.Path(executor._bash_vuln_fallback_dir(root))
+        vulns_dir.mkdir(parents=True)
+        pathlib.Path(vulns_dir, "old.json").write_text(json.dumps(payload), encoding="utf-8")
+        snapshot = executor._snapshot_bash_saved_vulns(str(vulns_dir))
+
+        assert executor._collect_bash_saved_vulns(str(vulns_dir), snapshot) == []
+
+        pathlib.Path(vulns_dir, "new.json").write_text(json.dumps(payload), encoding="utf-8")
+        collected = executor._collect_bash_saved_vulns(str(vulns_dir), snapshot)
+
+        assert len(collected) == 1
+        action = collected[0][0]
+        assert action.tool_input["tool_id"] == "bash_save_new.json"
+
+
+def test_claude_save_policy_forbids_internal_store_writes() -> None:
+    executor = _build_executor("")
+    executor._allowed_tools_json = json.dumps(["save_discovered_vulnerability"])
+
+    prompt = executor._compose_prompt("audit checks")
+
+    assert "Never write directly to AISEC_LOCAL_VULN_STORE_PATH" in prompt
+    assert "/tmp/aisec_local_vulnerabilities_*" in prompt
+
+
+def test_claude_oauth_auth_failure_retries_once_with_api_key(monkeypatch) -> None:
+    executor = _build_executor("")
+    executor._claude_access_token = "oauth-primary"
+    executor._anthropic_api_key = "api-fallback"
+    results = iter(
+        [
+            ("ERROR: authentication_error: invalid OAuth token", [], None),
+            ("fallback succeeded", [], None),
+        ]
+    )
+    monkeypatch.setattr(executor, "_run_claude_once", lambda _prompt: next(results))
+
+    output, _, _ = executor._run_claude("test")
+
+    assert output == "fallback succeeded"
+    assert executor._claude_access_token == ""
+
+
+def test_claude_does_not_fallback_on_successful_output_mentioning_401(monkeypatch) -> None:
+    executor = _build_executor("")
+    executor._claude_access_token = "oauth-primary"
+    executor._anthropic_api_key = "api-fallback"
+    calls = []
+
+    def _run_once(_prompt):
+        calls.append(True)
+        return ("The audited code handles HTTP 401 responses.", [], None)
+
+    monkeypatch.setattr(executor, "_run_claude_once", _run_once)
+
+    output, _, _ = executor._run_claude("test")
+
+    assert output == "The audited code handles HTTP 401 responses."
+    assert len(calls) == 1
+    assert executor._claude_access_token == "oauth-primary"

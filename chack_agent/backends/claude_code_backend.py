@@ -429,6 +429,9 @@ class ClaudeCodeExecutor:
                 "    steps (array of objects with file_path, code, description).\n"
                 "    Each step MUST include the actual file_path in the repo and the\n"
                 "    verbatim source code snippet from that file.\n"
+                "  Never write directly to AISEC_LOCAL_VULN_STORE_PATH or any\n"
+                "  /tmp/aisec_local_vulnerabilities_* directory. Use only the MCP\n"
+                "  save tool or save_vuln.sh in the current repository.\n"
                 "  If you do NOT save findings they are LOST."
             )
             policy_lines.append(save_block)
@@ -458,12 +461,51 @@ class ClaudeCodeExecutor:
         return "\n".join(prompt_parts)
 
     def _run_claude(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        result = self._run_claude_once(prompt)
+        if not self._should_retry_with_anthropic_api_key(result[0]):
+            return result
+
+        _LOGGER.warning(
+            "Claude Code OAuth token authentication failed. Falling back to ANTHROPIC_API_KEY."
+        )
+        self._claude_access_token = ""
+        self._claude_session_id = None
+        return self._run_claude_once(prompt)
+
+    def _should_retry_with_anthropic_api_key(self, output: str) -> bool:
+        if self._uses_openrouter_route:
+            return False
+        if not self._claude_access_token or not self._anthropic_api_key:
+            return False
+        text = str(output or "").strip().lower()
+        if not text.startswith("error:"):
+            return False
+        return any(
+            marker in text
+            for marker in (
+                "authentication",
+                "unauthorized",
+                "invalid token",
+                "invalid oauth",
+                "oauth token",
+                "status code 401",
+                "http 401",
+                "authentication_error",
+            )
+        )
+
+    def _run_claude_once(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_claude_home_and_settings()
 
         command = self._build_command(prompt)
         env = self._build_env()
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
+        bash_vulns_dir = self._bash_vuln_fallback_dir(exec_cwd)
+        if bash_vulns_dir:
+            os.makedirs(bash_vulns_dir, exist_ok=True)
+            env["CHACK_VULN_FALLBACK_DIR"] = bash_vulns_dir
         agents_md_path = self._write_agents_md(exec_cwd)
+        bash_vuln_snapshot = self._snapshot_bash_saved_vulns(bash_vulns_dir)
         timeout_seconds = int(
             os.environ.get("CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS", "") or "900"
         )
@@ -688,7 +730,7 @@ class ClaudeCodeExecutor:
                 response = response[-4000:]
 
         # Pick up any JSON-fallback vulns written via save_vuln.sh
-        bash_vuln_steps = self._collect_bash_saved_vulns(exec_cwd)
+        bash_vuln_steps = self._collect_bash_saved_vulns(bash_vulns_dir, bash_vuln_snapshot)
         if bash_vuln_steps:
             steps.extend(bash_vuln_steps)
 
@@ -862,10 +904,12 @@ if [ -z "$JSON" ]; then
     echo "Usage: bash save_vuln.sh '<JSON>'" >&2
     exit 1
 fi
-mkdir -p .vulns
-python3 - "$JSON" <<'PYEOF'
-import sys, json, time
+VULNS_DIR="${CHACK_VULN_FALLBACK_DIR:-.vulns}"
+mkdir -p "$VULNS_DIR"
+python3 - "$JSON" "$VULNS_DIR" <<'PYEOF'
+import json, os, sys, time
 data = json.loads(sys.argv[1])
+vulns_dir = sys.argv[2]
 errors = []
 if not data.get("name"):
     errors.append("missing: name")
@@ -876,7 +920,7 @@ if errors:
     for e in errors:
         print(f"  - {e}", file=sys.stderr)
     sys.exit(1)
-fname = f".vulns/vuln_{int(time.time()*1000)}.json"
+fname = os.path.join(vulns_dir, f"vuln_{int(time.time()*1000)}.json")
 with open(fname, "w") as f:
     json.dump(data, f, indent=2)
 print(f"Saved to {fname}")
@@ -918,6 +962,11 @@ bash save_vuln.sh '{{
 ```
 
 **If you do NOT save findings they are LOST. You MUST save every real vulnerability.**
+
+Never write directly to `AISEC_LOCAL_VULN_STORE_PATH`, any
+`/tmp/aisec_local_vulnerabilities_*` directory, or another component's internal
+state. Do not create summary/metadata files in a vulnerability directory. Use
+only the MCP save tool or `save_vuln.sh` in the current repository.
 """
             with open(agents_md_path, "w", encoding="utf-8") as f:
                 f.write(agents_md_content)
@@ -935,12 +984,37 @@ bash save_vuln.sh '{{
             _LOGGER.warning("Failed to write AGENTS.md: %s", exc)
             return None
 
-    @staticmethod
-    def _collect_bash_saved_vulns(exec_cwd: str | None) -> list[tuple[ToolAction, Any]]:
-        """Read JSON files from .vulns/ directory written by save_vuln.sh and convert to steps."""
+    def _bash_vuln_fallback_dir(self, exec_cwd: str | None) -> str:
         if not exec_cwd:
+            return ""
+        session_dir = os.path.basename(str(self._claude_home or "default")) or "default"
+        return os.path.join(exec_cwd, ".vulns", session_dir)
+
+    @staticmethod
+    def _snapshot_bash_saved_vulns(vulns_dir: str | None) -> dict[str, tuple[int, int]]:
+        if not vulns_dir:
+            return {}
+        if not os.path.isdir(vulns_dir):
+            return {}
+        snapshot: dict[str, tuple[int, int]] = {}
+        for fname in os.listdir(vulns_dir):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                stat = os.stat(os.path.join(vulns_dir, fname))
+                snapshot[fname] = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                continue
+        return snapshot
+
+    @staticmethod
+    def _collect_bash_saved_vulns(
+        vulns_dir: str | None,
+        previous_snapshot: dict[str, tuple[int, int]] | None = None,
+    ) -> list[tuple[ToolAction, Any]]:
+        """Read this session's new save_vuln.sh JSON files and convert them to steps."""
+        if not vulns_dir:
             return []
-        vulns_dir = os.path.join(exec_cwd, ".vulns")
         if not os.path.isdir(vulns_dir):
             return []
         steps: list[tuple[ToolAction, Any]] = []
@@ -949,6 +1023,9 @@ bash save_vuln.sh '{{
                 continue
             fpath = os.path.join(vulns_dir, fname)
             try:
+                stat = os.stat(fpath)
+                if (previous_snapshot or {}).get(fname) == (stat.st_mtime_ns, stat.st_size):
+                    continue
                 with open(fpath, "r", encoding="utf-8") as fh:
                     data = json.loads(fh.read())
                 if not isinstance(data, dict) or not data.get("name"):
