@@ -251,6 +251,72 @@ def test_claude_nonzero_exit_with_result_event_is_still_failure(monkeypatch, tmp
     assert "session limit" in output
 
 
+def test_claude_success_result_marked_error_is_failure(monkeypatch, tmp_path) -> None:
+    events = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": "session-id",
+                    "mcp_servers": [],
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": True,
+                    "result": "You've hit your limit · resets 1:40pm",
+                }
+            ),
+        ]
+    ) + "\n"
+
+    class _FakeProcess:
+        pid = 999999
+
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(events)
+
+        def poll(self):
+            return 0 if self.stdout.tell() >= len(events) else None
+
+        def wait(self):
+            return 0
+
+    executor = _build_executor("")
+    executor._claude_home = str(tmp_path)
+    monkeypatch.setattr(
+        "chack_agent.backends.claude_code_backend.subprocess.Popen",
+        lambda *args, **kwargs: _FakeProcess(),
+    )
+
+    output, _steps, _raw = executor._run_claude_once("prompt")
+
+    assert output.startswith("ERROR: Claude returned an error in final result event.")
+    assert "hit your limit" in output
+
+
+def test_claude_rate_limit_falls_back_to_anthropic_api_key(monkeypatch) -> None:
+    executor = _build_executor("")
+    executor._claude_access_token = "oauth-primary"
+    executor._anthropic_api_key = "api-key-fallback"
+    responses = iter(
+        [
+            ("ERROR: Claude returned an error: You've hit your limit", [], None),
+            ("{\"ok\":true}", [], None),
+        ]
+    )
+    monkeypatch.setattr(executor, "_run_claude_once", lambda _prompt: next(responses))
+
+    output, _steps, _raw = executor._run_claude("prompt")
+
+    assert output == '{"ok":true}'
+    assert executor._claude_access_token == ""
+
+
 def test_claude_command_resumes_captured_session_for_followup_prompt() -> None:
     executor = _build_executor("")
     executor._claude_session_id = "11111111-2222-3333-4444-555555555555"

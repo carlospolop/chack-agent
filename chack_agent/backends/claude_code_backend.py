@@ -474,7 +474,8 @@ class ClaudeCodeExecutor:
             return result
 
         _LOGGER.warning(
-            "Claude Code OAuth token authentication failed. Falling back to ANTHROPIC_API_KEY."
+            "Claude Code OAuth token is unavailable for this request. "
+            "Falling back to ANTHROPIC_API_KEY."
         )
         self._claude_access_token = ""
         self._claude_session_id = None
@@ -501,6 +502,8 @@ class ClaudeCodeExecutor:
                 "authentication_error",
                 "session limit",
                 "usage limit",
+                "rate limit",
+                "hit your limit",
                 "quota exceeded",
                 "credit balance",
             )
@@ -694,7 +697,10 @@ class ClaudeCodeExecutor:
                         )
                         raw_responses.append({"usage": usage})
 
-                    if str(event.get("subtype") or "").strip().lower() == "error":
+                    if (
+                        str(event.get("subtype") or "").strip().lower() == "error"
+                        or bool(event.get("is_error"))
+                    ):
                         return (
                             "ERROR: Claude returned an error in final result event. "
                             + (result_text or "No error text was returned."),
