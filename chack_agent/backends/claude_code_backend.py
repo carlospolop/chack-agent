@@ -380,9 +380,34 @@ class ClaudeCodeExecutor:
         base = str(self._base_system_prompt or "").strip()
 
         policy_lines: list[str] = []
+        try:
+            parsed_allowed_tools = json.loads(self._allowed_tools_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            parsed_allowed_tools = []
+        mcp_tool_names: list[str] = []
+        if isinstance(parsed_allowed_tools, list):
+            seen_mcp_tool_names: set[str] = set()
+            for raw_name in parsed_allowed_tools:
+                name = str(raw_name or "").strip()
+                if not name or name in seen_mcp_tool_names:
+                    continue
+                seen_mcp_tool_names.add(name)
+                mcp_tool_names.append(name)
+
+        if mcp_tool_names:
+            mappings = ", ".join(
+                f"`{name}` -> `mcp__chack_tools__{name}`" for name in mcp_tool_names
+            )
+            policy_lines.append(
+                "- Claude Code exposes the configured custom tools through the "
+                "`chack_tools` MCP server. Call the exact prefixed MCP names below; "
+                "do not call their unprefixed aliases: "
+                f"{mappings}."
+            )
         if self._require_task_steps_manager_init_first:
             policy_lines.append(
-                "- First, call task_steps_manager with action=init before any other tool call."
+                "- First, call `mcp__chack_tools__task_steps_manager` with "
+                "action=init before any other tool call."
             )
         if self._min_tools_used > 0:
             policy_lines.append(

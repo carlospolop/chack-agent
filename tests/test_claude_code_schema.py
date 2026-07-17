@@ -108,3 +108,27 @@ def test_claude_followup_prompt_only_suppresses_system_once() -> None:
     assert prompt == "original request\n\ntry harder"
     assert "SYSTEM SHOULD NOT REPEAT" not in prompt
     assert "SYSTEM SHOULD NOT REPEAT" in executor._compose_prompt("normal")
+
+
+def test_claude_prompt_maps_custom_tools_to_exact_mcp_names() -> None:
+    executor = _build_executor("")
+    executor._allowed_tools_json = json.dumps(
+        ["read_context_lines", "search_context", "mark_check_checked"]
+    )
+
+    prompt = executor._compose_prompt("audit checks")
+
+    assert "`read_context_lines` -> `mcp__chack_tools__read_context_lines`" in prompt
+    assert "`search_context` -> `mcp__chack_tools__search_context`" in prompt
+    assert "`mark_check_checked` -> `mcp__chack_tools__mark_check_checked`" in prompt
+    assert "do not call their unprefixed aliases" in prompt
+
+
+def test_claude_task_manager_policy_uses_exact_mcp_name() -> None:
+    executor = _build_executor("")
+    executor._require_task_steps_manager_init_first = True
+    executor._allowed_tools_json = json.dumps(["task_steps_manager"])
+
+    prompt = executor._compose_prompt("audit checks")
+
+    assert "call `mcp__chack_tools__task_steps_manager`" in prompt
