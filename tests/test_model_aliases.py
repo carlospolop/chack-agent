@@ -1,3 +1,4 @@
+import os
 import tempfile
 import textwrap
 import unittest
@@ -130,6 +131,23 @@ class ModelAliasResolutionTests(unittest.TestCase):
             ),
             "codex",
         )
+
+    def test_resolve_backend_alias_uses_claude_access_token_without_anthropic_api_key(self) -> None:
+        self.assertEqual(
+            resolve_backend_alias(
+                "DEFAULT_BACKEND",
+                claude_access_token="claude-token",
+            ),
+            "claude",
+        )
+
+    def test_resolve_backend_alias_reads_canonical_claude_oauth_token_env(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CLAUDE_CODE_OAUTH_TOKEN": "claude-token"},
+            clear=True,
+        ):
+            self.assertEqual(resolve_backend_alias("DEFAULT_BACKEND"), "claude")
 
     def test_resolve_backend_alias_raises_when_default_backend_has_no_api_key(self) -> None:
         with self.assertRaisesRegex(ValueError, "DEFAULT_BACKEND requires one of CODEX_ACCESS_TOKEN, OPENAI_API_KEY"):

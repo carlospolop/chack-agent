@@ -298,6 +298,7 @@ def _select_api_key_type(
     *,
     openai_api_key: str = "",
     codex_access_token: str = "",
+    claude_access_token: str = "",
     anthropic_api_key: str = "",
     openrouter_api_key: str = "",
     credentials: Any = None,
@@ -309,6 +310,13 @@ def _select_api_key_type(
         or os.environ.get("CODEX_ACCESS_TOKEN", "")
     ).strip()
     resolved_openai = str(openai_api_key or getattr(credentials, "openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")).strip()
+    resolved_claude_access = str(
+        claude_access_token
+        or getattr(credentials, "claude_access_token", "")
+        or getattr(credentials, "claude_code_oauth_token", "")
+        or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+        or os.environ.get("CLAUDE_ACCESS_TOKEN", "")
+    ).strip()
     resolved_anthropic = str(
         anthropic_api_key
         or getattr(credentials, "anthropic_api_key", "")
@@ -326,7 +334,7 @@ def _select_api_key_type(
         return "openai"
     if resolved_openai:
         return "openai"
-    if resolved_anthropic:
+    if resolved_claude_access or resolved_anthropic:
         return "anthropic"
     if resolved_openrouter:
         return "openrouter"
@@ -338,6 +346,7 @@ def resolve_backend_alias(
     *,
     openai_api_key: str = "",
     codex_access_token: str = "",
+    claude_access_token: str = "",
     anthropic_api_key: str = "",
     openrouter_api_key: str = "",
     credentials: Any = None,
@@ -351,6 +360,7 @@ def resolve_backend_alias(
         key_type = _select_api_key_type(
             openai_api_key=openai_api_key,
             codex_access_token=codex_access_token,
+            claude_access_token=claude_access_token,
             anthropic_api_key=anthropic_api_key,
             openrouter_api_key=openrouter_api_key,
             credentials=credentials,
@@ -364,7 +374,9 @@ def resolve_backend_alias(
             effective_name = "OPENROUTER_DEFAULT_BACKEND"
         else:
             raise ValueError(
-                "DEFAULT_BACKEND requires one of CODEX_ACCESS_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY/CLAUDE_API_KEY, or OPENROUTER_API_KEY"
+                "DEFAULT_BACKEND requires one of CODEX_ACCESS_TOKEN, OPENAI_API_KEY, "
+                "CLAUDE_CODE_OAUTH_TOKEN/CLAUDE_ACCESS_TOKEN, "
+                "ANTHROPIC_API_KEY/CLAUDE_API_KEY, or OPENROUTER_API_KEY"
             )
 
     aliases = _get_backend_aliases()

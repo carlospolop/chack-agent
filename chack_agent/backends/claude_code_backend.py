@@ -1119,6 +1119,14 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         env = {k: v for k, v in os.environ.items() if v is not None}
         env["PYTHONUNBUFFERED"] = "1"
 
+        # Claude Code defers MCP schemas through ToolSearch by default, but
+        # Haiku does not support the tool_reference blocks that ToolSearch
+        # requires. Load MCP tools up front for Haiku so exact custom tools do
+        # not intermittently fail as "No such tool available" and fall back to
+        # similarly named native tools.
+        if "haiku" in str(self._model_name or "").strip().lower():
+            env["ENABLE_TOOL_SEARCH"] = "false"
+
         env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
         env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
         if self._serialized_tools_override_b64:

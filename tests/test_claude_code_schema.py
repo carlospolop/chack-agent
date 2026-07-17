@@ -106,6 +106,26 @@ def test_claude_exec_disabled_denies_bash_without_hiding_mcp_tools() -> None:
     assert command[command.index("--disallowedTools") + 1] == "Bash"
 
 
+def test_claude_haiku_loads_mcp_tools_up_front(monkeypatch) -> None:
+    executor = _build_executor("")
+    executor._model_name = "claude-haiku-4-5"
+    monkeypatch.setenv("ENABLE_TOOL_SEARCH", "true")
+
+    env = executor._build_env()
+
+    assert env["ENABLE_TOOL_SEARCH"] == "false"
+
+
+def test_claude_non_haiku_preserves_explicit_tool_search_setting(monkeypatch) -> None:
+    executor = _build_executor("")
+    executor._model_name = "claude-sonnet-4-6"
+    monkeypatch.setenv("ENABLE_TOOL_SEARCH", "auto")
+
+    env = executor._build_env()
+
+    assert env["ENABLE_TOOL_SEARCH"] == "auto"
+
+
 def test_claude_command_resumes_captured_session_for_followup_prompt() -> None:
     executor = _build_executor("")
     executor._claude_session_id = "11111111-2222-3333-4444-555555555555"
