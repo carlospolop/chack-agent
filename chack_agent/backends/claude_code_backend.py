@@ -44,6 +44,7 @@ from .tool_payloads import (
 
 
 _LOGGER = logging.getLogger("chack.claude_code_backend")
+_MCP_STARTUP_STATUS_PATH_ENV = "CHACK_MCP_STARTUP_STATUS_PATH"
 
 
 def _descendant_pids(pid: int) -> list[int]:
@@ -503,6 +504,12 @@ class ClaudeCodeExecutor:
     def _run_claude_once(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_claude_home_and_settings()
 
+        startup_status_path = self._mcp_startup_status_path()
+        try:
+            os.remove(startup_status_path)
+        except FileNotFoundError:
+            pass
+
         command = self._build_command(prompt)
         env = self._build_env()
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
@@ -694,6 +701,7 @@ class ClaudeCodeExecutor:
                     continue
         finally:
             unregister_process(cancel_registration)
+            self._log_mcp_startup_status(startup_status_path)
             try:
                 if process.stdout is not None:
                     process.stdout.close()
@@ -741,6 +749,27 @@ class ClaudeCodeExecutor:
             steps.extend(bash_vuln_steps)
 
         return response, steps, _RawResult(raw_responses=raw_responses)
+
+    def _mcp_startup_status_path(self) -> str:
+        return os.path.join(str(self._claude_home or ""), "mcp_startup_status.json")
+
+    def _log_mcp_startup_status(self, path: str) -> None:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except FileNotFoundError:
+            _LOGGER.warning("Claude MCP startup receipt was not written: %s", path)
+            return
+        except Exception as exc:
+            _LOGGER.warning("Claude MCP startup receipt could not be read: %s", exc)
+            return
+        tool_names = payload.get("tool_names") if isinstance(payload, dict) else []
+        error = str(payload.get("error", "") if isinstance(payload, dict) else "")
+        _LOGGER.info(
+            "Claude MCP startup receipt: tools=%s error=%s",
+            ",".join(str(name) for name in (tool_names or [])),
+            error[:500] or "none",
+        )
 
     @staticmethod
     def _raw_lines_have_missing_resume_session(raw_lines: list[str]) -> bool:
@@ -1319,12 +1348,14 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
 
     def _write_claude_settings(self, claude_home: str) -> None:
         settings_path = os.path.join(claude_home, "settings.json")
+        mcp_env = self._mcp_env_map()
+        mcp_env[_MCP_STARTUP_STATUS_PATH_ENV] = self._mcp_startup_status_path()
         settings_payload = {
             "mcpServers": {
                 "chack_tools": {
                     "command": sys.executable,
                     "args": ["-m", "chack_agent.backends.chack_tools_mcp_server"],
-                    "env": self._mcp_env_map(),
+                    "env": mcp_env,
                     "alwaysLoad": True,
                 }
             }

@@ -40,6 +40,27 @@ from .tool_payloads import (
 )
 
 
+_MCP_STARTUP_STATUS_PATH_ENV = "CHACK_MCP_STARTUP_STATUS_PATH"
+
+
+def _write_startup_status(*, tool_names: list[str] | None = None, error: str = "") -> None:
+    path = str(os.environ.get(_MCP_STARTUP_STATUS_PATH_ENV, "") or "").strip()
+    if not path:
+        return
+    payload = {
+        "tool_names": sorted(str(name) for name in (tool_names or []) if str(name).strip()),
+        "error": str(error or "")[:2000],
+    }
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        temporary_path = f"{path}.{os.getpid()}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=True)
+        os.replace(temporary_path, path)
+    except Exception:
+        pass
+
+
 # Tools blocked from MCP exposure even if they are present in the Python
 # toolset. Historically `exec` was included here as a conservative default,
 # but Chack deployments now intentionally use the controlled ExecTool as the
@@ -501,6 +522,10 @@ def main() -> None:
             session_id=session_id,
         )
         _register_tools(mcp, tools, state)
+        _write_startup_status(
+            tool_names=[str(getattr(tool, "name", "") or "") for tool in tools]
+            + ["check_budget_status"]
+        )
 
         # ── Built-in budget status tool (not part of the dynamic toolset) ──
         @mcp.tool(
@@ -522,6 +547,7 @@ def main() -> None:
             mcp.run(transport="stdio")
     except Exception:
         trace = traceback.format_exc()
+        _write_startup_status(error=trace)
         try:
             print(trace, file=sys.stderr, flush=True)
         except Exception:

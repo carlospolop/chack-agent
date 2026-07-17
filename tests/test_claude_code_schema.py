@@ -147,6 +147,9 @@ def test_claude_mcp_settings_block_until_core_tools_are_loaded(tmp_path) -> None
 
     settings = json.loads(pathlib.Path(tmp_path, "settings.json").read_text(encoding="utf-8"))
     assert settings["mcpServers"]["chack_tools"]["alwaysLoad"] is True
+    assert settings["mcpServers"]["chack_tools"]["env"]["CHACK_MCP_STARTUP_STATUS_PATH"] == str(
+        pathlib.Path(tmp_path, "mcp_startup_status.json")
+    )
 
 
 def test_claude_waits_for_required_mcp_tools_on_constrained_workers(monkeypatch) -> None:
