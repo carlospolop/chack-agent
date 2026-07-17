@@ -321,9 +321,9 @@ models:
     cache_read: 0.05
     output: 0.15
   google/gemma-3-27b-it:
-    input: 0.08
-    cache_read: 0.04
-    output: 0.45
+    input: 0.1
+    cache_read: 0.1
+    output: 0.3
   google/gemma-3-4b-it:
     input: 0.05
     cache_read: 0.05
@@ -425,9 +425,9 @@ models:
     cache_read: 0.027
     output: 0.201
   meta-llama/llama-3.2-3b-instruct:
-    input: 0.05
-    cache_read: 0.05
-    output: 0.33
+    input: 0.0509
+    cache_read: 0.0509
+    output: 0.335
   meta-llama/llama-3.2-3b-instruct:free:
     input: 0
     cache_read: 0
@@ -452,6 +452,10 @@ models:
     input: 0.18
     cache_read: 0.18
     output: 0.18
+  meta/muse-spark-1.1:
+    input: 1.25
+    cache_read: 0.15
+    output: 4.25
   microsoft/phi-4:
     input: 0.07
     cache_read: 0.07
@@ -485,9 +489,9 @@ models:
     cache_read: 0.05
     output: 0.9
   minimax/minimax-m2.7:
-    input: 0.3
-    cache_read: 0.06
-    output: 1.2
+    input: 0.25
+    cache_read: 0.05
+    output: 1
   minimax/minimax-m3:
     input: 0.3
     cache_read: 0.06
@@ -585,13 +589,17 @@ models:
     cache_read: 0.095
     output: 2.85
   moonshotai/kimi-k2.6:
-    input: 0.66
-    cache_read: 0.144
-    output: 3.41
+    input: 0.95
+    cache_read: 0.16
+    output: 4
   moonshotai/kimi-k2.7-code:
-    input: 0.719
-    cache_read: 0.149
-    output: 3.49
+    input: 0.75
+    cache_read: 0.16
+    output: 3.5
+  moonshotai/kimi-k3:
+    input: 3
+    cache_read: 0.3
+    output: 15
   morph/morph-v3-fast:
     input: 0.8
     cache_read: 0.8
@@ -1037,8 +1045,8 @@ models:
     cache_read: 0.4
     output: 1
   qwen/qwen3-14b:
-    input: 0.12
-    cache_read: 0.12
+    input: 0.1
+    cache_read: 0.1
     output: 0.24
   qwen/qwen3-235b-a22b:
     input: 0.455
@@ -1160,9 +1168,9 @@ models:
     cache_read: 0.14
     output: 1
   qwen/qwen3.5-397b-a17b:
-    input: 0.45
-    cache_read: 0.225
-    output: 3
+    input: 0.39
+    cache_read: 0.39
+    output: 2.34
   qwen/qwen3.5-9b:
     input: 0.1
     cache_read: 0.1
@@ -1366,9 +1374,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.9562
-    cache_read: 0.17758
-    output: 3.0052
+    input: 0.9324
+    cache_read: 0.17316
+    output: 2.9304
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
@@ -1404,9 +1412,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 0.66
-    cache_read: 0.15
-    output: 3.41
+    input: 3
+    cache_read: 0.3
+    output: 15
   ~openai/gpt-latest:
     input: 5
     cache_read: 0.5
