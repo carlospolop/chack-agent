@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import sys
 import tempfile
 from typing import Any
 
@@ -13,6 +14,30 @@ CHACK_TOOLS_APPEND_B64_PATH_ENV = "CHACK_TOOLS_APPEND_B64_PATH"
 CHACK_TOOLS_CONFIG_JSON_PATH_ENV = "CHACK_TOOLS_CONFIG_JSON_PATH"
 CHACK_ALLOWED_TOOLS_JSON_PATH_ENV = "CHACK_ALLOWED_TOOLS_JSON_PATH"
 CHACK_INLINE_ENV_VALUE_MAX_CHARS = 24000
+
+
+def augment_subprocess_pythonpath(env: dict[str, str]) -> None:
+    """Preserve application import roots for MCP subprocess deserialization."""
+    candidates: list[str] = []
+    candidates.extend(str(env.get("PYTHONPATH", "") or "").split(os.pathsep))
+    candidates.extend(str(entry or os.getcwd()) for entry in sys.path)
+    if sys.argv:
+        candidates.append(os.path.dirname(os.path.abspath(sys.argv[0])))
+    candidates.append(os.getcwd())
+
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        raw = str(candidate or "").strip()
+        if not raw:
+            continue
+        path = os.path.abspath(os.path.expanduser(raw))
+        if path in seen or not os.path.isdir(path):
+            continue
+        seen.add(path)
+        resolved.append(path)
+    if resolved:
+        env["PYTHONPATH"] = os.pathsep.join(resolved)
 
 
 def _cloudpickle():

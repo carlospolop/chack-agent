@@ -38,6 +38,7 @@ from .tool_payloads import (
     CHACK_TOOLS_CONFIG_JSON_PATH_ENV,
     CHACK_TOOLS_OVERRIDE_B64_PATH_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
+    augment_subprocess_pythonpath,
     serialize_tools_payload,
     write_payload_to_file,
 )
@@ -1173,6 +1174,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
         env["PYTHONUNBUFFERED"] = "1"
+        augment_subprocess_pythonpath(env)
 
         # Claude Code defers MCP schemas through ToolSearch by default, but
         # Haiku does not support the tool_reference blocks that ToolSearch

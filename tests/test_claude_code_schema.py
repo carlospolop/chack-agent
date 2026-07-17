@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import tempfile
 
@@ -189,6 +190,17 @@ def test_claude_mcp_receives_cli_tokens_and_api_fallbacks(monkeypatch, tmp_path)
     assert "ANTHROPIC_API_KEY" not in mcp_env
     assert mcp_env["CODEX_ACCESS_TOKEN"] == "codex-primary"
     assert mcp_env["OPENAI_API_KEY"] == "openai-fallback"
+
+
+def test_claude_mcp_pythonpath_preserves_application_import_root(monkeypatch, tmp_path) -> None:
+    application_root = tmp_path / "application-root"
+    application_root.mkdir()
+    monkeypatch.syspath_prepend(str(application_root))
+    executor = _build_executor("")
+
+    env = executor._build_env()
+
+    assert str(application_root) in env["PYTHONPATH"].split(os.pathsep)
 
 
 def test_claude_command_resumes_captured_session_for_followup_prompt() -> None:

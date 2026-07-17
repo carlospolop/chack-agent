@@ -29,6 +29,7 @@ from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_c
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
+    augment_subprocess_pythonpath,
     serialize_tools_payload,
 )
 
@@ -461,6 +462,7 @@ class CopilotCliExecutor:
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
         env["PYTHONUNBUFFERED"] = "1"
+        augment_subprocess_pythonpath(env)
 
         # Copilot CLI auth — classic PATs (ghp_) are rejected by copilot CLI,
         # so only pass the token when it is NOT a classic PAT.

@@ -29,6 +29,7 @@ from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_c
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
+    augment_subprocess_pythonpath,
     serialize_tools_payload,
 )
 
@@ -426,6 +427,7 @@ class GeminiCliExecutor:
 
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
+        augment_subprocess_pythonpath(env)
         env["PYTHONUNBUFFERED"] = "1"
         env["GEMINI_CLI_HOME"] = str(self._gemini_home or os.getcwd())
         if self._gemini_api_key:
