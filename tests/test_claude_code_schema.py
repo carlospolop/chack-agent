@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import pathlib
 import tempfile
@@ -201,6 +202,53 @@ def test_claude_mcp_pythonpath_preserves_application_import_root(monkeypatch, tm
     env = executor._build_env()
 
     assert str(application_root) in env["PYTHONPATH"].split(os.pathsep)
+
+
+def test_claude_nonzero_exit_with_result_event_is_still_failure(monkeypatch, tmp_path) -> None:
+    events = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": "session-id",
+                    "mcp_servers": [{"name": "chack_tools", "status": "connected"}],
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": "You've hit your session limit",
+                }
+            ),
+        ]
+    ) + "\n"
+
+    class _FakeProcess:
+        pid = 999999
+
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(events)
+
+        def poll(self):
+            return 1 if self.stdout.tell() >= len(events) else None
+
+        def wait(self):
+            return 1
+
+    executor = _build_executor("")
+    executor._claude_home = str(tmp_path)
+    monkeypatch.setattr(
+        "chack_agent.backends.claude_code_backend.subprocess.Popen",
+        lambda *args, **kwargs: _FakeProcess(),
+    )
+
+    output, _steps, _raw = executor._run_claude_once("prompt")
+
+    assert output.startswith("ERROR: Claude exec failed (exit=1).")
+    assert "session limit" in output
 
 
 def test_claude_command_resumes_captured_session_for_followup_prompt() -> None:

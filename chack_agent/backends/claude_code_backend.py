@@ -739,12 +739,11 @@ class ClaudeCodeExecutor:
 
         if return_code != 0:
             details = "\n".join(raw_lines).strip() or "No output captured."
-            if not return_seen:
-                return (
-                    f"ERROR: Claude exec failed (exit={return_code}). {details}",
-                    steps,
-                    _RawResult(raw_responses=raw_responses),
-                )
+            return (
+                f"ERROR: Claude exec failed (exit={return_code}). {details}",
+                steps,
+                _RawResult(raw_responses=raw_responses),
+            )
 
         if failed_mcp_servers:
             failure_summary = ", ".join(
