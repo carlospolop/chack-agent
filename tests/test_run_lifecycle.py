@@ -151,6 +151,8 @@ def test_mcp_cost_warning_reads_parent_shared_state(isolated_run_state, monkeypa
 
 
 def test_exec_background_process_is_cleaned_at_run_end(isolated_run_state, monkeypatch):
+    if not os.path.isdir("/proc"):
+        pytest.skip("background process lifecycle assertion requires Linux /proc")
     session_id = "process-cleanup"
     monkeypatch.setenv("CHACK_TASK_SESSION_ID", session_id)
     helper = ExecTool(replace(ToolsConfig(), exec_timeout_seconds=5))

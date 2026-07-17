@@ -194,6 +194,12 @@ def get_playwright_fetch_tool(helper: PlaywrightFetchTool):
         Prefer it for reading a specific page, verifying dynamic content, and saving the rendered
         page text/HTML for later inspection.
 
+        Output: SUCCESS/ERROR text with page title, final URL, extracted rendered text, and local
+        artifact paths for saved HTML/text when available.
+
+        Parameters: url is required; wait_until, wait_for_selector, timeout_seconds, and max_chars
+        control navigation, readiness, timeout, and response size.
+
         Args:
             url: Absolute HTTP/HTTPS URL to open in the browser.
             wait_until: Browser navigation wait condition such as load, domcontentloaded, networkidle, or commit.
@@ -201,7 +207,6 @@ def get_playwright_fetch_tool(helper: PlaywrightFetchTool):
             timeout_seconds: Optional browser navigation timeout; defaults to tool configuration.
             max_chars: Optional maximum number of extracted text characters to return inline.
 
-        Output: Returns SUCCESS/ERROR text with page title, final URL, extracted rendered text, and local artifact paths for saved HTML/text when available.
         """
         tool_input = {
             "url": url,
