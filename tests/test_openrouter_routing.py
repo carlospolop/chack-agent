@@ -243,6 +243,35 @@ class OpenRouterRoutingTests(unittest.TestCase):
         self.assertTrue(executor._use_codex_access_token)
         self.assertEqual(result, ("Focus on HTTP 401 handling and authorization bypasses", [], None))
 
+    def test_codex_session_limit_falls_back_to_openai_api_key(self) -> None:
+        config = _make_config("codex", "gpt-5.4")
+        config.credentials.codex_access_token = _fake_chatgpt_access_token()
+        config.credentials.openai_api_key = "sk-openai-direct"
+        executor = build_codex_executor(
+            config,
+            system_prompt="system",
+            max_turns=2,
+            memory_max_messages=10,
+            memory_reset_to_messages=5,
+        )
+
+        with patch.object(
+            executor,
+            "_run_codex_once",
+            return_value=("fallback ok", [], None),
+        ) as fallback_mock:
+            result = executor._maybe_retry_with_api_key(
+                "prompt",
+                ("ERROR: You've hit your session limit", [], None),
+                allow_api_key_fallback=True,
+                codex_exec_failed=True,
+            )
+
+        self.assertFalse(executor._use_codex_access_token)
+        self.assertEqual(executor._openai_api_key, "sk-openai-direct")
+        fallback_mock.assert_called_once_with("prompt", allow_api_key_fallback=False)
+        self.assertEqual(result, ("fallback ok", [], None))
+
     def test_codex_executor_spills_large_tool_payloads_to_file(self) -> None:
         config = _make_config("codex", "gpt-5.4")
         config.credentials.openrouter_api_key = ""

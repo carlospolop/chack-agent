@@ -378,3 +378,21 @@ def test_claude_does_not_fallback_on_successful_output_mentioning_401(monkeypatc
     assert output == "The audited code handles HTTP 401 responses."
     assert len(calls) == 1
     assert executor._claude_access_token == "oauth-primary"
+
+
+def test_claude_oauth_session_limit_falls_back_to_anthropic_api_key(monkeypatch) -> None:
+    executor = _build_executor("")
+    executor._claude_access_token = "oauth-primary"
+    executor._anthropic_api_key = "api-fallback"
+    results = iter(
+        [
+            ("ERROR: You've hit your session limit; resets later", [], None),
+            ("fallback succeeded", [], None),
+        ]
+    )
+    monkeypatch.setattr(executor, "_run_claude_once", lambda _prompt: next(results))
+
+    output, _steps, _raw = executor._run_claude("prompt")
+
+    assert output == "fallback succeeded"
+    assert executor._claude_access_token == ""

@@ -695,6 +695,10 @@ class CodexExecutor:
             "unauthorized",
             "missing bearer or basic authentication",
             "incorrect api key provided",
+            "session limit",
+            "usage limit",
+            "quota exceeded",
+            "credit balance",
         )
         return any(indicator in normalized for indicator in indicators)
 

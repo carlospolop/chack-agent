@@ -499,6 +499,10 @@ class ClaudeCodeExecutor:
                 "status code 401",
                 "http 401",
                 "authentication_error",
+                "session limit",
+                "usage limit",
+                "quota exceeded",
+                "credit balance",
             )
         )
 
