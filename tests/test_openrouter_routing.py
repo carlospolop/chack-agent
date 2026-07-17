@@ -290,6 +290,34 @@ class OpenRouterRoutingTests(unittest.TestCase):
             "chack_agent.backends.openrouter_openai_backend",
         )
 
+    def test_claude_backend_prefers_oauth_token_when_anthropic_api_key_is_also_present(self) -> None:
+        config = _make_config("claude", "claude-haiku-4-5")
+        config.credentials.openrouter_api_key = ""
+        config.credentials.anthropic_api_key = "sk-ant-api-fallback"
+
+        with patch.dict(
+            os.environ,
+            {
+                "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-primary",
+                "ANTHROPIC_API_KEY": "sk-ant-api-fallback",
+            },
+            clear=False,
+        ):
+            executor = build_claude_executor(
+                config,
+                system_prompt="system",
+                max_turns=2,
+                memory_max_messages=10,
+                memory_reset_to_messages=5,
+            )
+            env = executor._build_env()
+
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "sk-ant-oat01-primary")
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+        self.assertNotIn("CLAUDE_API_KEY", env)
+        self.assertEqual(executor._anthropic_api_key, "sk-ant-api-fallback")
+
     def test_gemini_backend_delegates_to_openrouter_backend_for_routed_models(self) -> None:
         config = _make_config("gemini", "openrouter/google/gemini-2.5-flash")
 
