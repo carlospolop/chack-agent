@@ -173,6 +173,24 @@ def test_claude_honors_explicit_chack_mcp_startup_timeout(monkeypatch) -> None:
     assert env["MCP_CONNECT_TIMEOUT_MS"] == "90000"
 
 
+def test_claude_mcp_receives_cli_tokens_and_api_fallbacks(monkeypatch, tmp_path) -> None:
+    executor = _build_executor("")
+    executor._claude_home = str(tmp_path)
+    executor._claude_access_token = "claude-oauth-primary"
+    executor._anthropic_api_key = "anthropic-api-fallback"
+    monkeypatch.setenv("CODEX_ACCESS_TOKEN", "codex-primary")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-fallback")
+
+    executor._write_claude_settings(str(tmp_path))
+
+    settings = json.loads(pathlib.Path(tmp_path, "settings.json").read_text(encoding="utf-8"))
+    mcp_env = settings["mcpServers"]["chack_tools"]["env"]
+    assert mcp_env["CLAUDE_CODE_OAUTH_TOKEN"] == "claude-oauth-primary"
+    assert "ANTHROPIC_API_KEY" not in mcp_env
+    assert mcp_env["CODEX_ACCESS_TOKEN"] == "codex-primary"
+    assert mcp_env["OPENAI_API_KEY"] == "openai-fallback"
+
+
 def test_claude_command_resumes_captured_session_for_followup_prompt() -> None:
     executor = _build_executor("")
     executor._claude_session_id = "11111111-2222-3333-4444-555555555555"

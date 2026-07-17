@@ -565,6 +565,7 @@ class ClaudeCodeExecutor:
         raw_lines: list[str] = []
         raw_responses: list[Any] = []
         tool_calls: dict[str, tuple[str, Any]] = {}
+        failed_mcp_servers: dict[str, str] = {}
         started_at = time.monotonic()
         return_seen = False
 
@@ -617,6 +618,13 @@ class ClaudeCodeExecutor:
                     session_id = str(event.get("session_id") or "").strip()
                     if session_id:
                         self._claude_session_id = session_id
+                    for server in event.get("mcp_servers") or []:
+                        if not isinstance(server, dict):
+                            continue
+                        name = str(server.get("name") or "").strip()
+                        status = str(server.get("status") or "").strip().lower()
+                        if name and status not in {"connected", "ready"}:
+                            failed_mcp_servers[name] = status or "unknown"
                     continue
 
                 if event_type == "assistant":
@@ -737,6 +745,16 @@ class ClaudeCodeExecutor:
                     _RawResult(raw_responses=raw_responses),
                 )
 
+        if failed_mcp_servers:
+            failure_summary = ", ".join(
+                f"{name}={status}" for name, status in sorted(failed_mcp_servers.items())
+            )
+            return (
+                "ERROR: Required Claude MCP server failed to start: " + failure_summary,
+                steps,
+                _RawResult(raw_responses=raw_responses),
+            )
+
         response = "".join(output_parts).strip()
         if not response and raw_lines:
             response = "\n".join(raw_lines).strip()
@@ -765,7 +783,8 @@ class ClaudeCodeExecutor:
             return
         tool_names = payload.get("tool_names") if isinstance(payload, dict) else []
         error = str(payload.get("error", "") if isinstance(payload, dict) else "")
-        _LOGGER.info(
+        log_method = _LOGGER.warning if error else _LOGGER.info
+        log_method(
             "Claude MCP startup receipt: tools=%s error=%s",
             ",".join(str(name) for name in (tool_names or [])),
             error[:500] or "none",
@@ -1138,6 +1157,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         if (
             self._max_context_tokens > _CLAUDE_DEFAULT_CONTEXT_WINDOW
             and not self._uses_openrouter_route
+            and not self._claude_access_token
         ):
             args.extend(["--betas", _CLAUDE_1M_CONTEXT_BETA])
         if self._model_name:
@@ -1263,7 +1283,10 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         # when the budget is approached instead of ending the session. Paired
         # with the 1M-context beta above when the budget exceeds 200k.
         if self._max_context_tokens > 0:
-            env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(int(self._max_context_tokens))
+            compact_window = int(self._max_context_tokens)
+            if self._claude_access_token and not self._uses_openrouter_route:
+                compact_window = min(compact_window, _CLAUDE_DEFAULT_CONTEXT_WINDOW)
+            env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(compact_window)
 
         # Allow --dangerously-skip-permissions when running as root inside Docker/CI.
         env.setdefault("IS_SANDBOX", "1")
@@ -1435,6 +1458,12 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "AISEC_LOCAL_VULN_STORE_PATH",
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
+            "CODEX_ACCESS_TOKEN",
+            "CODEX_ID_TOKEN",
+            "CODEX_REFRESH_TOKEN",
+            "CODEX_ACCOUNT_ID",
+            "CODEX_LAST_REFRESH",
+            "CODEX_HOME",
             "BRAVE_API_KEY",
             "SERPAPI_API_KEY",
             "FORUMSCOUT_API_KEY",
@@ -1474,6 +1503,8 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "ANTHROPIC_API_KEY",
             "CLAUDE_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_ACCESS_TOKEN",
             "ANTHROPIC_BASE_URL",
             "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
             "OPENROUTER_API_KEY",

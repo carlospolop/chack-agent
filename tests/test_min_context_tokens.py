@@ -151,6 +151,7 @@ class CodexContextWindowConfigTests(unittest.TestCase):
 def _build_claude_executor(
     max_context_tokens: int = 0,
     uses_openrouter_route: bool = False,
+    claude_access_token: str = "",
 ) -> ClaudeCodeExecutor:
     return ClaudeCodeExecutor(
         _conversation=[],
@@ -198,6 +199,7 @@ def _build_claude_executor(
         _output_schema_json="",
         _max_context_tokens=max_context_tokens,
         _uses_openrouter_route=uses_openrouter_route,
+        _claude_access_token=claude_access_token,
     )
 
 
@@ -227,10 +229,26 @@ class ClaudeContextBetaTests(unittest.TestCase):
         command = executor._build_command("prompt")
         self.assertNotIn("--betas", command)
 
+    def test_no_beta_for_claude_oauth_token(self) -> None:
+        executor = _build_claude_executor(
+            max_context_tokens=250_000,
+            claude_access_token="oauth-token",
+        )
+        command = executor._build_command("prompt")
+        self.assertNotIn("--betas", command)
+
     def test_sets_auto_compact_window_env_when_configured(self) -> None:
         executor = _build_claude_executor(max_context_tokens=250_000)
         env = executor._build_env()
         self.assertEqual(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "250000")
+
+    def test_caps_auto_compact_window_for_claude_oauth_token(self) -> None:
+        executor = _build_claude_executor(
+            max_context_tokens=250_000,
+            claude_access_token="oauth-token",
+        )
+        env = executor._build_env()
+        self.assertEqual(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "200000")
 
     def test_no_auto_compact_window_env_when_unset(self) -> None:
         executor = _build_claude_executor(max_context_tokens=0)
