@@ -578,12 +578,20 @@ class ClaudeCodeExecutor:
         return_seen = False
 
         try:
-            # Close stdin immediately — prompt is already in the command args
+            # Claude Code accepts print-mode prompts on stdin. Keeping the prompt
+            # out of argv avoids the operating-system ARG_MAX limit when a
+            # multi-round agent carries a large set of prior findings forward.
             if process.stdin is not None:
                 try:
+                    process.stdin.write(prompt)
                     process.stdin.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _terminate_process_tree(process)
+                    return (
+                        f"ERROR: Failed to send prompt to Claude CLI: {type(exc).__name__}: {exc}",
+                        steps,
+                        _RawResult(raw_responses=raw_responses),
+                    )
 
             while True:
                 if cancellation_requested():
@@ -1177,7 +1185,6 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         if self._output_schema_json:
             args.extend(["--json-schema", self._output_schema_json])
 
-        args.append(prompt)
         return args
 
     def _build_env(self) -> dict[str, str]:

@@ -74,10 +74,47 @@ def test_claude_command_forces_configured_output_schema() -> None:
     assert command[command.index("--json-schema") + 1] == schema_json
     assert "--allow-dangerously-skip-permissions" in command
     assert "--dangerously-skip-permissions" in command
-    assert command.index("--json-schema") < len(command) - 1
-    assert command[-1] == prompt
+    assert prompt not in command
     assert "Use schema name: attack_surface_entrypoints" in prompt
     assert "Your response must strictly match the JSON schema." in prompt
+
+
+def test_claude_sends_large_prompt_via_stdin(monkeypatch, tmp_path) -> None:
+    prompt = "large prompt\n" + ("x" * 500_000)
+    captured: dict[str, object] = {}
+
+    class _CaptureStdin(io.StringIO):
+        def close(self) -> None:
+            captured["stdin"] = self.getvalue()
+
+    class _FakeProcess:
+        pid = 999999
+
+        def __init__(self, command):
+            captured["command"] = command
+            self.stdin = _CaptureStdin()
+            self.stdout = io.StringIO(
+                json.dumps({"type": "result", "subtype": "success", "result": "ok"}) + "\n"
+            )
+
+        def poll(self):
+            return 0 if self.stdout.tell() >= len(self.stdout.getvalue()) else None
+
+        def wait(self):
+            return 0
+
+    executor = _build_executor("")
+    executor._claude_home = str(tmp_path)
+    monkeypatch.setattr(
+        "chack_agent.backends.claude_code_backend.subprocess.Popen",
+        lambda command, **kwargs: _FakeProcess(command),
+    )
+
+    output, _steps, _raw = executor._run_claude_once(prompt)
+
+    assert output == "ok"
+    assert prompt not in captured["command"]
+    assert captured["stdin"] == prompt
 
 
 def test_claude_command_omits_json_schema_when_unconfigured() -> None:
@@ -328,7 +365,7 @@ def test_claude_command_resumes_captured_session_for_followup_prompt() -> None:
     assert "--dangerously-skip-permissions" in command
     assert "--resume" in command
     assert command[command.index("--resume") + 1] == "11111111-2222-3333-4444-555555555555"
-    assert command[-1] == prompt
+    assert prompt not in command
 
 
 def test_claude_followup_prompt_only_suppresses_system_once() -> None:
