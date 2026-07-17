@@ -126,6 +126,29 @@ def test_claude_non_haiku_preserves_explicit_tool_search_setting(monkeypatch) ->
     assert env["ENABLE_TOOL_SEARCH"] == "auto"
 
 
+def test_claude_large_custom_tool_payload_uses_file_backed_mcp_env(tmp_path) -> None:
+    executor = _build_executor("")
+    executor._claude_home = str(tmp_path)
+    executor._serialized_tools_append_b64 = "x" * 24001
+
+    env = executor._build_env()
+
+    assert "CHACK_TOOLS_APPEND_B64" not in env
+    payload_path = pathlib.Path(env["CHACK_TOOLS_APPEND_B64_PATH"])
+    assert payload_path.parent == tmp_path
+    assert payload_path.read_text(encoding="utf-8") == "x" * 24001
+
+
+def test_claude_mcp_settings_block_until_core_tools_are_loaded(tmp_path) -> None:
+    executor = _build_executor("")
+    executor._claude_home = str(tmp_path)
+
+    executor._write_claude_settings(str(tmp_path))
+
+    settings = json.loads(pathlib.Path(tmp_path, "settings.json").read_text(encoding="utf-8"))
+    assert settings["mcpServers"]["chack_tools"]["alwaysLoad"] is True
+
+
 def test_claude_command_resumes_captured_session_for_followup_prompt() -> None:
     executor = _build_executor("")
     executor._claude_session_id = "11111111-2222-3333-4444-555555555555"

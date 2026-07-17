@@ -31,9 +31,15 @@ from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
+    CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
+    CHACK_INLINE_ENV_VALUE_MAX_CHARS,
+    CHACK_TOOLS_APPEND_B64_PATH_ENV,
     CHACK_TOOLS_APPEND_B64_ENV,
+    CHACK_TOOLS_CONFIG_JSON_PATH_ENV,
+    CHACK_TOOLS_OVERRIDE_B64_PATH_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
     serialize_tools_payload,
+    write_payload_to_file,
 )
 
 
@@ -1127,12 +1133,34 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         if "haiku" in str(self._model_name or "").strip().lower():
             env["ENABLE_TOOL_SEARCH"] = "false"
 
-        env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
-        env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
-        if self._serialized_tools_override_b64:
-            env[CHACK_TOOLS_OVERRIDE_B64_ENV] = self._serialized_tools_override_b64
-        if self._serialized_tools_append_b64:
-            env[CHACK_TOOLS_APPEND_B64_ENV] = self._serialized_tools_append_b64
+        self._set_env_or_file(
+            env,
+            "CHACK_TOOLS_CONFIG_JSON",
+            self._tools_config_json,
+            path_env_key=CHACK_TOOLS_CONFIG_JSON_PATH_ENV,
+            prefix="chack_tools_config_",
+        )
+        self._set_env_or_file(
+            env,
+            "CHACK_ALLOWED_TOOLS_JSON",
+            self._allowed_tools_json,
+            path_env_key=CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
+            prefix="chack_allowed_tools_",
+        )
+        self._set_env_or_file(
+            env,
+            CHACK_TOOLS_OVERRIDE_B64_ENV,
+            self._serialized_tools_override_b64,
+            path_env_key=CHACK_TOOLS_OVERRIDE_B64_PATH_ENV,
+            prefix="chack_tools_override_",
+        )
+        self._set_env_or_file(
+            env,
+            CHACK_TOOLS_APPEND_B64_ENV,
+            self._serialized_tools_append_b64,
+            path_env_key=CHACK_TOOLS_APPEND_B64_PATH_ENV,
+            prefix="chack_tools_append_",
+        )
         env["CHACK_MODEL_PROVIDER"] = self._model_provider
         env["CHACK_DEFAULT_MODEL"] = self._default_model
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
@@ -1235,6 +1263,27 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
 
         return env
 
+    def _set_env_or_file(
+        self,
+        env: dict[str, str],
+        env_key: str,
+        value: str,
+        *,
+        path_env_key: str,
+        prefix: str,
+    ) -> None:
+        raw = str(value or "")
+        env.pop(env_key, None)
+        env.pop(path_env_key, None)
+        if not raw:
+            return
+        if len(raw) <= CHACK_INLINE_ENV_VALUE_MAX_CHARS:
+            env[env_key] = raw
+            return
+        payload_dir = self._claude_home or os.environ.get("CHACK_CLAUDE_HOME_BASE", "").strip() or ""
+        path = write_payload_to_file(raw, prefix=prefix, directory=payload_dir)
+        env[path_env_key] = path
+
     def _ensure_claude_home_and_settings(self) -> None:
         if self._claude_home:
             return
@@ -1262,6 +1311,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
                     "command": sys.executable,
                     "args": ["-m", "chack_agent.backends.chack_tools_mcp_server"],
                     "env": self._mcp_env_map(),
+                    "alwaysLoad": True,
                 }
             }
         }
@@ -1292,9 +1342,13 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
     def _mcp_env_map(self) -> dict[str, str]:
         env_keys = [
             "CHACK_TOOLS_CONFIG_JSON",
+            "CHACK_TOOLS_CONFIG_JSON_PATH",
             "CHACK_ALLOWED_TOOLS_JSON",
+            "CHACK_ALLOWED_TOOLS_JSON_PATH",
             "CHACK_TOOLS_OVERRIDE_B64",
+            "CHACK_TOOLS_OVERRIDE_B64_PATH",
             "CHACK_TOOLS_APPEND_B64",
+            "CHACK_TOOLS_APPEND_B64_PATH",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",
