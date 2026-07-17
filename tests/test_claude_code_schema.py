@@ -3,8 +3,12 @@ import io
 import os
 import pathlib
 import tempfile
+from datetime import datetime, timezone
 
-from chack_agent.backends.claude_code_backend import ClaudeCodeExecutor
+from chack_agent.backends.claude_code_backend import (
+    ClaudeCodeExecutor,
+    _seconds_until_claude_quota_reset,
+)
 
 
 def _build_executor(output_schema_json: str = "") -> ClaudeCodeExecutor:
@@ -499,3 +503,61 @@ def test_claude_oauth_session_limit_falls_back_to_anthropic_api_key(monkeypatch)
 
     assert output == "fallback succeeded"
     assert executor._claude_access_token == ""
+
+
+def test_claude_oauth_waits_for_near_term_utc_reset_without_api_fallback(monkeypatch) -> None:
+    executor = _build_executor("")
+    executor._claude_access_token = "oauth-primary"
+    executor._anthropic_api_key = ""
+    results = iter(
+        [
+            ("ERROR: You've hit your session limit · resets 4:40pm (UTC)", [], None),
+            ("claude token succeeded after reset", [], None),
+        ]
+    )
+    sleeps = []
+    monkeypatch.setenv("CHACK_CLAUDE_QUOTA_RESET_MAX_WAIT_SECONDS", "900")
+    monkeypatch.setattr(executor, "_run_claude_once", lambda _prompt: next(results))
+    monkeypatch.setattr(
+        "chack_agent.backends.claude_code_backend._seconds_until_claude_quota_reset",
+        lambda _output: 241,
+    )
+    monkeypatch.setattr("chack_agent.backends.claude_code_backend.time.sleep", sleeps.append)
+
+    output, _steps, _raw = executor._run_claude("prompt")
+
+    assert output == "claude token succeeded after reset"
+    assert executor._claude_access_token == "oauth-primary"
+    assert sleeps == [241]
+
+
+def test_claude_quota_reset_parser_uses_advertised_utc_time() -> None:
+    seconds = _seconds_until_claude_quota_reset(
+        "ERROR: Claude returned an error. You've hit your session limit · resets 4:40pm (UTC)",
+        now=datetime(2026, 7, 17, 16, 36, tzinfo=timezone.utc),
+    )
+
+    assert seconds == 241
+
+
+def test_claude_oauth_does_not_wait_past_configured_bound(monkeypatch) -> None:
+    executor = _build_executor("")
+    executor._claude_access_token = "oauth-primary"
+    executor._anthropic_api_key = ""
+    calls = []
+    monkeypatch.setenv("CHACK_CLAUDE_QUOTA_RESET_MAX_WAIT_SECONDS", "60")
+    monkeypatch.setattr(
+        executor,
+        "_run_claude_once",
+        lambda _prompt: calls.append(True)
+        or ("ERROR: You've hit your session limit · resets 4:40pm (UTC)", [], None),
+    )
+    monkeypatch.setattr(
+        "chack_agent.backends.claude_code_backend._seconds_until_claude_quota_reset",
+        lambda _output: 241,
+    )
+
+    output, _steps, _raw = executor._run_claude("prompt")
+
+    assert output.startswith("ERROR:")
+    assert len(calls) == 1

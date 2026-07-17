@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
@@ -46,6 +47,42 @@ from .tool_payloads import (
 
 _LOGGER = logging.getLogger("chack.claude_code_backend")
 _MCP_STARTUP_STATUS_PATH_ENV = "CHACK_MCP_STARTUP_STATUS_PATH"
+
+
+def _seconds_until_claude_quota_reset(
+    output: str,
+    *,
+    now: datetime | None = None,
+) -> int | None:
+    """Return the wait until a near-term UTC reset advertised by Claude CLI."""
+    text = str(output or "").strip()
+    lowered = text.lower()
+    if not text.startswith("ERROR:") or not any(
+        marker in lowered
+        for marker in ("session limit", "usage limit", "hit your limit", "quota exceeded")
+    ):
+        return None
+
+    match = re.search(
+        r"\bresets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(?:\((?:utc|gmt)\)|(?:utc|gmt))",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+
+    hour = int(match.group(1)) % 12
+    if match.group(3).lower() == "pm":
+        hour += 12
+    minute = int(match.group(2) or "0")
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    reset = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if reset <= current:
+        reset += timedelta(days=1)
+    return max(1, int((reset - current).total_seconds()) + 1)
 
 
 def _descendant_pids(pid: int) -> list[int]:
@@ -470,14 +507,29 @@ class ClaudeCodeExecutor:
 
     def _run_claude(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         result = self._run_claude_once(prompt)
-        if not self._should_retry_with_anthropic_api_key(result[0]):
+        if self._should_retry_with_anthropic_api_key(result[0]):
+            _LOGGER.warning(
+                "Claude Code OAuth token is unavailable for this request. "
+                "Falling back to ANTHROPIC_API_KEY."
+            )
+            self._claude_access_token = ""
+            self._claude_session_id = None
+            return self._run_claude_once(prompt)
+
+        wait_seconds = _seconds_until_claude_quota_reset(result[0])
+        max_wait_seconds = max(
+            0,
+            int(os.environ.get("CHACK_CLAUDE_QUOTA_RESET_MAX_WAIT_SECONDS", "900") or "900"),
+        )
+        if wait_seconds is None or wait_seconds > max_wait_seconds:
             return result
 
         _LOGGER.warning(
-            "Claude Code OAuth token is unavailable for this request. "
-            "Falling back to ANTHROPIC_API_KEY."
+            "Claude Code OAuth session quota resets in %ss; waiting once and retrying "
+            "with the configured Claude token.",
+            wait_seconds,
         )
-        self._claude_access_token = ""
+        time.sleep(wait_seconds)
         self._claude_session_id = None
         return self._run_claude_once(prompt)
 
