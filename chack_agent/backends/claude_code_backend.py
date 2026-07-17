@@ -1243,6 +1243,20 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         env.setdefault("AWS_CONFIG_FILE", os.environ.get("AWS_CONFIG_FILE", ""))
 
         # Claude Code internal tool timeouts -----------------------------------
+        # Required local MCP servers can take more than Claude Code's default
+        # 5-second connection snapshot on CPU-constrained CI workers, especially
+        # when several agents start together and deserialize custom toolsets.
+        # Keep startup blocking and use one bounded 60-second window so the
+        # first prompt never sees an incomplete tool registry.
+        mcp_startup_timeout_ms = (
+            os.environ.get("CHACK_CLAUDE_MCP_STARTUP_TIMEOUT_MS", "").strip()
+            or os.environ.get("MCP_CONNECT_TIMEOUT_MS", "").strip()
+            or os.environ.get("MCP_TIMEOUT", "").strip()
+            or "60000"
+        )
+        env["MCP_CONNECTION_NONBLOCKING"] = "false"
+        env["MCP_TIMEOUT"] = mcp_startup_timeout_ms
+        env["MCP_CONNECT_TIMEOUT_MS"] = mcp_startup_timeout_ms
         # BASH_DEFAULT_TIMEOUT_MS: default timeout for the Bash tool (default 120s)
         env.setdefault(
             "BASH_DEFAULT_TIMEOUT_MS",

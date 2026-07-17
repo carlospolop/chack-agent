@@ -149,6 +149,27 @@ def test_claude_mcp_settings_block_until_core_tools_are_loaded(tmp_path) -> None
     assert settings["mcpServers"]["chack_tools"]["alwaysLoad"] is True
 
 
+def test_claude_waits_for_required_mcp_tools_on_constrained_workers(monkeypatch) -> None:
+    executor = _build_executor("")
+    monkeypatch.setenv("MCP_CONNECTION_NONBLOCKING", "true")
+
+    env = executor._build_env()
+
+    assert env["MCP_CONNECTION_NONBLOCKING"] == "false"
+    assert env["MCP_TIMEOUT"] == "60000"
+    assert env["MCP_CONNECT_TIMEOUT_MS"] == "60000"
+
+
+def test_claude_honors_explicit_chack_mcp_startup_timeout(monkeypatch) -> None:
+    executor = _build_executor("")
+    monkeypatch.setenv("CHACK_CLAUDE_MCP_STARTUP_TIMEOUT_MS", "90000")
+
+    env = executor._build_env()
+
+    assert env["MCP_TIMEOUT"] == "90000"
+    assert env["MCP_CONNECT_TIMEOUT_MS"] == "90000"
+
+
 def test_claude_command_resumes_captured_session_for_followup_prompt() -> None:
     executor = _build_executor("")
     executor._claude_session_id = "11111111-2222-3333-4444-555555555555"
