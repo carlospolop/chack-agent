@@ -55,6 +55,7 @@ def test_worker_forces_local_backend_and_posts_success(monkeypatch, tmp_path):
     assert completion["status"] == "SUCCEEDED"
     assert completion["result"] == "A" * 2000
     assert completion["metadata"]["execution_backend"] == "local_worker"
+    assert "conversation_url" not in completion["metadata"]
 
 
 def test_worker_posts_timeout_with_partial_output(monkeypatch, tmp_path):
@@ -81,3 +82,40 @@ def test_worker_posts_timeout_with_partial_output(monkeypatch, tmp_path):
     assert completion["partial_result"] == "partial answer"
     assert completion["error_code"] == "BROWSER_OUTPUT_TIMEOUT"
     assert "/home/tester" not in completion["error_message"]
+    assert "conversation_url" not in completion["metadata"]
+
+
+def test_worker_refuses_ambiguous_retry_after_prior_browser_submission(monkeypatch, tmp_path):
+    worker, client = _worker(tmp_path)
+    job_id = "job_00000000-0000-0000-0000-000000000003"
+    job_dir = tmp_path / "jobs" / job_id
+    job_dir.mkdir(parents=True)
+    (job_dir / "chatgpt-run.json").write_text(
+        '{"conversation_url":"https://chatgpt.com/c/private","terminal_state":"running"}'
+    )
+    (job_dir / "chatgpt-pro-partial.md").write_text("preserved partial")
+
+    def should_not_launch(*_args, **_kwargs):
+        raise AssertionError("ambiguous retry must not submit to ChatGPT again")
+
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_remote_worker.ChatGPTWebResearchAgentTool._browser_research",
+        should_not_launch,
+    )
+    worker.process(
+        {
+            "job_id": job_id,
+            "lease_id": "lease-3",
+            "mode": "pro",
+            "prompt": "P" * 200,
+            "output_timeout_seconds": 1800,
+            "attempt": 2,
+        }
+    )
+
+    _, completion = client.completions[0]
+    assert completion["status"] == "FAILED"
+    assert completion["partial_result"] == "preserved partial"
+    assert completion["error_code"] == "AMBIGUOUS_PRIOR_BROWSER_SUBMISSION"
+    assert completion["metadata"]["prior_browser_submission_detected"] is True
+    assert "conversation_url" not in completion["metadata"]

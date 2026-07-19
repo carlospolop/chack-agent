@@ -25,6 +25,18 @@ from .config import ToolsConfig
 
 LOG = logging.getLogger("chack-chatgpt-worker")
 
+_PUBLIC_METADATA_FIELDS = {
+    "mode",
+    "started_at",
+    "finished_at",
+    "answer_chars",
+    "terminal_state",
+    "stage",
+    "forced_answer",
+    "execution_backend",
+    "prior_browser_submission_detected",
+}
+
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
@@ -57,6 +69,15 @@ def _sanitized_error(exc: Exception, cdp_url: str) -> str:
     if cdp_url:
         message = message.replace(cdp_url, "<local-cdp>")
     return message[:1000]
+
+
+def _public_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return broker-safe metadata without local paths or conversation URLs."""
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key in _PUBLIC_METADATA_FIELDS and isinstance(value, (str, int, float, bool))
+    }
 
 
 class ChatGPTRemoteWorker:
@@ -187,6 +208,29 @@ class ChatGPTRemoteWorker:
             )
             return
 
+        existing_state = _read_json(run_state_path)
+        if int(lease.get("attempt") or 1) > 1 and existing_state.get("conversation_url"):
+            metadata = _public_metadata(existing_state)
+            metadata.update(
+                {
+                    "mode": mode,
+                    "execution_backend": "local_worker",
+                    "prior_browser_submission_detected": True,
+                }
+            )
+            self._send_or_save_completion(
+                job_id,
+                {
+                    "lease_id": lease_id,
+                    "status": "FAILED",
+                    "partial_result": _read_text(partial_path),
+                    "metadata": metadata,
+                    "error_code": "AMBIGUOUS_PRIOR_BROWSER_SUBMISSION",
+                    "error_message": "A prior browser submission was detected; automatic resubmission was refused to avoid duplicate paid work.",
+                },
+            )
+            return
+
         helper = ChatGPTWebResearchAgentTool(self._config(mode, output_timeout), mode=cast(Mode, mode))
         stop = threading.Event()
         cancelled = threading.Event()
@@ -207,13 +251,13 @@ class ChatGPTRemoteWorker:
             self.client.heartbeat(job_id, lease_id=lease_id, stage="launching_browser", answer_chars=0)
             heartbeats.start()
             LOG.info("job=%s mode=%s launching local ChatGPT browser executor", job_id, mode)
-            answer, conversation_url, metadata = helper._browser_research(
+            answer, _conversation_url, metadata = helper._browser_research(
                 prompt,
                 run_state_path=run_state_path,
                 partial_path=partial_path,
             )
-            metadata = dict(metadata or {})
-            metadata.update({"conversation_url": conversation_url, "execution_backend": "local_worker"})
+            metadata = _public_metadata(dict(metadata or {}))
+            metadata.update({"execution_backend": "local_worker"})
             completion_status = "CANCELLED" if cancelled.is_set() else "SUCCEEDED"
             self._send_or_save_completion(
                 job_id,
@@ -238,7 +282,7 @@ class ChatGPTRemoteWorker:
                     "lease_id": lease_id,
                     "status": status,
                     "partial_result": partial,
-                    "metadata": state,
+                    "metadata": _public_metadata(state),
                     "error_code": error_code,
                     "error_message": _sanitized_error(exc, self.cdp_url),
                 },
