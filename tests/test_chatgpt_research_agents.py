@@ -1,5 +1,7 @@
 import json
 import re
+import threading
+import time
 
 import pytest
 
@@ -42,6 +44,31 @@ def test_chatgpt_modes_have_distinct_total_output_deadlines():
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 75 * 60
     assert CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS == 1800
     assert CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS == 4500
+
+
+def test_chatgpt_research_tool_accepts_and_runs_five_prompts_in_parallel(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="pro")
+    barrier = threading.Barrier(5)
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def run_single(prompt, *, save_artifacts):
+        nonlocal active, maximum_active
+        assert not save_artifacts
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        barrier.wait(timeout=5)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return f"answer:{prompt[-1]}"
+
+    monkeypatch.setattr(helper, "_run_single", run_single)
+    output = helper.run([("P" * 100) + str(index) for index in range(5)])
+    assert maximum_active == 5
+    assert output.count("SUBAGENT_RESULT_") == 5
 
 
 def test_mode_specific_timeout_overrides_legacy_shared_timeout():

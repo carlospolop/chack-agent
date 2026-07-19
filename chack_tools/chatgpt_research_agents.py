@@ -1009,7 +1009,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             cleanup_research_artifacts(evidence_dir, save_artifacts=save_artifacts)
 
     def run(self, prompt: str | list[str], save_artifacts: bool = False) -> str:
-        prompts, error = normalize_subagent_prompts(prompt, min_chars=100, max_prompts=3)
+        prompts, error = normalize_subagent_prompts(prompt, min_chars=100, max_prompts=5)
         if error:
             return error
         return run_parallel_subagent_prompts(
@@ -1028,7 +1028,7 @@ def _make_tool(helper: ChatGPTWebResearchAgentTool):
 Use it for an independent ChatGPT {mode_label} research or reasoning pass. Give a self-contained prompt with the topic, scope, source/evidence requirements, uncertainties to test, and expected output. Normal clients submit through the configured authenticated async HTTPS broker; only the outbound workstation worker uses the signed-in local Chrome/CDP executor.
 
 Args:
-    prompt: One detailed research prompt, or a list of up to 3 prompts to run independently.
+    prompt: One detailed research prompt, or a list of up to 5 prompts to run independently.
     save_artifacts: Preserve the exact prompt, complete response, run metadata, and conversation URL in the research evidence folder.
 
 Output: Standard Chack researcher JSON with terminal worked/failure status, the complete extracted review, and preserved artifact metadata when requested.
@@ -1049,7 +1049,7 @@ Output: Standard Chack researcher JSON with terminal worked/failure status, the 
     )
     properties = (getattr(tool, "params_json_schema", {}) or {}).get("properties", {})
     if "prompt" in properties:
-        properties["prompt"]["description"] = "One detailed research prompt, or a list of up to three independent detailed prompts."
+        properties["prompt"]["description"] = "One detailed research prompt, or a list of up to five independent detailed prompts."
     if "save_artifacts" in properties:
         properties["save_artifacts"]["description"] = "Preserve the exact request, response, run metadata, and conversation URL when true."
     return tool

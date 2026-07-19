@@ -856,7 +856,11 @@ def run_parallel_subagent_prompts(
         return runner(prompts[0])
 
     results: dict[int, str] = {}
-    max_workers = min(3, len(prompts))
+    # Researcher-specific validators remain the authority on batch size. Most
+    # researchers cap calls at three; the brokered ChatGPT tools deliberately
+    # allow five because the outbound workstation worker has five isolated
+    # browser slots.
+    max_workers = min(5, len(prompts))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(runner, prompt): idx
