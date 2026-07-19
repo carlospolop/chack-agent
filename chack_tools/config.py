@@ -169,6 +169,16 @@ class ToolsConfig:
     chatgpt_deep_timeout_seconds: Optional[int] = None
     chatgpt_research_timeout_seconds: int = 0  # deprecated shared fallback
     chatgpt_research_poll_seconds: int = 15
+    # Execution backend: "auto" uses the async HTTPS broker when URL + secret
+    # are configured and otherwise preserves the direct local-browser behavior.
+    # The outbound workstation worker always overrides this to "local" so it
+    # cannot recursively submit the job it has just leased.
+    chatgpt_execution_backend: str = "auto"
+    chatgpt_async_api_url: str = ""
+    chatgpt_async_api_secret: str = ""
+    chatgpt_async_poll_seconds: int = 10
+    chatgpt_async_max_wait_seconds: int = 10800
+    chatgpt_async_request_timeout_seconds: int = 30
     # Pro requests click "Answer now" this many seconds before their total
     # output deadline; this is part of, not added after, the Pro timeout.
     chatgpt_force_answer_grace_seconds: int = 300

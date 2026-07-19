@@ -15,9 +15,11 @@ import re
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Literal
 
+from .chatgpt_async_client import ChatGPTAsyncApiClient
 from .config import ToolsConfig
 from .research_artifacts import cleanup_research_artifacts
 from .subagent_config import (
@@ -94,6 +96,140 @@ class ChatGPTWebResearchAgentTool:
     def _force_answer_grace_seconds(self) -> int:
         configured = int(getattr(self.config, "chatgpt_force_answer_grace_seconds", 0) or 0)
         return max(60, configured or 300)
+
+    def _execution_backend(self) -> str:
+        configured = str(getattr(self.config, "chatgpt_execution_backend", "") or "").strip().lower()
+        backend = configured or os.environ.get("CHACK_CHATGPT_EXECUTION_BACKEND", "").strip().lower() or "auto"
+        if backend not in {"auto", "local", "remote"}:
+            raise ChatGPTWebResearchError(f"Unsupported ChatGPT execution backend: {backend}")
+        if backend == "auto":
+            return "remote" if self._async_api_url() and self._async_api_secret() else "local"
+        return backend
+
+    def _async_api_url(self) -> str:
+        configured = str(getattr(self.config, "chatgpt_async_api_url", "") or "").strip()
+        return configured or os.environ.get("CHACK_CHATGPT_ASYNC_API_URL", "").strip()
+
+    def _async_api_secret(self) -> str:
+        configured = str(getattr(self.config, "chatgpt_async_api_secret", "") or "").strip()
+        return configured or os.environ.get("CHACK_CHATGPT_ASYNC_API_SECRET", "").strip()
+
+    def _async_poll_seconds(self) -> int:
+        configured = int(getattr(self.config, "chatgpt_async_poll_seconds", 0) or 0)
+        environment = int(os.environ.get("CHACK_CHATGPT_ASYNC_POLL_SECONDS", "0") or 0)
+        return max(2, configured or environment or 10)
+
+    def _async_max_wait_seconds(self) -> int:
+        configured = int(getattr(self.config, "chatgpt_async_max_wait_seconds", 0) or 0)
+        environment = int(os.environ.get("CHACK_CHATGPT_ASYNC_MAX_WAIT_SECONDS", "0") or 0)
+        return max(self._timeout_seconds(), configured or environment or 10800)
+
+    def _async_client(self) -> ChatGPTAsyncApiClient:
+        url = self._async_api_url()
+        secret = self._async_api_secret()
+        if not url or not secret:
+            raise ChatGPTWebResearchError(
+                "Remote ChatGPT execution requires CHACK_CHATGPT_ASYNC_API_URL and CHACK_CHATGPT_ASYNC_API_SECRET."
+            )
+        request_timeout = int(getattr(self.config, "chatgpt_async_request_timeout_seconds", 0) or 0) or 30
+        return ChatGPTAsyncApiClient(url, secret, request_timeout_seconds=request_timeout)
+
+    def _remote_research(
+        self,
+        prompt: str,
+        *,
+        run_state_path: Path | None = None,
+        partial_path: Path | None = None,
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Submit through the cloud broker and poll without touching local CDP."""
+        client = self._async_client()
+        submitted = client.submit(mode=self.mode, prompt=prompt, idempotency_key=str(uuid.uuid4()))
+        job_id = str(submitted.get("job_id") or "")
+        if not job_id:
+            raise ChatGPTWebResearchError("ChatGPT async API did not return a job id.")
+
+        started = time.time()
+        deadline = time.monotonic() + self._async_max_wait_seconds()
+        metadata: dict[str, Any] = {
+            "mode": self.mode,
+            "execution_backend": "remote",
+            "remote_job_id": job_id,
+            "submitted_at": started,
+            "terminal_state": "queued",
+            "output_timeout_seconds": self._timeout_seconds(),
+        }
+        self._write_json(run_state_path, metadata)
+        last_stage = "queued"
+        last_chars = 0
+        while True:
+            if time.monotonic() >= deadline:
+                try:
+                    client.cancel(job_id)
+                except Exception:
+                    pass
+                metadata.update({"terminal_state": "timeout", "finished_at": time.time()})
+                self._write_json(run_state_path, metadata)
+                raise ChatGPTWebResearchError(
+                    f"Remote ChatGPT {self.mode} job exceeded the configured client wait deadline."
+                )
+
+            status_payload = client.status(job_id)
+            status = str(status_payload.get("status") or "").upper()
+            stage = str(status_payload.get("stage") or status or "queued").lower()
+            answer_chars = int(status_payload.get("answer_chars") or 0)
+            if stage != last_stage or answer_chars != last_chars:
+                self._emit_progress(f"remote_{stage}", answer_chars=answer_chars, running=status not in {"SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELLED", "EXPIRED"})
+                last_stage, last_chars = stage, answer_chars
+            metadata.update(
+                {
+                    "remote_status": status,
+                    "terminal_state": stage,
+                    "answer_chars": answer_chars,
+                    "last_polled_at": time.time(),
+                }
+            )
+            self._write_json(run_state_path, metadata)
+
+            if status in {"SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELLED", "EXPIRED"}:
+                result_payload = client.result(job_id)
+                answer = str(result_payload.get("result") or "")
+                partial = str(result_payload.get("partial_result") or "")
+                raw_metadata = result_payload.get("metadata")
+                remote_metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+                conversation_url = str(remote_metadata.get("conversation_url") or "")
+                metadata.update(remote_metadata)
+                metadata.update(
+                    {
+                        "remote_status": status,
+                        "terminal_state": "extracted" if status == "SUCCEEDED" else status.lower(),
+                        "finished_at": time.time(),
+                        "answer_chars": len(answer or partial),
+                    }
+                )
+                self._write_json(run_state_path, metadata)
+                if status == "SUCCEEDED" and answer.strip():
+                    self._emit_progress("remote_extracted", answer_chars=len(answer), running=False)
+                    return answer, conversation_url, metadata
+                if partial:
+                    self._write_partial(partial_path, partial)
+                error_code = str(result_payload.get("error_code") or status or "remote_failed")
+                error_message = str(result_payload.get("error_message") or "")
+                raise ChatGPTWebResearchError(
+                    f"Remote ChatGPT {self.mode} job ended as {status} ({error_code})"
+                    + (f": {error_message}" if error_message else "")
+                )
+            time.sleep(self._async_poll_seconds())
+
+    def _research(
+        self,
+        prompt: str,
+        *,
+        run_state_path: Path | None = None,
+        partial_path: Path | None = None,
+    ) -> tuple[str, str, dict[str, Any]]:
+        if self._execution_backend() == "remote":
+            return self._remote_research(prompt, run_state_path=run_state_path, partial_path=partial_path)
+        return self._browser_research(prompt, run_state_path=run_state_path, partial_path=partial_path)
 
     @staticmethod
     def _write_json(path: Path | None, payload: dict[str, Any]) -> None:
@@ -776,7 +912,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         request_path.write_text(prompt, encoding="utf-8")
         metadata: dict[str, Any] = {"mode": self.mode, "terminal_state": "error"}
         try:
-            answer, conversation_url, metadata = self._browser_research(
+            answer, conversation_url, metadata = self._research(
                 prompt,
                 run_state_path=run_state_path,
                 partial_path=partial_path,
@@ -889,7 +1025,7 @@ def _make_tool(helper: ChatGPTWebResearchAgentTool):
     mode_label = "Deep Research" if helper.mode == "deep" else "Pro mode"
     description = f"""Run one authenticated ChatGPT Web {mode_label} research agent in a clean Chrome tab and wait for the complete extracted response.
 
-Use it for an independent ChatGPT {mode_label} research or reasoning pass. Give a self-contained prompt with the topic, scope, source/evidence requirements, uncertainties to test, and expected output. The browser must already be signed in to ChatGPT and reachable through the configured Chrome CDP endpoint.
+Use it for an independent ChatGPT {mode_label} research or reasoning pass. Give a self-contained prompt with the topic, scope, source/evidence requirements, uncertainties to test, and expected output. Normal clients submit through the configured authenticated async HTTPS broker; only the outbound workstation worker uses the signed-in local Chrome/CDP executor.
 
 Args:
     prompt: One detailed research prompt, or a list of up to 3 prompts to run independently.

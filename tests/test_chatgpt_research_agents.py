@@ -1,6 +1,5 @@
 import json
 import re
-from pathlib import Path
 
 import pytest
 
@@ -12,6 +11,7 @@ from chack_tools.chatgpt_research_agents import (
     ChatGPTWebResearchError,
     resolve_chatgpt_timeout_seconds,
 )
+from chack_tools.chatgpt_async_client import ChatGPTAsyncApiClient
 from chack_tools.config import ToolsConfig
 from chack_tools.researcher_administrator_agent import (
     ResearcherAdministratorAgentTool,
@@ -100,6 +100,100 @@ def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
         "chatgpt-run.json",
     }
     assert (evidence / "chatgpt-pro-response.md").read_text() == "A" * 2500
+
+
+def test_auto_backend_uses_remote_only_when_url_and_secret_are_present(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="pro")
+    monkeypatch.delenv("CHACK_CHATGPT_ASYNC_API_URL", raising=False)
+    monkeypatch.delenv("CHACK_CHATGPT_ASYNC_API_SECRET", raising=False)
+    assert helper._execution_backend() == "local"
+
+    monkeypatch.setenv("CHACK_CHATGPT_ASYNC_API_URL", "https://broker.example")
+    monkeypatch.setenv("CHACK_CHATGPT_ASYNC_API_SECRET", "test-secret")
+    assert helper._execution_backend() == "remote"
+
+    local = ChatGPTWebResearchAgentTool(ToolsConfig(chatgpt_execution_backend="local"), mode="deep")
+    assert local._execution_backend() == "local"
+
+
+def test_remote_backend_submits_polls_and_preserves_result(monkeypatch, tmp_path):
+    class FakeClient:
+        def __init__(self):
+            self.polls = 0
+
+        def submit(self, **kwargs):
+            assert kwargs["mode"] == "deep"
+            assert kwargs["prompt"] == "P" * 500
+            assert kwargs["idempotency_key"]
+            return {"job_id": "job_00000000-0000-0000-0000-000000000001", "status": "QUEUED"}
+
+        def status(self, _job_id):
+            self.polls += 1
+            if self.polls == 1:
+                return {"status": "RUNNING", "stage": "browser_running", "answer_chars": 100}
+            return {"status": "SUCCEEDED", "stage": "extracted", "answer_chars": 2500}
+
+        def result(self, _job_id):
+            return {
+                "status": "SUCCEEDED",
+                "result": "R" * 2500,
+                "partial_result": "",
+                "metadata": {"conversation_url": "https://chatgpt.com/c/remote-test"},
+            }
+
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(
+            chatgpt_execution_backend="remote",
+            chatgpt_async_api_url="https://broker.example",
+            chatgpt_async_api_secret="test-secret",
+            chatgpt_async_poll_seconds=2,
+        ),
+        mode="deep",
+    )
+    fake = FakeClient()
+    monkeypatch.setattr(helper, "_async_client", lambda: fake)
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.sleep", lambda *_args: None)
+    run_state = tmp_path / "run.json"
+    partial = tmp_path / "partial.md"
+
+    answer, url, metadata = helper._remote_research(
+        "P" * 500,
+        run_state_path=run_state,
+        partial_path=partial,
+    )
+    assert answer == "R" * 2500
+    assert url == "https://chatgpt.com/c/remote-test"
+    assert metadata["execution_backend"] == "remote"
+    assert metadata["remote_status"] == "SUCCEEDED"
+    assert json.loads(run_state.read_text())["remote_job_id"].startswith("job_")
+
+
+def test_async_client_sends_bearer_secret_only_in_header():
+    class Response:
+        status_code = 202
+        content = b"{}"
+
+        @staticmethod
+        def json():
+            return {"job_id": "job_test"}
+
+    class Session:
+        def __init__(self):
+            self.call = None
+
+        def request(self, method, url, **kwargs):
+            self.call = (method, url, kwargs)
+            return Response()
+
+    session = Session()
+    client = ChatGPTAsyncApiClient("https://broker.example", "known-secret", session=session)  # type: ignore[arg-type]
+    client.submit(mode="pro", prompt="P" * 100, idempotency_key="idem")
+    assert session.call is not None
+    method, url, kwargs = session.call
+    assert method == "POST"
+    assert "known-secret" not in url
+    assert kwargs["headers"]["authorization"] == "Bearer known-secret"
+    assert "known-secret" not in json.dumps(kwargs["json"])
 
 
 def test_deep_research_counter_noise_is_removed_without_touching_normal_numbered_answers():
