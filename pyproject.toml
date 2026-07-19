@@ -31,6 +31,9 @@ openai_agents = [
   "openai-agents>=0.7.0",
 ]
 
+[project.scripts]
+chack-chatgpt-worker = "chack_tools.chatgpt_async_worker:main"
+
 [tool.setuptools]
 include-package-data = true
 

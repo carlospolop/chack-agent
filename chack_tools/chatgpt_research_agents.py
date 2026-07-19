@@ -114,7 +114,9 @@ class ChatGPTWebResearchAgentTool:
         if backend not in {"auto", "local", "remote"}:
             raise ChatGPTWebResearchError(f"Unsupported ChatGPT execution backend: {backend}")
         if backend == "auto":
-            return "remote" if self._async_api_url() and self._async_api_secret() else "local"
+            # The presence of either broker setting means this is a remote client.
+            # A partial deployment must fail closed instead of touching local CDP.
+            return "remote" if self._async_api_url() or self._async_api_secret() else "local"
         return backend
 
     def _async_api_url(self) -> str:

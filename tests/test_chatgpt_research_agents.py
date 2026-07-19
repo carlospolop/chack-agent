@@ -158,13 +158,17 @@ def test_five_same_mode_runs_use_distinct_artifact_directories(monkeypatch, tmp_
     assert {path.joinpath("chatgpt-request.md").read_text() for path in run_dirs} == set(prompts)
 
 
-def test_auto_backend_uses_remote_only_when_url_and_secret_are_present(monkeypatch):
+def test_auto_backend_fails_closed_when_any_remote_setting_is_present(monkeypatch):
     helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="pro")
     monkeypatch.delenv("CHACK_CHATGPT_ASYNC_API_URL", raising=False)
     monkeypatch.delenv("CHACK_CHATGPT_ASYNC_API_SECRET", raising=False)
     assert helper._execution_backend() == "local"
 
     monkeypatch.setenv("CHACK_CHATGPT_ASYNC_API_URL", "https://broker.example")
+    assert helper._execution_backend() == "remote"
+    with pytest.raises(ChatGPTWebResearchError, match="requires CHACK_CHATGPT_ASYNC_API_URL"):
+        helper._async_client()
+
     monkeypatch.setenv("CHACK_CHATGPT_ASYNC_API_SECRET", "test-secret")
     assert helper._execution_backend() == "remote"
 
@@ -251,6 +255,18 @@ def test_async_client_sends_bearer_secret_only_in_header():
     assert "known-secret" not in url
     assert kwargs["headers"]["authorization"] == "Bearer known-secret"
     assert "known-secret" not in json.dumps(kwargs["json"])
+    assert kwargs["allow_redirects"] is False
+
+
+def test_async_client_rejects_non_origin_or_credential_bearing_urls():
+    for url in (
+        "http://broker.example",
+        "https://user:pass@broker.example",
+        "https://broker.example/path",
+        "https://broker.example?next=elsewhere",
+    ):
+        with pytest.raises(ValueError, match="clean HTTPS origin"):
+            ChatGPTAsyncApiClient(url, "known-secret")
 
 
 def test_deep_research_counter_noise_is_removed_without_touching_normal_numbered_answers():

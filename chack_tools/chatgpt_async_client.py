@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import urllib.parse
 from typing import Any
 
 import requests
@@ -29,8 +30,17 @@ class ChatGPTAsyncApiClient:
     ):
         self.base_url = str(base_url or "").strip().rstrip("/")
         self.secret = str(secret or "").strip()
-        if not self.base_url.startswith("https://"):
-            raise ValueError("ChatGPT async API URL must use HTTPS")
+        parsed = urllib.parse.urlparse(self.base_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError("ChatGPT async API URL must be a clean HTTPS origin")
         if not self.secret:
             raise ValueError("ChatGPT async API secret is required")
         self.request_timeout_seconds = max(5, int(request_timeout_seconds or 30))
@@ -72,6 +82,7 @@ class ChatGPTAsyncApiClient:
                     },
                     json=json_body,
                     timeout=self.request_timeout_seconds,
+                    allow_redirects=False,
                 )
                 if response.status_code in expected:
                     if response.status_code == 204 or not response.content:
