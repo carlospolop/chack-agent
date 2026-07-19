@@ -138,17 +138,40 @@ def _safe_identifier(name: str, used: set[str]) -> str:
 def _py_type_from_schema(prop_schema: dict[str, Any]) -> Any:
     raw_type = prop_schema.get("type")
     if isinstance(raw_type, list):
-        non_null = [t for t in raw_type if t != "null"]
-        raw_type = non_null[0] if non_null else "string"
-    mapping = {
+        raw_types = [str(value) for value in raw_type]
+    elif raw_type:
+        raw_types = [str(raw_type)]
+    else:
+        any_of = prop_schema.get("anyOf")
+        raw_types = [
+            str(entry.get("type"))
+            for entry in any_of or []
+            if isinstance(entry, dict) and entry.get("type")
+        ]
+
+    scalar_mapping = {
         "string": str,
         "integer": int,
         "number": float,
         "boolean": bool,
         "object": dict,
-        "array": list,
+        "null": type(None),
     }
-    return mapping.get(str(raw_type or "string"), Any)
+    resolved: list[Any] = []
+    for type_name in raw_types:
+        if type_name == "array":
+            item_schema = prop_schema.get("items")
+            item_type = _py_type_from_schema(item_schema if isinstance(item_schema, dict) else {})
+            resolved.append(list[item_type])
+        else:
+            resolved.append(scalar_mapping.get(type_name, Any))
+
+    if not resolved or Any in resolved:
+        return Any
+    annotation = resolved[0]
+    for candidate in resolved[1:]:
+        annotation = annotation | candidate
+    return annotation
 
 
 def _schema_is_nullable(prop_schema: dict[str, Any]) -> bool:
