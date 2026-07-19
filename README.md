@@ -236,7 +236,7 @@ The agent can delegate to specialized sub‑agents. Sub‑agents run with restri
 * **Web Research**: Brave + SerpAPI (Google/Bing + AI‑mode endpoints if enabled).
 * **Scientific**: arXiv, Europe PMC, Semantic Scholar, OpenAlex, PLOS, Google Scholar/Patents, YouTube transcripts, PDF text.
 * **Social Network**: ForumScout + SerpAPI forums/news.
-* **Travel**: Google Flights and Hotels, Booking.com stay prices/reviews, Amadeus hotel offers/sentiments, vacation rentals, OpenTripMap attractions, Open-Meteo weather/air quality, Transitous public transport, Frankfurter exchange rates, Wikivoyage guides, local listings, and traveler opinions.
+* **Travel**: Google Flights and Hotels, Booking.com stay prices/reviews, Amadeus hotel offers/sentiments, vacation rentals, OpenTripMap attractions, Open-Meteo weather/air quality, Transitous public transport, Frankfurter exchange rates, Wikivoyage guides, travel-scoped Wikidata entity/relationship lookups, local listings, and traveler opinions.
 * **Business / Product / Legal / Data & Statistics / News & Media / Knowledge Graph / Religious / CLI**: additional domain researchers.
 
 #### Travel research
@@ -258,7 +258,7 @@ tools:
 
 With `SERPAPI_API_KEY`, the researcher receives structured Google Flights, Google Travel Explore, Google Hotels/vacation-rental search, property details, and hotel reviews. It also cross-checks Maps, Yelp, Apple Maps, Tripadvisor, web/news, forums, and Reddit when their corresponding credentials are available. Add `BOOKING_API_TOKEN` plus `BOOKING_AFFILIATE_ID` for official Booking.com prices, property data, and reviews; review access depends on the affiliate agreement. Add `AMADEUS_CLIENT_ID` plus `AMADEUS_CLIENT_SECRET` for Amadeus hotel offers and aggregate review sentiments, and `OPENTRIPMAP_API_KEY` for attraction discovery.
 
-The researcher always receives four additional keyless sources: Open-Meteo weather plus air-quality/pollen forecasts, Frankfurter central-bank reference exchange rates, Wikivoyage destination guides, and Transitous public-transport routing. Wikivoyage is orientation evidence rather than authority for volatile details. Transitous is a best-effort community service intended for free/open-source and non-profit use; its source attribution and usage policy must be respected.
+The researcher always receives additional keyless sources: Open-Meteo weather, marine, and air-quality/pollen forecasts; Nager.Date public holidays; Frankfurter central-bank reference exchange rates; Wikivoyage destination guides; Wikidata entity search and SPARQL; and Transitous public-transport routing. Wikivoyage and Wikidata are orientation evidence rather than authority for volatile or consequential historical details. Transitous is a best-effort community service intended for free/open-source and non-profit use; its source attribution and usage policy must be respected.
 
 Booking.com credentials require Managed Affiliate Partner access. Use `BOOKING_DEMAND_API_BASE_URL=https://demandapi-sandbox.booking.com/3.1` while testing and switch to the production URL only when the integration is approved. Amadeus defaults to its free test environment; use `AMADEUS_BASE_URL=https://api.amadeus.com` for production credentials. OpenTripMap offers a free non-commercial tier.
 

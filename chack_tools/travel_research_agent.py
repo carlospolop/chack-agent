@@ -25,7 +25,13 @@ from .forumscout_search import (
     get_reddit_comments_search_tool,
     get_reddit_posts_search_tool,
 )
-from .open_research_sources import OpenResearchTool, get_fetch_url_text_tool, get_gdelt_news_search_tool
+from .open_research_sources import (
+    OpenResearchTool,
+    get_fetch_url_text_tool,
+    get_gdelt_news_search_tool,
+    get_wikidata_entity_search_tool,
+    get_wikidata_sparql_tool,
+)
 from .open_travel_search import (
     OpenTravelSearchTool,
     get_open_meteo_air_quality_tool,
@@ -102,6 +108,7 @@ _TRAVEL_AGENT_SYSTEM_PROMPT = """### RULES
 - Check destination weather only when dates fall within the forecast horizon, and clearly label forecasts as predictions. For distant dates, research seasonal climate separately instead of presenting a forecast. For beach, surf, sailing, or ferry plans, check marine forecasts while warning that models do not replace local flags, operators, or navigation guidance.
 - Build itineraries that are geographically and temporally feasible. Use structured public-transport routing when coverage exists, then include transfer/check-in buffers, opening-day uncertainty, recovery time after long flights, and a cost breakdown with current reference-currency conversion plus inclusions/exclusions.
 - Use Wikivoyage as an openly licensed orientation source, not as authority for volatile opening hours, prices, entry rules, or safety. Consider destination air quality and pollen when relevant, clearly treating forecasts as predictions rather than medical advice. Check public holidays for closure/crowd risk, and use event inventory only as partial coverage that must be confirmed with the official organizer.
+- For cultural or historical travel, use the scoped Wikidata entity and SPARQL lookups to disambiguate places, aliases, coordinates, heritage relationships, and identifiers. Treat graph claims as orientation evidence and verify consequential historical or visitor information with official heritage, museum, archive, or tourism sources.
 - Never book, purchase, submit traveler data, or claim availability is guaranteed. Mention sources, and mention artifact filenames only when artifacts are preserved, without naming internal tool names.
 """ + OBJECTIVE_EVIDENCE_RULES
 
@@ -157,6 +164,8 @@ class TravelResearchAgentTool:
         tools.append(get_transitous_route_tool(self.open_travel))
         tools.append(get_fetch_url_text_tool(self.open))
         tools.append(get_gdelt_news_search_tool(self.open))
+        tools.append(get_wikidata_entity_search_tool(self.open))
+        tools.append(get_wikidata_sparql_tool(self.open))
 
         if os.environ.get("TICKETMASTER_API_KEY"):
             tools.append(get_ticketmaster_events_tool(self.open_travel))
@@ -300,6 +309,8 @@ class TravelResearchAgentTool:
                 "social_network_google_news_enabled": True,
                 "open_research_fetch_url_text_enabled": True,
                 "open_research_gdelt_enabled": True,
+                "open_research_wikidata_enabled": True,
+                "knowledge_graph_enabled": False,
                 "business_enabled": False,
                 "product_enabled": False,
                 "scientific_enabled": False,

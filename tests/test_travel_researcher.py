@@ -789,6 +789,9 @@ def test_travel_researcher_capability_set(monkeypatch):
     assert "convert_travel_currency" in names
     assert "search_wikivoyage_guides" in names
     assert "plan_public_transport_trip" in names
+    assert "wikidata_entity_search" in names
+    assert "wikidata_sparql" in names
+    assert "knowledge_graph_research" not in names
 
     for tool in helper._build_subagent_tools():
         description = str(getattr(tool, "description", "") or "")
