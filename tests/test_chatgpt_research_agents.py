@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
+from pathlib import Path
 import re
 import threading
 import time
@@ -119,14 +121,41 @@ def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
 
     payload = json.loads(helper._run_single("P" * 500, save_artifacts=True))
     assert payload["research_worked"] is True
-    assert payload["evidence_data_path"] == str(evidence)
+    run_dir = Path(payload["evidence_data_path"])
+    assert run_dir.parent == evidence
+    assert run_dir.name.startswith("run-")
     assert payload["final_research_review"] == "A" * 2500
     assert {row["filename"] for row in payload["key_artifacts"]} == {
         "chatgpt-pro-response.md",
         "chatgpt-request.md",
         "chatgpt-run.json",
     }
-    assert (evidence / "chatgpt-pro-response.md").read_text() == "A" * 2500
+    assert (run_dir / "chatgpt-pro-response.md").read_text() == "A" * 2500
+
+
+def test_five_same_mode_runs_use_distinct_artifact_directories(monkeypatch, tmp_path):
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="pro")
+    evidence = tmp_path / "evidence"
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.create_subagent_evidence_dir",
+        lambda *_args, **_kwargs: str(evidence),
+    )
+    barrier = threading.Barrier(5)
+
+    def browser(_prompt, *, run_state_path, partial_path):
+        assert run_state_path.parent == partial_path.parent
+        barrier.wait(timeout=5)
+        return "A" * 500, "", {"terminal_state": "extracted"}
+
+    monkeypatch.setattr(helper, "_browser_research", browser)
+    prompts = [f"Prompt {index} " * 60 for index in range(5)]
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        payloads = [json.loads(future.result()) for future in [pool.submit(helper._run_single, prompt, save_artifacts=True) for prompt in prompts]]
+
+    run_dirs = [Path(payload["evidence_data_path"]) for payload in payloads]
+    assert len(set(run_dirs)) == 5
+    assert all(path.parent == evidence for path in run_dirs)
+    assert {path.joinpath("chatgpt-request.md").read_text() for path in run_dirs} == set(prompts)
 
 
 def test_auto_backend_uses_remote_only_when_url_and_secret_are_present(monkeypatch):
@@ -189,7 +218,8 @@ def test_remote_backend_submits_polls_and_preserves_result(monkeypatch, tmp_path
         partial_path=partial,
     )
     assert answer == "R" * 2500
-    assert url == "https://chatgpt.com/c/remote-test"
+    assert url == ""
+    assert "conversation_url" not in metadata
     assert metadata["execution_backend"] == "remote"
     assert metadata["remote_status"] == "SUCCEEDED"
     assert json.loads(run_state.read_text())["remote_job_id"].startswith("job_")

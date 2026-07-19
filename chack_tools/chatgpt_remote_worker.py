@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+import fcntl
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ from .chatgpt_research_agents import ChatGPTWebResearchAgentTool, Mode
 from .config import ToolsConfig
 
 LOG = logging.getLogger("chack-chatgpt-worker")
+_JOB_ID_RE = re.compile(r"^job_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
 _PUBLIC_METADATA_FIELDS = {
     "mode",
@@ -101,6 +103,7 @@ class ChatGPTRemoteWorker:
             os.environ.get("CHACK_CHATGPT_WORKER_STATE_DIR", "~/.local/state/chack-chatgpt-worker")
         ).expanduser()
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._completion_lock = threading.Lock()
 
     def _config(self, mode: str, output_timeout_seconds: int) -> ToolsConfig:
         kwargs: dict[str, Any] = {
@@ -118,39 +121,41 @@ class ChatGPTRemoteWorker:
         return self.state_root / "jobs" / job_id / "pending-completion.json"
 
     def _send_or_save_completion(self, job_id: str, completion: dict[str, Any]) -> None:
-        pending = self._pending_path(job_id)
-        try:
-            self.client.complete(job_id, **completion)
-            pending.unlink(missing_ok=True)
-            LOG.info("job=%s completion accepted status=%s", job_id, completion.get("status"))
-        except ChatGPTAsyncApiError as exc:
-            _write_secure_json(pending, completion)
-            if exc.error_code == "lease_lost":
-                rejected = pending.with_name("rejected-completion.json")
-                pending.replace(rejected)
-                LOG.error("job=%s completion rejected because lease was lost; local output preserved at %s", job_id, rejected)
-                return
-            LOG.error("job=%s completion upload failed; preserved for retry (%s)", job_id, exc.error_code or type(exc).__name__)
-
-    def flush_pending(self) -> None:
-        jobs_root = self.state_root / "jobs"
-        if not jobs_root.exists():
-            return
-        for path in jobs_root.glob("*/pending-completion.json"):
-            completion = _read_json(path)
-            if not completion:
-                continue
-            job_id = path.parent.name
+        with self._completion_lock:
+            pending = self._pending_path(job_id)
             try:
                 self.client.complete(job_id, **completion)
-                path.unlink(missing_ok=True)
-                LOG.info("job=%s pending completion delivered", job_id)
+                pending.unlink(missing_ok=True)
+                LOG.info("job=%s completion accepted status=%s", job_id, completion.get("status"))
             except ChatGPTAsyncApiError as exc:
+                _write_secure_json(pending, completion)
                 if exc.error_code == "lease_lost":
-                    path.replace(path.with_name("rejected-completion.json"))
-                    LOG.error("job=%s pending completion rejected because lease was lost", job_id)
-                else:
-                    LOG.warning("job=%s pending completion still unavailable", job_id)
+                    rejected = pending.with_name("rejected-completion.json")
+                    pending.replace(rejected)
+                    LOG.error("job=%s completion rejected because lease was lost; local output preserved at %s", job_id, rejected)
+                    return
+                LOG.error("job=%s completion upload failed; preserved for retry (%s)", job_id, exc.error_code or type(exc).__name__)
+
+    def flush_pending(self) -> None:
+        with self._completion_lock:
+            jobs_root = self.state_root / "jobs"
+            if not jobs_root.exists():
+                return
+            for path in jobs_root.glob("*/pending-completion.json"):
+                completion = _read_json(path)
+                if not completion:
+                    continue
+                job_id = path.parent.name
+                try:
+                    self.client.complete(job_id, **completion)
+                    path.unlink(missing_ok=True)
+                    LOG.info("job=%s pending completion delivered", job_id)
+                except ChatGPTAsyncApiError as exc:
+                    if exc.error_code == "lease_lost":
+                        path.replace(path.with_name("rejected-completion.json"))
+                        LOG.error("job=%s pending completion rejected because lease was lost", job_id)
+                    else:
+                        LOG.warning("job=%s pending completion still unavailable", job_id)
 
     def _heartbeat_loop(
         self,
@@ -185,6 +190,37 @@ class ChatGPTRemoteWorker:
     def process(self, lease: dict[str, Any]) -> None:
         job_id = str(lease.get("job_id") or "")
         lease_id = str(lease.get("lease_id") or "")
+        if not _JOB_ID_RE.fullmatch(job_id) or not lease_id:
+            LOG.error("broker returned a lease with an invalid job or lease id")
+            return
+        job_dir = self.state_root / "jobs" / job_id
+        job_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path = job_dir / ".execution.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            os.chmod(lock_path, 0o600)
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                LOG.error("job=%s duplicate active execution refused", job_id)
+                self._send_or_save_completion(
+                    job_id,
+                    {
+                        "lease_id": lease_id,
+                        "status": "FAILED",
+                        "metadata": {"terminal_state": "duplicate_active_execution"},
+                        "error_code": "DUPLICATE_ACTIVE_EXECUTION",
+                        "error_message": "Another worker execution already owns this job; duplicate browser submission was refused.",
+                    },
+                )
+                return
+            try:
+                self._process_locked(lease)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _process_locked(self, lease: dict[str, Any]) -> None:
+        job_id = str(lease.get("job_id") or "")
+        lease_id = str(lease.get("lease_id") or "")
         mode = str(lease.get("mode") or "")
         prompt = str(lease.get("prompt") or "")
         output_timeout = int(lease.get("output_timeout_seconds") or (1800 if mode == "pro" else 4500))
@@ -199,6 +235,7 @@ class ChatGPTRemoteWorker:
         os.chmod(request_path, 0o600)
         run_state_path = job_dir / "chatgpt-run.json"
         partial_path = job_dir / f"chatgpt-{mode}-partial.md"
+        submission_marker = job_dir / "browser-submission-attempted.json"
 
         if lease.get("cancel_requested"):
             self._send_or_save_completion(
@@ -213,7 +250,7 @@ class ChatGPTRemoteWorker:
             return
 
         existing_state = _read_json(run_state_path)
-        if int(lease.get("attempt") or 1) > 1 and existing_state.get("conversation_url"):
+        if int(lease.get("attempt") or 1) > 1 and (existing_state.get("conversation_url") or submission_marker.exists()):
             metadata = _public_metadata(existing_state)
             metadata.update(
                 {
@@ -255,6 +292,10 @@ class ChatGPTRemoteWorker:
             self.client.heartbeat(job_id, lease_id=lease_id, stage="launching_browser", answer_chars=0)
             heartbeats.start()
             LOG.info("job=%s mode=%s launching local ChatGPT browser executor", job_id, mode)
+            _write_secure_json(
+                submission_marker,
+                {"job_id": job_id, "lease_id": lease_id, "mode": mode, "attempted_at": time.time()},
+            )
             answer, _conversation_url, metadata = helper._browser_research(
                 prompt,
                 run_state_path=run_state_path,

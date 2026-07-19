@@ -1,3 +1,4 @@
+import fcntl
 from pathlib import Path
 import threading
 import time
@@ -30,6 +31,7 @@ def _worker(tmp_path: Path) -> tuple[ChatGPTRemoteWorker, FakeWorkerClient]:
     worker.heartbeat_seconds = 10
     worker.concurrency = 1
     worker.state_root = tmp_path
+    worker._completion_lock = threading.Lock()
     return worker, client
 
 
@@ -199,3 +201,71 @@ def test_worker_runs_five_browser_jobs_concurrently_with_isolated_artifacts(monk
     assert all(payload["status"] == "SUCCEEDED" for _, payload in client.completions)
     assert all("conversation_url" not in payload["metadata"] for _, payload in client.completions)
     assert len(list((tmp_path / "jobs").glob("*/request.txt"))) == 5
+
+
+def test_worker_refuses_retry_after_submission_marker_without_conversation_url(monkeypatch, tmp_path):
+    worker, client = _worker(tmp_path)
+    job_id = "job_00000000-0000-0000-0000-000000000004"
+    job_dir = tmp_path / "jobs" / job_id
+    job_dir.mkdir(parents=True)
+    (job_dir / "browser-submission-attempted.json").write_text('{"attempted_at":1}')
+
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_remote_worker.ChatGPTWebResearchAgentTool._browser_research",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not resubmit")),
+    )
+    worker.process(
+        {
+            "job_id": job_id,
+            "lease_id": "lease-4",
+            "mode": "pro",
+            "prompt": "P" * 200,
+            "output_timeout_seconds": 1800,
+            "attempt": 2,
+        }
+    )
+
+    _, completion = client.completions[0]
+    assert completion["status"] == "FAILED"
+    assert completion["error_code"] == "AMBIGUOUS_PRIOR_BROWSER_SUBMISSION"
+
+
+def test_worker_rejects_invalid_job_id_before_filesystem_use(tmp_path):
+    worker, client = _worker(tmp_path)
+    worker.process(
+        {
+            "job_id": "../../outside",
+            "lease_id": "lease-bad",
+            "mode": "pro",
+            "prompt": "P" * 200,
+        }
+    )
+    assert not client.completions
+    assert not (tmp_path.parent / "outside").exists()
+
+
+def test_worker_refuses_a_second_execution_lock_for_the_same_job(monkeypatch, tmp_path):
+    worker, client = _worker(tmp_path)
+    job_id = "job_00000000-0000-0000-0000-000000000005"
+    job_dir = tmp_path / "jobs" / job_id
+    job_dir.mkdir(parents=True)
+    lock_path = job_dir / ".execution.lock"
+
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_remote_worker.ChatGPTWebResearchAgentTool._browser_research",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not launch twice")),
+    )
+    with lock_path.open("a+") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        worker.process(
+            {
+                "job_id": job_id,
+                "lease_id": "lease-duplicate",
+                "mode": "deep",
+                "prompt": "P" * 200,
+            }
+        )
+
+    _, completion = client.completions[0]
+    assert completion["status"] == "FAILED"
+    assert completion["error_code"] == "DUPLICATE_ACTIVE_EXECUTION"

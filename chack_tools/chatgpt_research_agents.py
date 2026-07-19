@@ -42,6 +42,17 @@ Mode = Literal["deep", "pro"]
 
 CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 30 * 60
 CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS = 75 * 60
+_REMOTE_METADATA_FIELDS = {
+    "mode",
+    "started_at",
+    "finished_at",
+    "answer_chars",
+    "terminal_state",
+    "stage",
+    "forced_answer",
+    "output_timeout_seconds",
+    "execution_backend",
+}
 
 
 def resolve_chatgpt_timeout_seconds(config: ToolsConfig, mode: Mode) -> int:
@@ -195,8 +206,15 @@ class ChatGPTWebResearchAgentTool:
                 answer = str(result_payload.get("result") or "")
                 partial = str(result_payload.get("partial_result") or "")
                 raw_metadata = result_payload.get("metadata")
-                remote_metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
-                conversation_url = str(remote_metadata.get("conversation_url") or "")
+                untrusted_metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+                remote_metadata = {
+                    key: value
+                    for key, value in untrusted_metadata.items()
+                    if key in _REMOTE_METADATA_FIELDS and isinstance(value, (str, int, float, bool))
+                }
+                # Remote clients never receive or propagate authenticated browser
+                # conversation URLs, even if a compromised broker tried to add one.
+                conversation_url = ""
                 metadata.update(remote_metadata)
                 metadata.update(
                     {
@@ -903,9 +921,18 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
 
     def _run_single(self, prompt: str, *, save_artifacts: bool) -> str:
         ctx = current_log_context()
-        evidence_dir = create_subagent_evidence_dir(self.tool_name, str(ctx.get("session_id") or current_session_id() or ""))
-        root = Path(evidence_dir)
+        evidence_parent = Path(
+            create_subagent_evidence_dir(
+                self.tool_name,
+                str(ctx.get("session_id") or current_session_id() or ""),
+            )
+        )
+        # The administrator intentionally groups same-type researchers under one
+        # parent. Fixed filenames must still be isolated per invocation when up
+        # to five same-mode requests execute concurrently.
+        root = evidence_parent / f"run-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
         root.mkdir(parents=True, exist_ok=True)
+        evidence_dir = str(root)
         run_state_path = root / "chatgpt-run.json"
         partial_path = root / f"chatgpt-{self.mode}-partial.md"
         request_path = root / "chatgpt-request.md"
