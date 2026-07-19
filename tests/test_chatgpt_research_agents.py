@@ -2,8 +2,16 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from chack_tools.agents_toolset import AgentsToolset
-from chack_tools.chatgpt_research_agents import ChatGPTWebResearchAgentTool
+from chack_tools.chatgpt_research_agents import (
+    CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS,
+    CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS,
+    ChatGPTWebResearchAgentTool,
+    ChatGPTWebResearchError,
+    resolve_chatgpt_timeout_seconds,
+)
 from chack_tools.config import ToolsConfig
 from chack_tools.researcher_administrator_agent import (
     ResearcherAdministratorAgentTool,
@@ -26,6 +34,30 @@ def test_chatgpt_research_tools_register_only_when_enabled():
         default_model="gpt-5-mini",
     )
     assert {"deepchatgpt_researcher", "prochatgpt_researcher"} <= _tool_names(on.tools)
+
+
+def test_chatgpt_modes_have_distinct_total_output_deadlines():
+    config = ToolsConfig()
+    assert resolve_chatgpt_timeout_seconds(config, "pro") == 30 * 60
+    assert resolve_chatgpt_timeout_seconds(config, "deep") == 75 * 60
+    assert CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS == 1800
+    assert CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS == 4500
+
+
+def test_mode_specific_timeout_overrides_legacy_shared_timeout():
+    config = ToolsConfig(
+        chatgpt_pro_timeout_seconds=321,
+        chatgpt_deep_timeout_seconds=654,
+        chatgpt_research_timeout_seconds=999,
+    )
+    assert resolve_chatgpt_timeout_seconds(config, "pro") == 321
+    assert resolve_chatgpt_timeout_seconds(config, "deep") == 654
+
+
+def test_legacy_shared_timeout_remains_a_compatibility_fallback():
+    config = ToolsConfig(chatgpt_research_timeout_seconds=777)
+    assert resolve_chatgpt_timeout_seconds(config, "pro") == 777
+    assert resolve_chatgpt_timeout_seconds(config, "deep") == 777
 
 
 def test_chatgpt_aliases_are_accepted_by_administrator():
@@ -176,37 +208,88 @@ def test_running_state_accepts_answer_now_label():
     assert ChatGPTWebResearchAgentTool._is_running(Page()) is True
 
 
-def test_pro_timeout_forces_answer_now_and_extracts_stable_result(monkeypatch, tmp_path):
+def test_pro_timeout_forces_answer_early_and_extracts_within_total_deadline(monkeypatch, tmp_path):
     helper = ChatGPTWebResearchAgentTool(
         ToolsConfig(
-            chatgpt_research_timeout_seconds=60,
+            chatgpt_pro_timeout_seconds=120,
             chatgpt_research_poll_seconds=2,
             chatgpt_force_answer_grace_seconds=60,
         ),
         mode="pro",
     )
-    ticks = iter([0.0, 61.0, 61.0, 62.0, 62.0, 63.0, 63.0])
+    clock = {"now": 0.0}
     clicked = []
 
     class Page:
         url = "https://chatgpt.com/c/forced-answer"
 
-        def wait_for_timeout(self, _milliseconds):
-            return None
+        def wait_for_timeout(self, milliseconds):
+            clock["now"] += milliseconds / 1000.0
 
-    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: next(ticks))
-    monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: clicked.append(True) or True)
-    monkeypatch.setattr(helper, "_longest_answer", lambda _page: "R" * 300)
-    monkeypatch.setattr(helper, "_is_running", lambda _page: False)
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: clicked.append(clock["now"]) or True)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: "R" * 300 if clicked else "")
+    monkeypatch.setattr(helper, "_is_running", lambda _page: not bool(clicked))
     run_state = tmp_path / "chatgpt-run.json"
     partial = tmp_path / "partial.md"
 
     answer = helper._wait_and_extract(Page(), partial_path=partial, run_state_path=run_state)
 
     assert answer == "R" * 300
-    assert clicked == [True]
+    assert clicked == [60.0]
+    assert clock["now"] == 64.0
+    assert clock["now"] < 120.0
     assert partial.read_text() == "R" * 300
-    assert json.loads(run_state.read_text())["forced_answer"] is True
+    state = json.loads(run_state.read_text())
+    assert state["forced_answer"] is True
+    assert state["output_timeout_seconds"] == 120
+
+
+def test_pro_answer_now_window_never_extends_total_output_deadline(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(
+            chatgpt_pro_timeout_seconds=120,
+            chatgpt_research_poll_seconds=10,
+            chatgpt_force_answer_grace_seconds=60,
+        ),
+        mode="pro",
+    )
+    clock = {"now": 0.0}
+    clicked = []
+
+    class Page:
+        url = "https://chatgpt.com/c/broken"
+
+        def wait_for_timeout(self, milliseconds):
+            clock["now"] += milliseconds / 1000.0
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: clicked.append(clock["now"]) or True)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: "")
+    monkeypatch.setattr(helper, "_is_running", lambda _page: True)
+
+    with pytest.raises(ChatGPTWebResearchError, match="120-second total output deadline"):
+        helper._wait_and_extract(Page())
+
+    assert clicked == [60.0]
+    assert clock["now"] == 120.0
+
+
+def test_deep_research_stops_at_its_total_output_deadline(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_deep_timeout_seconds=120, chatgpt_research_poll_seconds=45),
+        mode="deep",
+    )
+    clock = {"now": 0.0}
+    state = {"text": "", "links": [], "completed": False, "hasStop": True}
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    monkeypatch.setattr(helper, "_deep_connector_state", lambda *_args, **_kwargs: state)
+
+    with pytest.raises(ChatGPTWebResearchError, match="120-second total output deadline"):
+        helper._wait_and_extract_deep({"webSocketDebuggerUrl": "ws://test"})
+
+    assert clock["now"] == 120.0
 
 
 def test_failed_run_preserves_partial_response_and_conversation_url(monkeypatch, tmp_path):

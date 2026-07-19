@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 
 @dataclass
@@ -162,8 +162,15 @@ class ToolsConfig:
     deepchatgpt_enabled: bool = False
     prochatgpt_enabled: bool = False
     chatgpt_cdp_url: str = ""
-    chatgpt_research_timeout_seconds: int = 0
+    # Total browser-output deadlines. Mode-specific values take precedence over
+    # the deprecated shared timeout below. Zero/None means use the built-in
+    # defaults: 30 minutes for Pro and 75 minutes for Deep Research.
+    chatgpt_pro_timeout_seconds: Optional[int] = None
+    chatgpt_deep_timeout_seconds: Optional[int] = None
+    chatgpt_research_timeout_seconds: int = 0  # deprecated shared fallback
     chatgpt_research_poll_seconds: int = 15
+    # Pro requests click "Answer now" this many seconds before their total
+    # output deadline; this is part of, not added after, the Pro timeout.
     chatgpt_force_answer_grace_seconds: int = 300
 
     subchack_enabled: bool = False

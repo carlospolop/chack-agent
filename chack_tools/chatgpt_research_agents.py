@@ -38,6 +38,26 @@ except ImportError:  # pragma: no cover - mirrors the other researcher modules
 
 Mode = Literal["deep", "pro"]
 
+CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 30 * 60
+CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS = 75 * 60
+
+
+def resolve_chatgpt_timeout_seconds(config: ToolsConfig, mode: Mode) -> int:
+    """Return the total output deadline for one ChatGPT browser request.
+
+    Mode-specific configuration is authoritative. The old shared setting is
+    retained as a compatibility fallback for callers that have not migrated.
+    """
+    field_name = "chatgpt_deep_timeout_seconds" if mode == "deep" else "chatgpt_pro_timeout_seconds"
+    configured = getattr(config, field_name, None)
+    if configured is not None and int(configured or 0) > 0:
+        return max(60, int(configured))
+    legacy = int(getattr(config, "chatgpt_research_timeout_seconds", 0) or 0)
+    if legacy > 0:
+        return max(60, legacy)
+    default = CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS if mode == "deep" else CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS
+    return default
+
 
 class ChatGPTWebResearchError(RuntimeError):
     """A launch, terminal-state, or extraction failure in ChatGPT Web."""
@@ -54,7 +74,7 @@ class ChatGPTWebResearchAgentTool:
         if mode not in {"deep", "pro"}:
             raise ValueError(f"Unsupported ChatGPT research mode: {mode}")
         self.config = config
-        self.mode = mode
+        self.mode: Mode = mode
 
     @property
     def tool_name(self) -> str:
@@ -65,9 +85,7 @@ class ChatGPTWebResearchAgentTool:
         return configured or os.environ.get("CHACK_CHATGPT_CDP_URL", "").strip() or "http://127.0.0.1:9226"
 
     def _timeout_seconds(self) -> int:
-        default = 5400 if self.mode == "deep" else 3600
-        configured = int(getattr(self.config, "chatgpt_research_timeout_seconds", 0) or 0)
-        return max(60, configured or default)
+        return resolve_chatgpt_timeout_seconds(self.config, self.mode)
 
     def _poll_seconds(self) -> int:
         configured = int(getattr(self.config, "chatgpt_research_poll_seconds", 0) or 0)
@@ -481,7 +499,8 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         run_state_path: Path | None = None,
     ) -> str:
         websocket_url = str(connector.get("webSocketDebuggerUrl") or "")
-        deadline = time.monotonic() + self._timeout_seconds()
+        timeout_seconds = self._timeout_seconds()
+        deadline = time.monotonic() + timeout_seconds
         previous = ""
         stable_polls = 0
         last_progress_at = 0.0
@@ -512,13 +531,17 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     "terminal_state": "running",
                     "updated_at": time.time(),
                     "answer_chars": len(answer),
+                    "output_timeout_seconds": timeout_seconds,
                 },
             )
             if bool(state.get("completed")) and not bool(state.get("hasStop")) and len(answer) >= 1200 and stable_polls >= 1:
                 return answer
-            time.sleep(self._poll_seconds())
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining > 0:
+                time.sleep(min(float(self._poll_seconds()), remaining))
         raise ChatGPTWebResearchError(
-            f"ChatGPT deep request did not reach an extractable terminal state within {self._timeout_seconds()} seconds."
+            f"ChatGPT deep request did not reach an extractable terminal state within its "
+            f"{timeout_seconds}-second total output deadline."
         )
 
     def _wait_and_extract(
@@ -528,7 +551,11 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         partial_path: Path | None = None,
         run_state_path: Path | None = None,
     ) -> str:
-        deadline = time.monotonic() + self._timeout_seconds()
+        timeout_seconds = self._timeout_seconds()
+        started_monotonic = time.monotonic()
+        hard_deadline = started_monotonic + timeout_seconds
+        force_window = min(self._force_answer_grace_seconds(), timeout_seconds)
+        force_at = hard_deadline - force_window
         previous = ""
         stable_polls = 0
         last_progress_at = 0.0
@@ -536,33 +563,35 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         force_baseline = ""
         while True:
             now = time.monotonic()
-            if now >= deadline:
-                if self.mode == "pro" and not forced_answer and self._click_answer_now_if_present(page):
-                    forced_answer = True
-                    force_baseline = previous
-                    stable_polls = 0
-                    deadline = now + self._force_answer_grace_seconds()
-                    self._emit_progress(
-                        "forced_answer_requested",
-                        answer_chars=len(previous),
-                        running=True,
-                        forced_answer=True,
-                    )
-                    self._write_json(
-                        run_state_path,
-                        {
-                            "mode": self.mode,
-                            "terminal_state": "forcing_answer",
-                            "updated_at": time.time(),
-                            "answer_chars": len(previous),
-                            "forced_answer": True,
-                        },
-                    )
-                else:
-                    raise ChatGPTWebResearchError(
-                        f"ChatGPT {self.mode} request did not reach an extractable terminal state within "
-                        f"{self._timeout_seconds()} seconds plus a {self._force_answer_grace_seconds() if forced_answer else 0}-second answer grace period."
-                    )
+            # Pro's Answer-now recovery window is inside the total output
+            # deadline. It must never extend a broken browser request beyond the
+            # configured 30-minute default.
+            if (
+                self.mode == "pro"
+                and not forced_answer
+                and now >= force_at
+                and self._click_answer_now_if_present(page)
+            ):
+                forced_answer = True
+                force_baseline = previous
+                stable_polls = 0
+                self._emit_progress(
+                    "forced_answer_requested",
+                    answer_chars=len(previous),
+                    running=True,
+                    forced_answer=True,
+                )
+                self._write_json(
+                    run_state_path,
+                    {
+                        "mode": self.mode,
+                        "terminal_state": "forcing_answer",
+                        "updated_at": time.time(),
+                        "answer_chars": len(previous),
+                        "forced_answer": True,
+                        "output_timeout_seconds": timeout_seconds,
+                    },
+                )
             if self.mode == "deep":
                 self._click_deep_start_if_present(page)
             answer = self._longest_answer(page)
@@ -592,6 +621,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     "answer_chars": len(answer),
                     "running": running,
                     "forced_answer": forced_answer,
+                    "output_timeout_seconds": timeout_seconds,
                 },
             )
             # Two identical polls plus no running control avoids saving a streaming
@@ -604,7 +634,14 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             )
             if len(answer) >= min_chars and changed_after_force and not running and stable_polls >= 2:
                 return answer
-            page.wait_for_timeout(self._poll_seconds() * 1000)
+            if now >= hard_deadline:
+                raise ChatGPTWebResearchError(
+                    f"ChatGPT {self.mode} request did not reach an extractable terminal state within its "
+                    f"{timeout_seconds}-second total output deadline"
+                    f"{' (including the Answer now recovery window)' if self.mode == 'pro' else ''}."
+                )
+            remaining = max(0.0, hard_deadline - now)
+            page.wait_for_timeout(min(float(self._poll_seconds()), remaining) * 1000)
 
     def _browser_research(
         self,
@@ -619,11 +656,14 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             raise ChatGPTWebResearchError("Playwright is required for ChatGPT Web researchers.") from exc
 
         started_at = time.time()
+        output_timeout_seconds = self._timeout_seconds()
         self._write_json(
             run_state_path,
             {
                 "mode": self.mode,
                 "started_at": started_at,
+                "output_deadline_at": started_at + output_timeout_seconds,
+                "output_timeout_seconds": output_timeout_seconds,
                 "terminal_state": "launching",
                 "answer_chars": 0,
             },
