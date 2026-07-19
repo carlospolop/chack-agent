@@ -89,6 +89,8 @@ class CopilotCliExecutor:
         require_task_steps_manager_init_first: bool,
         output_schema_json: str,
         thinking_effort: str = "high",
+        travel_model: str = "",
+        travel_max_turns: int = 50,
     ) -> None:
         self._conversation = conversation
         self._memory_limit = memory_max_messages
@@ -109,6 +111,7 @@ class CopilotCliExecutor:
         self._websearcher_model = websearcher_model
         self._business_model = business_model
         self._product_model = product_model
+        self._travel_model = travel_model
         self._cli_model = cli_model
         self._subchack_model = subchack_model
         self._social_network_max_turns = social_network_max_turns
@@ -116,6 +119,7 @@ class CopilotCliExecutor:
         self._websearcher_max_turns = websearcher_max_turns
         self._business_max_turns = business_max_turns
         self._product_max_turns = product_max_turns
+        self._travel_max_turns = travel_max_turns
         self._cli_max_turns = cli_max_turns
         self._subchack_max_turns = subchack_max_turns
         self._min_tools_used = max(0, int(min_tools_used or 0))
@@ -495,6 +499,7 @@ class CopilotCliExecutor:
         env["CHACK_WEBSEARCHER_MODEL"] = self._websearcher_model
         env["CHACK_BUSINESS_MODEL"] = self._business_model
         env["CHACK_PRODUCT_MODEL"] = self._product_model
+        env["CHACK_TRAVEL_MODEL"] = self._travel_model
         env["CHACK_CLI_MODEL"] = self._cli_model
         env["CHACK_SUBCHACK_MODEL"] = self._subchack_model
         env["CHACK_SOCIAL_NETWORK_MAX_TURNS"] = str(self._social_network_max_turns)
@@ -502,6 +507,7 @@ class CopilotCliExecutor:
         env["CHACK_WEBSEARCHER_MAX_TURNS"] = str(self._websearcher_max_turns)
         env["CHACK_BUSINESS_MAX_TURNS"] = str(self._business_max_turns)
         env["CHACK_PRODUCT_MAX_TURNS"] = str(self._product_max_turns)
+        env["CHACK_TRAVEL_MAX_TURNS"] = str(self._travel_max_turns)
         env["CHACK_CLI_MAX_TURNS"] = str(self._cli_max_turns)
         env["CHACK_SUBCHACK_MAX_TURNS"] = str(self._subchack_max_turns)
         env["CHACK_MIN_TOOLS_USED"] = str(self._min_tools_used)
@@ -788,6 +794,10 @@ def build_executor(
             toolset_kwargs["product_model"] = config.model.product
         if "product_max_turns" in init_params:
             toolset_kwargs["product_max_turns"] = config.model.product_max_turns
+        if "travel_model" in init_params:
+            toolset_kwargs["travel_model"] = config.model.travel
+        if "travel_max_turns" in init_params:
+            toolset_kwargs["travel_max_turns"] = config.model.travel_max_turns
         if "cli_model" in init_params:
             toolset_kwargs["cli_model"] = config.model.cli
         if "cli_max_turns" in init_params:
@@ -865,6 +875,7 @@ def build_executor(
         websearcher_model=str(config.model.websearcher or ""),
         business_model=str(config.model.business or ""),
         product_model=str(config.model.product or ""),
+        travel_model=str(config.model.travel or ""),
         cli_model=str(config.model.cli or ""),
         subchack_model=str(config.model.subchack or ""),
         social_network_max_turns=int(config.model.social_network_max_turns or 30),
@@ -872,6 +883,7 @@ def build_executor(
         websearcher_max_turns=int(config.model.websearcher_max_turns or 30),
         business_max_turns=int(config.model.business_max_turns or 30),
         product_max_turns=int(config.model.product_max_turns or 30),
+        travel_max_turns=int(config.model.travel_max_turns or 40),
         cli_max_turns=int(config.model.cli_max_turns or 30),
         subchack_max_turns=int(config.model.subchack_max_turns or 30),
         min_tools_used=max(0, int(config.tools.min_tools_used or 0)),

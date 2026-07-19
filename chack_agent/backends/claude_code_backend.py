@@ -244,6 +244,8 @@ class ClaudeCodeExecutor:
     _output_schema: str | None = None
     _prompt_only_next_invocation: bool = False
     _thinking_effort: str = "high"
+    _travel_model: str = ""
+    _travel_max_turns: int = 50
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
         self._prompt_only_next_invocation = True
@@ -1287,6 +1289,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         env["CHACK_WEBSEARCHER_MODEL"] = self._websearcher_model
         env["CHACK_BUSINESS_MODEL"] = self._business_model
         env["CHACK_PRODUCT_MODEL"] = self._product_model
+        env["CHACK_TRAVEL_MODEL"] = self._travel_model
         env["CHACK_LEGAL_MODEL"] = self._legal_model
         env["CHACK_DATA_STATISTICS_MODEL"] = self._data_statistics_model
         env["CHACK_NEWS_MEDIA_MODEL"] = self._news_media_model
@@ -1300,6 +1303,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         env["CHACK_WEBSEARCHER_MAX_TURNS"] = str(self._websearcher_max_turns)
         env["CHACK_BUSINESS_MAX_TURNS"] = str(self._business_max_turns)
         env["CHACK_PRODUCT_MAX_TURNS"] = str(self._product_max_turns)
+        env["CHACK_TRAVEL_MAX_TURNS"] = str(self._travel_max_turns)
         env["CHACK_LEGAL_MAX_TURNS"] = str(self._legal_max_turns)
         env["CHACK_DATA_STATISTICS_MAX_TURNS"] = str(self._data_statistics_max_turns)
         env["CHACK_NEWS_MEDIA_MAX_TURNS"] = str(self._news_media_max_turns)
@@ -1729,6 +1733,10 @@ def build_executor(
             toolset_kwargs["product_model"] = config.model.product
         if "product_max_turns" in init_params:
             toolset_kwargs["product_max_turns"] = config.model.product_max_turns
+        if "travel_model" in init_params:
+            toolset_kwargs["travel_model"] = config.model.travel
+        if "travel_max_turns" in init_params:
+            toolset_kwargs["travel_max_turns"] = config.model.travel_max_turns
         if "legal_model" in init_params:
             toolset_kwargs["legal_model"] = config.model.legal
         if "legal_max_turns" in init_params:
@@ -1813,6 +1821,7 @@ def build_executor(
         _websearcher_model=str(config.model.websearcher or ""),
         _business_model=str(config.model.business or ""),
         _product_model=str(config.model.product or ""),
+        _travel_model=str(config.model.travel or ""),
         _legal_model=str(config.model.legal or ""),
         _data_statistics_model=str(config.model.data_statistics or ""),
         _news_media_model=str(config.model.news_media or ""),
@@ -1826,6 +1835,7 @@ def build_executor(
         _websearcher_max_turns=int(config.model.websearcher_max_turns or 30),
         _business_max_turns=int(config.model.business_max_turns or 30),
         _product_max_turns=int(config.model.product_max_turns or 30),
+        _travel_max_turns=int(config.model.travel_max_turns or 40),
         _legal_max_turns=int(config.model.legal_max_turns or 30),
         _data_statistics_max_turns=int(config.model.data_statistics_max_turns or 30),
         _news_media_max_turns=int(config.model.news_media_max_turns or 30),

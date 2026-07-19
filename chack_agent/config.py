@@ -48,6 +48,7 @@ class ModelConfig:
     websearcher: str = "CHEAP_BUT_QUALITY"
     business: str = "CHEAP_BUT_QUALITY"
     product: str = "CHEAP_BUT_QUALITY"
+    travel: str = "CHEAP_BUT_QUALITY"
     legal: str = "CHEAP_BUT_QUALITY"
     data_statistics: str = "CHEAP_BUT_QUALITY"
     news_media: str = "CHEAP_BUT_QUALITY"
@@ -61,6 +62,7 @@ class ModelConfig:
     websearcher_thinking_effort: str = "high"
     business_thinking_effort: str = "high"
     product_thinking_effort: str = "high"
+    travel_thinking_effort: str = "high"
     legal_thinking_effort: str = "high"
     data_statistics_thinking_effort: str = "high"
     news_media_thinking_effort: str = "high"
@@ -75,6 +77,7 @@ class ModelConfig:
     websearcher_max_turns: int = 50
     business_max_turns: int = 50
     product_max_turns: int = 50
+    travel_max_turns: int = 50
     legal_max_turns: int = 50
     data_statistics_max_turns: int = 50
     news_media_max_turns: int = 50
@@ -291,6 +294,7 @@ def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
         "websearcher": "websearcher_agent",
         "business": "business_agent",
         "product": "product_agent",
+        "travel": "travel_agent",
         "legal": "legal_agent",
         "data_statistics": "data_statistics_agent",
         "news_media": "news_media_agent",

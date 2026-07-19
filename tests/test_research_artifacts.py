@@ -201,10 +201,11 @@ def test_fetch_url_text_records_source_url_and_tool(monkeypatch, tmp_path):
         def raise_for_status(self):
             return None
 
-    def fake_get(url, headers=None, timeout=None, allow_redirects=None):
+    def fake_get(url, headers=None, timeout=None, allow_redirects=None, stream=None):
         return FakeResponse()
 
     monkeypatch.setattr("chack_tools.open_research_sources.requests.get", fake_get)
+    monkeypatch.setattr("chack_tools.open_research_sources._is_public_https_url", lambda url: url.startswith("https://example.com/"))
 
     result = OpenResearchTool(ToolsConfig()).fetch_url_text("https://example.com/start")
     assert result.startswith("SUCCESS:")
@@ -216,6 +217,51 @@ def test_fetch_url_text_records_source_url_and_tool(monkeypatch, tmp_path):
     assert len(rows) == 2
     assert {row["source_url"] for row in rows} == {"https://example.com/final"}
     assert {row["tool"] for row in rows} == {"fetch_url_text"}
+
+
+def test_fetch_url_text_rejects_private_targets_and_redirects(monkeypatch):
+    from chack_tools.open_research_sources import OpenResearchTool
+
+    called = []
+    monkeypatch.setattr(
+        "chack_tools.open_research_sources._is_public_https_url",
+        lambda url: url == "https://public.example/start",
+    )
+
+    class RedirectResponse:
+        status_code = 302
+        headers = {"location": "http://169.254.169.254/latest/meta-data"}
+        url = "https://public.example/start"
+
+    monkeypatch.setattr(
+        "chack_tools.open_research_sources.requests.get",
+        lambda *args, **kwargs: called.append((args, kwargs)) or RedirectResponse(),
+    )
+    helper = OpenResearchTool(ToolsConfig())
+    assert helper.fetch_url_text("http://127.0.0.1/") == "ERROR: url must be a public HTTPS address"
+    assert called == []
+    assert helper.fetch_url_text("https://public.example/start") == "ERROR: URL redirect was not a public HTTPS address"
+    assert len(called) == 1 and called[0][1]["allow_redirects"] is False
+
+
+def test_fetch_url_text_rejects_oversized_responses_before_reading(monkeypatch):
+    from chack_tools.open_research_sources import OpenResearchTool, _MAX_FETCH_TEXT_BYTES
+
+    class LargeResponse:
+        status_code = 200
+        headers = {"content-type": "text/plain", "content-length": str(_MAX_FETCH_TEXT_BYTES + 1)}
+        url = "https://public.example/page"
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            raise AssertionError("oversized response body must not be read")
+
+    monkeypatch.setattr("chack_tools.open_research_sources._is_public_https_url", lambda _url: True)
+    monkeypatch.setattr("chack_tools.open_research_sources.requests.get", lambda *args, **kwargs: LargeResponse())
+    result = OpenResearchTool(ToolsConfig()).fetch_url_text("https://public.example/page")
+    assert result == "ERROR: fetched URL exceeded the response-size limit"
 
 
 def test_artifact_writers_prefer_context_root_over_process_env(monkeypatch, tmp_path):

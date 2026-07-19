@@ -165,7 +165,7 @@ print(result.output)
 `thinking_effort` accepts `none`, `minimal`, `low`, `medium`, `high`,
 `xhigh`/`extra_high`, and `max`. The default is `high` everywhere. Per-agent
 keys follow `<role>_thinking_effort`; supported roles are `social_network`,
-`scientific`, `websearcher`, `business`, `product`, `legal`,
+`scientific`, `websearcher`, `business`, `product`, `travel`, `legal`,
 `data_statistics`, `news_media`, `knowledge_graph`, `religious`, `cli`,
 `subchack`, `researcher_administrator`, and `researcher_queue`.
 
@@ -236,7 +236,53 @@ The agent can delegate to specialized sub‑agents. Sub‑agents run with restri
 * **Web Research**: Brave + SerpAPI (Google/Bing + AI‑mode endpoints if enabled).
 * **Scientific**: arXiv, Europe PMC, Semantic Scholar, OpenAlex, PLOS, Google Scholar/Patents, YouTube transcripts, PDF text.
 * **Social Network**: ForumScout + SerpAPI forums/news.
+* **Travel**: Google Flights and Hotels, Booking.com stay prices/reviews, Amadeus hotel offers/sentiments, vacation rentals, OpenTripMap attractions, Open-Meteo weather/air quality, Transitous public transport, Frankfurter exchange rates, Wikivoyage guides, local listings, and traveler opinions.
 * **Business / Product / Legal / Data & Statistics / News & Media / Knowledge Graph / Religious / CLI**: additional domain researchers.
+
+#### Travel research
+
+Enable `travel_research` for autonomous trip comparisons and itinerary research:
+
+```yaml
+agent:
+  travel: CHEAP_BUT_QUALITY
+  travel_thinking_effort: high
+  travel_max_turns: 50
+
+tools:
+  travel_enabled: true
+  travel_max_results: 10
+  travel_max_tools_used: 40
+  playwright_enabled: true
+```
+
+With `SERPAPI_API_KEY`, the researcher receives structured Google Flights, Google Travel Explore, Google Hotels/vacation-rental search, property details, and hotel reviews. It also cross-checks Maps, Yelp, Apple Maps, Tripadvisor, web/news, forums, and Reddit when their corresponding credentials are available. Add `BOOKING_API_TOKEN` plus `BOOKING_AFFILIATE_ID` for official Booking.com prices, property data, and reviews; review access depends on the affiliate agreement. Add `AMADEUS_CLIENT_ID` plus `AMADEUS_CLIENT_SECRET` for Amadeus hotel offers and aggregate review sentiments, and `OPENTRIPMAP_API_KEY` for attraction discovery.
+
+The researcher always receives four additional keyless sources: Open-Meteo weather plus air-quality/pollen forecasts, Frankfurter central-bank reference exchange rates, Wikivoyage destination guides, and Transitous public-transport routing. Wikivoyage is orientation evidence rather than authority for volatile details. Transitous is a best-effort community service intended for free/open-source and non-profit use; its source attribution and usage policy must be respected.
+
+Booking.com credentials require Managed Affiliate Partner access. Use `BOOKING_DEMAND_API_BASE_URL=https://demandapi-sandbox.booking.com/3.1` while testing and switch to the production URL only when the integration is approved. Amadeus defaults to its free test environment; use `AMADEUS_BASE_URL=https://api.amadeus.com` for production credentials. OpenTripMap offers a free non-commercial tier.
+
+The same endpoints can be exposed directly instead of through the researcher:
+
+```yaml
+tools:
+  travel_google_flights_enabled: true
+  travel_google_travel_explore_enabled: true
+  travel_google_hotels_enabled: true
+  travel_google_hotels_reviews_enabled: true
+  travel_booking_enabled: true
+  travel_amadeus_enabled: true
+  travel_opentripmap_enabled: true
+  travel_open_meteo_enabled: true
+  travel_open_meteo_air_quality_enabled: true
+  travel_frankfurter_enabled: true
+  travel_wikivoyage_enabled: true
+  travel_transitous_enabled: true
+```
+
+Additional direct tools are `find_booking_cities`, `search_booking_stays`, `get_booking_stay_details`, `get_booking_stay_reviews`, `search_amadeus_hotel_prices`, `get_amadeus_hotel_sentiments`, `search_destination_places`, `get_destination_place_details`, `get_destination_air_quality`, `convert_travel_currency`, `search_wikivoyage_guides`, and `plan_public_transport_trip`. Existing tools remain `search_google_flights`, `explore_google_travel_destinations`, `search_google_stays`, `get_google_stay_details`, `get_google_stay_reviews`, and `get_destination_weather`.
+
+Airbnb does not provide a generally available public shopping API. Set `vacation_rentals=true` on `search_google_stays` for Airbnb-like inventory aggregated by Google, and use the researcher's web access to verify a specific Airbnb page when necessary. Neither path claims a result is from Airbnb unless the source identifies it. All flight, hotel, and rental prices are time-sensitive snapshots and never booking guarantees; these tools do not book or purchase anything.
 
 #### Research Administrator
 As the number of `*_research` researchers grows, you can expose a single **`researcher_administrator`** tool instead of every researcher. The administrator is itself a Chack sub‑agent whose only tools are the researchers you enable for it. Given one research request it:
@@ -254,7 +300,7 @@ tools:
   researcher_administrator_enabled: true
   # Which researchers the administrator may launch. Accepts short names or
   # aliases (e.g. "web" == "websearcher"). Empty = every researcher enabled above.
-  researcher_administrator_researchers: ["scientific", "websearcher", "business"]
+  researcher_administrator_researchers: ["scientific", "websearcher", "business", "travel"]
   researcher_administrator_max_tools_used: 60
   # Manage, from the yaml, the model used by the administrator itself AND by the
   # researchers it launches. This block works on every backend and takes
@@ -333,7 +379,7 @@ For MCP-capable CLI backends (`codex`, `claude`, `gemini`), enabling `tools.play
 
 * **`agent`** (`ModelConfig` + `SessionConfig` + `AgentConfig`):
   * `primary`, `provider`: Main agent model settings.
-  * `social_network`, `scientific`, `websearcher`, `cli`: Sub‑agent models (fallback to `primary`).
+  * `social_network`, `scientific`, `websearcher`, `business`, `product`, `travel`, `cli`: Sub‑agent models (fallback to `primary`).
   * `max_turns`, `memory_max_messages`, `memory_reset_to_messages`, `memory_summary_max_chars`: Session behavior.
   * `max_runtime_minutes`: Maximum runtime in minutes for the run. Set to `0` to disable.
   * If the budget is reached, the run raises `TimeoutError` and stops.

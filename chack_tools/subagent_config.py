@@ -948,6 +948,11 @@ def build_subagent_config(
             provider=provider,
             fallback="CHEAP_BUT_QUALITY",
         ),
+        travel=_resolve_alias(
+            str(model_overrides.get("travel") or ""),
+            provider=provider,
+            fallback="CHEAP_BUT_QUALITY",
+        ),
         legal=_resolve_alias(
             str(model_overrides.get("legal") or ""),
             provider=provider,
@@ -993,6 +998,7 @@ def build_subagent_config(
         websearcher_max_turns=int(model_overrides.get("websearcher_max_turns") or 30),
         business_max_turns=int(model_overrides.get("business_max_turns") or 30),
         product_max_turns=int(model_overrides.get("product_max_turns") or 30),
+        travel_max_turns=int(model_overrides.get("travel_max_turns") or 40),
         legal_max_turns=int(model_overrides.get("legal_max_turns") or 30),
         data_statistics_max_turns=int(model_overrides.get("data_statistics_max_turns") or 30),
         news_media_max_turns=int(model_overrides.get("news_media_max_turns") or 30),
@@ -1022,6 +1028,7 @@ def build_subagent_config(
         "websearcher": "websearcher_agent",
         "business": "business_agent",
         "product": "product_agent",
+        "travel": "travel_agent",
         "legal": "legal_agent",
         "data_statistics": "data_statistics_agent",
         "news_media": "news_media_agent",

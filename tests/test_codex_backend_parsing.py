@@ -138,6 +138,35 @@ def test_codex_mcp_env_allowlist_includes_local_vulnerability_store_path():
     assert "AISEC_LOCAL_VULN_STORE_PATH" in env_vars
 
 
+def test_codex_mcp_env_allowlist_transports_all_researcher_models_and_travel_credentials():
+    env_vars = _load_list_literal(
+        MODULE_PATH,
+        "CodexExecutor",
+        "_write_codex_config",
+        "env_vars",
+    )
+
+    required = {
+        "CHACK_TRAVEL_MODEL",
+        "CHACK_LEGAL_MODEL",
+        "CHACK_DATA_STATISTICS_MODEL",
+        "CHACK_NEWS_MEDIA_MODEL",
+        "CHACK_KNOWLEDGE_GRAPH_MODEL",
+        "CHACK_RELIGIOUS_MODEL",
+        "CHACK_RESEARCHER_ADMINISTRATOR_MODEL",
+        "CHACK_TRAVEL_MAX_TURNS",
+        "CHACK_NEWS_MEDIA_MAX_TURNS",
+        "CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION",
+        "BOOKING_API_TOKEN",
+        "BOOKING_AFFILIATE_ID",
+        "AMADEUS_CLIENT_ID",
+        "AMADEUS_CLIENT_SECRET",
+        "OPENTRIPMAP_API_KEY",
+        "TICKETMASTER_API_KEY",
+    }
+    assert required <= set(env_vars)
+
+
 def test_claude_mcp_env_allowlist_includes_local_vulnerability_store_path():
     env_vars = _load_list_literal(
         CLAUDE_MODULE_PATH,

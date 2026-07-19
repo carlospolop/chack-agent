@@ -843,6 +843,10 @@ def build_executor(
             toolset_kwargs["product_model"] = config.model.product
         if "product_max_turns" in init_params:
             toolset_kwargs["product_max_turns"] = config.model.product_max_turns
+        if "travel_model" in init_params:
+            toolset_kwargs["travel_model"] = config.model.travel
+        if "travel_max_turns" in init_params:
+            toolset_kwargs["travel_max_turns"] = config.model.travel_max_turns
         if "cli_model" in init_params:
             toolset_kwargs["cli_model"] = config.model.cli
         if "cli_max_turns" in init_params:

@@ -231,6 +231,8 @@ class CodexExecutor:
     _researcher_administrator_max_turns: int = 100
     _thinking_effort: str = "high"
     _prompt_only_next_invocation: bool = False
+    _travel_model: str = ""
+    _travel_max_turns: int = 50
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
         self._prompt_only_next_invocation = True
@@ -825,6 +827,7 @@ class CodexExecutor:
         env["CHACK_WEBSEARCHER_MODEL"] = self._websearcher_model
         env["CHACK_BUSINESS_MODEL"] = self._business_model
         env["CHACK_PRODUCT_MODEL"] = self._product_model
+        env["CHACK_TRAVEL_MODEL"] = self._travel_model
         env["CHACK_LEGAL_MODEL"] = self._legal_model
         env["CHACK_DATA_STATISTICS_MODEL"] = self._data_statistics_model
         env["CHACK_NEWS_MEDIA_MODEL"] = self._news_media_model
@@ -838,6 +841,7 @@ class CodexExecutor:
         env["CHACK_WEBSEARCHER_MAX_TURNS"] = str(self._websearcher_max_turns)
         env["CHACK_BUSINESS_MAX_TURNS"] = str(self._business_max_turns)
         env["CHACK_PRODUCT_MAX_TURNS"] = str(self._product_max_turns)
+        env["CHACK_TRAVEL_MAX_TURNS"] = str(self._travel_max_turns)
         env["CHACK_LEGAL_MAX_TURNS"] = str(self._legal_max_turns)
         env["CHACK_DATA_STATISTICS_MAX_TURNS"] = str(self._data_statistics_max_turns)
         env["CHACK_NEWS_MEDIA_MAX_TURNS"] = str(self._news_media_max_turns)
@@ -914,15 +918,31 @@ class CodexExecutor:
             "CHACK_WEBSEARCHER_MODEL",
             "CHACK_BUSINESS_MODEL",
             "CHACK_PRODUCT_MODEL",
+            "CHACK_TRAVEL_MODEL",
+            "CHACK_LEGAL_MODEL",
+            "CHACK_DATA_STATISTICS_MODEL",
+            "CHACK_NEWS_MEDIA_MODEL",
+            "CHACK_KNOWLEDGE_GRAPH_MODEL",
+            "CHACK_RELIGIOUS_MODEL",
             "CHACK_CLI_MODEL",
             "CHACK_SUBCHACK_MODEL",
+            "CHACK_RESEARCHER_ADMINISTRATOR_MODEL",
             "CHACK_SOCIAL_NETWORK_MAX_TURNS",
             "CHACK_SCIENTIFIC_MAX_TURNS",
             "CHACK_WEBSEARCHER_MAX_TURNS",
             "CHACK_BUSINESS_MAX_TURNS",
             "CHACK_PRODUCT_MAX_TURNS",
+            "CHACK_TRAVEL_MAX_TURNS",
+            "CHACK_LEGAL_MAX_TURNS",
+            "CHACK_DATA_STATISTICS_MAX_TURNS",
+            "CHACK_NEWS_MEDIA_MAX_TURNS",
+            "CHACK_KNOWLEDGE_GRAPH_MAX_TURNS",
+            "CHACK_RELIGIOUS_MAX_TURNS",
             "CHACK_CLI_MAX_TURNS",
             "CHACK_SUBCHACK_MAX_TURNS",
+            "CHACK_RESEARCHER_ADMINISTRATOR_MAX_TURNS",
+            "CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION",
+            "CHACK_CODEX_EXEC_TIMEOUT_SECONDS",
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
@@ -941,6 +961,12 @@ class CodexExecutor:
             "SERPAPI_API_KEY",
             "FORUMSCOUT_API_KEY",
             "FORUMSCOUT_BASE_URL",
+            "BOOKING_API_TOKEN",
+            "BOOKING_AFFILIATE_ID",
+            "AMADEUS_CLIENT_ID",
+            "AMADEUS_CLIENT_SECRET",
+            "OPENTRIPMAP_API_KEY",
+            "TICKETMASTER_API_KEY",
             "GH_TOKEN",
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
@@ -1470,6 +1496,7 @@ def build_executor(
                 websearcher_model=config.model.websearcher,
                 business_model=config.model.business,
                 product_model=config.model.product,
+                travel_model=config.model.travel,
                 legal_model=config.model.legal,
                 data_statistics_model=config.model.data_statistics,
                 news_media_model=config.model.news_media,
@@ -1483,6 +1510,7 @@ def build_executor(
                 websearcher_max_turns=config.model.websearcher_max_turns,
                 business_max_turns=config.model.business_max_turns,
                 product_max_turns=config.model.product_max_turns,
+                travel_max_turns=config.model.travel_max_turns,
                 legal_max_turns=config.model.legal_max_turns,
                 data_statistics_max_turns=config.model.data_statistics_max_turns,
                 news_media_max_turns=config.model.news_media_max_turns,
@@ -1572,6 +1600,7 @@ def build_executor(
         _websearcher_model=str(config.model.websearcher or ""),
         _business_model=str(config.model.business or ""),
         _product_model=str(config.model.product or ""),
+        _travel_model=str(config.model.travel or ""),
         _legal_model=str(config.model.legal or ""),
         _data_statistics_model=str(config.model.data_statistics or ""),
         _news_media_model=str(config.model.news_media or ""),
@@ -1586,6 +1615,7 @@ def build_executor(
         _websearcher_max_turns=int(config.model.websearcher_max_turns or 30),
         _business_max_turns=int(config.model.business_max_turns or 30),
         _product_max_turns=int(config.model.product_max_turns or 30),
+        _travel_max_turns=int(config.model.travel_max_turns or 40),
         _legal_max_turns=int(config.model.legal_max_turns or 30),
         _data_statistics_max_turns=int(config.model.data_statistics_max_turns or 30),
         _news_media_max_turns=int(config.model.news_media_max_turns or 30),

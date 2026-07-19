@@ -79,6 +79,7 @@ _MCP_ROLE_AGENT_FIELDS = {
     "websearcher": "websearcher_agent",
     "business": "business_agent",
     "product": "product_agent",
+    "travel": "travel_agent",
     "legal": "legal_agent",
     "data_statistics": "data_statistics_agent",
     "news_media": "news_media_agent",
@@ -250,6 +251,7 @@ def _load_toolset() -> list[Any]:
     websearcher_model = os.environ.get("CHACK_WEBSEARCHER_MODEL", "")
     business_model = os.environ.get("CHACK_BUSINESS_MODEL", "")
     product_model = os.environ.get("CHACK_PRODUCT_MODEL", "")
+    travel_model = os.environ.get("CHACK_TRAVEL_MODEL", "")
     legal_model = os.environ.get("CHACK_LEGAL_MODEL", "")
     data_statistics_model = os.environ.get("CHACK_DATA_STATISTICS_MODEL", "")
     news_media_model = os.environ.get("CHACK_NEWS_MEDIA_MODEL", "")
@@ -286,6 +288,7 @@ def _load_toolset() -> list[Any]:
         websearcher_model=websearcher_model,
         business_model=business_model,
         product_model=product_model,
+        travel_model=travel_model,
         legal_model=legal_model,
         data_statistics_model=data_statistics_model,
         news_media_model=news_media_model,
@@ -301,6 +304,7 @@ def _load_toolset() -> list[Any]:
         self_critique_rounds=_to_int("CHACK_SELF_CRITIQUE_ROUNDS", 0),
         business_max_turns=_to_int("CHACK_BUSINESS_MAX_TURNS", 50),
         product_max_turns=_to_int("CHACK_PRODUCT_MAX_TURNS", 50),
+        travel_max_turns=_to_int("CHACK_TRAVEL_MAX_TURNS", 50),
         legal_max_turns=_to_int("CHACK_LEGAL_MAX_TURNS", 50),
         data_statistics_max_turns=_to_int("CHACK_DATA_STATISTICS_MAX_TURNS", 50),
         news_media_max_turns=_to_int("CHACK_NEWS_MEDIA_MAX_TURNS", 50),

@@ -289,6 +289,7 @@ RESEARCHER_REGISTRY: dict[str, tuple[str, str]] = {
     "scientific": ("scientific_enabled", "scientific_research"),
     "business": ("business_enabled", "business_research"),
     "product": ("product_enabled", "product_research"),
+    "travel": ("travel_enabled", "travel_research"),
     "websearcher": ("websearcher_enabled", "websearcher_research"),
     "social_network": ("social_network_enabled", "social_network_research"),
     "legal": ("legal_enabled", "legal_research"),
@@ -364,8 +365,8 @@ def researcher_administrator_output_schema(*, preserve_artifacts: bool) -> dict:
 _ADMINISTRATOR_SYSTEM_PROMPT = """### RULES
 - You are a research administrator. You have no search tools of your own: you gather evidence by orchestrating the specialized `*_research` sub-agents you have available and synthesizing their findings. Never answer from your own prior knowledge or assumptions; the only exception is the trivially certain case described below.
 - Your main goal is to find all the relevant information in every source about the requested topic.
-- Start with a coverage map: identify the entities, jurisdictions, timeframe, technical/scientific/business/legal/social/data/news angles, and which researcher type should cover each angle.
-- Launch a first wave of complementary researchers for any broad or uncertain request. Include `websearcher_research` for open-web grounding unless the task is explicitly non-web, then add domain researchers such as scientific, legal, business, product, data/statistics, news/media, social network, knowledge graph, religious, or cli when their source families could matter.
+- Start with a coverage map: identify the entities, jurisdictions, timeframe, technical/scientific/business/travel/legal/social/data/news angles, and which researcher type should cover each angle.
+- Launch a first wave of complementary researchers for any broad or uncertain request. Include `websearcher_research` for open-web grounding unless the task is explicitly non-web, then add domain researchers such as scientific, legal, business, product, travel, data/statistics, news/media, social network, knowledge graph, religious, or cli when their source families could matter.
 - Only launch researcher tools that are actually available in this run's capability map. If the user requested a source family whose researcher is not enabled, record it as a coverage gap instead of attempting an unavailable tool.
 - Do not launch researchers that are not materially related to the topic. For example, a normal question about a famous football player likely needs web/news/social/business/entity research, not scientific or religious research unless the user specifically asks for those angles.
 - In that first wave, prefer breadth over repeating one researcher type: normally run 3-5 different relevant researcher types before relaunching the same type, unless the request is genuinely narrow.
@@ -1027,6 +1028,7 @@ class ResearcherAdministratorAgentTool:
         websearcher_model: str = "",
         business_model: str = "",
         product_model: str = "",
+        travel_model: str = "",
         legal_model: str = "",
         data_statistics_model: str = "",
         news_media_model: str = "",
@@ -1038,6 +1040,7 @@ class ResearcherAdministratorAgentTool:
         websearcher_max_turns: int = 30,
         business_max_turns: int = 30,
         product_max_turns: int = 30,
+        travel_max_turns: int = 40,
         legal_max_turns: int = 30,
         data_statistics_max_turns: int = 30,
         news_media_max_turns: int = 30,
@@ -1064,6 +1067,7 @@ class ResearcherAdministratorAgentTool:
         self.websearcher_model = websearcher_model
         self.business_model = business_model
         self.product_model = product_model
+        self.travel_model = travel_model
         self.legal_model = legal_model
         self.data_statistics_model = data_statistics_model
         self.news_media_model = news_media_model
@@ -1075,6 +1079,7 @@ class ResearcherAdministratorAgentTool:
         self.websearcher_max_turns = max(2, int(websearcher_max_turns or 30))
         self.business_max_turns = max(2, int(business_max_turns or 30))
         self.product_max_turns = max(2, int(product_max_turns or 30))
+        self.travel_max_turns = max(2, int(travel_max_turns or 40))
         self.legal_max_turns = max(2, int(legal_max_turns or 30))
         self.data_statistics_max_turns = max(2, int(data_statistics_max_turns or 30))
         self.news_media_max_turns = max(2, int(news_media_max_turns or 30))
@@ -1282,6 +1287,18 @@ class ResearcherAdministratorAgentTool:
                 self_critique_enabled=self._researcher_self_critique_enabled(),
                 self_critique_rounds=self._researcher_self_critique_rounds(),
             )
+        elif short == "travel":
+            from .travel_research_agent import TravelResearchAgentTool
+
+            helper = TravelResearchAgentTool(
+                self.config,
+                model_name=self._model_for("travel", self.travel_model),
+                fallback_model=self.fallback_model,
+                model_provider=self.model_provider,
+                max_turns=self._max_turns_for("travel", self.travel_max_turns),
+                self_critique_enabled=self._researcher_self_critique_enabled(),
+                self_critique_rounds=self._researcher_self_critique_rounds(),
+            )
         elif short == "social_network":
             from .social_network_agent import SocialNetworkAgentTool
 
@@ -1419,7 +1436,7 @@ class ResearcherAdministratorAgentTool:
                 requests_json: Compact JSON array of request objects. Each object must contain:
                     researcher: researcher short-name or tool name, such as "websearcher",
                         "scientific", "business", "legal", "data_statistics", "news_media",
-                        "knowledge_graph", "social_network", "product", "religious", or "cli".
+                        "knowledge_graph", "social_network", "product", "travel", "religious", or "cli".
                     prompt: detailed researcher prompt, at least 500 characters, with scope,
                         entities, timeframe, source/tool families, disconfirming angles, and
                         expected comparisons. Keep each prompt specific to that researcher.
@@ -1968,6 +1985,7 @@ class ResearcherAdministratorAgentTool:
             websearcher_model=self._model_for("websearcher", self.websearcher_model),
             business_model=self._model_for("business", self.business_model),
             product_model=self._model_for("product", self.product_model),
+            travel_model=self._model_for("travel", self.travel_model),
             legal_model=self._model_for("legal", self.legal_model),
             data_statistics_model=self._model_for("data_statistics", self.data_statistics_model),
             news_media_model=self._model_for("news_media", self.news_media_model),
@@ -1979,6 +1997,7 @@ class ResearcherAdministratorAgentTool:
             websearcher_max_turns=self._max_turns_for("websearcher", self.websearcher_max_turns),
             business_max_turns=self._max_turns_for("business", self.business_max_turns),
             product_max_turns=self._max_turns_for("product", self.product_max_turns),
+            travel_max_turns=self._max_turns_for("travel", self.travel_max_turns),
             legal_max_turns=self._max_turns_for("legal", self.legal_max_turns),
             data_statistics_max_turns=self._max_turns_for("data_statistics", self.data_statistics_max_turns),
             news_media_max_turns=self._max_turns_for("news_media", self.news_media_max_turns),

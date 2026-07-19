@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time as time_module
 from typing import Any
 from uuid import uuid4
 
@@ -165,7 +166,7 @@ class ForumScoutTool:
         return os.environ.get("FORUMSCOUT_API_KEY", "")
 
     def _base_url(self) -> str:
-        return os.environ.get("FORUMSCOUT_BASE_URL", "https://forumscout.app")
+        return str(os.environ.get("FORUMSCOUT_BASE_URL", "") or "https://forumscout.app").rstrip("/")
 
     def _serpapi_key(self) -> str:
         keys = usable_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
@@ -189,35 +190,48 @@ class ForumScoutTool:
             "X-API-Key": api_key,
         }
         url = f"{self._base_url()}{endpoint}"
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=timeout_seconds)
-        except requests.exceptions.Timeout:
-            return "ERROR: ForumScout request timed out"
-        except requests.exceptions.ConnectionError:
-            return "ERROR: Failed to connect to ForumScout"
-
-        if response.status_code >= 400:
-            body = (response.text or "").strip().replace("\n", " ")
-            if len(body) > 220:
-                body = body[:217] + "..."
-            detail = f" ({body})" if body else ""
-            return f"ERROR: ForumScout returned HTTP {response.status_code}{detail}"
-
-        try:
-            payload = response.json()
-        except ValueError:
-            # Retry once on transient HTML/invalid payloads.
+        payload = None
+        last_error = "ERROR: ForumScout request failed"
+        # ForumScout occasionally returns a transient Vercel HTML response or
+        # times out while its upstream forum search is warming. Retry only
+        # idempotent GETs, with a small bounded backoff.
+        for attempt in range(3):
             try:
                 response = requests.get(url, headers=headers, params=params, timeout=timeout_seconds)
-                payload = response.json()
-            except Exception:
-                return "ERROR: ForumScout returned invalid JSON"
+            except requests.exceptions.Timeout:
+                last_error = "ERROR: ForumScout request timed out"
+            except requests.exceptions.ConnectionError:
+                last_error = "ERROR: Failed to connect to ForumScout"
+            else:
+                if response.status_code >= 400:
+                    body = (response.text or "").strip().replace("\n", " ")
+                    if len(body) > 220:
+                        body = body[:217] + "..."
+                    detail = f" ({body})" if body else ""
+                    last_error = f"ERROR: ForumScout returned HTTP {response.status_code}{detail}"
+                    if response.status_code < 500 and response.status_code != 429:
+                        return last_error
+                else:
+                    try:
+                        payload = response.json()
+                        break
+                    except ValueError:
+                        last_error = "ERROR: ForumScout returned invalid JSON"
+            if attempt < 2:
+                time_module.sleep(0.4 * (2 ** attempt))
+
+        if payload is None:
+            return last_error
 
         if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError:
-                return "ERROR: ForumScout returned invalid JSON"
+            message = " ".join(payload.split()).strip().lower()
+            if message in {"no posts found", "no results found", "no results"}:
+                payload = []
+            else:
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    return "ERROR: ForumScout returned invalid JSON"
 
         artifact = _write_json_artifact("forumscout", query, payload)
         results = payload if isinstance(payload, list) else payload.get("results", [])

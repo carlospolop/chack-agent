@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import re
+import socket
 import time
 from io import BytesIO
 from html import unescape
 from typing import Any, Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urljoin, urlparse
 from uuid import uuid4
 import xml.etree.ElementTree as ET
 
@@ -32,6 +34,25 @@ _HEADERS = {
     ),
     "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
 }
+_MAX_FETCH_TEXT_BYTES = 2 * 1024 * 1024
+
+
+def _is_public_https_url(value: str) -> bool:
+    """Reject credentialed, non-HTTPS, nonstandard-port, and non-public destinations."""
+    try:
+        parsed = urlparse(str(value or "").strip())
+        if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+            return False
+        if parsed.port not in (None, 443):
+            return False
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+            if item and len(item) > 4 and item[4]
+        }
+        return bool(addresses) and all(ipaddress.ip_address(address).is_global for address in addresses)
+    except (OSError, ValueError):
+        return False
 
 
 def _run_logged(tool: str, tool_input: dict, func):
@@ -267,10 +288,30 @@ class OpenResearchTool:
         url = str(url or "").strip()
         if not url:
             return "ERROR: url cannot be empty"
-        if not url.lower().startswith(("http://", "https://")):
-            return "ERROR: url must start with http:// or https://"
+        if not _is_public_https_url(url):
+            return "ERROR: url must be a public HTTPS address"
         try:
-            response = requests.get(url, headers=_HEADERS, timeout=timeout_seconds, allow_redirects=True)
+            current_url = url
+            response = None
+            for _redirect in range(6):
+                if not _is_public_https_url(current_url):
+                    return "ERROR: URL redirect was not a public HTTPS address"
+                response = requests.get(
+                    current_url, headers=_HEADERS, timeout=timeout_seconds, allow_redirects=False, stream=True
+                )
+                if int(getattr(response, "status_code", 200) or 200) in {301, 302, 303, 307, 308}:
+                    location = str(response.headers.get("location") or "").strip()
+                    if not location:
+                        return "ERROR: URL redirect did not include a destination"
+                    if hasattr(response, "close"):
+                        response.close()
+                    current_url = urljoin(current_url, location)
+                    continue
+                break
+            else:
+                return "ERROR: URL returned too many redirects"
+            if response is None:
+                return "ERROR: URL fetch failed"
             response.raise_for_status()
         except requests.exceptions.Timeout:
             return "ERROR: URL fetch timed out"
@@ -279,13 +320,38 @@ class OpenResearchTool:
         except requests.exceptions.HTTPError as exc:
             return f"ERROR: URL returned HTTP {exc.response.status_code}"
         content_type = str(response.headers.get("content-type") or "").lower()
-        raw = response.text or ""
+        content_length = str(response.headers.get("content-length") or "").strip()
+        if content_length.isdigit() and int(content_length) > _MAX_FETCH_TEXT_BYTES:
+            if hasattr(response, "close"):
+                response.close()
+            return "ERROR: fetched URL exceeded the response-size limit"
+        if hasattr(response, "iter_content"):
+            chunks: list[bytes] = []
+            received = 0
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                received += len(chunk)
+                if received > _MAX_FETCH_TEXT_BYTES:
+                    if hasattr(response, "close"):
+                        response.close()
+                    return "ERROR: fetched URL exceeded the response-size limit"
+                chunks.append(chunk)
+            raw = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+        else:
+            raw = response.text or ""
+            if len(raw.encode("utf-8", errors="replace")) > _MAX_FETCH_TEXT_BYTES:
+                return "ERROR: fetched URL exceeded the response-size limit"
+        if hasattr(response, "close"):
+            response.close()
         text = _html_to_text(raw) if "html" in content_type or "<html" in raw[:500].lower() else raw
         if len(text.strip()) < 40:
             return "ERROR: fetched URL did not contain enough extractable text"
         host = urlparse(str(response.url or url)).netloc or "page"
         raw_ext = "html" if "html" in content_type or "<html" in raw[:500].lower() else "txt"
         final_url = str(response.url or url)
+        if not _is_public_https_url(final_url):
+            return "ERROR: fetched URL resolved to a non-public destination"
         raw_path, text_path = _write_text_artifacts(
             "web-pages",
             host,

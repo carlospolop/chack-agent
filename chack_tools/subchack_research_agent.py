@@ -50,6 +50,7 @@ class SubChackResearchAgentTool:
         websearcher_model: str = "",
         business_model: str = "",
         product_model: str = "",
+        travel_model: str = "",
         legal_model: str = "",
         data_statistics_model: str = "",
         news_media_model: str = "",
@@ -61,6 +62,7 @@ class SubChackResearchAgentTool:
         websearcher_max_turns: int = 30,
         business_max_turns: int = 30,
         product_max_turns: int = 30,
+        travel_max_turns: int = 40,
         legal_max_turns: int = 30,
         data_statistics_max_turns: int = 30,
         news_media_max_turns: int = 30,
@@ -84,6 +86,7 @@ class SubChackResearchAgentTool:
         self.websearcher_model = websearcher_model
         self.business_model = business_model
         self.product_model = product_model
+        self.travel_model = travel_model
         self.legal_model = legal_model
         self.data_statistics_model = data_statistics_model
         self.news_media_model = news_media_model
@@ -95,6 +98,7 @@ class SubChackResearchAgentTool:
         self.websearcher_max_turns = max(2, int(websearcher_max_turns or 30))
         self.business_max_turns = max(2, int(business_max_turns or 30))
         self.product_max_turns = max(2, int(product_max_turns or 30))
+        self.travel_max_turns = max(2, int(travel_max_turns or 40))
         self.legal_max_turns = max(2, int(legal_max_turns or 30))
         self.data_statistics_max_turns = max(2, int(data_statistics_max_turns or 30))
         self.news_media_max_turns = max(2, int(news_media_max_turns or 30))
@@ -149,6 +153,7 @@ class SubChackResearchAgentTool:
             websearcher_model=self.websearcher_model,
             business_model=self.business_model,
             product_model=self.product_model,
+            travel_model=self.travel_model,
             legal_model=self.legal_model,
             data_statistics_model=self.data_statistics_model,
             news_media_model=self.news_media_model,
@@ -161,6 +166,7 @@ class SubChackResearchAgentTool:
             websearcher_max_turns=self.websearcher_max_turns,
             business_max_turns=self.business_max_turns,
             product_max_turns=self.product_max_turns,
+            travel_max_turns=self.travel_max_turns,
             legal_max_turns=self.legal_max_turns,
             data_statistics_max_turns=self.data_statistics_max_turns,
             news_media_max_turns=self.news_media_max_turns,

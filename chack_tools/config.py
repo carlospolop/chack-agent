@@ -110,6 +110,25 @@ class ToolsConfig:
     business_wikidata_enabled: bool = False
     business_playwright_enabled: bool = False
 
+    travel_enabled: bool = False
+    travel_max_results: int = 10
+    travel_google_flights_enabled: bool = False
+    travel_google_travel_explore_enabled: bool = False
+    travel_google_hotels_enabled: bool = False
+    travel_google_hotels_reviews_enabled: bool = False
+    travel_booking_enabled: bool = False
+    travel_amadeus_enabled: bool = False
+    travel_opentripmap_enabled: bool = False
+    travel_open_meteo_enabled: bool = False
+    travel_open_meteo_air_quality_enabled: bool = False
+    travel_open_meteo_marine_enabled: bool = False
+    travel_public_holidays_enabled: bool = False
+    travel_ticketmaster_enabled: bool = False
+    travel_frankfurter_enabled: bool = False
+    travel_wikivoyage_enabled: bool = False
+    travel_transitous_enabled: bool = False
+    travel_agent: dict = field(default_factory=dict)
+
     product_enabled: bool = False
     product_max_results: int = 10
     product_serpapi_enabled: bool = False
@@ -241,6 +260,7 @@ class ToolsConfig:
     scientific_max_tools_used: int = 0
     websearcher_max_tools_used: int = 0
     business_max_tools_used: int = 0
+    travel_max_tools_used: int = 0
     product_max_tools_used: int = 0
     legal_max_tools_used: int = 0
     data_statistics_max_tools_used: int = 0

@@ -4,6 +4,7 @@ from dataclasses import replace
 from .config import ToolsConfig
 from .brave_search import BraveSearchTool, get_brave_search_tool
 from .business_research_agent import BusinessResearchAgentTool, get_business_research_tool
+from .travel_research_agent import TravelResearchAgentTool, get_travel_research_tool
 from .business_search import (
     BusinessSearchTool,
     get_amazon_product_search_tool,
@@ -126,6 +127,16 @@ from .open_research_agents import (
     get_news_media_research_tool,
     get_religious_research_tool,
 )
+from .open_travel_search import (
+    OpenTravelSearchTool,
+    get_open_meteo_air_quality_tool,
+    get_open_meteo_marine_tool,
+    get_public_holidays_tool,
+    get_ticketmaster_events_tool,
+    get_transitous_route_tool,
+    get_travel_currency_tool,
+    get_wikivoyage_search_tool,
+)
 from .researcher_administrator_agent import (
     ResearcherAdministratorAgentTool,
     get_researcher_administrator_tool,
@@ -161,6 +172,23 @@ from .serpapi_web_search import (
 )
 from .social_network_agent import SocialNetworkAgentTool, get_social_network_research_tool
 from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
+from .travel_search import (
+    TravelSearchTool,
+    get_amadeus_hotel_prices_tool,
+    get_amadeus_hotel_sentiments_tool,
+    get_booking_cities_tool,
+    get_booking_stay_details_tool,
+    get_booking_stay_reviews_tool,
+    get_booking_stays_search_tool,
+    get_google_flights_search_tool,
+    get_google_stay_details_tool,
+    get_google_stay_reviews_tool,
+    get_google_stays_search_tool,
+    get_google_travel_explore_tool,
+    get_open_meteo_forecast_tool,
+    get_opentripmap_place_details_tool,
+    get_opentripmap_places_search_tool,
+)
 from .websearcher_agent import WebSearcherAgentTool, get_websearcher_research_tool
 from .cli_research_agent import CliResearchAgentTool, get_cli_research_tool
 from .chatgpt_research_agents import (
@@ -182,6 +210,7 @@ class AgentsToolset:
         websearcher_model: str = "CHEAP_BUT_QUALITY",
         business_model: str = "CHEAP_BUT_QUALITY",
         product_model: str = "CHEAP_BUT_QUALITY",
+        travel_model: str = "CHEAP_BUT_QUALITY",
         legal_model: str = "CHEAP_BUT_QUALITY",
         data_statistics_model: str = "CHEAP_BUT_QUALITY",
         news_media_model: str = "CHEAP_BUT_QUALITY",
@@ -195,6 +224,7 @@ class AgentsToolset:
         websearcher_max_turns: int = 30,
         business_max_turns: int = 30,
         product_max_turns: int = 30,
+        travel_max_turns: int = 40,
         legal_max_turns: int = 30,
         data_statistics_max_turns: int = 30,
         news_media_max_turns: int = 30,
@@ -235,6 +265,10 @@ class AgentsToolset:
             product_model,
             fallback="CHEAP_BUT_QUALITY",
         )
+        self.travel_model = self._resolve_alias(
+            travel_model,
+            fallback="CHEAP_BUT_QUALITY",
+        )
         self.legal_model = self._resolve_alias(
             legal_model,
             fallback="CHEAP_BUT_QUALITY",
@@ -272,6 +306,7 @@ class AgentsToolset:
         self.websearcher_max_turns = websearcher_max_turns
         self.business_max_turns = business_max_turns
         self.product_max_turns = product_max_turns
+        self.travel_max_turns = travel_max_turns
         self.legal_max_turns = legal_max_turns
         self.data_statistics_max_turns = data_statistics_max_turns
         self.news_media_max_turns = news_media_max_turns
@@ -566,6 +601,45 @@ class AgentsToolset:
         if has_serpapi and self.config.business_google_patents_details_enabled:
             tools.append(get_google_patents_details_tool(scientific_helper))
 
+        travel_helper = TravelSearchTool(self.config)
+        open_travel_helper = OpenTravelSearchTool(self.config)
+        if has_serpapi and self.config.travel_google_flights_enabled:
+            tools.append(get_google_flights_search_tool(travel_helper))
+        if has_serpapi and self.config.travel_google_travel_explore_enabled:
+            tools.append(get_google_travel_explore_tool(travel_helper))
+        if has_serpapi and self.config.travel_google_hotels_enabled:
+            tools.append(get_google_stays_search_tool(travel_helper))
+            tools.append(get_google_stay_details_tool(travel_helper))
+        if has_serpapi and self.config.travel_google_hotels_reviews_enabled:
+            tools.append(get_google_stay_reviews_tool(travel_helper))
+        if self.config.travel_booking_enabled:
+            tools.append(get_booking_cities_tool(travel_helper))
+            tools.append(get_booking_stays_search_tool(travel_helper))
+            tools.append(get_booking_stay_details_tool(travel_helper))
+            tools.append(get_booking_stay_reviews_tool(travel_helper))
+        if self.config.travel_amadeus_enabled:
+            tools.append(get_amadeus_hotel_prices_tool(travel_helper))
+            tools.append(get_amadeus_hotel_sentiments_tool(travel_helper))
+        if self.config.travel_opentripmap_enabled:
+            tools.append(get_opentripmap_places_search_tool(travel_helper))
+            tools.append(get_opentripmap_place_details_tool(travel_helper))
+        if self.config.travel_open_meteo_enabled:
+            tools.append(get_open_meteo_forecast_tool(travel_helper))
+        if self.config.travel_open_meteo_air_quality_enabled:
+            tools.append(get_open_meteo_air_quality_tool(open_travel_helper))
+        if self.config.travel_open_meteo_marine_enabled:
+            tools.append(get_open_meteo_marine_tool(open_travel_helper))
+        if self.config.travel_public_holidays_enabled:
+            tools.append(get_public_holidays_tool(open_travel_helper))
+        if self.config.travel_ticketmaster_enabled and os.environ.get("TICKETMASTER_API_KEY"):
+            tools.append(get_ticketmaster_events_tool(open_travel_helper))
+        if self.config.travel_frankfurter_enabled:
+            tools.append(get_travel_currency_tool(open_travel_helper))
+        if self.config.travel_wikivoyage_enabled:
+            tools.append(get_wikivoyage_search_tool(open_travel_helper))
+        if self.config.travel_transitous_enabled:
+            tools.append(get_transitous_route_tool(open_travel_helper))
+
         product_helper = ProductSearchTool(self.config)
         if self.config.product_open_food_facts_enabled:
             tools.append(get_open_food_facts_search_tool(product_helper))
@@ -653,6 +727,7 @@ class AgentsToolset:
                 websearcher_model=self.websearcher_model,
                 business_model=self.business_model,
                 product_model=self.product_model,
+                travel_model=self.travel_model,
                 legal_model=self.legal_model,
                 data_statistics_model=self.data_statistics_model,
                 news_media_model=self.news_media_model,
@@ -664,6 +739,7 @@ class AgentsToolset:
                 websearcher_max_turns=self.websearcher_max_turns,
                 business_max_turns=self.business_max_turns,
                 product_max_turns=self.product_max_turns,
+                travel_max_turns=self.travel_max_turns,
                 legal_max_turns=self.legal_max_turns,
                 data_statistics_max_turns=self.data_statistics_max_turns,
                 news_media_max_turns=self.news_media_max_turns,
@@ -701,6 +777,7 @@ class AgentsToolset:
                 websearcher_model=self.websearcher_model,
                 business_model=self.business_model,
                 product_model=self.product_model,
+                travel_model=self.travel_model,
                 legal_model=self.legal_model,
                 data_statistics_model=self.data_statistics_model,
                 news_media_model=self.news_media_model,
@@ -712,6 +789,7 @@ class AgentsToolset:
                 websearcher_max_turns=self.websearcher_max_turns,
                 business_max_turns=self.business_max_turns,
                 product_max_turns=self.product_max_turns,
+                travel_max_turns=self.travel_max_turns,
                 legal_max_turns=self.legal_max_turns,
                 data_statistics_max_turns=self.data_statistics_max_turns,
                 news_media_max_turns=self.news_media_max_turns,
@@ -791,6 +869,7 @@ class AgentsToolset:
                 websearcher_model=self.websearcher_model,
                 business_model=self.business_model,
                 product_model=self.product_model,
+                travel_model=self.travel_model,
                 legal_model=self.legal_model,
                 data_statistics_model=self.data_statistics_model,
                 news_media_model=self.news_media_model,
@@ -802,6 +881,7 @@ class AgentsToolset:
                 websearcher_max_turns=self.websearcher_max_turns,
                 business_max_turns=self.business_max_turns,
                 product_max_turns=self.product_max_turns,
+                travel_max_turns=self.travel_max_turns,
                 legal_max_turns=self.legal_max_turns,
                 data_statistics_max_turns=self.data_statistics_max_turns,
                 news_media_max_turns=self.news_media_max_turns,
@@ -882,6 +962,18 @@ class AgentsToolset:
                 self_critique_rounds=self.self_critique_rounds,
             )
             tools.append(get_business_research_tool(business_helper))
+
+        if self.config.travel_enabled:
+            travel_research_helper = TravelResearchAgentTool(
+                self.config,
+                model_name=self.travel_model,
+                fallback_model=self.default_model,
+                model_provider=self.model_provider,
+                max_turns=self.travel_max_turns,
+                self_critique_enabled=self.self_critique_enabled,
+                self_critique_rounds=self.self_critique_rounds,
+            )
+            tools.append(get_travel_research_tool(travel_research_helper))
 
         if self.config.product_enabled:
             product_helper = ProductResearchAgentTool(
