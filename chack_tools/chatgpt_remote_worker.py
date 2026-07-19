@@ -1,14 +1,15 @@
 """Outbound-only workstation worker for cloud-brokered ChatGPT Web jobs.
 
-The worker never opens a listening port. It leases one job at a time over HTTPS,
-runs the existing direct Chrome/CDP implementation, heartbeats partial progress,
-and posts a terminal result. Its execution backend is forced to ``local`` to
-prevent recursive submission through the broker.
+The worker never opens a listening port. It leases a bounded number of jobs over
+HTTPS, runs each in an isolated tab and per-job evidence directory, heartbeats
+partial progress, and posts terminal results. Its execution backend is forced to
+``local`` to prevent recursive submission through the broker.
 """
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import json
 import logging
 import os
@@ -93,6 +94,9 @@ class ChatGPTRemoteWorker:
         self.worker_id = os.environ.get("CHACK_CHATGPT_WORKER_ID", "").strip() or f"{socket.gethostname()}-{os.getpid()}"
         self.poll_seconds = max(2, int(os.environ.get("CHACK_CHATGPT_WORKER_POLL_SECONDS", "10")))
         self.heartbeat_seconds = max(10, int(os.environ.get("CHACK_CHATGPT_WORKER_HEARTBEAT_SECONDS", "30")))
+        # Five is the deliberately tested workstation/browser ceiling. Keep a
+        # hard cap even if a service environment is accidentally set higher.
+        self.concurrency = max(1, min(5, int(os.environ.get("CHACK_CHATGPT_WORKER_CONCURRENCY", "1"))))
         self.state_root = Path(
             os.environ.get("CHACK_CHATGPT_WORKER_STATE_DIR", "~/.local/state/chack-chatgpt-worker")
         ).expanduser()
@@ -301,18 +305,58 @@ class ChatGPTRemoteWorker:
         return True
 
     def run_forever(self) -> None:
-        LOG.info("worker=%s outbound ChatGPT worker started", self.worker_id)
-        while True:
+        self._run_pool(stop_when_idle=False)
+
+    @staticmethod
+    def _collect_finished(active: set[Future[None]]) -> None:
+        for future in tuple(active):
+            if not future.done():
+                continue
+            active.remove(future)
             try:
-                worked = self.run_once()
-                if not worked:
-                    time.sleep(self.poll_seconds)
-            except ChatGPTAsyncApiError as exc:
-                LOG.warning("broker unavailable (%s); retrying", exc.error_code or type(exc).__name__)
-                time.sleep(self.poll_seconds)
+                future.result()
             except Exception:
-                LOG.exception("unexpected worker loop failure")
-                time.sleep(self.poll_seconds)
+                # ``process`` contains per-job failure conversion, but keep the
+                # pool alive if a truly unexpected programming error escapes.
+                LOG.exception("unexpected parallel worker job failure")
+
+    def _run_pool(self, *, stop_when_idle: bool) -> None:
+        LOG.info(
+            "worker=%s outbound ChatGPT worker started concurrency=%d",
+            self.worker_id,
+            self.concurrency,
+        )
+        with ThreadPoolExecutor(max_workers=self.concurrency, thread_name_prefix="chatgpt-browser-job") as executor:
+            active: set[Future[None]] = set()
+            while True:
+                self._collect_finished(active)
+                try:
+                    self.flush_pending()
+                    queue_empty = False
+                    while len(active) < self.concurrency:
+                        lease = self.client.lease(worker_id=self.worker_id)
+                        if not lease:
+                            queue_empty = True
+                            break
+                        active.add(executor.submit(self.process, lease))
+                except ChatGPTAsyncApiError as exc:
+                    LOG.warning("broker unavailable (%s); retrying", exc.error_code or type(exc).__name__)
+                    queue_empty = True
+                except Exception:
+                    LOG.exception("unexpected worker leasing failure")
+                    queue_empty = True
+
+                if stop_when_idle and queue_empty and not active:
+                    return
+                if active:
+                    wait(active, timeout=self.poll_seconds, return_when=FIRST_COMPLETED)
+                    self._collect_finished(active)
+                else:
+                    time.sleep(self.poll_seconds)
+
+    def run_until_idle(self) -> None:
+        """Process all currently available jobs, then return (test/maintenance helper)."""
+        self._run_pool(stop_when_idle=True)
 
 
 def main() -> int:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -33,7 +34,21 @@ class ChatGPTAsyncApiClient:
         if not self.secret:
             raise ValueError("ChatGPT async API secret is required")
         self.request_timeout_seconds = max(5, int(request_timeout_seconds or 30))
-        self.session = session or requests.Session()
+        # ``requests.Session`` does not promise thread safety. The outbound
+        # workstation worker can execute several browser jobs concurrently, so
+        # give every worker/heartbeat thread its own connection pool. Tests or
+        # callers that explicitly inject a session retain the old behaviour.
+        self.session = session
+        self._thread_local = threading.local()
+
+    def _http_session(self) -> requests.Session:
+        if self.session is not None:
+            return self.session
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._thread_local.session = session
+        return session
 
     def _request(
         self,
@@ -47,7 +62,7 @@ class ChatGPTAsyncApiClient:
         last_error: Exception | None = None
         for attempt, delay in enumerate((1, 2, 5), start=1):
             try:
-                response = self.session.request(
+                response = self._http_session().request(
                     method,
                     url,
                     headers={

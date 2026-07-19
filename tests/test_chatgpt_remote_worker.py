@@ -1,4 +1,6 @@
 from pathlib import Path
+import threading
+import time
 from typing import Any, cast
 
 from chack_tools.chatgpt_remote_worker import ChatGPTRemoteWorker
@@ -26,8 +28,20 @@ def _worker(tmp_path: Path) -> tuple[ChatGPTRemoteWorker, FakeWorkerClient]:
     worker.worker_id = "test-worker"
     worker.poll_seconds = 2
     worker.heartbeat_seconds = 10
+    worker.concurrency = 1
     worker.state_root = tmp_path
     return worker, client
+
+
+def test_worker_concurrency_environment_is_bounded_to_five(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHACK_CHATGPT_ASYNC_API_URL", "https://broker.example")
+    monkeypatch.setenv("CHACK_CHATGPT_ASYNC_WORKER_SECRET", "worker-test-secret")
+    monkeypatch.setenv("CHACK_CHATGPT_WORKER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("CHACK_CHATGPT_WORKER_CONCURRENCY", "99")
+    assert ChatGPTRemoteWorker().concurrency == 5
+
+    monkeypatch.setenv("CHACK_CHATGPT_WORKER_CONCURRENCY", "0")
+    assert ChatGPTRemoteWorker().concurrency == 1
 
 
 def test_worker_forces_local_backend_and_posts_success(monkeypatch, tmp_path):
@@ -119,3 +133,69 @@ def test_worker_refuses_ambiguous_retry_after_prior_browser_submission(monkeypat
     assert completion["error_code"] == "AMBIGUOUS_PRIOR_BROWSER_SUBMISSION"
     assert completion["metadata"]["prior_browser_submission_detected"] is True
     assert "conversation_url" not in completion["metadata"]
+
+
+def test_worker_runs_five_browser_jobs_concurrently_with_isolated_artifacts(monkeypatch, tmp_path):
+    worker, _ = _worker(tmp_path)
+    worker.concurrency = 5
+    worker.poll_seconds = 1
+    jobs = [
+        {
+            "job_id": f"job_00000000-0000-0000-0000-0000000001{i:02d}",
+            "lease_id": f"lease-{i}",
+            "mode": "pro" if i % 2 else "deep",
+            "prompt": f"Prompt {i} " * 30,
+            "output_timeout_seconds": 1800 if i % 2 else 4500,
+        }
+        for i in range(5)
+    ]
+
+    class ConcurrentClient(FakeWorkerClient):
+        def __init__(self):
+            super().__init__()
+            self.jobs = list(jobs)
+            self.lock = threading.Lock()
+
+        def lease(self, *, worker_id):
+            assert worker_id == "test-worker"
+            with self.lock:
+                return self.jobs.pop(0) if self.jobs else None
+
+        def heartbeat(self, job_id, **kwargs):
+            with self.lock:
+                return super().heartbeat(job_id, **kwargs)
+
+        def complete(self, job_id, **kwargs):
+            with self.lock:
+                return super().complete(job_id, **kwargs)
+
+    client = ConcurrentClient()
+    worker.client = cast(Any, client)
+    barrier = threading.Barrier(5)
+    active = 0
+    maximum_active = 0
+    lock = threading.Lock()
+
+    def browser(_self, prompt, *, run_state_path, partial_path):
+        nonlocal active, maximum_active
+        assert run_state_path.parent.name.startswith("job_")
+        assert partial_path.parent == run_state_path.parent
+        assert prompt.startswith("Prompt ")
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        barrier.wait(timeout=5)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return "parallel answer " + prompt[:20], "https://chatgpt.com/c/private", {"terminal_state": "extracted"}
+
+    monkeypatch.setattr("chack_tools.chatgpt_remote_worker.ChatGPTWebResearchAgentTool._browser_research", browser)
+    worker.run_until_idle()
+
+    assert maximum_active == 5
+    assert len(client.completions) == 5
+    assert {job_id for job_id, _ in client.completions} == {job["job_id"] for job in jobs}
+    assert all(payload["status"] == "SUCCEEDED" for _, payload in client.completions)
+    assert all("conversation_url" not in payload["metadata"] for _, payload in client.completions)
+    assert len(list((tmp_path / "jobs").glob("*/request.txt"))) == 5
