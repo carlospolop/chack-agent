@@ -549,6 +549,8 @@ class GeminiCliExecutor:
             "CHACK_ALLOWED_TOOLS_JSON",
             "CHACK_TOOLS_OVERRIDE_B64",
             "CHACK_TOOLS_APPEND_B64",
+            "CHACK_CHATGPT_ASYNC_API_URL",
+            "CHACK_CHATGPT_ASYNC_API_SECRET",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",

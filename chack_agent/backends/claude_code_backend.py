@@ -579,7 +579,7 @@ class ClaudeCodeExecutor:
         if bash_vulns_dir:
             os.makedirs(bash_vulns_dir, exist_ok=True)
             env["CHACK_VULN_FALLBACK_DIR"] = bash_vulns_dir
-        agents_md_path = self._write_agents_md(exec_cwd)
+        self._write_agents_md(exec_cwd)
         bash_vuln_snapshot = self._snapshot_bash_saved_vulns(bash_vulns_dir)
         timeout_seconds = int(
             os.environ.get("CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS", "") or "900"
@@ -1491,6 +1491,8 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "CHACK_TOOLS_OVERRIDE_B64_PATH",
             "CHACK_TOOLS_APPEND_B64",
             "CHACK_TOOLS_APPEND_B64_PATH",
+            "CHACK_CHATGPT_ASYNC_API_URL",
+            "CHACK_CHATGPT_ASYNC_API_SECRET",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",

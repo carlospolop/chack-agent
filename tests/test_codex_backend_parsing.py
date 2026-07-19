@@ -8,6 +8,7 @@ from typing import Any
 MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "backends" / "codex_backend.py"
 CLAUDE_MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "backends" / "claude_code_backend.py"
 GEMINI_MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "backends" / "gemini_cli_backend.py"
+COPILOT_MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "backends" / "copilot_cli_backend.py"
 OUTPUT_SCHEMA_MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "output_schema.py"
 
 
@@ -187,6 +188,19 @@ def test_gemini_mcp_env_allowlist_includes_local_vulnerability_store_path():
     )
 
     assert "AISEC_LOCAL_VULN_STORE_PATH" in env_vars
+
+
+def test_cli_mcp_env_allowlists_transport_async_chatgpt_broker_credentials():
+    configurations = (
+        (MODULE_PATH, "CodexExecutor", "_write_codex_config", "env_vars"),
+        (CLAUDE_MODULE_PATH, "ClaudeCodeExecutor", "_mcp_env_map", "env_keys"),
+        (GEMINI_MODULE_PATH, "GeminiCliExecutor", "_gemini_mcp_env_map", "env_keys"),
+        (COPILOT_MODULE_PATH, "CopilotCliExecutor", "_copilot_mcp_env_map", "env_keys"),
+    )
+    required = {"CHACK_CHATGPT_ASYNC_API_URL", "CHACK_CHATGPT_ASYNC_API_SECRET"}
+    for path, class_name, function_name, target_name in configurations:
+        values = _load_list_literal(path, class_name, function_name, target_name)
+        assert required <= set(values), f"missing broker environment in {path.name}"
 
 
 def test_codex_backend_logs_codex_cli_failure_event():

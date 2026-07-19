@@ -22,7 +22,6 @@ from chack_tools.telemetry import log_event
 from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
-from ..live_cost_state import report_live_usage
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from ..thinking_effort import copilot_thinking_effort, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
@@ -572,6 +571,8 @@ class CopilotCliExecutor:
             "CHACK_ALLOWED_TOOLS_JSON",
             "CHACK_TOOLS_OVERRIDE_B64",
             "CHACK_TOOLS_APPEND_B64",
+            "CHACK_CHATGPT_ASYNC_API_URL",
+            "CHACK_CHATGPT_ASYNC_API_SECRET",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",

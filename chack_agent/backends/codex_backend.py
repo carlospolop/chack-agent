@@ -910,6 +910,8 @@ class CodexExecutor:
             "CHACK_TOOLS_OVERRIDE_B64_PATH",
             "CHACK_TOOLS_APPEND_B64",
             "CHACK_TOOLS_APPEND_B64_PATH",
+            "CHACK_CHATGPT_ASYNC_API_URL",
+            "CHACK_CHATGPT_ASYNC_API_SECRET",
             "PYTHONPATH",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
