@@ -32,7 +32,7 @@ openai_agents = [
 ]
 
 [project.scripts]
-chack-chatgpt-worker = "chack_tools.chatgpt_async_worker:main"
+chack-chatgpt-worker = "chack_tools.chatgpt_remote_worker:main"
 
 [tool.setuptools]
 include-package-data = true
