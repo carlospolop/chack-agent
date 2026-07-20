@@ -143,6 +143,42 @@ def test_duplicate_post_tool_event_is_counted_once(plugin):
     assert transformed.endswith("_Chack usage: queue x1 · admin x1 · chatgptpro x1_")
 
 
+def test_shared_merged_administrator_is_not_double_counted_across_queue_calls(plugin):
+    plugin._pre_llm_call(session_id="merged", task_id="merged-task", turn_id="merged-turn")
+    shared_payload = {
+        "researches": [
+            {
+                "research_id": "research-shared-123",
+                "researcher_call_counts": {"prochatgpt_researcher": 2},
+                "researcher_usage_complete": True,
+            }
+        ],
+        "researcher_usage": {
+            "administrator_calls": 1,
+            "administrator_call_ids": ["research-shared-123"],
+            "researcher_call_counts": {"prochatgpt_researcher": 2},
+            "total_researcher_calls": 2,
+            "complete": True,
+        },
+    }
+    for call_id in ("queue-call-a", "queue-call-b"):
+        plugin._post_tool_call(
+            tool_name="mcp__chack_agent__researcher_queue",
+            result={"result": json.dumps(shared_payload)},
+            session_id="merged",
+            task_id="merged-task",
+            turn_id="merged-turn",
+            tool_call_id=call_id,
+            status="ok",
+        )
+
+    transformed = plugin._transform_llm_output(response_text="Merged answer", session_id="merged")
+
+    assert transformed.endswith(
+        "_Chack usage: queue x2 · admin x1 · chatgptpro x2_"
+    )
+
+
 def test_no_queue_call_leaves_response_unchanged(plugin):
     plugin._pre_llm_call(session_id="plain", task_id="plain-task", turn_id="plain-turn")
     assert plugin._transform_llm_output(response_text="Plain answer", session_id="plain") is None

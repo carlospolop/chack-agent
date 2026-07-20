@@ -118,6 +118,101 @@ def test_administrator_empty_allowlist_uses_globally_enabled():
     assert set(helper._enabled_researchers()) == {"scientific", "websearcher"}
 
 
+def test_administrator_run_accounting_is_isolated_across_concurrent_calls(monkeypatch):
+    cfg = ToolsConfig(
+        researcher_administrator_enabled=True,
+        deepchatgpt_enabled=True,
+        prochatgpt_enabled=True,
+    )
+    helper = ResearcherAdministratorAgentTool(
+        cfg,
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["deepchatgpt", "prochatgpt"],
+    )
+    barrier = threading.Barrier(2)
+    observed: dict[str, dict[str, int]] = {}
+
+    def fake_scoped(prompt, ctx, save_artifacts=False):
+        short = "prochatgpt" if prompt == "run-a" else "deepchatgpt"
+        helper._launched_researcher_counts[short] += 1
+        helper._launched_async_job_ids.append(f"job-{short}")
+        barrier.wait(timeout=5)
+        observed[prompt] = dict(helper._launched_researcher_counts)
+        assert helper._launched_async_job_ids == [f"job-{short}"]
+        return prompt
+
+    monkeypatch.setattr(helper, "_run_single_scoped", fake_scoped)
+    outputs: dict[str, str] = {}
+    threads = [
+        threading.Thread(target=lambda: outputs.__setitem__("run-a", helper._run_single("run-a", {}))),
+        threading.Thread(target=lambda: outputs.__setitem__("run-b", helper._run_single("run-b", {}))),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert outputs == {"run-a": "run-a", "run-b": "run-b"}
+    assert observed == {
+        "run-a": {"prochatgpt": 1},
+        "run-b": {"deepchatgpt": 1},
+    }
+
+
+def test_administrator_error_output_keeps_exact_attempted_researcher_count(monkeypatch, tmp_path):
+    import chack_agent
+
+    cfg = ToolsConfig(
+        researcher_administrator_enabled=True,
+        prochatgpt_enabled=True,
+    )
+    helper = ResearcherAdministratorAgentTool(
+        cfg,
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["prochatgpt"],
+    )
+    monkeypatch.setattr(
+        helper,
+        "_build_subagent_tools",
+        lambda _enabled: [SimpleNamespace(name="task_steps_manager")],
+    )
+
+    class FakeChack:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self, **kwargs):
+            helper._launched_researcher_counts["prochatgpt"] += 1
+            return SimpleNamespace(
+                output="ERROR: synthetic administrator failure",
+                tool_counts=Counter(),
+                all_steps=[],
+            )
+
+    monkeypatch.setattr(chack_agent, "Chack", FakeChack)
+    output = helper._run_single(
+        "Research an evidence-heavy medical question with exact sources. " * 12,
+        {
+            "max_turns": 20,
+            "max_runtime_minutes": 0,
+            "remaining_runtime_minutes": 0,
+            "max_cost_usd": 0,
+            "remaining_cost_usd": 0,
+            "research_master_dir": str(tmp_path / "admin-error"),
+        },
+        save_artifacts=True,
+    )
+    payload = json.loads(output)
+
+    assert payload["research_worked"] is False
+    assert payload["researcher_call_counts"] == {"prochatgpt_researcher": 1}
+    assert payload["total_researcher_calls"] == 1
+    assert "synthetic administrator failure" in payload["failure_reason"]
+
+
 def test_administrator_capability_map_lists_internal_researcher_tools():
     cfg = ToolsConfig(
         researcher_administrator_enabled=True,

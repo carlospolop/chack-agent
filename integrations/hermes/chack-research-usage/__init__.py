@@ -51,6 +51,7 @@ class _TurnUsage:
     researcher_calls: dict[str, int] = field(default_factory=dict)
     complete: bool = True
     seen_tool_call_ids: set[str] = field(default_factory=set)
+    seen_administrator_call_ids: set[str] = field(default_factory=set)
 
 
 _LOCK = threading.RLock()
@@ -183,6 +184,20 @@ def _usage_from_payload(payload: dict[str, Any]) -> tuple[int, dict[str, int], b
     return len(rows), counts, complete
 
 
+def _administrator_records_from_payload(
+    payload: dict[str, Any],
+) -> list[tuple[str, dict[str, int], bool]]:
+    """Return per-administrator ledgers so shared merged work can be deduplicated."""
+    records: list[tuple[str, dict[str, int], bool]] = []
+    for row in payload.get("researches") or []:
+        if not isinstance(row, dict):
+            continue
+        call_id = str(row.get("research_id") or row.get("administrator_call_id") or "").strip()
+        counts, complete = _row_counts(row)
+        records.append((call_id, counts, complete))
+    return records
+
+
 def _display_name(tool_name: str) -> str:
     if tool_name in _DISPLAY_NAMES:
         return _DISPLAY_NAMES[tool_name]
@@ -241,11 +256,30 @@ def _post_tool_call(
         if payload is None:
             usage.complete = False
             return
-        administrators, researcher_counts, complete = _usage_from_payload(payload)
-        usage.administrator_calls += administrators
-        for name, count in researcher_counts.items():
-            usage.researcher_calls[name] = usage.researcher_calls.get(name, 0) + count
-        usage.complete = usage.complete and complete and str(status or "").lower() not in {"error", "failed"}
+        administrator_records = _administrator_records_from_payload(payload)
+        if administrator_records:
+            for administrator_call_id, researcher_counts, complete in administrator_records:
+                if (
+                    administrator_call_id
+                    and administrator_call_id in usage.seen_administrator_call_ids
+                ):
+                    continue
+                if administrator_call_id:
+                    usage.seen_administrator_call_ids.add(administrator_call_id)
+                usage.administrator_calls += 1
+                for name, count in researcher_counts.items():
+                    usage.researcher_calls[name] = usage.researcher_calls.get(name, 0) + count
+                usage.complete = usage.complete and complete
+            structured_usage = payload.get("researcher_usage")
+            if isinstance(structured_usage, dict):
+                usage.complete = usage.complete and structured_usage.get("complete") is True
+        else:
+            administrators, researcher_counts, complete = _usage_from_payload(payload)
+            usage.administrator_calls += administrators
+            for name, count in researcher_counts.items():
+                usage.researcher_calls[name] = usage.researcher_calls.get(name, 0) + count
+            usage.complete = usage.complete and complete
+        usage.complete = usage.complete and str(status or "").lower() not in {"error", "failed"}
 
 
 def _transform_llm_output(*, response_text: str, session_id: str = "", **_: Any) -> str | None:

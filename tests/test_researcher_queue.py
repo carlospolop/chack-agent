@@ -470,7 +470,11 @@ def test_process_batch_runs_admin_per_group_and_labels_topics(monkeypatch):
     assert payload["researches"][0]["conclusions"] == "concl::merged one covering a+b"
     assert payload["researches"][0]["topic"].startswith("merged one covering a+b")
     assert payload["researches"][1]["conclusions"] == "concl::merged two"
-    assert payload["researcher_usage"] == {
+    usage = dict(payload["researcher_usage"])
+    administrator_call_ids = usage.pop("administrator_call_ids")
+    assert len(administrator_call_ids) == 2
+    assert len(set(administrator_call_ids)) == 2
+    assert usage == {
         "administrator_calls": 2,
         "researcher_call_counts": {},
         "total_researcher_calls": 0,
@@ -502,7 +506,11 @@ def test_process_batch_aggregates_exact_private_researcher_usage(monkeypatch):
 
     payload = json.loads(helper._process_batch(["a", "b"]))
 
-    assert payload["researcher_usage"] == {
+    usage = dict(payload["researcher_usage"])
+    administrator_call_ids = usage.pop("administrator_call_ids")
+    assert len(administrator_call_ids) == 2
+    assert len(set(administrator_call_ids)) == 2
+    assert usage == {
         "administrator_calls": 2,
         "researcher_call_counts": {
             "deepchatgpt_researcher": 1,

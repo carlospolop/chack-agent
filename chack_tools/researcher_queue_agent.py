@@ -131,12 +131,20 @@ def _researcher_usage_for(researches: Any) -> dict[str, Any]:
         for name, count in _clean_researcher_call_counts(raw_counts).items():
             researcher_counts[name] = researcher_counts.get(name, 0) + count
     researcher_counts = dict(sorted(researcher_counts.items()))
-    return {
+    usage = {
         "administrator_calls": len(rows),
         "researcher_call_counts": researcher_counts,
         "total_researcher_calls": int(sum(researcher_counts.values())),
         "complete": complete,
     }
+    administrator_call_ids = [
+        str(row.get("research_id") or "").strip()
+        for row in rows
+        if str(row.get("research_id") or "").strip()
+    ]
+    if administrator_call_ids:
+        usage["administrator_call_ids"] = administrator_call_ids
+    return usage
 
 
 def _json_loads(output: Any) -> Optional[dict]:

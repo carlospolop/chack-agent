@@ -51,6 +51,19 @@ _ASYNC_RESEARCH_LOCK = threading.Lock()
 _ASYNC_RESEARCH_JOBS: dict[str, dict[str, Any]] = {}
 
 
+class _AdministratorRunAccounting:
+    """Mutable accounting scoped to one administrator invocation."""
+
+    def __init__(self) -> None:
+        self.async_job_ids: list[str] = []
+        self.researcher_counts: Counter[str] = Counter()
+
+
+_ADMINISTRATOR_RUN_ACCOUNTING: contextvars.ContextVar[_AdministratorRunAccounting | None] = (
+    contextvars.ContextVar("chack_administrator_run_accounting", default=None)
+)
+
+
 def _async_job_store(job_id: str, job: dict[str, Any]) -> None:
     with _ASYNC_RESEARCH_LOCK:
         _ASYNC_RESEARCH_JOBS[job_id] = job
@@ -1086,8 +1099,47 @@ class ResearcherAdministratorAgentTool:
         self.knowledge_graph_max_turns = max(2, int(knowledge_graph_max_turns or 30))
         self.religious_max_turns = max(2, int(religious_max_turns or 30))
         self.cli_max_turns = max(2, int(cli_max_turns or 30))
-        self._launched_async_job_ids: list[str] = []
-        self._launched_researcher_counts: Counter[str] = Counter()
+        self._fallback_run_accounting = _AdministratorRunAccounting()
+
+    def _current_run_accounting(self) -> _AdministratorRunAccounting:
+        accounting = _ADMINISTRATOR_RUN_ACCOUNTING.get()
+        return accounting if accounting is not None else self._fallback_run_accounting
+
+    @property
+    def _launched_async_job_ids(self) -> list[str]:
+        return self._current_run_accounting().async_job_ids
+
+    @_launched_async_job_ids.setter
+    def _launched_async_job_ids(self, value: list[str]) -> None:
+        accounting = self._current_run_accounting()
+        accounting.async_job_ids[:] = list(value or [])
+
+    @property
+    def _launched_researcher_counts(self) -> Counter[str]:
+        return self._current_run_accounting().researcher_counts
+
+    @_launched_researcher_counts.setter
+    def _launched_researcher_counts(self, value: Counter[str]) -> None:
+        accounting = self._current_run_accounting()
+        accounting.researcher_counts.clear()
+        accounting.researcher_counts.update(value or {})
+
+    def _launched_researcher_tool_counts(self) -> Counter[str]:
+        """Map run-local launch attempts to canonical researcher tool names."""
+        tool_names = {tool_name for _short, (_attr, tool_name) in RESEARCHER_REGISTRY.items()}
+        counts: Counter[str] = Counter()
+        for raw_name, raw_count in self._launched_researcher_counts.items():
+            count = int(raw_count or 0)
+            if count <= 0:
+                continue
+            name = str(raw_name or "").strip()
+            if name in tool_names:
+                counts[name] += count
+                continue
+            short = normalize_researcher_name(name)
+            if short in RESEARCHER_REGISTRY:
+                counts[RESEARCHER_REGISTRY[short][1]] += count
+        return counts
 
     @staticmethod
     def _normalize_researchers(researchers: Optional[list[str]]) -> list[str]:
@@ -2051,6 +2103,14 @@ class ResearcherAdministratorAgentTool:
         return tools
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
+        accounting = _AdministratorRunAccounting()
+        token = _ADMINISTRATOR_RUN_ACCOUNTING.set(accounting)
+        try:
+            return self._run_single_scoped(prompt, ctx, save_artifacts=save_artifacts)
+        finally:
+            _ADMINISTRATOR_RUN_ACCOUNTING.reset(token)
+
+    def _run_single_scoped(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
         enabled_researchers = self._enabled_researchers()
         if not enabled_researchers:
             return (
@@ -2060,9 +2120,6 @@ class ResearcherAdministratorAgentTool:
         tools = self._build_subagent_tools(enabled_researchers)
         if not tools:
             return "ERROR: no researcher tools available for researcher_administrator."
-        self._launched_async_job_ids = []
-        self._launched_researcher_counts = Counter()
-
         model_name = self._resolved_model() or ""
         launch_block = subagent_launch_block_reason(
             parent_original_runtime_minutes=int(ctx.get("max_runtime_minutes") or 0),
@@ -2221,7 +2278,7 @@ class ResearcherAdministratorAgentTool:
                 combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
                 combined_failures = _researcher_failures_from_async_jobs(self._launched_async_job_ids)
                 combined_tool_counts = _researcher_call_counts_from_async_jobs(self._launched_async_job_ids)
-                combined_tool_counts.update(self._launched_researcher_counts)
+                combined_tool_counts.update(self._launched_researcher_tool_counts())
                 failure_payload = {
                     "research_worked": False,
                     "failure_reason": f"{type(exc).__name__}: {exc}",
@@ -2238,10 +2295,29 @@ class ResearcherAdministratorAgentTool:
                 )
             output = result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
             if output.startswith("ERROR:"):
-                return output
+                combined_responses = list(researcher_responses or [])
+                combined_responses.extend(_researcher_responses_from_async_jobs(self._launched_async_job_ids))
+                combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
+                combined_failures = _researcher_failures_from_async_jobs(self._launched_async_job_ids)
+                combined_tool_counts = _researcher_call_counts_from_async_jobs(self._launched_async_job_ids)
+                combined_tool_counts.update(self._launched_researcher_tool_counts())
+                failure_payload = {
+                    "research_worked": False,
+                    "failure_reason": output,
+                    "administrator_conclusions": "",
+                }
+                return finalize_researcher_administrator_output(
+                    _compact_json(failure_payload),
+                    evidence_dir=master_dir,
+                    save_artifacts=save_artifacts,
+                    researcher_responses=combined_responses,
+                    researcher_failures=combined_failures,
+                    tool_counts=combined_tool_counts,
+                    steps=result.all_steps,
+                )
             tool_counts = result.tool_counts.copy()
             tool_counts.update(_researcher_call_counts_from_async_jobs(self._launched_async_job_ids))
-            tool_counts.update(self._launched_researcher_counts)
+            tool_counts.update(self._launched_researcher_tool_counts())
             combined_responses = list(researcher_responses or [])
             combined_responses.extend(_researcher_responses_from_async_jobs(self._launched_async_job_ids))
             combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
