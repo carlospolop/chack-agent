@@ -951,9 +951,19 @@ class ResearcherQueueAgentTool:
             raw_counts = payload.get("researcher_call_counts")
             entry["researcher_call_counts"] = _clean_researcher_call_counts(raw_counts)
             entry["total_researcher_calls"] = int(sum(entry["researcher_call_counts"].values()))
-            entry["researcher_usage_complete"] = isinstance(raw_counts, dict)
+            required_satisfied = payload.get("required_researchers_satisfied")
+            entry["research_worked"] = payload.get("research_worked") is True
+            if isinstance(required_satisfied, bool):
+                entry["required_researchers_satisfied"] = required_satisfied
+            # Counts are only complete when the administrator returned its ledger and
+            # every explicitly required researcher completed successfully. A failed
+            # required browser job may still have a call count; do not mistake that
+            # attempt for successful coverage.
+            entry["researcher_usage_complete"] = (
+                isinstance(raw_counts, dict) and required_satisfied is not False
+            )
             conclusions = str(payload.get("administrator_conclusions") or "").strip()
-            if conclusions:
+            if conclusions and entry["research_worked"]:
                 entry["conclusions"] = conclusions
                 evidence_path = str(payload.get("evidence_data_path") or "").strip()
                 if save_artifacts and evidence_path:
@@ -963,6 +973,8 @@ class ResearcherQueueAgentTool:
                     entry["output_files"] = output_files
                 return entry
             failure = str(payload.get("failure_reason") or "").strip()
+            if not failure and not entry["research_worked"]:
+                failure = "research administrator did not report successful research"
             if failure:
                 entry["conclusions"] = f"Research failed: {failure}"
                 evidence_path = str(payload.get("evidence_data_path") or "").strip()

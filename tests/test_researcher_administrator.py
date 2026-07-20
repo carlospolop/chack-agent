@@ -6,6 +6,8 @@ from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
 from chack_tools.research_artifacts import cleanup_research_artifacts
@@ -116,6 +118,34 @@ def test_administrator_empty_allowlist_uses_globally_enabled():
     )
     helper = ResearcherAdministratorAgentTool(cfg, model_provider="openai", fallback_model="m")
     assert set(helper._enabled_researchers()) == {"scientific", "websearcher"}
+
+
+def test_required_researchers_must_be_enabled_for_administrator():
+    cfg = ToolsConfig(researcher_administrator_enabled=True, websearcher_enabled=True)
+    with pytest.raises(ValueError, match="required_researchers must be enabled"):
+        ResearcherAdministratorAgentTool(
+            cfg,
+            model_provider="openai",
+            fallback_model="m",
+            researchers=["websearcher"],
+            required_researchers=["prochatgpt"],
+        )
+
+
+def test_administrator_tracks_required_researchers():
+    cfg = ToolsConfig(
+        researcher_administrator_enabled=True,
+        websearcher_enabled=True,
+        prochatgpt_enabled=True,
+    )
+    helper = ResearcherAdministratorAgentTool(
+        cfg,
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["websearcher", "prochatgpt"],
+        required_researchers=["websearcher", "prochatgpt"],
+    )
+    assert helper.required_researchers == ["websearcher", "prochatgpt"]
 
 
 def test_administrator_run_accounting_is_isolated_across_concurrent_calls(monkeypatch):
@@ -1382,6 +1412,68 @@ def test_administrator_finalizer_omits_evidence_path_when_not_preserved():
     assert payload["researcher_responses"] == []
     assert payload["researcher_tool_call_counts"] == {}
     assert payload["researcher_call_counts"] == {}
+
+
+def test_administrator_finalizer_requires_success_from_each_required_researcher():
+    from chack_tools.researcher_administrator_agent import finalize_researcher_administrator_output
+
+    responses = [
+        {
+            "research_worked": True,
+            "failure_reason": "",
+            "final_research_review": "web evidence",
+            "researcher_tool": "websearcher_research",
+        },
+        {
+            "research_worked": True,
+            "failure_reason": "",
+            "final_research_review": "pro evidence",
+            "researcher_tool": "prochatgpt_researcher",
+        },
+    ]
+    final = finalize_researcher_administrator_output(
+        '{"research_worked":true,"failure_reason":"","administrator_conclusions":"summary"}',
+        evidence_dir="/tmp/evidence",
+        save_artifacts=False,
+        researcher_responses=responses,
+        tool_counts=Counter(),
+        steps=[],
+        required_researchers=["websearcher", "prochatgpt"],
+    )
+    payload = json.loads(final)
+
+    assert payload["research_worked"] is True
+    assert payload["required_researchers_satisfied"] is True
+    assert payload["required_researchers"] == ["websearcher_research", "prochatgpt_researcher"]
+
+
+def test_administrator_finalizer_fails_when_required_researcher_did_not_succeed():
+    from chack_tools.researcher_administrator_agent import finalize_researcher_administrator_output
+
+    final = finalize_researcher_administrator_output(
+        '{"research_worked":true,"failure_reason":"","administrator_conclusions":"summary"}',
+        evidence_dir="/tmp/evidence",
+        save_artifacts=False,
+        researcher_responses=[{
+            "research_worked": True,
+            "failure_reason": "",
+            "final_research_review": "web evidence",
+            "researcher_tool": "websearcher_research",
+        }],
+        researcher_failures=[{
+            "researcher_tool": "prochatgpt_researcher",
+            "status": "failed",
+            "failure_reason": "browser failed",
+        }],
+        tool_counts=Counter(),
+        steps=[],
+        required_researchers=["websearcher", "prochatgpt"],
+    )
+    payload = json.loads(final)
+
+    assert payload["research_worked"] is False
+    assert payload["required_researchers_satisfied"] is False
+    assert "prochatgpt_researcher" in payload["failure_reason"]
 
 
 def test_administrator_finalizer_writes_admin_and_researcher_output_files(tmp_path):

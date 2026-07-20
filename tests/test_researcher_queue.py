@@ -50,6 +50,7 @@ def test_queue_registered_only_when_enabled():
 def test_queue_default_wait_is_90_minutes():
     assert ToolsConfig().researcher_queue_max_wait_seconds == 5400
     assert ToolsConfig().researcher_queue_max_cost_usd == 5.0
+    assert ToolsConfig().researcher_queue_required_researchers == []
 
 
 def test_queue_create_returns_reusable_queue_folder():
@@ -753,6 +754,7 @@ def test_run_admin_passes_save_artifacts_and_extracts_evidence_path():
     assert out == {
         "conclusions": "admin conclusion",
         "evidence_data_path": "/tmp/evidence/admin",
+        "research_worked": True,
         "researcher_call_counts": {
             "deepchatgpt_researcher": 1,
             "prochatgpt_researcher": 2,
@@ -760,6 +762,38 @@ def test_run_admin_passes_save_artifacts_and_extracts_evidence_path():
         "total_researcher_calls": 3,
         "researcher_usage_complete": True,
     }
+
+
+def test_run_admin_marks_required_researcher_failure_as_incomplete():
+    class Admin:
+        def _run_single(self, prompt, ctx, save_artifacts=False):
+            return json.dumps(
+                {
+                    "research_worked": False,
+                    "failure_reason": "Required researchers did not complete: prochatgpt_researcher.",
+                    "administrator_conclusions": "partial web-only conclusions",
+                    "researcher_call_counts": {
+                        "websearcher_research": 1,
+                        "prochatgpt_researcher": 1,
+                    },
+                    "required_researchers_satisfied": False,
+                }
+            )
+
+    helper = ResearcherQueueAgentTool(
+        Admin(),
+        config=ToolsConfig(),
+        model_provider="openai",
+        fallback_model="m",
+        queue=ResearcherQueue(),
+    )
+
+    out = helper._run_admin("prompt text", {}, save_artifacts=False)
+
+    assert out["research_worked"] is False
+    assert out["required_researchers_satisfied"] is False
+    assert out["researcher_usage_complete"] is False
+    assert out["conclusions"].startswith("Research failed:")
 
 
 def test_queue_research_context_uses_fixed_queue_limits_not_requester_context():

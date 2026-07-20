@@ -924,6 +924,7 @@ def finalize_researcher_administrator_output(
     tool_counts: Counter[str],
     steps: list[Any],
     researcher_failures: list[dict[str, Any]] | None = None,
+    required_researchers: list[str] | None = None,
 ) -> str:
     payload = _json_from_output(output)
     if payload is None:
@@ -951,6 +952,22 @@ def finalize_researcher_administrator_output(
     calls = _researcher_call_counts(tool_counts, responses, payload["researcher_failures"])
     payload["researcher_call_counts"] = calls
     payload["total_researcher_calls"] = int(sum(calls.values()))
+    required_shorts = ResearcherAdministratorAgentTool._normalize_researchers(required_researchers)
+    if required_shorts:
+        required_tools = [RESEARCHER_REGISTRY[short][1] for short in required_shorts]
+        successful_tools = {
+            str(response.get("researcher_tool") or "").strip()
+            for response in responses
+            if isinstance(response, dict) and response.get("research_worked") is True
+        }
+        missing_tools = [name for name in required_tools if name not in successful_tools]
+        payload["required_researchers"] = required_tools
+        payload["required_researchers_satisfied"] = not missing_tools
+        if missing_tools:
+            message = "Required researchers did not complete successfully: " + ", ".join(missing_tools) + "."
+            existing_reason = str(payload.get("failure_reason") or "").strip()
+            payload["research_worked"] = False
+            payload["failure_reason"] = f"{existing_reason} {message}".strip()
     if save_artifacts:
         try:
             from .research_artifacts import register_untracked_research_artifacts
@@ -1034,6 +1051,7 @@ class ResearcherAdministratorAgentTool:
         model_provider: str = "",
         max_turns: int = 100,
         researchers: Optional[list[str]] = None,
+        required_researchers: Optional[list[str]] = None,
         researcher_model_overrides: Optional[dict] = None,
         researcher_max_turns_overrides: Optional[dict] = None,
         social_network_model: str = "",
@@ -1073,6 +1091,13 @@ class ResearcherAdministratorAgentTool:
         self.self_critique_rounds = max(0, int(self_critique_rounds or 0))
         self.self_critique_enabled = bool(self_critique_enabled or self.self_critique_rounds > 0)
         self.researchers = self._normalize_researchers(researchers)
+        self.required_researchers = self._normalize_researchers(required_researchers)
+        unavailable_required = sorted(set(self.required_researchers) - set(self._enabled_researchers()))
+        if unavailable_required:
+            raise ValueError(
+                "required_researchers must be enabled for this administrator: "
+                + ", ".join(unavailable_required)
+            )
         self.researcher_model_overrides = self._normalize_override_map(researcher_model_overrides)
         self.researcher_max_turns_overrides = self._normalize_override_map(researcher_max_turns_overrides)
         self.social_network_model = social_network_model
@@ -2170,11 +2195,20 @@ class ResearcherAdministratorAgentTool:
             if save_artifacts
             else f"Temporary master evidence folder for this run (do not report it in the final JSON): {master_dir}\n"
         )
+        required_line = (
+            "The caller requires successful results from every one of these researcher types: "
+            + ", ".join(self.required_researchers)
+            + ". Launch each at least once, wait for terminal output (including long ChatGPT browser jobs), "
+            "and do not report research_worked=true unless all required researchers returned research_worked=true.\n"
+            if self.required_researchers
+            else ""
+        )
 
         admin_context = (
             "\n\n### Research administration\n"
             f"Available researcher tools: {available_line}.\n"
             "Do not attempt any `*_research` tool absent from that available list; mark that source family as an uncovered gap instead.\n"
+            f"{required_line}"
             f"{budget_line}"
             f"{master_line}"
             "Each researcher type writes its downloads into its own subfolder here:\n"
@@ -2187,7 +2221,7 @@ class ResearcherAdministratorAgentTool:
             "When artifacts are preserved, inspect the master folder with list_research_artifacts, grep_research_artifacts, or read_research_artifact before declaring that no evidence was collected or that a researcher made no progress; files can appear even when live telemetry is sparse. "
             "For cost and latency control, start with the smallest set of clearly relevant researchers that can cover the task; because execution is serialized, the first wave should usually be 1-2 researchers, and 3 only for broad questions with enough runtime. "
             "Once half the runtime is gone, prefer synthesizing from completed results plus explicit gaps instead of launching more researchers. "
-            "Do not launch researchers just because they are enabled, and do not duplicate a researcher by default. "
+            "Do not launch researchers just because they are enabled unless they are explicitly listed as required, and do not duplicate a researcher by default. "
             "Only launch two runs of the same researcher when the user explicitly asks for split/complementary duplicate research, or after the first result shows a material skipped source family that matters to the answer. "
             "If you intentionally repeat a researcher, include `Duplicate reason:` in that researcher prompt with at least 80 characters explaining the material new gap or contradiction. "
             "For split-priority duplicates, give both runs all essential detail/fetch/download utilities and split only the discovery/source-priority emphasis. "
@@ -2292,6 +2326,7 @@ class ResearcherAdministratorAgentTool:
                     researcher_failures=combined_failures,
                     tool_counts=combined_tool_counts,
                     steps=[],
+                    required_researchers=self.required_researchers,
                 )
             output = result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
             if output.startswith("ERROR:"):
@@ -2314,6 +2349,7 @@ class ResearcherAdministratorAgentTool:
                     researcher_failures=combined_failures,
                     tool_counts=combined_tool_counts,
                     steps=result.all_steps,
+                    required_researchers=self.required_researchers,
                 )
             tool_counts = result.tool_counts.copy()
             tool_counts.update(_researcher_call_counts_from_async_jobs(self._launched_async_job_ids))
@@ -2330,6 +2366,7 @@ class ResearcherAdministratorAgentTool:
                 researcher_failures=combined_failures,
                 tool_counts=tool_counts,
                 steps=result.all_steps,
+                required_researchers=self.required_researchers,
             )
         finally:
             end_researcher_response_collection(collector_token)

@@ -771,6 +771,9 @@ class AgentsToolset:
                 researchers=list(
                     getattr(self.config, "researcher_administrator_researchers", []) or []
                 ),
+                required_researchers=list(
+                    getattr(self.config, "researcher_administrator_required_researchers", []) or []
+                ),
                 researcher_model_overrides=admin_agent_cfg.get("researcher_models"),
                 researcher_max_turns_overrides=admin_agent_cfg.get("researcher_max_turns"),
                 social_network_model=self.social_network_model,
@@ -812,6 +815,9 @@ class AgentsToolset:
 
             queue_agent_cfg = dict(getattr(self.config, "researcher_queue_agent", {}) or {})
             queue_researchers = list(getattr(self.config, "researcher_queue_researchers", []) or [])
+            queue_required_researchers = list(
+                getattr(self.config, "researcher_queue_required_researchers", []) or []
+            )
             queue_admin_model = (
                 self._resolve_alias(str(queue_agent_cfg.get("model") or ""), fallback="")
                 or self.researcher_administrator_model
@@ -842,6 +848,7 @@ class AgentsToolset:
                 self.config,
                 researcher_administrator_enabled=True,
                 researcher_administrator_researchers=queue_researchers,
+                researcher_administrator_required_researchers=queue_required_researchers,
                 researcher_administrator_max_tools_used=queue_admin_budget,
                 chatgpt_pro_timeout_seconds=pro_browser_timeout,
                 chatgpt_deep_timeout_seconds=deep_browser_timeout,
@@ -860,6 +867,7 @@ class AgentsToolset:
                 model_provider=self.model_provider,
                 max_turns=queue_admin_max_turns,
                 researchers=queue_researchers,
+                required_researchers=queue_required_researchers,
                 researcher_model_overrides=queue_agent_cfg.get("researcher_models"),
                 researcher_max_turns_overrides=queue_agent_cfg.get("researcher_max_turns"),
                 social_network_model=self.social_network_model,
