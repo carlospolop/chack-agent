@@ -334,6 +334,7 @@ class Chack:
             "researcher_queue_create": "🗂️",
             "researcher_queue": "📥",
             "researcher_queue_status": "📡",
+            "parallel_research": "⚡",
             "start_researchers_async": "🚀",
             "poll_researchers_async": "📡",
             "cancel_researchers_async": "🛑",

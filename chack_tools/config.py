@@ -186,6 +186,12 @@ class ToolsConfig:
     subchack_enabled: bool = False
     subchack_agent: dict = field(default_factory=dict)
 
+    # Root-level dispatcher that lets the current agent select and launch up to
+    # four of its enabled researcher tools concurrently. Every dispatched
+    # researcher prompt is hard-validated to contain at least 500 characters.
+    parallel_research_enabled: bool = False
+    parallel_research_max_requests: int = 4
+
     researcher_administrator_enabled: bool = False
     # Researcher short-names the administrator may launch (e.g. ["scientific",
     # "business", "websearcher"]). Empty means "every researcher enabled above".

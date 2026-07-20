@@ -138,9 +138,11 @@ from .open_travel_search import (
     get_wikivoyage_search_tool,
 )
 from .researcher_administrator_agent import (
+    RESEARCHER_REGISTRY,
     ResearcherAdministratorAgentTool,
     get_researcher_administrator_tool,
 )
+from .parallel_research_tool import get_parallel_research_tool
 from .scientific_research_agent import ScientificResearchAgentTool, get_scientific_research_tool
 from .scientific_search import (
     ScientificSearchTool,
@@ -1052,6 +1054,19 @@ class AgentsToolset:
                 self_critique_rounds=self.self_critique_rounds,
             )
             tools.append(get_religious_research_tool(religious_helper))
+
+        if getattr(self.config, "parallel_research_enabled", False):
+            researcher_tool_names = {
+                tool_name for _short, (_attribute, tool_name) in RESEARCHER_REGISTRY.items()
+            }
+            researcher_tools = [
+                tool for tool in tools if self._tool_name(tool) in researcher_tool_names
+            ]
+            if researcher_tools:
+                tools.append(get_parallel_research_tool(
+                    researcher_tools,
+                    max_requests=int(getattr(self.config, "parallel_research_max_requests", 4) or 4),
+                ))
 
         if self.config.pdf_text_enabled:
             pdf_helper = PdfTextTool(self.config)
