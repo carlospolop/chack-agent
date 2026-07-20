@@ -158,10 +158,6 @@ models:
     input: 0.2
     cache_read: 0.2
     output: 0.9
-  cognitivecomputations/dolphin-mistral-24b-venice-edition:free:
-    input: 0
-    cache_read: 0
-    output: 0
   cohere/command-a:
     input: 2.5
     cache_read: 2.5
@@ -424,18 +420,10 @@ models:
     input: 0.0509
     cache_read: 0.0509
     output: 0.335
-  meta-llama/llama-3.2-3b-instruct:free:
-    input: 0
-    cache_read: 0
-    output: 0
   meta-llama/llama-3.3-70b-instruct:
     input: 0.13
     cache_read: 0.13
     output: 0.4
-  meta-llama/llama-3.3-70b-instruct:free:
-    input: 0
-    cache_read: 0
-    output: 0
   meta-llama/llama-4-maverick:
     input: 0.2
     cache_read: 0.2
@@ -616,10 +604,6 @@ models:
     input: 1
     cache_read: 1
     output: 1
-  nousresearch/hermes-3-llama-3.1-405b:free:
-    input: 0
-    cache_read: 0
-    output: 0
   nousresearch/hermes-3-llama-3.1-70b:
     input: 0.7
     cache_read: 0.7
@@ -645,9 +629,9 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3-super-120b-a12b:
-    input: 0.21
-    cache_read: 0.06
-    output: 0.455
+    input: 0.085
+    cache_read: 0.085
+    output: 0.4
   nvidia/nemotron-3-super-120b-a12b:free:
     input: 0
     cache_read: 0
@@ -1041,9 +1025,9 @@ models:
     cache_read: 0.4
     output: 1
   qwen/qwen3-14b:
-    input: 0.2275
-    cache_read: 0.2275
-    output: 0.91
+    input: 0.12
+    cache_read: 0.12
+    output: 0.24
   qwen/qwen3-235b-a22b:
     input: 0.455
     cache_read: 0.455
@@ -1053,9 +1037,9 @@ models:
     cache_read: 0.09
     output: 0.55
   qwen/qwen3-235b-a22b-thinking-2507:
-    input: 0.1495
-    cache_read: 0.1495
-    output: 1.495
+    input: 0.3
+    cache_read: 0.3
+    output: 3
   qwen/qwen3-30b-a3b:
     input: 0.13
     cache_read: 0.13
@@ -1098,10 +1082,6 @@ models:
     cache_read: 0.13
     cache_write: 0.8125
     output: 3.25
-  qwen/qwen3-coder:free:
-    input: 0
-    cache_read: 0
-    output: 0
   qwen/qwen3-max:
     input: 0.78
     cache_read: 0.156
@@ -1115,10 +1095,6 @@ models:
     input: 0.1
     cache_read: 0.07
     output: 1.1
-  qwen/qwen3-next-80b-a3b-instruct:free:
-    input: 0
-    cache_read: 0
-    output: 0
   qwen/qwen3-next-80b-a3b-thinking:
     input: 0.0975
     cache_read: 0.0975
@@ -1363,8 +1339,8 @@ models:
     output: 0.4
   z-ai/glm-5:
     input: 0.95
-    cache_read: 0.19
-    output: 3.15
+    cache_read: 0.2
+    output: 2.55
   z-ai/glm-5-turbo:
     input: 1.2
     cache_read: 0.24
@@ -1374,9 +1350,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.2534
-    cache_read: 0.04706
-    output: 0.7964
+    input: 0.9744
+    cache_read: 0.18096
+    output: 3.0624
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
