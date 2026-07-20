@@ -258,7 +258,7 @@ class WebSearcherAgentTool:
             reset_research_artifact_context(artifact_context_tokens)
 
     def run(self, prompt: str | list[str], save_artifacts: bool = False) -> str:
-        prompts, error = normalize_subagent_prompts(prompt, min_chars=300, max_prompts=3)
+        prompts, error = normalize_subagent_prompts(prompt, min_chars=500, max_prompts=3)
         if error:
             return error
         ctx = current_log_context()
@@ -282,7 +282,7 @@ def get_websearcher_research_tool(
         The sub-agent uses Brave + Google + Bing (including AI-mode endpoints) to cross-validate.
 
         Args:
-            prompt: A detailed web research request (string) or a list of up to 3 detailed requests. Each request must be at least 300 characters indicating the goals of the subagent, suggested process to obtain proper results, expected output, and relevant information to gather.
+            prompt: A detailed web research request (string) or a list of up to 3 detailed requests. Each request must be at least 500 characters indicating the goals of the subagent, suggested process to obtain proper results, expected output, and relevant information to gather.
             save_artifacts: If true, preserve the evidence folder after the run and return it in the JSON result. If false, artifacts are temporary and deleted after the run.
 
         Output: Returns the researcher's JSON result with worked status, failure reason when relevant, final review, and artifact folder path only when artifacts are preserved.
