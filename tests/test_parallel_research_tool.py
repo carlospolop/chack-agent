@@ -50,13 +50,12 @@ def test_parallel_research_runs_selected_researchers_concurrently():
     token = set_active_usage_session(session_id)
     try:
         payload = _invoke(tool, {
-            "requests_json": json.dumps([
+            "requests": [
                 {"researcher": "travel", "prompt": prompt},
                 {"researcher": "websearcher", "prompt": prompt},
                 {"researcher": "news_media", "prompt": prompt},
                 {"researcher": "social_network", "prompt": prompt},
-            ]),
-            "max_parallel": 4,
+            ],
         })
     finally:
         reset_active_usage_session(token)
@@ -66,6 +65,11 @@ def test_parallel_research_runs_selected_researchers_concurrently():
         "travel", "websearcher", "news_media", "social_network",
     ]
     assert max_active == 4
+    assert tool.params_json_schema["required"] == ["requests"]
+    assert set(tool.params_json_schema["properties"]) == {"requests"}
+    request_schema = tool.params_json_schema["$defs"]["ParallelResearchRequest"]
+    assert request_schema["required"] == ["researcher", "prompt"]
+    assert request_schema["additionalProperties"] is False
     assert STORE.snapshot(session_id) == {
         "travel_research": 1,
         "websearcher_research": 1,
@@ -83,16 +87,16 @@ def test_parallel_research_rejects_short_prompts_and_more_than_four_requests():
 
     tool = get_parallel_research_tool([travel], max_requests=4)
     short = _invoke(tool, {
-        "requests_json": json.dumps([{"researcher": "travel", "prompt": "short"}]),
+        "requests": [{"researcher": "travel", "prompt": "short"}],
     })
     assert short["worked"] is False
     assert "at least 500 characters" in short["errors"][0]["error"]
 
     prompt = "x" * 500
     too_many = _invoke(tool, {
-        "requests_json": json.dumps([
+        "requests": [
             {"researcher": "travel", "prompt": prompt} for _ in range(5)
-        ]),
+        ],
     })
     assert too_many["worked"] is False
     assert "At most 4" in too_many["errors"][0]
