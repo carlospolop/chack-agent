@@ -956,6 +956,13 @@ class CodexExecutor:
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
             "CODEX_ACCESS_TOKEN",
+            # The parent Codex executor may authenticate with a private
+            # per-run auth.json instead of exporting a bearer token. Pass the
+            # directory to the local MCP subprocess so researcher tools can
+            # copy that authenticated session into their own isolated Codex
+            # homes. Without this, nested web/travel researchers fail even
+            # though the administrator itself is authenticated.
+            "CODEX_HOME",
             "ANTHROPIC_API_KEY",
             "CLAUDE_API_KEY",
             "GEMINI_API_KEY",

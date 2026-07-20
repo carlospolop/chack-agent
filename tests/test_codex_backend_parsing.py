@@ -139,6 +139,17 @@ def test_codex_mcp_env_allowlist_includes_local_vulnerability_store_path():
     assert "AISEC_LOCAL_VULN_STORE_PATH" in env_vars
 
 
+def test_codex_mcp_env_allowlist_propagates_parent_codex_auth_home():
+    env_vars = _load_list_literal(
+        MODULE_PATH,
+        "CodexExecutor",
+        "_write_codex_config",
+        "env_vars",
+    )
+
+    assert "CODEX_HOME" in env_vars
+
+
 def test_codex_mcp_env_allowlist_transports_all_researcher_models_and_travel_credentials():
     env_vars = _load_list_literal(
         MODULE_PATH,
