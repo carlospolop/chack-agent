@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextvars
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, TypedDict
 
 from .researcher_administrator_agent import (
     RESEARCHER_REGISTRY,
@@ -23,6 +23,11 @@ MIN_RESEARCH_PROMPT_CHARS = 500
 MAX_PARALLEL_RESEARCHERS = 4
 
 
+class ParallelResearchRequest(TypedDict):
+    researcher: str
+    prompt: str
+
+
 def _tool_name(tool: Any) -> str:
     return str(getattr(tool, "name", "") or getattr(tool, "__name__", "") or "").strip()
 
@@ -37,28 +42,19 @@ def get_parallel_research_tool(researcher_tools: list[Any], *, max_requests: int
 
     @function_tool(name_override="parallel_research")
     def parallel_research(
-        requests_json: str,
-        save_artifacts: bool = False,
-        max_parallel: int = 4,
+        requests: list[ParallelResearchRequest],
     ) -> str:
         """Run up to four selected researchers concurrently.
 
         Args:
-            requests_json: JSON array of objects with `researcher` and `prompt`. The
+            requests: Array of objects with `researcher` and `prompt`. The
                 researcher may be a short name such as travel, websearcher, news_media,
                 or social_network, or its full tool name. Every prompt must contain at
                 least 500 characters of task-specific context and evidence requirements.
-            save_artifacts: Preserve researcher evidence folders when true.
-            max_parallel: Maximum concurrent researchers, clamped to 1-4.
-
         Output: JSON containing results in request order plus validation/runtime errors.
         """
-        try:
-            requests = json.loads(str(requests_json or "[]"))
-        except json.JSONDecodeError as exc:
-            return json.dumps({"worked": False, "results": [], "errors": [f"Invalid JSON: {exc}"]})
         if not isinstance(requests, list) or not requests:
-            return json.dumps({"worked": False, "results": [], "errors": ["requests_json must be a non-empty array."]})
+            return json.dumps({"worked": False, "results": [], "errors": ["requests must be a non-empty array."]})
         if len(requests) > configured_max:
             return json.dumps({
                 "worked": False,
@@ -102,7 +98,7 @@ def get_parallel_research_tool(researcher_tools: list[Any], *, max_requests: int
                 STORE.add(row["tool_name"])
                 output = ResearcherAdministratorAgentTool._invoke_tool_sync(
                     tools_by_name[row["tool_name"]],
-                    {"prompt": row["prompt"], "save_artifacts": bool(save_artifacts)},
+                    {"prompt": row["prompt"], "save_artifacts": False},
                 )
                 result = {
                     "index": row["index"],
@@ -117,7 +113,7 @@ def get_parallel_research_tool(researcher_tools: list[Any], *, max_requests: int
 
             return context.run(invoke)
 
-        worker_count = max(1, min(int(max_parallel or configured_max), configured_max, len(normalized)))
+        worker_count = max(1, min(configured_max, len(normalized)))
         results: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="parallel-research") as executor:
             futures = {
@@ -145,8 +141,7 @@ def get_parallel_research_tool(researcher_tools: list[Any], *, max_requests: int
         "\n\nUse this when two or more independent research tasks can run concurrently. "
         "Each request chooses its researcher explicitly and every prompt is hard-rejected below 500 characters. "
         "The tool accepts at most four requests and returns all outputs to the calling agent for synthesis.\n"
-        "Parameters: requests_json is a JSON array of researcher/prompt objects; save_artifacts controls evidence "
-        "preservation; max_parallel is clamped to 1-4.\n"
+        "Parameters: requests is an array of researcher/prompt objects. No other parameters are accepted.\n"
         "Output: JSON with worked, request-ordered researcher results, parsed responses when available, and errors."
     )
     return parallel_research
