@@ -135,7 +135,7 @@ def _safe_admin_json(path_value: Any) -> dict[str, Any] | None:
             return None
         payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         return payload if isinstance(payload, dict) else None
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
 
@@ -146,7 +146,13 @@ def _row_counts(row: dict[str, Any]) -> tuple[dict[str, int], bool]:
 
     output_files = row.get("output_files")
     if isinstance(output_files, dict):
-        for path_value in output_files.values():
+        candidates: list[Any] = []
+        administrator_output = output_files.get("administrator_output")
+        evidence_root = row.get("evidence_data_path")
+        if isinstance(administrator_output, str) and isinstance(evidence_root, str):
+            candidates.append(Path(evidence_root) / administrator_output)
+        candidates.extend(value for value in output_files.values() if isinstance(value, str))
+        for path_value in candidates:
             payload = _safe_admin_json(path_value)
             if payload is not None and isinstance(payload.get("researcher_call_counts"), dict):
                 return _positive_counts(payload["researcher_call_counts"]), True

@@ -180,7 +180,11 @@ def test_old_queue_payload_can_recover_counts_from_safe_admin_artifact(plugin, t
         "researches": [
             {
                 "conclusions": "legacy result",
-                "output_files": {"json": str(admin_path)},
+                "evidence_data_path": str(admin_path.parent),
+                "output_files": {
+                    "administrator_output": admin_path.name,
+                    "researcher_outputs": ["researcher_outputs/001.json"],
+                },
             }
         ]
     }
