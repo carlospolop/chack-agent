@@ -11,6 +11,7 @@ from .researcher_administrator_agent import (
     normalize_researcher_name,
 )
 from .subagent_config import researcher_response_from_output
+from .tool_usage_state import STORE
 
 try:
     from agents import function_tool
@@ -95,6 +96,10 @@ def get_parallel_research_tool(researcher_tools: list[Any], *, max_requests: int
 
         def run_one(row: dict[str, Any], context: contextvars.Context) -> dict[str, Any]:
             def invoke() -> dict[str, Any]:
+                # The parent agent sees `parallel_research` as its root tool. Record
+                # each selected researcher in the same run-scoped usage ledger so
+                # callers can audit which nested researchers were actually invoked.
+                STORE.add(row["tool_name"])
                 output = ResearcherAdministratorAgentTool._invoke_tool_sync(
                     tools_by_name[row["tool_name"]],
                     {"prompt": row["prompt"], "save_artifacts": bool(save_artifacts)},

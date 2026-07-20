@@ -6,6 +6,11 @@ from agents import function_tool
 
 from chack_tools.parallel_research_tool import get_parallel_research_tool
 from chack_tools.researcher_administrator_agent import ResearcherAdministratorAgentTool
+from chack_tools.tool_usage_state import (
+    STORE,
+    reset_active_usage_session,
+    set_active_usage_session,
+)
 
 
 def _invoke(tool, payload):
@@ -40,21 +45,34 @@ def test_parallel_research_runs_selected_researchers_concurrently():
     ]
     tool = get_parallel_research_tool(researchers, max_requests=4)
     prompt = "Detailed evidence request. " + ("x" * 520)
-    payload = _invoke(tool, {
-        "requests_json": json.dumps([
-            {"researcher": "travel", "prompt": prompt},
-            {"researcher": "websearcher", "prompt": prompt},
-            {"researcher": "news_media", "prompt": prompt},
-            {"researcher": "social_network", "prompt": prompt},
-        ]),
-        "max_parallel": 4,
-    })
+    session_id = "parallel-research-concurrency-test"
+    STORE.reset_session(session_id)
+    token = set_active_usage_session(session_id)
+    try:
+        payload = _invoke(tool, {
+            "requests_json": json.dumps([
+                {"researcher": "travel", "prompt": prompt},
+                {"researcher": "websearcher", "prompt": prompt},
+                {"researcher": "news_media", "prompt": prompt},
+                {"researcher": "social_network", "prompt": prompt},
+            ]),
+            "max_parallel": 4,
+        })
+    finally:
+        reset_active_usage_session(token)
 
     assert payload["worked"] is True
     assert [item["researcher"] for item in payload["results"]] == [
         "travel", "websearcher", "news_media", "social_network",
     ]
     assert max_active == 4
+    assert STORE.snapshot(session_id) == {
+        "travel_research": 1,
+        "websearcher_research": 1,
+        "news_media_research": 1,
+        "social_network_research": 1,
+    }
+    STORE.clear(session_id)
 
 
 def test_parallel_research_rejects_short_prompts_and_more_than_four_requests():
