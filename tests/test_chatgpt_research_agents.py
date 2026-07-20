@@ -103,7 +103,7 @@ def test_chatgpt_aliases_are_accepted_by_administrator():
 
 
 def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
-    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="pro")
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(chatgpt_execution_backend="local"), mode="pro")
     evidence = tmp_path / "evidence"
     monkeypatch.setattr(
         "chack_tools.chatgpt_research_agents.create_subagent_evidence_dir",
@@ -460,7 +460,7 @@ def test_deep_research_stops_at_its_total_output_deadline(monkeypatch):
 
 
 def test_failed_run_preserves_partial_response_and_conversation_url(monkeypatch, tmp_path):
-    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="pro")
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(chatgpt_execution_backend="local"), mode="pro")
     evidence = tmp_path / "evidence"
     monkeypatch.setattr(
         "chack_tools.chatgpt_research_agents.create_subagent_evidence_dir",
