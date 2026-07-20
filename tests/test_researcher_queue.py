@@ -470,6 +470,48 @@ def test_process_batch_runs_admin_per_group_and_labels_topics(monkeypatch):
     assert payload["researches"][0]["conclusions"] == "concl::merged one covering a+b"
     assert payload["researches"][0]["topic"].startswith("merged one covering a+b")
     assert payload["researches"][1]["conclusions"] == "concl::merged two"
+    assert payload["researcher_usage"] == {
+        "administrator_calls": 2,
+        "researcher_call_counts": {},
+        "total_researcher_calls": 0,
+        "complete": False,
+    }
+
+
+def test_process_batch_aggregates_exact_private_researcher_usage(monkeypatch):
+    helper = _make_helper()
+    monkeypatch.setattr(
+        helper,
+        "_merge_prompts",
+        lambda prompts: [("deep topic", [0]), ("focused topic", [1])],
+    )
+
+    def fake_admin(prompt, ctx, save_artifacts=False):
+        if prompt == "deep topic":
+            counts = {"deepchatgpt_researcher": 1, "websearcher_research": 2}
+        else:
+            counts = {"prochatgpt_researcher": 2, "websearcher_research": 1}
+        return {
+            "conclusions": f"done::{prompt}",
+            "researcher_call_counts": counts,
+            "total_researcher_calls": sum(counts.values()),
+            "researcher_usage_complete": True,
+        }
+
+    monkeypatch.setattr(helper, "_run_admin", fake_admin)
+
+    payload = json.loads(helper._process_batch(["a", "b"]))
+
+    assert payload["researcher_usage"] == {
+        "administrator_calls": 2,
+        "researcher_call_counts": {
+            "deepchatgpt_researcher": 1,
+            "prochatgpt_researcher": 2,
+            "websearcher_research": 3,
+        },
+        "total_researcher_calls": 6,
+        "complete": True,
+    }
 
 
 def test_process_batch_includes_evidence_paths_when_artifacts_are_preserved(monkeypatch):
@@ -544,6 +586,58 @@ def test_filter_removes_evidence_path_for_callers_that_did_not_request_artifacts
 
     assert payload["artifacts_preserved"] is False
     assert "evidence_data_path" not in payload["researches"][0]
+
+
+def test_filter_recomputes_usage_for_each_batched_caller():
+    result = json.dumps(
+        {
+            "researches": [
+                {
+                    "topic": "caller A",
+                    "members": [0],
+                    "researcher_call_counts": {"prochatgpt_researcher": 2},
+                    "researcher_usage_complete": True,
+                },
+                {
+                    "topic": "caller B",
+                    "members": [1],
+                    "researcher_call_counts": {"deepchatgpt_researcher": 1},
+                    "researcher_usage_complete": True,
+                },
+            ],
+            "count": 2,
+        }
+    )
+
+    first = json.loads(
+        ResearcherQueue._filter_result_for_waiter(
+            result,
+            _QueueWaiter(0, 1, save_artifacts=False),
+            batch_id="batch-usage",
+            artifacts_preserved=False,
+        )
+    )
+    second = json.loads(
+        ResearcherQueue._filter_result_for_waiter(
+            result,
+            _QueueWaiter(1, 2, save_artifacts=False),
+            batch_id="batch-usage",
+            artifacts_preserved=False,
+        )
+    )
+
+    assert first["researcher_usage"] == {
+        "administrator_calls": 1,
+        "researcher_call_counts": {"prochatgpt_researcher": 2},
+        "total_researcher_calls": 2,
+        "complete": True,
+    }
+    assert second["researcher_usage"] == {
+        "administrator_calls": 1,
+        "researcher_call_counts": {"deepchatgpt_researcher": 1},
+        "total_researcher_calls": 1,
+        "complete": True,
+    }
 
 
 def test_helper_run_batches_merges_and_routes_shared_research_to_matching_callers(monkeypatch):
@@ -630,6 +724,10 @@ def test_run_admin_passes_save_artifacts_and_extracts_evidence_path():
                     "failure_reason": "",
                     "administrator_conclusions": "admin conclusion",
                     "evidence_data_path": "/tmp/evidence/admin",
+                    "researcher_call_counts": {
+                        "deepchatgpt_researcher": 1,
+                        "prochatgpt_researcher": 2,
+                    },
                 }
             )
 
@@ -647,6 +745,12 @@ def test_run_admin_passes_save_artifacts_and_extracts_evidence_path():
     assert out == {
         "conclusions": "admin conclusion",
         "evidence_data_path": "/tmp/evidence/admin",
+        "researcher_call_counts": {
+            "deepchatgpt_researcher": 1,
+            "prochatgpt_researcher": 2,
+        },
+        "total_researcher_calls": 3,
+        "researcher_usage_complete": True,
     }
 
 

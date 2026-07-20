@@ -1,0 +1,7 @@
+name: chack-research-usage
+version: "1.0.0"
+description: Append exact per-turn Chack queue, administrator, and private researcher call counts to final Hermes responses.
+hooks:
+  - pre_llm_call
+  - post_tool_call
+  - transform_llm_output

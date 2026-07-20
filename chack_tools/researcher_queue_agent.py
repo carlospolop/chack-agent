@@ -95,6 +95,50 @@ def _compact(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _clean_researcher_call_counts(value: Any) -> dict[str, int]:
+    """Return a stable, positive-only researcher call-count mapping."""
+    if not isinstance(value, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for raw_name, raw_count in value.items():
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            counts[name] = counts.get(name, 0) + count
+    return dict(sorted(counts.items()))
+
+
+def _researcher_usage_for(researches: Any) -> dict[str, Any]:
+    """Aggregate one administrator per research plus its private researchers.
+
+    ``complete`` is false whenever an administrator failed before returning its
+    structured call ledger. Callers can therefore show known counts without
+    presenting partial accounting as exact.
+    """
+    rows = [row for row in (researches or []) if isinstance(row, dict)]
+    researcher_counts: dict[str, int] = {}
+    complete = True
+    for row in rows:
+        raw_counts = row.get("researcher_call_counts")
+        if not isinstance(raw_counts, dict) or row.get("researcher_usage_complete") is False:
+            complete = False
+            continue
+        for name, count in _clean_researcher_call_counts(raw_counts).items():
+            researcher_counts[name] = researcher_counts.get(name, 0) + count
+    researcher_counts = dict(sorted(researcher_counts.items()))
+    return {
+        "administrator_calls": len(rows),
+        "researcher_call_counts": researcher_counts,
+        "total_researcher_calls": int(sum(researcher_counts.values())),
+        "complete": complete,
+    }
+
+
 def _json_loads(output: Any) -> Optional[dict]:
     text = str(output or "").strip()
     if not text:
@@ -545,6 +589,7 @@ class ResearcherQueue:
             row["matched_request_indices"] = [idx - waiter.start for idx in matched]
             filtered.append(row)
         if artifacts_preserved and waiter.save_artifacts and waiter.request_dir:
+            usage = _researcher_usage_for(filtered)
             _write_json_file(
                 Path(waiter.request_dir) / "matched_researches.json",
                 {
@@ -553,6 +598,7 @@ class ResearcherQueue:
                     "request_evidence_data_path": waiter.request_dir,
                     "researches": filtered,
                     "count": len(filtered),
+                    "researcher_usage": usage,
                 },
             )
             for idx, item in enumerate(filtered):
@@ -575,6 +621,7 @@ class ResearcherQueue:
                 ),
                 "researches": filtered,
                 "count": len(filtered),
+                "researcher_usage": _researcher_usage_for(filtered),
                 "artifacts_preserved": bool(artifacts_preserved and waiter.save_artifacts),
             }
         )
@@ -823,6 +870,7 @@ class ResearcherQueueAgentTool:
                 "queue_evidence_data_path": queue_root if save_artifacts else "",
                 "researches": researches,
                 "count": len(researches),
+                "researcher_usage": _researcher_usage_for(researches),
                 "artifacts_preserved": bool(save_artifacts),
             }
         )
@@ -878,15 +926,24 @@ class ResearcherQueueAgentTool:
     ) -> dict[str, Any]:
         # Call the administrator's core directly to skip its LLM-facing length gate
         # (the merge agent already produced a proper prompt) and to keep the master
-        # evidence dir isolated per call — runs are sequential, so the process-global
-        # research env vars are never raced.
+        # evidence directory isolated per call. Context-local research state keeps
+        # concurrently dispatched administrator runs from sharing artifact roots.
         try:
             raw = self.admin._run_single(str(prompt), ctx, save_artifacts=save_artifacts)
         except Exception as exc:
-            return {"conclusions": f"Research failed ({type(exc).__name__}: {exc})"}
+            return {
+                "conclusions": f"Research failed ({type(exc).__name__}: {exc})",
+                "researcher_call_counts": {},
+                "total_researcher_calls": 0,
+                "researcher_usage_complete": False,
+            }
         payload = _json_loads(raw)
         entry: dict[str, Any] = {}
         if isinstance(payload, dict):
+            raw_counts = payload.get("researcher_call_counts")
+            entry["researcher_call_counts"] = _clean_researcher_call_counts(raw_counts)
+            entry["total_researcher_calls"] = int(sum(entry["researcher_call_counts"].values()))
+            entry["researcher_usage_complete"] = isinstance(raw_counts, dict)
             conclusions = str(payload.get("administrator_conclusions") or "").strip()
             if conclusions:
                 entry["conclusions"] = conclusions
@@ -907,7 +964,12 @@ class ResearcherQueueAgentTool:
                 if save_artifacts and isinstance(output_files, dict):
                     entry["output_files"] = output_files
                 return entry
-        return {"conclusions": str(raw or "").strip()}
+        return {
+            "conclusions": str(raw or "").strip(),
+            "researcher_call_counts": {},
+            "total_researcher_calls": 0,
+            "researcher_usage_complete": False,
+        }
 
     # -- merge agent: cluster overlapping requests into fewer research prompts --
     def _merge_prompts(self, prompts: list[str]) -> list[tuple[str, list[int], str]]:
