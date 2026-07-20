@@ -49,9 +49,25 @@ _LOGGER = logging.getLogger("chack.codex_backend")
 # (verifiers vs research administrators vs sub-researchers) get different wall-clock caps.
 # CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION is a JSON map {sub_action: seconds, "default": n};
 # falls back to the global CHACK_CODEX_EXEC_TIMEOUT_SECONDS, then 900.
-def _resolve_codex_exec_timeout(sub_action: str) -> int:
-    default = int(os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "900") or "900")
-    raw = str(os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION", "") or "").strip()
+def _resolve_codex_exec_timeout(
+    sub_action: str,
+    runtime_env: Optional[dict[str, str]] = None,
+) -> int:
+    runtime_env = runtime_env or {}
+    default = int(
+        runtime_env.get(
+            "CHACK_CODEX_EXEC_TIMEOUT_SECONDS",
+            os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "900"),
+        )
+        or "900"
+    )
+    raw = str(
+        runtime_env.get(
+            "CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION",
+            os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION", ""),
+        )
+        or ""
+    ).strip()
     if raw:
         try:
             m = json.loads(raw)
@@ -146,8 +162,11 @@ def _preview_text(value: Any, *, max_chars: int = 2000) -> str:
     return text[:max_chars] + "...[truncated]"
 
 
-def _resolve_codex_exec_cwd() -> str:
-    candidate = str(os.environ.get("CHACK_EXEC_CWD", "") or "").strip()
+def _resolve_codex_exec_cwd(runtime_env: Optional[dict[str, str]] = None) -> str:
+    runtime_env = runtime_env or {}
+    candidate = str(
+        runtime_env.get("CHACK_EXEC_CWD", os.environ.get("CHACK_EXEC_CWD", "")) or ""
+    ).strip()
     if candidate:
         return candidate
     return os.getcwd()
@@ -233,6 +252,20 @@ class CodexExecutor:
     _prompt_only_next_invocation: bool = False
     _travel_model: str = ""
     _travel_max_turns: int = 50
+    _runtime_env_json: str = "{}"
+
+    def _runtime_env(self) -> dict[str, str]:
+        try:
+            value = json.loads(self._runtime_env_json or "{}")
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): str(item) for key, item in value.items() if item is not None}
+
+    def _runtime_env_value(self, name: str, default: str = "") -> str:
+        runtime_env = self._runtime_env()
+        return str(runtime_env.get(name, os.environ.get(name, default)) or default)
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
         self._prompt_only_next_invocation = True
@@ -324,8 +357,8 @@ class CodexExecutor:
     ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         command = self._build_command()
         env = self._build_env()
-        timeout_seconds = _resolve_codex_exec_timeout(self._sub_action)
-        exec_cwd = _resolve_codex_exec_cwd()
+        timeout_seconds = _resolve_codex_exec_timeout(self._sub_action, self._runtime_env())
+        exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
         _LOGGER.info(
             "Starting Codex CLI process: model=%s timeout_seconds=%s thread_id=%s cwd=%s ts=%s",
             self._model_name,
@@ -762,6 +795,9 @@ class CodexExecutor:
 
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
+        # Config env belongs to this executor. Overlay it after the process env so
+        # parallel Chack instances cannot overwrite one another's runtime settings.
+        env.update(self._runtime_env())
         augment_subprocess_pythonpath(env)
         if self._uses_openrouter_route:
             env["OPENROUTER_API_KEY"] = self._openai_api_key
@@ -812,9 +848,9 @@ class CodexExecutor:
         # session id) under the configured env var so the shared server can route this
         # agent's tool calls to the right identity. Set per-subprocess (not inherited)
         # so parallel same-process agents don't collide on one os.environ value.
-        if str(os.environ.get("CHACK_CODEX_MCP_URL", "") or "").strip():
+        if self._runtime_env_value("CHACK_CODEX_MCP_URL").strip():
             bearer_env_name = (
-                str(os.environ.get("CHACK_CODEX_MCP_BEARER_TOKEN_ENV", "") or "").strip()
+                self._runtime_env_value("CHACK_CODEX_MCP_BEARER_TOKEN_ENV").strip()
                 or "CHACK_CODEX_MCP_BEARER_TOKEN"
             )
             bearer_token = str(current_session_id() or self._thread_id or "").strip()
@@ -879,7 +915,7 @@ class CodexExecutor:
         if len(raw) <= CHACK_INLINE_ENV_VALUE_MAX_CHARS:
             env[env_key] = raw
             return
-        payload_dir = self._codex_home or os.environ.get("CHACK_CODEX_HOME_BASE", "").strip() or ""
+        payload_dir = self._codex_home or self._runtime_env_value("CHACK_CODEX_HOME_BASE").strip() or ""
         path = write_payload_to_file(raw, prefix=prefix, directory=payload_dir)
         env[path_env_key] = path
 
@@ -887,8 +923,8 @@ class CodexExecutor:
         if self._codex_home:
             return
         safe_session = re.sub(r"[^A-Za-z0-9._-]", "_", str(current_session_id() or "default"))
-        home_base = str(
-            os.environ.get("CHACK_CODEX_HOME_BASE", os.path.expanduser("~/.codex/chack")) or ""
+        home_base = self._runtime_env_value(
+            "CHACK_CODEX_HOME_BASE", os.path.expanduser("~/.codex/chack")
         ).strip() or os.path.expanduser("~/.codex/chack")
         base = os.path.join(home_base, safe_session)
         os.makedirs(base, exist_ok=True)
@@ -1053,10 +1089,11 @@ class CodexExecutor:
         )
         config_lines.append(f"instructions = {_toml_string(instructions_text)}")
         chack_mcp_startup_timeout = int(
-            os.environ.get("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "120") or "120"
+            self._runtime_env_value("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "120")
+            or "120"
         )
         playwright_mcp_startup_timeout = int(
-            os.environ.get(
+            self._runtime_env_value(
                 "CHACK_CODEX_PLAYWRIGHT_MCP_STARTUP_TIMEOUT_SECONDS",
                 str(chack_mcp_startup_timeout),
             )
@@ -1084,8 +1121,10 @@ class CodexExecutor:
             if header_entries:
                 config_lines.extend(["[model_providers.openrouter.env_http_headers]"])
                 config_lines.extend(header_entries)
-        chack_mcp_tool_timeout = int(os.environ.get("CHACK_MCP_TOOL_TIMEOUT_SECONDS", "3600") or "3600")
-        chack_shared_mcp_url = str(os.environ.get("CHACK_CODEX_MCP_URL", "") or "").strip()
+        chack_mcp_tool_timeout = int(
+            self._runtime_env_value("CHACK_MCP_TOOL_TIMEOUT_SECONDS", "3600") or "3600"
+        )
+        chack_shared_mcp_url = self._runtime_env_value("CHACK_CODEX_MCP_URL").strip()
         if chack_shared_mcp_url:
             # Point every codex agent at ONE shared streamable-HTTP MCP server (e.g. a
             # host-process server that holds a shared queue / board), instead of each
@@ -1096,7 +1135,7 @@ class CodexExecutor:
                 f"url = {_toml_string(chack_shared_mcp_url)}",
             ]
             bearer_env = (
-                str(os.environ.get("CHACK_CODEX_MCP_BEARER_TOKEN_ENV", "") or "").strip()
+                self._runtime_env_value("CHACK_CODEX_MCP_BEARER_TOKEN_ENV").strip()
                 or "CHACK_CODEX_MCP_BEARER_TOKEN"
             )
             shared_mcp_lines.append(f"bearer_token_env_var = {_toml_string(bearer_env)}")
@@ -1654,4 +1693,21 @@ def build_executor(
         _openrouter_app_name=str((route.headers.get("X-Title", "") if route else "")),
         _disable_native_shell=disable_native_shell,
         _disable_native_web_search=disable_native_web_search,
+        _runtime_env_json=json.dumps(
+            {
+                "CHACK_EXEC_TIMEOUT": str(config.tools.exec_timeout_seconds),
+                "CHACK_EXEC_MAX_OUTPUT": str(config.tools.exec_max_output_chars),
+                **(
+                    {"CHACK_EXEC_CWD": str(config.tools.exec_cwd)}
+                    if str(getattr(config.tools, "exec_cwd", "") or "").strip()
+                    else {}
+                ),
+                **{
+                    str(key): str(value)
+                    for key, value in (config.env or {}).items()
+                    if value is not None
+                },
+            },
+            ensure_ascii=False,
+        ),
     )
