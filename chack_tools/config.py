@@ -190,6 +190,10 @@ class ToolsConfig:
     # Researcher short-names the administrator may launch (e.g. ["scientific",
     # "business", "websearcher"]). Empty means "every researcher enabled above".
     researcher_administrator_researchers: list = field(default_factory=list)
+    # Optional subset that must each return one successful result. This is useful
+    # when the caller treats researcher selection as a requirement rather than an
+    # allowlist. Empty preserves the administrator's relevance-based selection.
+    researcher_administrator_required_researchers: list = field(default_factory=list)
     researcher_administrator_agent: dict = field(default_factory=dict)
 
     # Shared research queue. Several agents (threads in one process, or external
@@ -218,6 +222,9 @@ class ToolsConfig:
     # Researcher short-names the queue's administrator may launch. Empty means
     # "every researcher enabled above" (same semantics as the administrator).
     researcher_queue_researchers: list = field(default_factory=list)
+    # Optional subset of queue researchers that must each complete successfully
+    # in every merged administrator request.
+    researcher_queue_required_researchers: list = field(default_factory=list)
     researcher_queue_agent: dict = field(default_factory=dict)
     researcher_queue_max_tools_used: int = 0
 
