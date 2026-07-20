@@ -223,7 +223,7 @@ class ChatGPTRemoteWorker:
         lease_id = str(lease.get("lease_id") or "")
         mode = str(lease.get("mode") or "")
         prompt = str(lease.get("prompt") or "")
-        output_timeout = int(lease.get("output_timeout_seconds") or (1800 if mode == "pro" else 4500))
+        output_timeout = int(lease.get("output_timeout_seconds") or (5400 if mode == "pro" else 4500))
         if not job_id or not lease_id or mode not in {"pro", "deep"} or not prompt:
             LOG.error("broker returned an invalid lease payload")
             return

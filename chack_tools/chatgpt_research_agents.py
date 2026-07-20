@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - mirrors the other researcher modules
 
 Mode = Literal["deep", "pro"]
 
-CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 30 * 60
+CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 90 * 60
 CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS = 75 * 60
 _REMOTE_METADATA_FIELDS = {
     "mode",
@@ -156,7 +156,13 @@ class ChatGPTWebResearchAgentTool:
     ) -> tuple[str, str, dict[str, Any]]:
         """Submit through the cloud broker and poll without touching local CDP."""
         client = self._async_client()
-        submitted = client.submit(mode=self.mode, prompt=prompt, idempotency_key=str(uuid.uuid4()))
+        output_timeout_seconds = self._timeout_seconds()
+        submitted = client.submit(
+            mode=self.mode,
+            prompt=prompt,
+            idempotency_key=str(uuid.uuid4()),
+            output_timeout_seconds=output_timeout_seconds,
+        )
         job_id = str(submitted.get("job_id") or "")
         if not job_id:
             raise ChatGPTWebResearchError("ChatGPT async API did not return a job id.")
@@ -169,7 +175,7 @@ class ChatGPTWebResearchAgentTool:
             "remote_job_id": job_id,
             "submitted_at": started,
             "terminal_state": "queued",
-            "output_timeout_seconds": self._timeout_seconds(),
+            "output_timeout_seconds": output_timeout_seconds,
         }
         self._write_json(run_state_path, metadata)
         last_stage = "queued"
@@ -721,7 +727,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             now = time.monotonic()
             # Pro's Answer-now recovery window is inside the total output
             # deadline. It must never extend a broken browser request beyond the
-            # configured 30-minute default.
+            # configured total output deadline.
             if (
                 self.mode == "pro"
                 and not forced_answer

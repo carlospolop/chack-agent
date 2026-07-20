@@ -42,9 +42,9 @@ def test_chatgpt_research_tools_register_only_when_enabled():
 
 def test_chatgpt_modes_have_distinct_total_output_deadlines():
     config = ToolsConfig()
-    assert resolve_chatgpt_timeout_seconds(config, "pro") == 30 * 60
+    assert resolve_chatgpt_timeout_seconds(config, "pro") == 90 * 60
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 75 * 60
-    assert CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS == 1800
+    assert CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS == 5400
     assert CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS == 4500
 
 
@@ -184,6 +184,7 @@ def test_remote_backend_submits_polls_and_preserves_result(monkeypatch, tmp_path
         def submit(self, **kwargs):
             assert kwargs["mode"] == "deep"
             assert kwargs["prompt"] == "P" * 500
+            assert kwargs["output_timeout_seconds"] == 4500
             assert kwargs["idempotency_key"]
             return {"job_id": "job_00000000-0000-0000-0000-000000000001", "status": "QUEUED"}
 
@@ -248,13 +249,14 @@ def test_async_client_sends_bearer_secret_only_in_header():
 
     session = Session()
     client = ChatGPTAsyncApiClient("https://broker.example", "known-secret", session=session)  # type: ignore[arg-type]
-    client.submit(mode="pro", prompt="P" * 100, idempotency_key="idem")
+    client.submit(mode="pro", prompt="P" * 100, idempotency_key="idem", output_timeout_seconds=5400)
     assert session.call is not None
     method, url, kwargs = session.call
     assert method == "POST"
     assert "known-secret" not in url
     assert kwargs["headers"]["authorization"] == "Bearer known-secret"
     assert "known-secret" not in json.dumps(kwargs["json"])
+    assert kwargs["json"]["output_timeout_seconds"] == 5400
     assert kwargs["allow_redirects"] is False
 
 

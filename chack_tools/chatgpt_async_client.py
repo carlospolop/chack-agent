@@ -117,11 +117,25 @@ class ChatGPTAsyncApiClient:
             error_code=getattr(last_error, "error_code", "transport_error"),
         )
 
-    def submit(self, *, mode: str, prompt: str, idempotency_key: str) -> dict[str, Any]:
+    def submit(
+        self,
+        *,
+        mode: str,
+        prompt: str,
+        idempotency_key: str,
+        output_timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "mode": mode,
+            "prompt": prompt,
+            "idempotency_key": idempotency_key,
+        }
+        if output_timeout_seconds is not None:
+            body["output_timeout_seconds"] = int(output_timeout_seconds)
         return self._request(
             "POST",
             "/v1/chatgpt/jobs",
-            json_body={"mode": mode, "prompt": prompt, "idempotency_key": idempotency_key},
+            json_body=body,
             expected=(200, 202),
         )
 
