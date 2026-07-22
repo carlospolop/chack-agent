@@ -83,7 +83,7 @@ def _resolve_codex_exec_timeout(
 
 
 # Optional host-process callback invoked whenever a codex process times out, so the
-# application (e.g. the factchecker) can alert Discord. Called with a dict describing the
+# host application can alert its operator. Called with a dict describing the
 # timed-out agent. Runs in the same process/thread that monitors the codex subprocess.
 _CODEX_TIMEOUT_HOOK = None
 

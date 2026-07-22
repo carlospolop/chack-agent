@@ -8,7 +8,7 @@ merge agent, each merged request is researched once by a ``ResearcherAdministrat
 and every caller receives the researches relevant to the request(s) it submitted.
 
 Sharing works in two ways with the exact same in-memory queue:
-- Same process: several chacks running as threads (e.g. the factchecker verifiers)
+- Same process: several chacks running as threads (e.g. parallel verifier agents)
   share the module-level ``RESEARCHER_QUEUE`` singleton directly.
 - MCP service: run one long-lived ``chack_tools`` MCP server (streamable-http); every
   external client that connects hits the same process and therefore the same queue.
@@ -180,7 +180,7 @@ def _queue_root_for_id(queue_id: str) -> str:
 
 
 # Env var that supplies a default queue_id when a caller does not pass one. Lets a
-# host process (e.g. the factchecker) make every researcher_queue call in the
+# host process make every researcher_queue call in the
 # process share one logical queue and one shared evidence folder.
 QUEUE_ID_ENV = "CHACK_RESEARCHER_QUEUE_ID"
 
