@@ -949,6 +949,15 @@ class CodexExecutor:
             "CHACK_CHATGPT_ASYNC_API_URL",
             "CHACK_CHATGPT_ASYNC_API_SECRET",
             "PYTHONPATH",
+            # Preserve any caller-provided execution sandbox in the MCP server.
+            # Dynamic-AIgent uses these variables to route PoC package installs
+            # into a disposable virtualenv instead of this scanner runtime.
+            "PATH",
+            "VIRTUAL_ENV",
+            "PIP_REQUIRE_VIRTUALENV",
+            "PIP_DISABLE_PIP_VERSION_CHECK",
+            "PYTHONNOUSERSITE",
+            "DYNAMIC_POC_VIRTUAL_ENV",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",

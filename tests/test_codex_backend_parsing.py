@@ -214,6 +214,27 @@ def test_cli_mcp_env_allowlists_transport_async_chatgpt_broker_credentials():
         assert required <= set(values), f"missing broker environment in {path.name}"
 
 
+def test_cli_mcp_env_allowlists_preserve_poc_python_isolation():
+    configurations = (
+        (MODULE_PATH, "CodexExecutor", "_write_codex_config", "env_vars"),
+        (CLAUDE_MODULE_PATH, "ClaudeCodeExecutor", "_mcp_env_map", "env_keys"),
+        (GEMINI_MODULE_PATH, "GeminiCliExecutor", "_gemini_mcp_env_map", "env_keys"),
+        (COPILOT_MODULE_PATH, "CopilotCliExecutor", "_copilot_mcp_env_map", "env_keys"),
+    )
+    required = {
+        "PATH",
+        "VIRTUAL_ENV",
+        "PIP_REQUIRE_VIRTUALENV",
+        "PIP_DISABLE_PIP_VERSION_CHECK",
+        "PYTHONNOUSERSITE",
+        "DYNAMIC_POC_VIRTUAL_ENV",
+    }
+    for path, class_name, function_name, target_name in configurations:
+        values = _load_list_literal(path, class_name, function_name, target_name)
+        assert required <= set(values), f"missing PoC isolation environment in {path.name}"
+        assert "DYNAMIC_POC_HOST_PATH" not in values, f"host PATH leaked into {path.name}"
+
+
 def test_codex_backend_logs_codex_cli_failure_event():
     module_ast = ast.parse(MODULE_PATH.read_text())
     found = False
