@@ -49,6 +49,47 @@ _LOGGER = logging.getLogger("chack.claude_code_backend")
 _MCP_STARTUP_STATUS_PATH_ENV = "CHACK_MCP_STARTUP_STATUS_PATH"
 
 
+def _claude_cli_json_schema(schema_json: str) -> str:
+    """Remove dialect declarations that Claude CLI cannot resolve.
+
+    Claude Code validates ``--json-schema`` with its bundled validator. Some
+    releases do not register the draft 2020-12 metaschema and reject an
+    otherwise supported schema solely because it contains ``$schema``. The
+    declaration does not define an output constraint, so remove it while
+    preserving every validation keyword. Keep invalid/non-object input intact
+    so the CLI still reports the original configuration error.
+    """
+
+    raw_schema = str(schema_json or "")
+    try:
+        schema = json.loads(raw_schema)
+    except (TypeError, json.JSONDecodeError):
+        return raw_schema
+    if not isinstance(schema, dict):
+        return raw_schema
+
+    changed = False
+
+    def strip_dialect(value: Any) -> Any:
+        nonlocal changed
+        if isinstance(value, dict):
+            normalized = {}
+            for key, item in value.items():
+                if key == "$schema":
+                    changed = True
+                    continue
+                normalized[key] = strip_dialect(item)
+            return normalized
+        if isinstance(value, list):
+            return [strip_dialect(item) for item in value]
+        return value
+
+    normalized = strip_dialect(schema)
+    if not changed:
+        return raw_schema
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
+
 def _seconds_until_claude_quota_reset(
     output: str,
     *,
@@ -1237,7 +1278,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         if self._claude_session_id:
             args.extend(["--resume", self._claude_session_id])
         if self._output_schema_json:
-            args.extend(["--json-schema", self._output_schema_json])
+            args.extend(["--json-schema", _claude_cli_json_schema(self._output_schema_json)])
 
         return args
 
