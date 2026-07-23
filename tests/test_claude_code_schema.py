@@ -83,6 +83,29 @@ def test_claude_command_forces_configured_output_schema() -> None:
     assert "Your response must strictly match the JSON schema." in prompt
 
 
+def test_claude_command_removes_unsupported_json_schema_dialect_declarations() -> None:
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "result": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "string",
+            }
+        },
+        "required": ["result"],
+    }
+    executor = _build_executor(json.dumps(schema))
+
+    command = executor._build_command(executor._compose_prompt("classify repository"))
+    cli_schema = json.loads(command[command.index("--json-schema") + 1])
+
+    assert "$schema" not in cli_schema
+    assert "$schema" not in cli_schema["properties"]["result"]
+    assert cli_schema["properties"]["result"]["type"] == "string"
+    assert cli_schema["required"] == ["result"]
+
+
 def test_claude_sends_large_prompt_via_stdin(monkeypatch, tmp_path) -> None:
     prompt = "large prompt\n" + ("x" * 500_000)
     captured: dict[str, object] = {}
