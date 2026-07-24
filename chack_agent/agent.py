@@ -79,6 +79,10 @@ from .pricing import (
     load_pricing,
     resolve_pricing_path,
 )
+from .resume_compaction import (
+    DEFAULT_RESUME_COMPACTION_INSTRUCTIONS,
+    ResumeCompactionResult,
+)
 
 
 def _build_self_critique_prompt(*, mention_task_steps_manager: bool) -> str:
@@ -161,6 +165,15 @@ class RunResult:
     total_cost: Optional[float] = None
     tool_counts_text: str = ""
     suffix: str = ""
+    time_to_first_token_seconds: Optional[float] = None
+    time_to_first_token_source: str = "unavailable"
+    initial_prompt_chars: int = 0
+    resume_compaction_attempted: bool = False
+    resume_compaction_succeeded: bool = False
+    resume_compaction_backend: str = ""
+    resume_compaction_method: str = ""
+    resume_compaction_duration_seconds: float = 0.0
+    resume_compaction_error: str = ""
 
 
 TaskStepsSnapshotCallback = Callable[[Dict[str, Any]], None]
@@ -1342,6 +1355,8 @@ class Chack:
         prompt_variables_override: Optional[Dict[str, Any]] = None,
         exec_cwd: Optional[str] = None,
         stop_requested: Optional[Callable[[], bool]] = None,
+        compact_before_resume: bool = False,
+        resume_compaction_instructions: Optional[str] = None,
     ) -> RunResult:
         return await asyncio.to_thread(
             self.run,
@@ -1363,6 +1378,8 @@ class Chack:
             prompt_variables_override=prompt_variables_override,
             exec_cwd=exec_cwd,
             stop_requested=stop_requested,
+            compact_before_resume=compact_before_resume,
+            resume_compaction_instructions=resume_compaction_instructions,
         )
 
     def run(
@@ -1388,6 +1405,8 @@ class Chack:
         exec_cwd: Optional[str] = None,
         stop_requested: Optional[Callable[[], bool]] = None,
         output_schema_json_override: Optional[Dict[str, Any]] = None,
+        compact_before_resume: bool = False,
+        resume_compaction_instructions: Optional[str] = None,
     ) -> RunResult:
         log_token = set_log_context(
             main_action=str(self.config.agent.main_action or ""),
@@ -1458,6 +1477,11 @@ class Chack:
             cost_warning_threshold = max_cost_usd * budget_warning_ratio
             cost_critical_threshold = max_cost_usd * budget_critical_ratio
             estimated_cost_spent = 0.0
+            resume_compaction = ResumeCompactionResult(
+                backend=str(getattr(self.config.model, "provider", "") or ""),
+                method="unavailable",
+            )
+            resume_compaction_usage = (0, 0, 0, 0)
             progress_state = {"runtime_percent": 0, "cost_percent": 0}
             limit_event_state = {"runtime": False, "cost": False, "tools": False}
             completion_preserved_state = {
@@ -1465,6 +1489,8 @@ class Chack:
                 "cost": False,
                 "tools": False,
             }
+            time_to_first_token_seconds: Optional[float] = None
+            time_to_first_token_source = "unavailable"
 
             # Export budget env vars for MCP subprocess backends
             export_budget_env(
@@ -1596,6 +1622,114 @@ class Chack:
                 max_cost_usd=max_cost_usd,
             )
 
+            if compact_before_resume:
+                compact_for_resume = getattr(executor, "compact_for_resume", None)
+                if callable(compact_for_resume):
+                    focus = str(
+                        resume_compaction_instructions
+                        if resume_compaction_instructions is not None
+                        else DEFAULT_RESUME_COMPACTION_INSTRUCTIONS
+                    ).strip()
+                    try:
+                        compacted = compact_for_resume(focus)
+                        if isinstance(compacted, ResumeCompactionResult):
+                            resume_compaction = compacted
+                        elif isinstance(compacted, dict):
+                            resume_compaction = ResumeCompactionResult(
+                                backend=str(
+                                    compacted.get("backend")
+                                    or getattr(self.config.model, "provider", "")
+                                    or ""
+                                ),
+                                method=str(
+                                    compacted.get("method") or "backend_native"
+                                ),
+                                attempted=bool(compacted.get("attempted")),
+                                succeeded=bool(compacted.get("succeeded")),
+                                duration_seconds=max(
+                                    0.0,
+                                    float(
+                                        compacted.get("duration_seconds", 0.0)
+                                        or 0.0
+                                    ),
+                                ),
+                                raw_responses=list(
+                                    compacted.get("raw_responses") or []
+                                ),
+                                error=str(compacted.get("error") or ""),
+                            )
+                        else:
+                            resume_compaction = ResumeCompactionResult(
+                                backend=str(
+                                    getattr(self.config.model, "provider", "")
+                                    or ""
+                                ),
+                                method="backend_native",
+                                attempted=bool(compacted),
+                                succeeded=bool(compacted),
+                            )
+                    except Exception as exc:
+                        resume_compaction = ResumeCompactionResult(
+                            backend=str(
+                                getattr(self.config.model, "provider", "") or ""
+                            ),
+                            method="backend_native",
+                            attempted=True,
+                            succeeded=False,
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                    resume_compaction_usage = self._usage_from_raw_result(
+                        type(
+                            "_ResumeCompactionRawResult",
+                            (),
+                            {
+                                "raw_responses": list(
+                                    resume_compaction.raw_responses or []
+                                )
+                            },
+                        )()
+                    )
+                    resume_cost = self._estimate_model_cost(
+                        self._pricing,
+                        str(self.config.model.primary or ""),
+                        prompt_tokens=resume_compaction_usage[0],
+                        completion_tokens=resume_compaction_usage[1],
+                        cached_prompt_tokens=resume_compaction_usage[2],
+                        cache_write_tokens=resume_compaction_usage[3],
+                    )
+                    estimated_cost_spent += float(resume_cost or 0.0)
+                    update_spent_usd(estimated_cost_spent)
+                    export_spent_usd_env(estimated_cost_spent)
+                    log_event(
+                        "agent_resume_compaction",
+                        payload={
+                            "session_id": session_id,
+                            "task_session_id": telemetry_task_session_id,
+                            "backend": resume_compaction.backend,
+                            "method": resume_compaction.method,
+                            "attempted": resume_compaction.attempted,
+                            "succeeded": resume_compaction.succeeded,
+                            "duration_seconds": resume_compaction.duration_seconds,
+                            "prompt_tokens": resume_compaction_usage[0],
+                            "completion_tokens": resume_compaction_usage[1],
+                            "cached_prompt_tokens": resume_compaction_usage[2],
+                            "cache_write_prompt_tokens": resume_compaction_usage[3],
+                            "error": resume_compaction.error[:500],
+                        },
+                    )
+                    if (
+                        resume_compaction.attempted
+                        and not resume_compaction.succeeded
+                    ):
+                        self.logger.warning(
+                            "Pre-resume compaction failed open for session %s "
+                            "(backend=%s method=%s error=%s).",
+                            session_id,
+                            resume_compaction.backend,
+                            resume_compaction.method,
+                            resume_compaction.error,
+                        )
+
             def _listener(board_text: str) -> None:
                 if on_task_steps_manager_update is None:
                     pass
@@ -1658,7 +1792,7 @@ class Chack:
                 require_task_steps_manager_init: Optional[bool] = None,
                 required_tools_target: Optional[Sequence[str]] = None,
             ):
-                nonlocal estimated_cost_spent
+                nonlocal estimated_cost_spent, time_to_first_token_seconds, time_to_first_token_source
                 result = {}
                 all_steps: list = []
                 prompt_total = 0
@@ -2046,6 +2180,30 @@ class Chack:
                         attempt_cached,
                         attempt_cache_write,
                     ) = self._usage_from_raw_result(result.get("raw_result"))
+                    raw_time_to_first_token = getattr(
+                        result.get("raw_result"),
+                        "time_to_first_token_seconds",
+                        None,
+                    )
+                    if (
+                        time_to_first_token_seconds is None
+                        and raw_time_to_first_token is not None
+                    ):
+                        try:
+                            time_to_first_token_seconds = max(
+                                0.0,
+                                float(raw_time_to_first_token),
+                            )
+                            time_to_first_token_source = str(
+                                getattr(
+                                    result.get("raw_result"),
+                                    "time_to_first_token_source",
+                                    "backend_first_response_event",
+                                )
+                                or "backend_first_response_event"
+                            )
+                        except (TypeError, ValueError):
+                            pass
 
                     if max_cost_usd > 0:
                         attempt_cost = 0.0
@@ -2325,6 +2483,12 @@ class Chack:
                 raise ValueError(
                     "No user input text provided and config.user_prompt is empty."
                 )
+            initial_prompt_chars = len(request_text) + len(
+                self._system_prompt_for_session(
+                    session_id,
+                    system_prompt_override=system_prompt_override,
+                )
+            )
 
             (
                 result,
@@ -2334,6 +2498,10 @@ class Chack:
                 cached_prompt_tokens,
                 cache_write_prompt_tokens,
             ) = _invoke_with_min_tools(request_text, "Run 1")
+            prompt_tokens += resume_compaction_usage[0]
+            completion_tokens += resume_compaction_usage[1]
+            cached_prompt_tokens += resume_compaction_usage[2]
+            cache_write_prompt_tokens += resume_compaction_usage[3]
             output = result.get("output", "")
             run1_output = output
             if result.get("error") == "stopped":
@@ -2527,6 +2695,15 @@ class Chack:
                     "cached_prompt_tokens": cached_prompt_tokens,
                     "cache_write_prompt_tokens": cache_write_prompt_tokens,
                     "total_cost": total_cost,
+                    "time_to_first_token_seconds": time_to_first_token_seconds,
+                    "time_to_first_token_source": time_to_first_token_source,
+                    "initial_prompt_chars": initial_prompt_chars,
+                    "resume_compaction_attempted": resume_compaction.attempted,
+                    "resume_compaction_succeeded": resume_compaction.succeeded,
+                    "resume_compaction_backend": resume_compaction.backend,
+                    "resume_compaction_method": resume_compaction.method,
+                    "resume_compaction_duration_seconds": resume_compaction.duration_seconds,
+                    "resume_compaction_error": resume_compaction.error[:500],
                     "main_cost": main_cost,
                     "nested_cost": nested_cost,
                     "pricing_model": model_name,
@@ -2576,6 +2753,15 @@ class Chack:
                 total_cost=total_cost,
                 tool_counts_text=tool_counts_text,
                 suffix=suffix,
+                time_to_first_token_seconds=time_to_first_token_seconds,
+                time_to_first_token_source=time_to_first_token_source,
+                initial_prompt_chars=initial_prompt_chars,
+                resume_compaction_attempted=resume_compaction.attempted,
+                resume_compaction_succeeded=resume_compaction.succeeded,
+                resume_compaction_backend=resume_compaction.backend,
+                resume_compaction_method=resume_compaction.method,
+                resume_compaction_duration_seconds=resume_compaction.duration_seconds,
+                resume_compaction_error=resume_compaction.error,
             )
         except Exception as exc:
             limit_text = str(exc or "").lower()

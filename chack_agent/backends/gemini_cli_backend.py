@@ -23,6 +23,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
+from ..resume_compaction import ResumeCompactionResult
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from ..thinking_effort import gemini_thinking_config, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
@@ -78,6 +79,8 @@ class ToolAction:
 @dataclass
 class _RawResult:
     raw_responses: list[Any]
+    time_to_first_token_seconds: float | None = None
+    time_to_first_token_source: str = "unavailable"
 
 
 class GeminiCliExecutor:
@@ -192,6 +195,31 @@ class GeminiCliExecutor:
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
 
+    def compact_for_resume(
+        self, focus_instructions: str = ""
+    ) -> ResumeCompactionResult:
+        del focus_instructions  # Gemini CLI /compress has no focus argument.
+        result = ResumeCompactionResult(
+            backend="gemini",
+            method="/compress",
+        )
+        if not self._gemini_session_id:
+            return result
+        result.attempted = True
+        started_at = time.monotonic()
+        try:
+            output, _steps, raw_result = self._run_gemini("/compress")
+            result.raw_responses = list(raw_result.raw_responses or [])
+            normalized = str(output or "").strip().lower()
+            if normalized.startswith("error:") or "unknown command" in normalized:
+                result.error = str(output or "Gemini /compress failed.")
+            else:
+                result.succeeded = True
+        except Exception as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        result.duration_seconds = max(0.0, time.monotonic() - started_at)
+        return result
+
     def _compose_prompt(self, user_input: str) -> str:
         base = str(self._base_system_prompt or "").strip()
         policy_lines: list[str] = []
@@ -281,6 +309,7 @@ class GeminiCliExecutor:
         raw_lines: list[str] = []
         raw_responses: list[Any] = []
         started_at = time.monotonic()
+        time_to_first_token_seconds: float | None = None
         tool_calls: dict[str, tuple[str, dict[str, Any]]] = {}
 
         try:
@@ -311,6 +340,14 @@ class GeminiCliExecutor:
                     continue
 
                 event_type = str(event.get("type") or "").strip()
+                if (
+                    time_to_first_token_seconds is None
+                    and event_type != "init"
+                ):
+                    time_to_first_token_seconds = max(
+                        0.0,
+                        time.monotonic() - started_at,
+                    )
                 if event_type == "init":
                     session_id = str(event.get("session_id") or "").strip()
                     if session_id:
@@ -419,7 +456,11 @@ class GeminiCliExecutor:
             if response:
                 response = response[-4000:]
 
-        return response, steps, _RawResult(raw_responses=raw_responses)
+        return response, steps, _RawResult(
+            raw_responses=raw_responses,
+            time_to_first_token_seconds=time_to_first_token_seconds,
+            time_to_first_token_source="gemini_first_response_event",
+        )
 
     def _build_command(self, prompt: str) -> list[str]:
         args: list[str] = [self._gemini_cli_path, "-p", prompt, "-o", "stream-json"]

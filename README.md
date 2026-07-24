@@ -75,6 +75,18 @@ result = agent.run(
 )
 
 print(result.output)
+
+# Opt in only when this continuation should compact its existing native
+# conversation before receiving the new instruction.
+continued = agent.run(
+    session_id="investigation-001",
+    text="Find additional checks",
+    compact_before_resume=True,
+    resume_compaction_instructions=(
+        "Preserve the supplied context, existing checks, prior conclusions, "
+        "and unexplored hypotheses."
+    ),
+)
 ```
 
 You can also replace the default toolset entirely:
@@ -340,6 +352,15 @@ Researchers listed in `researcher_administrator_researchers` are force‑enabled
 ### 3. Memory Architecture
 * **Short‑Term Memory**: Compaction is driven by `max_context_tokens` and `compaction_threshold_ratio`.
   - `memory_summary_max_chars` controls how long the running memory summary can be.
+  - `run(..., compact_before_resume=True)` explicitly invokes the selected
+    backend's compactor before that individual continuation. It is off by
+    default and is not a session-wide setting: an ordinary resume never
+    implicitly requests it.
+  - `resume_compaction_instructions="..."` optionally tells compaction which
+    prior conclusions, state, or unresolved work must survive.
+  - `RunResult` reports whether compaction was attempted/succeeded, its backend
+    method and duration, and any error. Backend-reported compaction tokens and
+    cost are included in the run totals.
 * **Long‑Term Memory**: File-based persistence. The agent reads/writes summaries to a `long_term_memory_dir`.
 
 ## Configuration & Environment Variables

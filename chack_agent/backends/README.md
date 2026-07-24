@@ -1,12 +1,34 @@
 # Backends Overview
 
-This folder contains 6 runtime backends:
+This folder contains 7 runtime backends:
 - `openai_compaction_backend.py`
 - `openrouter_openai_backend.py`
 - `codex_backend.py`
 - `langgraph_backend.py`
 - `gemini_cli_backend.py`
 - `claude_code_backend.py`
+- `copilot_cli_backend.py`
+
+## Explicit pre-resume compaction
+
+`Chack.run(..., compact_before_resume=True)` asks the live executor to compact
+its existing conversation before the new top-level instruction is sent. This is
+strictly opt-in: ordinary resumes, first turns, and internal retry attempts do
+not trigger it. The choice is per `run`/`arun` call; there is no session-wide
+configuration that silently compacts every continuation. Optional
+`resume_compaction_instructions` focus the summary on state the next turn needs.
+
+- OpenAI: `responses.compact(...)`
+- Codex: app-server `thread/compact/start`
+- Claude Code: `/compact [focus instructions]`
+- Gemini CLI: `/compress`
+- Copilot CLI: `/compact [focus instructions]`
+- OpenRouter and LangGraph: summary plus server/checkpoint thread rotation
+
+Compaction is fail-open: a backend compaction error is returned in `RunResult`
+and the requested continuation still runs. When a backend reports usage, those
+input, cached-input, output-token, and cost values are included in the run
+totals.
 
 ## Current shared config defaults
 

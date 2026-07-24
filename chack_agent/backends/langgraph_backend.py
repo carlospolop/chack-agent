@@ -7,6 +7,7 @@ import logging
 import os
 from operator import add
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from ..thinking_effort import normalize_thinking_effort
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
+from ..resume_compaction import ResumeCompactionResult
 from .playwright_mcp import (
     playwright_mcp_call_tool,
     playwright_mcp_is_available,
@@ -118,6 +120,7 @@ class LangGraphExecutor:
     _output_schema_json: str
     _output_schema_name: str
     _output_schema_strict: bool
+    _pending_resume_summary: str = ""
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
@@ -141,7 +144,13 @@ class LangGraphExecutor:
         except Exception:
             pass
 
-        result_state = self._graph.invoke({"messages": [HumanMessage(content=user_input)]}, config=config)
+        graph_input: dict[str, Any] = {
+            "messages": [HumanMessage(content=user_input)]
+        }
+        if self._pending_resume_summary:
+            graph_input["summary"] = self._pending_resume_summary
+            self._pending_resume_summary = ""
+        result_state = self._graph.invoke(graph_input, config=config)
         state_values = dict(result_state or {})
 
         messages = state_values.get("messages", []) or []
@@ -220,6 +229,55 @@ class LangGraphExecutor:
             pass
         return list(self._conversation)
 
+    def compact_for_resume(
+        self, focus_instructions: str = ""
+    ) -> ResumeCompactionResult:
+        result = ResumeCompactionResult(
+            backend="langgraph",
+            method="summary_thread_rotation",
+        )
+        config = {"configurable": {"thread_id": self._thread_id}}
+        try:
+            snapshot = self._graph.get_state(config)
+            values = snapshot.values if snapshot is not None else {}
+        except Exception as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+            return result
+        messages = (
+            list(values.get("messages") or [])
+            if isinstance(values, dict)
+            else []
+        )
+        previous_summary = (
+            str(values.get("summary") or "")
+            if isinstance(values, dict)
+            else ""
+        )
+        if not messages:
+            return result
+        result.attempted = True
+        started_at = time.monotonic()
+        try:
+            summary = self._summarize_messages(
+                previous_summary,
+                messages,
+                messages_before=len(messages),
+                messages_after_keep=0,
+                focus_instructions=focus_instructions,
+            )
+            if not summary:
+                raise RuntimeError("summary model returned an empty summary")
+            # LangGraph's additive message reducer cannot delete the old
+            # checkpoint safely. Start a fresh thread seeded with the summary.
+            self._thread_id = f"langgraph-{uuid.uuid4()}"
+            self._pending_resume_summary = summary
+            self._conversation = []
+            result.succeeded = True
+        except Exception as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        result.duration_seconds = max(0.0, time.monotonic() - started_at)
+        return result
+
     def _extract_output(self, messages: list[AnyMessage]) -> str:
         for message in reversed(messages):
             if isinstance(message, AIMessage):
@@ -267,6 +325,7 @@ class LangGraphExecutor:
         messages_after_keep: int = 0,
         triggered_by_messages: bool = False,
         triggered_by_tokens: bool = False,
+        focus_instructions: str = "",
     ) -> str:
         if not messages:
             return previous_summary
@@ -286,6 +345,11 @@ class LangGraphExecutor:
         source_chars = len(chunk)
         did_truncate = False
 
+        focus_block = (
+            f"\n\nCompaction focus:\n{focus_instructions.strip()}"
+            if str(focus_instructions or "").strip()
+            else ""
+        )
         if previous_summary:
             prompt = (
                 "You maintain compact conversation memory.\n"
@@ -294,11 +358,12 @@ class LangGraphExecutor:
                 "New messages:\n"
                 f"{chunk}\n\n"
                 "Return an updated concise summary preserving key facts, decisions, and constraints."
+                f"{focus_block}"
             )
         else:
             prompt = (
                 "Summarize the following conversation history concisely, preserving key facts, decisions, and constraints:\n"
-                f"{chunk}"
+                f"{chunk}{focus_block}"
             )
 
         response = self._summary_model.invoke([HumanMessage(content=prompt)])

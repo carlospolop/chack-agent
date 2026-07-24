@@ -27,6 +27,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
+from ..resume_compaction import ResumeCompactionResult
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
@@ -224,6 +225,8 @@ class ToolAction:
 @dataclass
 class _RawResult:
     raw_responses: list[Any]
+    time_to_first_token_seconds: float | None = None
+    time_to_first_token_source: str = "unavailable"
 
 
 @dataclass
@@ -426,6 +429,36 @@ class ClaudeCodeExecutor:
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
 
+    def compact_for_resume(
+        self, focus_instructions: str = ""
+    ) -> ResumeCompactionResult:
+        result = ResumeCompactionResult(
+            backend="claude",
+            method="/compact",
+        )
+        if not self._claude_session_id:
+            return result
+        result.attempted = True
+        started_at = time.monotonic()
+        command = "/compact"
+        if str(focus_instructions or "").strip():
+            command += f" {focus_instructions.strip()}"
+        try:
+            output, _steps, raw_result = self._run_claude_once(
+                command,
+                resume_compaction=True,
+            )
+            result.raw_responses = list(raw_result.raw_responses or [])
+            normalized = str(output or "").strip().lower()
+            if normalized.startswith("error:") or "unknown slash command" in normalized:
+                result.error = str(output or "Claude /compact failed.")
+            else:
+                result.succeeded = True
+        except Exception as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        result.duration_seconds = max(0.0, time.monotonic() - started_at)
+        return result
+
     def _has_save_vulnerability_tool(self) -> bool:
         """Check if save_discovered_vulnerability is in the allowed tools."""
         try:
@@ -604,7 +637,12 @@ class ClaudeCodeExecutor:
             )
         )
 
-    def _run_claude_once(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+    def _run_claude_once(
+        self,
+        prompt: str,
+        *,
+        resume_compaction: bool = False,
+    ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_claude_home_and_settings()
 
         startup_status_path = self._mcp_startup_status_path()
@@ -613,7 +651,10 @@ class ClaudeCodeExecutor:
         except FileNotFoundError:
             pass
 
-        command = self._build_command(prompt)
+        command = self._build_command(
+            prompt,
+            resume_compaction=resume_compaction,
+        )
         env = self._build_env()
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
         bash_vulns_dir = self._bash_vuln_fallback_dir(exec_cwd)
@@ -670,6 +711,7 @@ class ClaudeCodeExecutor:
         tool_calls: dict[str, tuple[str, Any]] = {}
         failed_mcp_servers: dict[str, str] = {}
         started_at = time.monotonic()
+        time_to_first_token_seconds: float | None = None
         return_seen = False
 
         try:
@@ -724,6 +766,14 @@ class ClaudeCodeExecutor:
 
                 event_type = str(event.get("type") or event.get("event") or "").strip().lower()
                 subtype = str(event.get("subtype") or "").strip().lower()
+                if (
+                    time_to_first_token_seconds is None
+                    and event_type != "system"
+                ):
+                    time_to_first_token_seconds = max(
+                        0.0,
+                        time.monotonic() - started_at,
+                    )
 
                 if event_type == "system" and subtype == "init":
                     session_id = str(event.get("session_id") or "").strip()
@@ -879,7 +929,11 @@ class ClaudeCodeExecutor:
         if bash_vuln_steps:
             steps.extend(bash_vuln_steps)
 
-        return response, steps, _RawResult(raw_responses=raw_responses)
+        return response, steps, _RawResult(
+            raw_responses=raw_responses,
+            time_to_first_token_seconds=time_to_first_token_seconds,
+            time_to_first_token_source="claude_first_response_event",
+        )
 
     def _mcp_startup_status_path(self) -> str:
         return os.path.join(str(self._claude_home or ""), "mcp_startup_status.json")
@@ -1223,7 +1277,12 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             _LOGGER.info("Collected %d JSON-fallback vulnerabilities from %s", len(steps), vulns_dir)
         return steps
 
-    def _build_command(self, prompt: str) -> list[str]:
+    def _build_command(
+        self,
+        prompt: str,
+        *,
+        resume_compaction: bool = False,
+    ) -> list[str]:
         try:
             tools_cfg = json.loads(self._tools_config_json or "{}")
             _exec_enabled = bool(tools_cfg.get("exec_enabled", False))
@@ -1238,19 +1297,31 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "stream-json",
             "--allow-dangerously-skip-permissions",
             "--dangerously-skip-permissions",
-            "--mcp-config",
-            os.path.join(self._claude_home or os.getcwd(), "settings.json"),
-            "--strict-mcp-config",
         ]
+        if resume_compaction:
+            args.extend(["--tools", ""])
+        else:
+            args.extend(
+                [
+                    "--mcp-config",
+                    os.path.join(
+                        self._claude_home or os.getcwd(),
+                        "settings.json",
+                    ),
+                    "--strict-mcp-config",
+                ]
+            )
         # ``--tools Bash`` is a built-in-tool allowlist in Claude Code. Passing
         # it hides every configured MCP tool, which made models attempt MCP
         # names as shell commands. Leave the normal tool registry intact when
         # execution is enabled; when it is disabled, deny only native Bash so
         # MCP tools remain discoverable and callable.
-        if not _exec_enabled:
+        if not resume_compaction and not _exec_enabled:
             args.extend(["--disallowedTools", "Bash"])
 
-        if self._max_turns > 0:
+        if resume_compaction:
+            args.extend(["--max-turns", "1"])
+        elif self._max_turns > 0:
             args.extend(["--max-turns", str(self._max_turns)])
         args.extend(
             [
@@ -1277,8 +1348,13 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             args.extend(["--model", self._model_name])
         if self._claude_session_id:
             args.extend(["--resume", self._claude_session_id])
-        if self._output_schema_json:
-            args.extend(["--json-schema", _claude_cli_json_schema(self._output_schema_json)])
+        if self._output_schema_json and not resume_compaction:
+            args.extend(
+                [
+                    "--json-schema",
+                    _claude_cli_json_schema(self._output_schema_json),
+                ]
+            )
 
         return args
 

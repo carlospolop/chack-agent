@@ -16,6 +16,7 @@ from chack_agent.agent import _task_snapshot_is_complete
 from chack_agent.budget_warning_state import inject_budget_warning_from_env
 from chack_agent.live_cost_state import report_live_usage
 from chack_agent.limit_event_state import emit_limit_reached
+from chack_agent.resume_compaction import ResumeCompactionResult
 from chack_agent.config import (
     AgentConfig,
     ChackConfig,
@@ -338,6 +339,46 @@ class _ToolLimitEventExecutor:
         }
 
 
+class _ObservableExecutor:
+    def invoke(self, payload, context=None):
+        del payload, context
+        return {
+            "output": "observable result",
+            "intermediate_steps": [],
+            "raw_result": SimpleNamespace(
+                raw_responses=[],
+                time_to_first_token_seconds=0.42,
+            ),
+        }
+
+
+class _ExplicitResumeCompactionExecutor(_ObservableExecutor):
+    def __init__(self):
+        self.compaction_calls = []
+
+    def compact_for_resume(self, focus_instructions):
+        self.compaction_calls.append(focus_instructions)
+        return ResumeCompactionResult(
+            backend="test",
+            method="test_compactor",
+            attempted=True,
+            succeeded=True,
+            duration_seconds=1.25,
+            raw_responses=[
+                {
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 20,
+                        "input_tokens_details": {
+                            "cached_tokens": 40,
+                            "cache_write_tokens": 0,
+                        },
+                    }
+                }
+            ],
+        )
+
+
 class _TestChack(Chack):
     def _get_executor(self, *args, **kwargs):
         del args, kwargs
@@ -406,6 +447,57 @@ def test_completed_task_result_survives_late_cost_timeout(isolated_run_state):
     assert "Create artifact — PR created" in result.output
     assert "Verify artifact — PR verified" in result.output
     assert "Finalization limit" in result.output
+
+
+def test_run_result_exposes_prompt_characters_and_first_token_latency(
+    isolated_run_state,
+):
+    agent = _InjectedExecutorChack(_fallback_config())
+    agent.executor = _ObservableExecutor()
+
+    result = agent.run(
+        "observable-run",
+        "do observable work",
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert result.time_to_first_token_seconds == 0.42
+    assert result.time_to_first_token_source == "backend_first_response_event"
+    assert result.initial_prompt_chars > len("do observable work")
+
+
+def test_resume_compaction_is_opt_in_and_its_usage_is_counted(
+    isolated_run_state,
+):
+    agent = _InjectedExecutorChack(_fallback_config())
+    executor = _ExplicitResumeCompactionExecutor()
+    agent.executor = executor
+
+    normal = agent.run(
+        "observable-run",
+        "first turn",
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+    compacted = agent.run(
+        "observable-run",
+        "next turn",
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+        compact_before_resume=True,
+        resume_compaction_instructions="Preserve the current checks.",
+    )
+
+    assert normal.resume_compaction_attempted is False
+    assert executor.compaction_calls == ["Preserve the current checks."]
+    assert compacted.resume_compaction_attempted is True
+    assert compacted.resume_compaction_succeeded is True
+    assert compacted.resume_compaction_method == "test_compactor"
+    assert compacted.resume_compaction_duration_seconds == 1.25
+    assert compacted.prompt_tokens == 100
+    assert compacted.completion_tokens == 20
+    assert compacted.cached_prompt_tokens == 40
 
 
 @pytest.mark.parametrize("agent_type", [_RuntimeLimitChack, _ToolLimitChack])

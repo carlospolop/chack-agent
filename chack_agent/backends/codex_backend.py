@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import selectors
 import shutil
 import signal
 import subprocess
@@ -27,6 +28,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..openrouter_routing import get_openrouter_route
+from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -181,6 +183,8 @@ class ToolAction:
 @dataclass
 class _RawResult:
     raw_responses: list[Any]
+    time_to_first_token_seconds: float | None = None
+    time_to_first_token_source: str = "unavailable"
 
 
 @dataclass
@@ -317,6 +321,264 @@ class CodexExecutor:
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
 
+    def compact_for_resume(
+        self, focus_instructions: str = ""
+    ) -> ResumeCompactionResult:
+        result = ResumeCompactionResult(
+            backend="codex",
+            method="thread/compact/start",
+        )
+        if not self._thread_id:
+            return result
+        result.attempted = True
+        started_at = time.monotonic()
+        try:
+            result.raw_responses = self._compact_codex_thread(
+                focus_instructions
+            )
+            result.succeeded = True
+        except Exception as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        result.duration_seconds = max(0.0, time.monotonic() - started_at)
+        return result
+
+    def _compact_codex_thread(
+        self, focus_instructions: str
+    ) -> list[Any]:
+        self._ensure_codex_home_and_config()
+        command = [self._codex_path, "app-server", "--stdio"]
+        env = self._build_env()
+        exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
+        timeout_seconds = max(
+            30,
+            int(
+                self._runtime_env_value(
+                    "CHACK_CODEX_COMPACTION_TIMEOUT_SECONDS",
+                    "300",
+                )
+                or "300"
+            ),
+        )
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=env,
+            cwd=exec_cwd or None,
+            start_new_session=True,
+        )
+        cancel_registration = register_process(process, _terminate_process_tree)
+        deadline = time.monotonic() + timeout_seconds
+        selector = selectors.DefaultSelector()
+        compaction_usage: dict[str, Any] = {}
+        if process.stdout is None or process.stdin is None:
+            _terminate_process_tree(process)
+            unregister_process(cancel_registration)
+            raise RuntimeError("Codex app-server did not expose stdio pipes")
+        selector.register(process.stdout, selectors.EVENT_READ)
+
+        def _send(message: dict[str, Any]) -> None:
+            if process.stdin is None:
+                raise RuntimeError("Codex app-server stdin closed unexpectedly")
+            process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            process.stdin.flush()
+
+        def _wait_for(
+            predicate,
+            *,
+            description: str,
+        ) -> dict[str, Any]:
+            while time.monotonic() < deadline:
+                if cancellation_requested():
+                    raise RuntimeError("Codex compaction cancelled")
+                if process.poll() is not None:
+                    stderr = (
+                        process.stderr.read()
+                        if process.stderr is not None
+                        else ""
+                    )
+                    raise RuntimeError(
+                        f"Codex app-server exited while waiting for {description}: "
+                        f"{str(stderr or '').strip()[-1000:]}"
+                    )
+                remaining = max(0.0, deadline - time.monotonic())
+                events = selector.select(timeout=min(1.0, remaining))
+                if not events:
+                    continue
+                line = process.stdout.readline()
+                if not line:
+                    continue
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if (
+                    str(message.get("method") or "")
+                    == "thread/tokenUsage/updated"
+                ):
+                    params = (
+                        message.get("params")
+                        if isinstance(message.get("params"), dict)
+                        else {}
+                    )
+                    token_usage = (
+                        params.get("tokenUsage")
+                        if isinstance(params.get("tokenUsage"), dict)
+                        else {}
+                    )
+                    last = (
+                        token_usage.get("last")
+                        if isinstance(token_usage.get("last"), dict)
+                        else {}
+                    )
+                    if last:
+                        compaction_usage.clear()
+                        compaction_usage.update(
+                            {
+                                "input_tokens": int(
+                                    last.get("inputTokens", 0) or 0
+                                ),
+                                "output_tokens": int(
+                                    last.get("outputTokens", 0) or 0
+                                ),
+                                "input_tokens_details": {
+                                    "cached_tokens": int(
+                                        last.get(
+                                            "cachedInputTokens",
+                                            0,
+                                        )
+                                        or 0
+                                    ),
+                                    "cache_write_tokens": 0,
+                                },
+                            }
+                        )
+                if "error" in message and "id" in message:
+                    error = message.get("error")
+                    if isinstance(error, dict):
+                        error = error.get("message") or error
+                    raise RuntimeError(
+                        f"Codex app-server request failed: {error}"
+                    )
+                if predicate(message):
+                    return message
+            raise TimeoutError(
+                f"Codex app-server timed out waiting for {description}"
+            )
+
+        try:
+            _send(
+                {
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {
+                            "name": "chack-agent",
+                            "title": "Chack pre-resume compactor",
+                            "version": "1",
+                        },
+                        "capabilities": {"experimentalApi": True},
+                    },
+                }
+            )
+            _wait_for(
+                lambda message: message.get("id") == 1
+                and "result" in message,
+                description="initialize response",
+            )
+            _send({"method": "initialized"})
+            compact_prompt = (
+                "Create a detailed continuation summary of this conversation. "
+                "The summary will replace the prior turns and must let the next "
+                "agent continue without rereading them."
+            )
+            if str(focus_instructions or "").strip():
+                compact_prompt += "\n\n" + focus_instructions.strip()
+            _send(
+                {
+                    "id": 2,
+                    "method": "thread/resume",
+                    "params": {
+                        "threadId": self._thread_id,
+                        "model": self._model_name,
+                        "config": {"compact_prompt": compact_prompt},
+                    },
+                }
+            )
+            _wait_for(
+                lambda message: message.get("id") == 2
+                and "result" in message,
+                description="thread resume response",
+            )
+            _send(
+                {
+                    "id": 3,
+                    "method": "thread/compact/start",
+                    "params": {"threadId": self._thread_id},
+                }
+            )
+            _wait_for(
+                lambda message: message.get("id") == 3
+                and "result" in message,
+                description="compaction start response",
+            )
+
+            def _is_compaction_complete(message: dict[str, Any]) -> bool:
+                method = str(message.get("method") or "")
+                params = (
+                    message.get("params")
+                    if isinstance(message.get("params"), dict)
+                    else {}
+                )
+                item = (
+                    params.get("item")
+                    if isinstance(params.get("item"), dict)
+                    else {}
+                )
+                item_type = str(item.get("type") or "")
+                return (
+                    method == "item/completed"
+                    and item_type == "contextCompaction"
+                ) or method == "thread/compacted"
+
+            _wait_for(
+                _is_compaction_complete,
+                description="compaction completion",
+            )
+            if compaction_usage:
+                report_live_usage(
+                    self._model_name,
+                    prompt_tokens=int(
+                        compaction_usage.get("input_tokens", 0) or 0
+                    ),
+                    completion_tokens=int(
+                        compaction_usage.get("output_tokens", 0) or 0
+                    ),
+                    cached_prompt_tokens=int(
+                        compaction_usage.get(
+                            "input_tokens_details",
+                            {},
+                        ).get("cached_tokens", 0)
+                        or 0
+                    ),
+                    cache_write_tokens=0,
+                )
+                return [{"usage": dict(compaction_usage)}]
+            return []
+        finally:
+            selector.close()
+            try:
+                process.stdin.close()
+            except Exception:
+                pass
+            _terminate_process_tree(process)
+            unregister_process(cancel_registration)
+
     def _compose_prompt(self, user_input: str) -> str:
         if self._prompt_only_next_invocation:
             self._prompt_only_next_invocation = False
@@ -421,6 +683,7 @@ class CodexExecutor:
         combined_output_lines: list[str] = []
         error_messages: list[str] = []
         started_at = time.monotonic()
+        time_to_first_token_seconds: float | None = None
 
         if process.stdin is not None:
             try:
@@ -486,6 +749,14 @@ class CodexExecutor:
                 continue
 
             event_type = str(event.get("type", "") or "")
+            if (
+                time_to_first_token_seconds is None
+                and event_type not in {"thread.started", "turn.started", "turn.completed", "error"}
+            ):
+                time_to_first_token_seconds = max(
+                    0.0,
+                    time.monotonic() - started_at,
+                )
             if event_type == "thread.started":
                 thread_id = str(event.get("thread_id", "") or "").strip()
                 if thread_id:
@@ -643,7 +914,15 @@ class CodexExecutor:
                 allow_api_key_fallback,
                 codex_exec_failed=True,
             )
-        result = (output, steps, _RawResult(raw_responses=raw_responses))
+        result = (
+            output,
+            steps,
+            _RawResult(
+                raw_responses=raw_responses,
+                time_to_first_token_seconds=time_to_first_token_seconds,
+                time_to_first_token_source="codex_first_response_event",
+            ),
+        )
         return self._maybe_retry_with_api_key(
             prompt,
             result,
