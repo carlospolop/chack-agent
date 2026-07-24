@@ -351,6 +351,15 @@ Researchers listed in `researcher_administrator_researchers` are force‑enabled
 
 ### 3. Memory Architecture
 * **Short‑Term Memory**: Compaction is driven by `max_context_tokens` and `compaction_threshold_ratio`.
+  - `compaction_threshold_ratio` is only the trigger point. For example,
+    `max_context_tokens: 250000` with `compaction_threshold_ratio: 0.75`
+    starts compaction at 187,500 active input tokens. It does **not** retain
+    75% of the old conversation.
+  - After the trigger, native backends replace old history with their compact
+    summary. Summary-based backends retain the generated summary (bounded by
+    `memory_summary_max_chars`) plus only the newest
+    `memory_reset_to_messages`, so the resulting context is much smaller than
+    the trigger context.
   - `memory_summary_max_chars` controls how long the running memory summary can be.
   - `run(..., compact_before_resume=True)` explicitly invokes the selected
     backend's compactor before that individual continuation. It is off by

@@ -238,6 +238,7 @@ class CodexExecutor:
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
+    _output_schema_strict: bool = True
     _max_context_tokens: int = 0
     _compaction_threshold_ratio: float = 0.50
     _uses_openrouter_route: bool = False
@@ -1556,7 +1557,10 @@ class CodexExecutor:
             return
         if not isinstance(schema_obj, dict):
             return
-        schema_obj = self._normalize_codex_output_schema(schema_obj)
+        schema_obj = self._normalize_codex_output_schema(
+            schema_obj,
+            force_all_required=self._output_schema_strict,
+        )
         path = os.path.join(codex_home, "output_schema.json")
         try:
             with open(path, "w", encoding="utf-8") as handle:
@@ -1567,34 +1571,69 @@ class CodexExecutor:
             self._output_schema_path = None
 
     @classmethod
-    def _normalize_codex_output_schema(cls, schema: Any) -> Any:
+    def _normalize_codex_output_schema(
+        cls,
+        schema: Any,
+        *,
+        force_all_required: bool = True,
+    ) -> Any:
         if isinstance(schema, list):
-            return [cls._normalize_codex_output_schema(item) for item in schema]
+            return [
+                cls._normalize_codex_output_schema(
+                    item,
+                    force_all_required=force_all_required,
+                )
+                for item in schema
+            ]
         if not isinstance(schema, dict):
             return schema
 
         normalized = {
-            key: cls._normalize_codex_output_schema(value)
+            key: cls._normalize_codex_output_schema(
+                value,
+                force_all_required=force_all_required,
+            )
             for key, value in schema.items()
         }
         properties = normalized.get("properties")
         if isinstance(properties, dict):
             normalized["properties"] = {
-                str(key): cls._normalize_codex_output_schema(value)
+                str(key): cls._normalize_codex_output_schema(
+                    value,
+                    force_all_required=force_all_required,
+                )
                 for key, value in properties.items()
             }
-            normalized["required"] = list(normalized["properties"].keys())
+            if force_all_required:
+                normalized["required"] = list(normalized["properties"].keys())
+            elif "required" in normalized:
+                declared = normalized.get("required")
+                normalized["required"] = (
+                    [
+                        str(key)
+                        for key in declared
+                        if str(key) in normalized["properties"]
+                    ]
+                    if isinstance(declared, list)
+                    else []
+                )
             normalized.setdefault("additionalProperties", False)
         elif "required" in normalized:
             normalized.pop("required", None)
         for union_key in ("anyOf", "allOf", "oneOf"):
             if isinstance(normalized.get(union_key), list):
                 normalized[union_key] = [
-                    cls._normalize_codex_output_schema(item)
+                    cls._normalize_codex_output_schema(
+                        item,
+                        force_all_required=force_all_required,
+                    )
                     for item in normalized[union_key]
                 ]
         if isinstance(normalized.get("items"), dict):
-            normalized["items"] = cls._normalize_codex_output_schema(normalized["items"])
+            normalized["items"] = cls._normalize_codex_output_schema(
+                normalized["items"],
+                force_all_required=force_all_required,
+            )
         return normalized
 
     @staticmethod
@@ -1970,6 +2009,9 @@ def build_executor(
             json.dumps(getattr(config.agent, "output_schema_json", None), ensure_ascii=False, indent=2)
             if getattr(config.agent, "output_schema_json", None)
             else ""
+        ),
+        _output_schema_strict=bool(
+            getattr(config.agent, "output_schema_strict", True)
         ),
         _max_context_tokens=int(getattr(config.model, "max_context_tokens", 0) or 0),
         _compaction_threshold_ratio=float(

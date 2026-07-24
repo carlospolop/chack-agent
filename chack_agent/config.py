@@ -96,8 +96,9 @@ class AgentConfig:
     max_runtime_minutes: int = 0
     max_cost_usd: float = 0.0
     require_task_steps_manager_init_first: bool = True
-    # Match Hermes's balanced context policy by default: keep full capacity,
-    # but compact once the active context reaches 50%.
+    # Trigger compaction when active input reaches this fraction of the context
+    # window. This is never a post-compaction retention ratio: compaction
+    # replaces old history with a much smaller native or generated summary.
     compaction_threshold_ratio: float = 0.50
     compaction_target_ratio: float = 0.20
     compaction_model: str = ""

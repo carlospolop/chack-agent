@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -14,7 +15,10 @@ from chack_agent.config import (
     ToolsConfig,
     resolve_config_aliases,
 )
-from chack_agent.backends.codex_backend import build_executor as build_codex_executor
+from chack_agent.backends.codex_backend import (
+    CodexExecutor,
+    build_executor as build_codex_executor,
+)
 from chack_agent.backends.claude_code_backend import (
     ClaudeCodeExecutor,
     _CLAUDE_1M_CONTEXT_BETA,
@@ -139,6 +143,33 @@ class CodexContextWindowConfigTests(unittest.TestCase):
                     body = handle.read()
         self.assertIn("model_auto_compact_token_limit = 100000", body)
 
+    def test_seventy_five_percent_is_trigger_not_retained_context(self) -> None:
+        with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(
+            "chack_agent.model_aliases._get_backend_aliases", return_value={}
+        ), tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"CHACK_CODEX_HOME_BASE": tmpdir}):
+                config = resolve_config_aliases(_make_config("codex", 250_000))
+                config.agent.compaction_threshold_ratio = 0.75
+                executor = build_codex_executor(
+                    config,
+                    system_prompt="system",
+                    max_turns=2,
+                    memory_max_messages=250,
+                    memory_reset_to_messages=12,
+                )
+                executor._ensure_codex_home_and_config()
+                assert executor._codex_home is not None
+                with open(
+                    os.path.join(executor._codex_home, "config.toml"),
+                    encoding="utf-8",
+                ) as handle:
+                    body = handle.read()
+
+        # Codex receives the point at which its native summarizing compactor
+        # starts. Nothing configures it to retain 75% of the transcript.
+        self.assertIn("model_auto_compact_token_limit = 187500", body)
+        self.assertNotIn("model_context_window = 187500", body)
+
     def test_omits_auto_compact_limit_when_unset(self) -> None:
         with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(
             "chack_agent.model_aliases._get_backend_aliases", return_value={}
@@ -146,6 +177,72 @@ class CodexContextWindowConfigTests(unittest.TestCase):
             with patch.dict(os.environ, {"CHACK_CODEX_HOME_BASE": tmpdir}):
                 body = self._build(0, tmpdir)
         self.assertNotIn("model_auto_compact_token_limit", body)
+
+    def test_non_strict_codex_schema_preserves_declared_optional_patch_fields(self) -> None:
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "Title": {"type": "string"},
+                "Description": {"type": "string"},
+            },
+            "required": ["Title"],
+        }
+
+        normalized = CodexExecutor._normalize_codex_output_schema(
+            schema,
+            force_all_required=False,
+        )
+
+        self.assertEqual(normalized["required"], ["Title"])
+        self.assertNotIn("Description", normalized["required"])
+
+    def test_strict_codex_schema_still_requires_every_declared_property(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "Title": {"type": "string"},
+                "Description": {"type": "string"},
+            },
+            "required": ["Title"],
+        }
+
+        normalized = CodexExecutor._normalize_codex_output_schema(schema)
+
+        self.assertEqual(normalized["required"], ["Title", "Description"])
+
+    def test_codex_executor_writes_optional_fields_for_non_strict_patch_schema(
+        self,
+    ) -> None:
+        with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(
+            "chack_agent.model_aliases._get_backend_aliases", return_value={}
+        ), tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"CHACK_CODEX_HOME_BASE": tmpdir}):
+                config = resolve_config_aliases(_make_config("codex", 250_000))
+                config.agent.output_schema_strict = False
+                config.agent.output_schema_json = {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "Title": {"type": "string"},
+                        "Description": {"type": "string"},
+                    },
+                    "required": ["Title"],
+                }
+                executor = build_codex_executor(
+                    config,
+                    system_prompt="system",
+                    max_turns=2,
+                    memory_max_messages=10,
+                    memory_reset_to_messages=5,
+                )
+                executor._ensure_codex_home_and_config()
+                assert executor._output_schema_path is not None
+                with open(executor._output_schema_path, encoding="utf-8") as handle:
+                    written = json.load(handle)
+
+        self.assertEqual(written["required"], ["Title"])
+        self.assertNotIn("Description", written["required"])
 
 
 def _build_claude_executor(
