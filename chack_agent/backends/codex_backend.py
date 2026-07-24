@@ -1548,6 +1548,14 @@ class CodexExecutor:
 
     def _write_output_schema_file(self, codex_home: str) -> None:
         self._output_schema_path = None
+        # Codex CLI structured output accepts only strict schemas: every
+        # property must be required. A non-strict Chack schema intentionally
+        # models patch objects whose omitted fields remain unchanged, so
+        # passing it through --output-schema causes an API-level 400 before the
+        # model can run. Let Chack's normal JSON extraction/schema validation
+        # handle these responses instead.
+        if not self._output_schema_strict:
+            return
         raw = str(self._output_schema_json or "").strip()
         if not raw:
             return

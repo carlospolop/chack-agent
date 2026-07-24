@@ -211,7 +211,7 @@ class CodexContextWindowConfigTests(unittest.TestCase):
 
         self.assertEqual(normalized["required"], ["Title", "Description"])
 
-    def test_codex_executor_writes_optional_fields_for_non_strict_patch_schema(
+    def test_codex_executor_omits_cli_schema_for_non_strict_patch_schema(
         self,
     ) -> None:
         with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(
@@ -237,12 +237,7 @@ class CodexContextWindowConfigTests(unittest.TestCase):
                     memory_reset_to_messages=5,
                 )
                 executor._ensure_codex_home_and_config()
-                assert executor._output_schema_path is not None
-                with open(executor._output_schema_path, encoding="utf-8") as handle:
-                    written = json.load(handle)
-
-        self.assertEqual(written["required"], ["Title"])
-        self.assertNotIn("Description", written["required"])
+                self.assertIsNone(executor._output_schema_path)
 
 
 def _build_claude_executor(
