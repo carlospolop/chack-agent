@@ -368,6 +368,8 @@ class TestMCPServerRegistration:
         assert "check_budget_status" in source
         assert "budget_status_from_env" in source
         assert "mcp.tool" in source or "@mcp.tool" in source
+        assert "after at least five other tool calls" in source
+        assert "Do not call it before finishing a short task" in source
 
 
 # ---------------------------------------------------------------------------

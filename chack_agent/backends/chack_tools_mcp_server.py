@@ -559,8 +559,10 @@ def main() -> None:
             name="check_budget_status",
             description=(
                 "Returns the current runtime and cost budget status. "
-                "Call this periodically (every 5-10 tool calls) to check "
-                "if you are approaching budget limits and need to wrap up."
+                "Use it only in a long run after at least five other tool calls, "
+                "then at most once every 5-10 additional calls, or after an explicit "
+                "budget warning. Do not call it before finishing a short task; hard "
+                "runtime and cost limits are enforced automatically."
             ),
         )
         async def _check_budget_status() -> str:
