@@ -164,6 +164,24 @@ def _preview_text(value: Any, *, max_chars: int = 2000) -> str:
     return text[:max_chars] + "...[truncated]"
 
 
+def _readline_when_ready(stream: Any, wait_seconds: float) -> Optional[str]:
+    """Read one subprocess line only when its pipe is ready.
+
+    ``TextIO.readline()`` blocks indefinitely when a child stays alive without
+    producing output. Waiting on the pipe first lets the caller continue
+    enforcing execution deadlines and cancellation while the provider is
+    silent.
+    """
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(stream, selectors.EVENT_READ)
+        if not selector.select(timeout=max(0.0, float(wait_seconds))):
+            return None
+        return stream.readline()
+    finally:
+        selector.close()
+
+
 def _resolve_codex_exec_cwd(runtime_env: Optional[dict[str, str]] = None) -> str:
     runtime_env = runtime_env or {}
     candidate = str(
@@ -735,7 +753,16 @@ class CodexExecutor:
                 )
             if process.stdout is None:
                 break
-            line = process.stdout.readline()
+            remaining_seconds = max(
+                0.0,
+                timeout_seconds - (time.monotonic() - started_at),
+            )
+            line = _readline_when_ready(
+                process.stdout,
+                min(1.0, remaining_seconds),
+            )
+            if line is None:
+                continue
             if line == "" and process.poll() is not None:
                 break
             if not line:
