@@ -108,6 +108,35 @@ def test_required_tool_call_returns_error_after_retry_budget():
     assert result.run1_output == result.output
 
 
+def test_backend_failure_does_not_resume_to_satisfy_tool_requirements():
+    failure = (
+        "ERROR: Codex exec failed (exit=1).\n"
+        "You've hit your usage limit. Try again next week."
+    )
+    executor = _Executor([
+        {"output": failure, "intermediate_steps": [], "raw_result": None},
+        {"output": "must not run", "intermediate_steps": [], "raw_result": None},
+    ])
+    agent = _TestChack(
+        executor,
+        _config(min_tools_used=2, missing_tools_reminders_max=3),
+    )
+
+    result = agent.run(
+        "terminal-backend-failure",
+        "inspect the repository",
+        required_tool_names=["update_vulnerability"],
+        required_tool_call_attempts=3,
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert executor.calls == 1
+    assert result.output == failure
+    assert result.prompt_tokens == 0
+    assert result.completion_tokens == 0
+
+
 def test_self_critique_reuses_same_executor_session_without_repeating_previous_answer():
     executor = _Executor([
         {"output": "first answer", "intermediate_steps": [], "raw_result": None},

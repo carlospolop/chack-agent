@@ -206,6 +206,39 @@ def _task_snapshot_is_complete(snapshot: Dict[str, Any]) -> bool:
     return bool(snapshot.get("completed")) and total > 0 and done == total
 
 
+_BACKEND_FAILURE_OUTPUT_PREFIXES = (
+    "error: codex exec failed",
+    "error: failed to launch codex cli",
+    "error: codex cli executable was not found",
+    "error: codex execution timed out",
+    "error: codex execution cancelled",
+    "error: codex exec produced no usable response",
+    "error: claude exec failed",
+    "error: failed to launch claude cli",
+    "error: claude cli executable was not found",
+    "error: claude execution timed out",
+    "error: claude execution cancelled",
+    "error: claude returned an error in final result event",
+    "error: required claude mcp server failed to start",
+    "error: gemini exec failed",
+    "error: failed to launch gemini cli",
+    "error: gemini cli executable was not found",
+    "error: gemini execution timed out",
+    "error: gemini result error",
+    "error: copilot exec failed",
+    "error: failed to launch copilot cli",
+    "error: copilot cli executable was not found",
+    "error: copilot execution timed out",
+)
+
+
+def _looks_like_backend_failure_output(output: Any) -> bool:
+    normalized = str(output or "").strip().lower()
+    return bool(normalized) and any(
+        normalized.startswith(prefix) for prefix in _BACKEND_FAILURE_OUTPUT_PREFIXES
+    )
+
+
 class Chack:
     def __init__(
         self,
@@ -2171,6 +2204,13 @@ class Chack:
 
                     result = _invoke_with_budget()
                     if result.get("error") == "stopped":
+                        break
+                    if _looks_like_backend_failure_output(result.get("output")):
+                        # The backend did not produce an agent response. Do not
+                        # resume the same failed thread merely to satisfy tool
+                        # minimums or required-tool reminders; the caller owns
+                        # provider-aware retry, fallback, and quota handling.
+                        result["error"] = "backend_failure"
                         break
 
                     (
