@@ -142,6 +142,12 @@ totals.
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
 - Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Codex JSON output lines and mapped into intermediate steps.
+- Top-level MCP calls are also counted in a tiny file-backed run-state counter
+  at the MCP execution boundary. `agent.py` merges those counts with provider
+  steps by taking the larger per-tool observation, so Codex transcript
+  compaction, timeout, or a truncated event stream cannot erase earlier tool
+  telemetry or cause required-tool enforcement to repeat completed work. The
+  counter is deleted with the rest of the per-run state.
 
 ### Guardrails
 
@@ -168,6 +174,8 @@ totals.
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
 - Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Claude JSON stream events and mapped into intermediate steps.
+- The shared MCP-boundary counter supplies any calls missing from Claude's
+  returned event stream without double-counting calls present in both sources.
 
 ### Guardrails
 
@@ -223,6 +231,8 @@ totals.
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
 - Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Gemini `stream-json` events and mapped into intermediate steps.
+- The shared MCP-boundary counter supplies any calls missing from Gemini's
+  returned event stream without double-counting calls present in both sources.
 
 ### Guardrails
 

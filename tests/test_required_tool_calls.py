@@ -12,6 +12,8 @@ from chack_agent.config import (
     SessionConfig,
     ToolsConfig,
 )
+from chack_tools.run_lifecycle import record_mcp_tool_usage
+from chack_tools.task_steps_manager_state import current_session_id
 
 
 class _Executor:
@@ -27,6 +29,27 @@ class _Executor:
         if self.responses:
             return self.responses.pop(0)
         return {"output": "done", "intermediate_steps": [], "raw_result": None}
+
+
+class _McpBoundaryOnlyExecutor:
+    """Simulate provider output losing tool events after MCP executed them."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, payload, context=None):
+        del payload, context
+        self.calls += 1
+        task_session_id = current_session_id()
+        assert task_session_id
+        record_mcp_tool_usage("update_vulnerability", task_session_id)
+        record_mcp_tool_usage("update_vulnerability", task_session_id)
+        record_mcp_tool_usage("read_file", task_session_id)
+        return {
+            "output": "saved despite compacted provider transcript",
+            "intermediate_steps": [],
+            "raw_result": None,
+        }
 
 
 class _TestChack(Chack):
@@ -85,6 +108,30 @@ def test_required_tool_call_retries_until_tool_is_seen():
     assert executor.calls == 2
     assert result.output == "saved"
     assert result.tool_counts["chack_tools-update_vulnerability"] == 1
+
+
+def test_mcp_boundary_counts_survive_missing_provider_steps():
+    executor = _McpBoundaryOnlyExecutor()
+    agent = _TestChack(executor, _config())
+
+    result = agent.run(
+        "mcp-boundary-tool-telemetry",
+        "finish only after updating",
+        required_tool_names=["update_vulnerability"],
+        required_tool_call_attempts=1,
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert executor.calls == 1
+    assert result.output == "saved despite compacted provider transcript"
+    assert result.run1_steps == 0
+    assert result.run1_tools_used == 3
+    assert result.tools_used == 3
+    assert result.tool_counts == {
+        "update_vulnerability": 2,
+        "read_file": 1,
+    }
 
 
 def test_required_tool_call_returns_error_after_retry_budget():

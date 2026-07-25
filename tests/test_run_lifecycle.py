@@ -32,6 +32,8 @@ from chack_tools.run_lifecycle import (
     claim_non_task_tool_slot,
     cleanup_run_state,
     mark_task_manager_initialized,
+    read_mcp_tool_usage,
+    record_mcp_tool_usage,
     task_manager_initialized,
     tool_budget_warning,
     write_live_cost,
@@ -89,6 +91,51 @@ def test_parallel_process_claims_are_atomic(isolated_run_state):
         claims.append(json.loads(stdout))
     assert sum(1 for claim in claims if claim["allowed"]) == 5
     assert max(claim["used"] for claim in claims) == 5
+    cleanup_run_state(session_id)
+
+
+def test_mcp_tool_usage_survives_parallel_processes_and_cleanup(
+    isolated_run_state,
+):
+    session_id = "parallel-mcp-tool-usage"
+    code = (
+        "from chack_tools.run_lifecycle import record_mcp_tool_usage; "
+        f"record_mcp_tool_usage('read_file', {session_id!r})"
+    )
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=os.environ.copy(),
+        )
+        for _ in range(12)
+    ]
+    for process in processes:
+        _, stderr = process.communicate(timeout=20)
+        assert process.returncode == 0, stderr
+
+    record_mcp_tool_usage("search_code", session_id)
+    assert read_mcp_tool_usage(session_id) == {
+        "read_file": 12,
+        "search_code": 1,
+    }
+    cleanup_run_state(session_id)
+    assert read_mcp_tool_usage(session_id) == {}
+
+
+def test_corrupt_mcp_telemetry_recovers_without_blocking_tools(
+    isolated_run_state,
+):
+    session_id = "corrupt-mcp-telemetry"
+    record_mcp_tool_usage("read_file", session_id)
+    state_path = next(isolated_run_state.glob("*.tool-usage.json"))
+    state_path.write_text("{not-json", encoding="utf-8")
+
+    record_mcp_tool_usage("search_code", session_id)
+
+    assert read_mcp_tool_usage(session_id) == {"search_code": 1}
     cleanup_run_state(session_id)
 
 

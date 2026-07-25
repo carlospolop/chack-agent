@@ -8,6 +8,7 @@ import os
 import signal
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -153,6 +154,62 @@ def tool_budget_warning(claim: ToolBudgetClaim) -> str:
     )
 
 
+def record_mcp_tool_usage(tool_name: str, session_id: str = "") -> None:
+    """Persist one top-level MCP tool attempt for complete run telemetry.
+
+    Provider CLIs can compact their transcript, time out, or exit before
+    returning earlier tool-call events to Chack. This file-backed counter is
+    updated at the actual MCP execution boundary, so the parent process can
+    still report every call. It is scan-local, tiny, and removed with the other
+    run-state files when the agent finishes.
+    """
+    normalized_name = str(tool_name or "").strip()
+    path = _state_path("tool-usage", session_id)
+    if not normalized_name or path is None:
+        return
+    try:
+        with path.open("a+", encoding="utf-8") as handle:
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            state = _read_locked_json(handle, {"counts": {}})
+            raw_counts = (state or {}).get("counts") or {}
+            counts = {
+                str(name): max(0, int(count or 0))
+                for name, count in raw_counts.items()
+                if str(name).strip()
+            }
+            counts[normalized_name] = counts.get(normalized_name, 0) + 1
+            _write_locked_json(handle, {"counts": counts})
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, TypeError, ValueError):
+        # Observability must never prevent the requested tool from executing.
+        return
+
+
+def read_mcp_tool_usage(session_id: str = "") -> Counter[str]:
+    """Return the cumulative MCP-boundary tool counts for one agent run."""
+    path = _state_path("tool-usage", session_id)
+    if path is None or not path.exists():
+        return Counter()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            state = _read_locked_json(handle, {"counts": {}})
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return Counter(
+            {
+                str(name): max(0, int(count or 0))
+                for name, count in ((state or {}).get("counts") or {}).items()
+                if str(name).strip() and int(count or 0) > 0
+            }
+        )
+    except (OSError, TypeError, ValueError):
+        return Counter()
+
+
 def mark_task_manager_initialized(session_id: str) -> None:
     """Persist init-first state so an MCP restart does not require a second init."""
     path = _state_path("task-manager", session_id)
@@ -283,7 +340,7 @@ def cleanup_process_groups(session_id: str, *, grace_seconds: float = 0.5) -> li
 
 def cleanup_run_state(session_id: str) -> None:
     cleanup_process_groups(session_id)
-    for kind in ("tools", "budget", "process-groups", "task-manager"):
+    for kind in ("tools", "tool-usage", "budget", "process-groups", "task-manager"):
         path = _state_path(kind, session_id)
         if path is not None:
             try:

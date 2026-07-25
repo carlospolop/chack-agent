@@ -53,7 +53,13 @@ from chack_tools.cancellation import (
     reset_cancellation_event,
     set_cancellation_event,
 )
-from chack_tools.run_lifecycle import cleanup_run_state, read_live_cost, write_live_cost
+from chack_tools.run_lifecycle import (
+    cleanup_run_state,
+    read_live_cost,
+    read_mcp_tool_usage,
+    task_manager_initialized,
+    write_live_cost,
+)
 from .live_cost_state import (
     LiveCostLimitExceeded,
     reset_active_live_cost_callback,
@@ -589,6 +595,26 @@ class Chack:
 
     def _missing_required_tool_names(self, steps, required_tool_names: Sequence[str]) -> list[str]:
         called = [self._tool_name(step) for step in steps]
+        return self._missing_required_tool_names_from_called(
+            called,
+            required_tool_names,
+        )
+
+    def _missing_required_tool_names_from_counter(
+        self,
+        counts: Counter[str],
+        required_tool_names: Sequence[str],
+    ) -> list[str]:
+        return self._missing_required_tool_names_from_called(
+            list(counts),
+            required_tool_names,
+        )
+
+    def _missing_required_tool_names_from_called(
+        self,
+        called: Sequence[str],
+        required_tool_names: Sequence[str],
+    ) -> list[str]:
         missing: list[str] = []
         for required_name in required_tool_names:
             if not any(self._tool_name_satisfies_required(tool, required_name) for tool in called):
@@ -602,6 +628,37 @@ class Chack:
             if name:
                 counts[name] += 1
         return counts
+
+    def _merge_mcp_tool_counts(
+        self,
+        step_counts: Counter[str],
+        mcp_counts: Counter[str],
+    ) -> Counter[str]:
+        """Merge duplicate observations while retaining MCP-only calls.
+
+        A provider-returned step and the MCP boundary counter usually describe
+        the same top-level call. Prefer the exact MCP name and the larger count
+        instead of adding both. Calls absent from provider output—commonly after
+        provider compaction or timeout—remain visible.
+        """
+        merged = Counter(step_counts)
+        for mcp_name, mcp_count in mcp_counts.items():
+            matching_names = [
+                step_name
+                for step_name in merged
+                if self._tool_name_satisfies_required(step_name, mcp_name)
+                or self._tool_name_satisfies_required(mcp_name, step_name)
+            ]
+            observed_count = max(
+                [int(merged.pop(name, 0) or 0) for name in matching_names]
+                or [0]
+            )
+            merged[mcp_name] = max(
+                int(merged.get(mcp_name, 0) or 0),
+                observed_count,
+                int(mcp_count or 0),
+            )
+        return merged
 
     @staticmethod
     def _usage_from_raw_result(raw_result) -> tuple[int, int, int, int]:
@@ -2406,12 +2463,21 @@ class Chack:
                     all_steps.extend(current_steps)
                     if result.get("completion_preserved_after_limit"):
                         break
-                    has_init = any(self._is_task_steps_manager_init_step(step) for step in all_steps)
-                    non_task_tools = self._non_task_tool_count(all_steps)
+                    observed_tool_counts = self._merge_mcp_tool_counts(
+                        self._step_tool_counts(all_steps),
+                        read_mcp_tool_usage(task_session_id),
+                    )
+                    has_init = any(
+                        self._is_task_steps_manager_init_step(step)
+                        for step in all_steps
+                    ) or task_manager_initialized(task_session_id)
+                    non_task_tools = self._non_task_tool_count_from_counter(
+                        observed_tool_counts
+                    )
                     missing_init = effective_require_init and not has_init
                     missing_tools = effective_min_tools > 0 and non_task_tools < effective_min_tools
-                    missing_required_tools = self._missing_required_tool_names(
-                        all_steps,
+                    missing_required_tools = self._missing_required_tool_names_from_counter(
+                        observed_tool_counts,
                         effective_required_tools,
                     )
                     missing_required = bool(missing_required_tools)
@@ -2547,12 +2613,21 @@ class Chack:
                 enable_self_critique = False
                 self_critique_rounds = 0
             rounds_used = len(run1_all_steps) + (1 if run1_output else 0)
-            tools_used = self._non_task_tool_count(run1_all_steps)
+            mcp_counts_run1 = read_mcp_tool_usage(task_session_id)
+            run1_observed_counts = self._merge_mcp_tool_counts(
+                self._step_tool_counts(run1_all_steps),
+                mcp_counts_run1,
+            )
+            tools_used = self._non_task_tool_count_from_counter(
+                run1_observed_counts
+            )
             self.logger.info(
-                "Run 1 complete: output_chars=%s steps=%s non_task_tools=%s ts=%s.",
+                "Run 1 complete: output_chars=%s steps=%s non_task_tools=%s "
+                "mcp_boundary_tools=%s ts=%s.",
                 len(run1_output or ""),
                 len(run1_all_steps),
                 tools_used,
+                sum(mcp_counts_run1.values()),
                 _log_timestamp(),
             )
 
@@ -2611,7 +2686,16 @@ class Chack:
                     output = critique_output or output
                     result = critique_result
                     rounds_used += len(critique_steps) + (1 if critique_output else 0)
-                    tools_used = self._non_task_tool_count(run1_all_steps + run2_all_steps)
+                    current_mcp_counts = read_mcp_tool_usage(task_session_id)
+                    current_observed_counts = self._merge_mcp_tool_counts(
+                        self._step_tool_counts(
+                            run1_all_steps + run2_all_steps
+                        ),
+                        current_mcp_counts,
+                    )
+                    tools_used = self._non_task_tool_count_from_counter(
+                        current_observed_counts
+                    )
                     self.logger.info(
                         "%s complete: output_chars=%s steps=%s non_task_tools=%s ts=%s.",
                         run_label,
@@ -2626,8 +2710,25 @@ class Chack:
             nested_counts_run2.subtract(nested_counts_run1)
             nested_counts_run2 = Counter({k: v for k, v in nested_counts_run2.items() if v > 0})
 
-            run1_tool_counts = self._step_tool_counts(run1_all_steps)
-            run2_tool_counts = self._step_tool_counts(run2_all_steps)
+            mcp_counts_total = read_mcp_tool_usage(task_session_id)
+            mcp_counts_run2 = Counter(mcp_counts_total)
+            mcp_counts_run2.subtract(mcp_counts_run1)
+            mcp_counts_run2 = Counter(
+                {
+                    key: value
+                    for key, value in mcp_counts_run2.items()
+                    if value > 0
+                }
+            )
+
+            run1_tool_counts = self._merge_mcp_tool_counts(
+                self._step_tool_counts(run1_all_steps),
+                mcp_counts_run1,
+            )
+            run2_tool_counts = self._merge_mcp_tool_counts(
+                self._step_tool_counts(run2_all_steps),
+                mcp_counts_run2,
+            )
             run1_tool_counts.update(nested_counts_run1)
             run2_tool_counts.update(nested_counts_run2)
 
@@ -2636,13 +2737,19 @@ class Chack:
             nested_usage_by_model = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
 
             run1_tools_used = (
-                self._non_task_tool_count(run1_all_steps)
+                self._non_task_tool_count_from_counter(run1_observed_counts)
                 + self._non_task_tool_count_from_counter(nested_counts_run1)
             )
             run2_tools_used = (
-                self._non_task_tool_count(run2_all_steps)
+                self._non_task_tool_count_from_counter(
+                    self._merge_mcp_tool_counts(
+                        self._step_tool_counts(run2_all_steps),
+                        mcp_counts_run2,
+                    )
+                )
                 + self._non_task_tool_count_from_counter(nested_counts_run2)
             )
+            tools_used = run1_tools_used + run2_tools_used
 
             model_name = self.config.model.primary
             main_cost = estimate_cost(
