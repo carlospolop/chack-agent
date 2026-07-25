@@ -92,14 +92,13 @@ def _build_self_critique_prompt(*, mention_task_steps_manager: bool) -> str:
             "\n  - If you continue with more tool calls, keep the live task plan updated with"
             " task_steps_manager"
         )
-    return f"""Is this the best you can do? Make sure you have gathered ALL the context about the request: Check the web for latest info, read more terraform/code files, read all logs needed, be 10000% sure you got EVERY CONTEXT NEEDED and up to date information to be sure that your repsonse is correct. Now check everything you have done and improve whatever you can:
-  - Get more context about the request and the needed info to answer it
-  - Check the web for latest info about errors, services, terraform, etc. related to the request
-  - Read more repos/files/code/logs related to the request to get more context
-  - Then, recheck if your answer was actually accurate and the best possible
-  - Improve the PR if you made one
-  - Improve the answer recommendation you gave{extra_line}
-Your response to this improvement request will be the final one you give to the user, so don't mention the previous answer, just give the improved final answer or PR and give the user the best possible solution and answer."""
+    return f"""Review the work already completed and produce the best final result.
+  - Reuse the conversation context and every tool result already gathered.
+  - Recheck the result against the original goal, required output, and unresolved assumptions.
+  - Make targeted tool calls only for a specific missing fact, unresolved candidate, failed operation, or changed state.
+  - Preserve correct completed work and improve or correct only what the evidence requires.
+  - If the existing result is already complete and accurate, return it without repeating unchanged discovery or verification work.{extra_line}
+Your response to this review is the final response. Return the improved final result directly without discussing the earlier draft or the review process."""
 
 def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")

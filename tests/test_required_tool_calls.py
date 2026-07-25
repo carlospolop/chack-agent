@@ -132,7 +132,8 @@ def test_self_critique_reuses_same_executor_session_without_repeating_previous_a
     assert "original request" in executor.inputs[1]
     assert "Previous answer:" not in executor.inputs[1]
     assert "first answer" not in executor.inputs[1]
-    assert "Is this the best you can do?" in executor.inputs[1]
+    assert "Reuse the conversation context" in executor.inputs[1]
+    assert "targeted tool calls" in executor.inputs[1]
 
 
 def test_self_critique_is_disabled_by_default():
