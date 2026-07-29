@@ -34,6 +34,7 @@ from .long_term_memory import (
     save_long_term_memory,
 )
 from chack_tools.task_steps_manager_state import STORE, reset_active_context, set_active_context
+from chack_tools.native_planning import native_planning_backend, native_planning_prompt
 from chack_tools.tool_usage_state import (
     STORE as TOOL_USAGE_STORE,
     reset_active_max_tools_used,
@@ -91,9 +92,19 @@ from .resume_compaction import (
 )
 
 
-def _build_self_critique_prompt(*, mention_task_steps_manager: bool) -> str:
+def _build_self_critique_prompt(
+    *,
+    mention_task_steps_manager: bool,
+    native_task_planning_backend: str = "",
+) -> str:
     extra_line = ""
-    if mention_task_steps_manager:
+    native_line = native_planning_prompt(
+        native_task_planning_backend,
+        required_first=False,
+    )
+    if native_line:
+        extra_line = f"\n  - If you continue with more tool calls, {native_line[2:]}"
+    elif mention_task_steps_manager:
         extra_line = (
             "\n  - If you continue with more tool calls, keep the live task plan updated with"
             " task_steps_manager"
@@ -122,8 +133,15 @@ def _build_initial_system_prompt(
     *,
     task_steps_manager_enabled: bool,
     require_task_steps_manager_init_first: bool,
+    native_task_planning_backend: str = "",
 ) -> str:
-    if task_steps_manager_enabled and require_task_steps_manager_init_first:
+    native_backend = native_planning_backend(native_task_planning_backend)
+    if task_steps_manager_enabled and native_backend:
+        task_note = native_planning_prompt(
+            native_backend,
+            required_first=require_task_steps_manager_init_first,
+        ) + "\n"
+    elif task_steps_manager_enabled and require_task_steps_manager_init_first:
         task_note = (
             "- Your first tool call must be task_steps_manager action=init with a concise plan. "
             "Keep it updated as work progresses.\n"
@@ -133,7 +151,7 @@ def _build_initial_system_prompt(
     else:
         task_note = ""
     tool_note = (
-        "- task_steps_manager calls do not count toward non-task tool requirements.\n"
+        "- Planning-tool calls do not count toward non-task tool requirements.\n"
         if task_steps_manager_enabled
         else ""
     )
@@ -275,17 +293,23 @@ class Chack:
         self._last_activity_at: Dict[str, float] = {}
         self._session_started_at: Dict[str, float] = {}
         self._pricing = load_pricing(resolve_pricing_path())
-        self._self_critique_prompt = _build_self_critique_prompt(
-            mention_task_steps_manager=(
-                bool(getattr(self.config.tools, "task_steps_manager_enabled", True))
-                and bool(getattr(self.config.agent, "require_task_steps_manager_init_first", True))
-            ),
-        )
-        export_env(self.config, self.config_path)
         try:
             backend = resolve_backend_type(self.config)
         except Exception:
             backend = str(getattr(self.config.model, "provider", "") or "").strip().lower() or "unknown"
+        native_backend = native_planning_backend(backend)
+        planning_enabled = bool(
+            getattr(self.config.tools, "task_steps_manager_enabled", True)
+        )
+        self._self_critique_prompt = _build_self_critique_prompt(
+            mention_task_steps_manager=(
+                planning_enabled
+                and not native_backend
+                and bool(getattr(self.config.agent, "require_task_steps_manager_init_first", True))
+            ),
+            native_task_planning_backend=native_backend if planning_enabled else "",
+        )
+        export_env(self.config, self.config_path)
         self.logger.info(
             "Agent instantiated: model=%s backend=%s api_key_type=%s",
             str(getattr(self.config.model, "primary", "") or "").strip(),
@@ -551,14 +575,32 @@ class Chack:
             return action == "init"
         return False
 
-    def _non_task_tool_count(self, steps) -> int:
-        return sum(1 for step in steps if self._tool_name(step) != "task_steps_manager")
-
     @staticmethod
-    def _non_task_tool_count_from_counter(counter: Counter[str]) -> int:
+    def _is_planning_tool_name(name: Any) -> bool:
+        normalized = str(name or "").strip().split("__")[-1].lower()
+        return normalized in {
+            "task_steps_manager",
+            "todowrite",
+            "taskcreate",
+            "taskupdate",
+            "tasklist",
+            "taskget",
+            "enterplanmode",
+            "exitplanmode",
+        }
+
+    def _non_task_tool_count(self, steps) -> int:
+        return sum(
+            1
+            for step in steps
+            if not self._is_planning_tool_name(self._tool_name(step))
+        )
+
+    @classmethod
+    def _non_task_tool_count_from_counter(cls, counter: Counter[str]) -> int:
         total = 0
         for name, count in counter.items():
-            if name == "task_steps_manager":
+            if cls._is_planning_tool_name(name):
                 continue
             total += count
         return total
@@ -713,6 +755,10 @@ class Chack:
 
     def _system_prompt_for_session(self, session_id: str, system_prompt_override: Optional[str] = None) -> str:
         base = system_prompt_override or self.config.session.system_prompt or self.config.system_prompt
+        try:
+            backend = resolve_backend_type(self.config)
+        except Exception:
+            backend = str(getattr(self.config.model, "provider", "") or "")
 
         initial_system_prompt = _build_initial_system_prompt(
             task_steps_manager_enabled=bool(
@@ -721,6 +767,7 @@ class Chack:
             require_task_steps_manager_init_first=bool(
                 getattr(self.config.agent, "require_task_steps_manager_init_first", True)
             ),
+            native_task_planning_backend=native_planning_backend(backend),
         )
         if initial_system_prompt:
             base = f"{initial_system_prompt}\n\n{base}"
@@ -1621,7 +1668,7 @@ class Chack:
                 ),
             )
 
-            # Internal bookkeeping/session key for TaskStepsManager state.
+            # Common plan store for either Chack's manager or a backend-native planner.
             task_session_id = f"{session_id}:{uuid.uuid4().hex}"
             # If this run was spawned by a tool (sub-agent), usage_session_id is the
             # parent run id; reuse it for telemetry so tool executions show under the
@@ -1637,7 +1684,7 @@ class Chack:
                 memory_max_messages=int(self.config.session.memory_max_messages or 0),
                 memory_reset_to_messages=int(self.config.session.memory_reset_to_messages or 0),
             )
-            STORE.create_session(task_session_id, title="Task Steps Manager")
+            STORE.create_session(task_session_id, title="Agent Plan")
             TOOL_USAGE_STORE.reset_session(task_session_id)
             write_live_cost(task_session_id, 0.0)
 
@@ -1669,10 +1716,23 @@ class Chack:
 
             available_tool_names = self._available_tool_names(executor)
             update_log_context(available_tool_names=available_tool_names)
+            native_backend = native_planning_backend(
+                getattr(executor, "_native_task_planning_backend", "")
+            )
+            require_native_plan_first = bool(
+                require_task_steps_manager_init_first and native_backend
+            )
+            if hasattr(executor, "_require_native_plan_first"):
+                executor._require_native_plan_first = require_native_plan_first
             require_task_steps_manager_init_first = bool(
                 require_task_steps_manager_init_first
+                and not native_backend
                 and self._task_steps_manager_available(available_tool_names=available_tool_names)
             )
+            if hasattr(executor, "_require_task_steps_manager_init_first"):
+                executor._require_task_steps_manager_init_first = (
+                    require_task_steps_manager_init_first
+                )
 
             log_event(
                 "agent_start",
@@ -1692,6 +1752,8 @@ class Chack:
                     "self_critique_enabled": bool(enable_self_critique),
                     "self_critique_rounds": int(self_critique_rounds),
                     "require_task_steps_manager_init_first": bool(require_task_steps_manager_init_first),
+                    "native_task_planning_backend": native_backend,
+                    "require_native_plan_first": require_native_plan_first,
                     "system_prompt_override": bool(system_prompt_override),
                     "tools_override": bool(tools_override),
                     "tools_append": bool(tools_append),

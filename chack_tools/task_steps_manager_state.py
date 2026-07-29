@@ -24,6 +24,9 @@ class TaskItem:
     text: str
     status: str = "todo"  # todo | doing | done
     notes: str = ""
+    # Backend-native task identifier (for example Claude Code TaskCreate IDs).
+    # It is intentionally omitted from public snapshots/rendering.
+    source_id: str = ""
 
 
 @dataclass
@@ -227,6 +230,155 @@ class TaskStepsManagerStore:
                 "current_task": active_run["current_task"] if active_run else "",
                 "completed": bool(runs) and all(bool(run["completed"]) for run in runs),
             }
+
+    @staticmethod
+    def _normalize_status(value: Any) -> str:
+        raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if raw in {"done", "completed", "complete", "success", "succeeded"}:
+            return "done"
+        if raw in {"doing", "in_progress", "inprogress", "active", "started", "working"}:
+            return "doing"
+        return "todo"
+
+    def replace_snapshot(
+        self,
+        session_id: str,
+        run_label: str,
+        tasks: List[Dict[str, Any]],
+        *,
+        source: str = "native_plan",
+    ) -> str:
+        """Atomically mirror a backend-native plan and emit at most one update.
+
+        Native planners generally publish the complete current plan repeatedly.  A
+        snapshot operation avoids the burst of Telegram/Discord edits that would
+        result from replaying one ``replace`` plus N ``update`` actions.
+        """
+        run = self.ensure_run(session_id, run_label)
+        normalized: List[TaskItem] = []
+        for index, raw in enumerate(tasks or [], start=1):
+            if not isinstance(raw, dict):
+                continue
+            text = str(raw.get("text") or "").strip()
+            if not text:
+                continue
+            normalized.append(
+                TaskItem(
+                    id=len(normalized) + 1,
+                    text=text,
+                    status=self._normalize_status(raw.get("status")),
+                    notes=str(raw.get("notes") or "").strip(),
+                    source_id=str(raw.get("source_id") or index).strip(),
+                )
+            )
+
+        before = [
+            (task.text, task.status, task.notes, task.source_id)
+            for task in run.tasks
+        ]
+        after = [
+            (task.text, task.status, task.notes, task.source_id)
+            for task in normalized
+        ]
+        if run.initialized and before == after:
+            return "SUCCESS: native task snapshot unchanged"
+
+        was_initialized = run.initialized
+        run.tasks = normalized
+        run.next_id = len(normalized) + 1
+        run.initialized = True
+        run.completed_emitted = False
+        self._notify(session_id, reason=f"{run_label}:{source}:snapshot")
+        event_type = "tasklist_updated" if was_initialized else "tasklist_defined"
+        self._log_event(
+            event_type,
+            payload={
+                "action": "native_snapshot",
+                "source": source,
+                **self._run_counts(run),
+                "progress_percent": self._progress_percent(run),
+                "current_task": self._current_task(run),
+                "tasks": self._snapshot(run),
+            },
+            session_id=session_id,
+            run_label=run.label,
+        )
+        self._maybe_emit_completion(session_id, run)
+        return f"SUCCESS: mirrored {len(run.tasks)} native plan tasks"
+
+    def upsert_native_task(
+        self,
+        session_id: str,
+        run_label: str,
+        *,
+        source_id: str = "",
+        text: str = "",
+        status: str = "",
+        notes: str = "",
+        delete: bool = False,
+        source: str = "native_plan",
+    ) -> str:
+        """Apply a single native TaskCreate/TaskUpdate-style delta."""
+        run = self.ensure_run(session_id, run_label)
+        native_id = str(source_id or "").strip()
+        clean_text = str(text or "").strip()
+        task = next(
+            (item for item in run.tasks if native_id and item.source_id == native_id),
+            None,
+        )
+        if task is None and native_id.isdigit():
+            task = next((item for item in run.tasks if item.id == int(native_id)), None)
+        if task is None and clean_text:
+            task = next((item for item in run.tasks if item.text == clean_text), None)
+
+        if delete:
+            if task is None:
+                return "SUCCESS: native task already absent"
+            run.tasks = [item for item in run.tasks if item is not task]
+        elif task is None:
+            if not clean_text:
+                return "ERROR: native task text is required for a new task"
+            task = TaskItem(
+                id=run.next_id,
+                text=clean_text,
+                status=self._normalize_status(status),
+                notes=str(notes or "").strip(),
+                source_id=native_id,
+            )
+            run.tasks.append(task)
+            run.next_id += 1
+        else:
+            before = (task.text, task.status, task.notes, task.source_id)
+            if clean_text:
+                task.text = clean_text
+            if str(status or "").strip():
+                task.status = self._normalize_status(status)
+            if str(notes or "").strip():
+                task.notes = str(notes).strip()
+            if native_id:
+                task.source_id = native_id
+            if before == (task.text, task.status, task.notes, task.source_id):
+                return "SUCCESS: native task unchanged"
+
+        run.initialized = True
+        run.completed_emitted = False
+        self._notify(session_id, reason=f"{run_label}:{source}:delta")
+        self._log_event(
+            "tasklist_updated",
+            payload={
+                "action": "native_delete" if delete else "native_upsert",
+                "source": source,
+                "source_id": native_id,
+                **self._run_counts(run),
+                "progress_percent": self._progress_percent(run),
+                "current_task": self._current_task(run),
+                "tasks": self._snapshot(run),
+            },
+            session_id=session_id,
+            run_label=run.label,
+        )
+        self._maybe_emit_completion(session_id, run)
+        return "SUCCESS: native task plan updated"
 
     def apply(
         self,

@@ -59,8 +59,12 @@ totals.
 
 ### `task_steps_manager init first`
 
-- Enforced in backend tool-input guardrail `require_task_steps_manager_init_first`.
-- Codex, Gemini CLI and LangGraph backends enforce this in their tool execution layers.
+- For backends without native planning, Chack enforces this setting in its
+  `task_steps_manager` tool-input guardrail.
+- Codex and Claude Code do not receive that MCP tool. The same setting becomes
+  prompt guidance to create the first plan with Codex `update_plan` or Claude
+  Code `TodoWrite`/`Task*`; native plan updates are mirrored into Chack's shared
+  plan store and its Telegram/Discord listener.
 
 ## `openai_compaction_backend.py`
 
@@ -142,6 +146,9 @@ totals.
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
 - Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Codex JSON output lines and mapped into intermediate steps.
+- Codex `todo_list` events from native `update_plan` are mirrored on every
+  `item.started`, `item.updated`, and `item.completed` event into the shared
+  Chack plan board. Duplicate snapshots do not emit redundant chat edits.
 - Top-level MCP calls are also counted in a tiny file-backed run-state counter
   at the MCP execution boundary. `agent.py` merges those counts with provider
   steps by taking the larger per-tool observation, so Codex transcript
@@ -152,7 +159,10 @@ totals.
 ### Guardrails
 
 - No backend tool-input guardrail hooks (since execution is external CLI-driven).
-- MCP server hard-enforces `task_steps_manager init first` and `max_tools_used` limits.
+- The MCP server never exposes `task_steps_manager` to Codex. When init-first is
+  configured, the prompt asks Codex to call native `update_plan` first and keep
+  it current; this cannot be hard-enforced because it is a provider-native tool.
+- MCP still hard-enforces `max_tools_used` for transported Chack tools.
 - MCP does not expose command-execution tools (e.g. `exec`) to avoid duplication with Codex native command execution.
 
 ## `claude_code_backend.py`
@@ -174,14 +184,19 @@ totals.
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
 - Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Claude JSON stream events and mapped into intermediate steps.
+- Successful Claude native `TodoWrite`, `TaskCreate`, and `TaskUpdate` events are
+  normalized into the same shared plan board and listener used by Chack's tool.
 - The shared MCP-boundary counter supplies any calls missing from Claude's
   returned event stream without double-counting calls present in both sources.
 
 ### Guardrails
 
-- Prompt-level policy for min/max tool usage and `task_steps_manager init first` is injected in the prompt.
-- MCP server enforces `task_steps_manager init first` and `max_tools_used` limits.
-- `--tools ""` disables Claude Code native built-ins to avoid duplicate native tool execution paths.
+- Prompt-level policy for min/max tool usage is injected in the prompt.
+- The MCP server never exposes `task_steps_manager` to Claude Code. When
+  init-first is configured, Claude is asked to create and maintain the plan with
+  its installed native `TodoWrite` or `TaskCreate`/`TaskUpdate` tools; this is
+  advisory rather than hard-enforced.
+- Native planning calls do not count toward Chack's non-task tool limits.
 
 ---
 

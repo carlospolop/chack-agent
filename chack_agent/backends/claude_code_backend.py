@@ -21,6 +21,7 @@ from chack_tools.task_steps_manager_state import (
     current_run_label,
     current_session_id,
 )
+from chack_tools.native_planning import native_planning_prompt, sync_claude_native_task
 from chack_tools.telemetry import log_event
 from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
 from chack_tools.tool_usage_state import effective_max_tools_used
@@ -274,6 +275,8 @@ class ClaudeCodeExecutor:
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
+    _native_task_planning_backend: str = ""
+    _require_native_plan_first: bool = False
     _output_schema_name: str = "output_schema"
     _output_schema_strict: bool = True
     _max_context_tokens: int = 0
@@ -501,6 +504,12 @@ class ClaudeCodeExecutor:
         base = str(self._base_system_prompt or "").strip()
 
         policy_lines: list[str] = []
+        native_plan_line = native_planning_prompt(
+            self._native_task_planning_backend,
+            required_first=self._require_native_plan_first,
+        )
+        if native_plan_line:
+            policy_lines.append(native_plan_line)
         try:
             parsed_allowed_tools = json.loads(self._allowed_tools_json or "[]")
         except (TypeError, json.JSONDecodeError):
@@ -1093,6 +1102,13 @@ class ClaudeCodeExecutor:
         steps.append((step, None))
         self._log_tool_called(step.tool, step.tool_input)
 
+        if self._native_task_planning_backend:
+            sync_claude_native_task(
+                step.tool,
+                tool_input,
+                status=status,
+                result=result_payload,
+            )
         if str(step.tool).strip() == "task_steps_manager":
             self._sync_task_steps_manager(tool_input, status)
 
@@ -1915,10 +1931,18 @@ def build_executor(
         base_toolset = AgentsToolset(config.tools, **_build_toolset_kwargs())
         allowed_tool_names = _extract_tool_names(list(base_toolset.tools))
 
-    require_task_steps_manager_init_first = bool(
-        getattr(config.agent, "require_task_steps_manager_init_first", True)
-        and ("task_steps_manager" in allowed_tool_names)
+    native_task_planning_backend = (
+        "claude"
+        if bool(getattr(config.tools, "task_steps_manager_enabled", True))
+        else ""
     )
+    # Claude Code's TodoWrite/Task* tools produce better native plans. Explicit
+    # Chack tool overrides are translated into native-plan prompt guidance too.
+    allowed_tool_names = [
+        name for name in allowed_tool_names if name != "task_steps_manager"
+    ]
+
+    require_task_steps_manager_init_first = False
 
     configured_claude_path = os.environ.get("CLAUDE_CLI_PATH", "").strip() or "claude"
     claude_cli_path = shutil.which(configured_claude_path) or configured_claude_path
@@ -1976,6 +2000,11 @@ def build_executor(
             json.dumps(config.agent.output_schema_json, ensure_ascii=False)
             if getattr(config.agent, "output_schema_json", None)
             else ""
+        ),
+        _native_task_planning_backend=native_task_planning_backend,
+        _require_native_plan_first=bool(
+            native_task_planning_backend
+            and getattr(config.agent, "require_task_steps_manager_init_first", True)
         ),
         _output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
         _output_schema_strict=bool(getattr(config.agent, "output_schema_strict", True)),

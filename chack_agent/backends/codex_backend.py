@@ -21,6 +21,7 @@ from chack_tools.task_steps_manager_state import (
     current_run_label,
     current_session_id,
 )
+from chack_tools.native_planning import native_planning_prompt, sync_native_plan_snapshot
 from chack_tools.telemetry import log_event
 from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
 from chack_tools.tool_usage_state import effective_max_tools_used
@@ -276,6 +277,8 @@ class CodexExecutor:
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
+    _native_task_planning_backend: str = ""
+    _require_native_plan_first: bool = False
     _output_schema_strict: bool = True
     _max_context_tokens: int = 0
     _compaction_threshold_ratio: float = 0.50
@@ -624,6 +627,12 @@ class CodexExecutor:
             return str(user_input or "")
         base = str(self._base_system_prompt or "").strip()
         policy_lines: list[str] = []
+        native_plan_line = native_planning_prompt(
+            self._native_task_planning_backend,
+            required_first=self._require_native_plan_first,
+        )
+        if native_plan_line:
+            policy_lines.append(native_plan_line)
         if self._require_task_steps_manager_init_first:
             policy_lines.append(
                 "- First, call task_steps_manager with action=init before any other tool call."
@@ -817,9 +826,29 @@ class CodexExecutor:
                     error_messages.append(message)
                 continue
 
-            if event_type == "item.completed":
-                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+            if event_type in {"item.started", "item.updated", "item.completed"}:
+                raw_item = event.get("item")
+                item: dict[str, Any] = raw_item if isinstance(raw_item, dict) else {}
                 item_type = str(item.get("type", "") or "")
+
+                if item_type == "todo_list":
+                    if self._native_task_planning_backend:
+                        sync_native_plan_snapshot(
+                            item.get("items") or [],
+                            source="codex:update_plan",
+                            infer_current=True,
+                        )
+                    # Keep the plan visible in the execution trace without counting
+                    # it as a non-task tool. Only record the terminal event once.
+                    if event_type == "item.completed":
+                        step = self._item_to_step(item)
+                        if step is not None:
+                            steps.append((step, None))
+                            self._log_tool_called(step.tool, step.tool_input)
+                    continue
+
+                if event_type != "item.completed":
+                    continue
 
                 if item_type == "error":
                     message = str(item.get("message", "") or "").strip()
@@ -1975,11 +2004,18 @@ def build_executor(
     else:
         allowed_tool_names = _extract_tool_names(_configured_base_tools())
 
-    has_task_steps_manager_tool = (
-        "task_steps_manager" in allowed_tool_names
-        if allowed_tool_names is not None
-        else bool(getattr(config.tools, "task_steps_manager_enabled", True))
+    native_task_planning_backend = (
+        "codex"
+        if bool(getattr(config.tools, "task_steps_manager_enabled", True))
+        else ""
     )
+    # Never transport the Chack task manager into Codex. Even explicit tool
+    # overrides map to Codex's native update_plan prompt/callback path instead.
+    allowed_tool_names = [
+        name for name in (allowed_tool_names or []) if name != "task_steps_manager"
+    ]
+
+    has_task_steps_manager_tool = False
     require_task_steps_manager_init_first = bool(
         getattr(config.agent, "require_task_steps_manager_init_first", True)
         and has_task_steps_manager_tool
@@ -2077,6 +2113,11 @@ def build_executor(
             json.dumps(getattr(config.agent, "output_schema_json", None), ensure_ascii=False, indent=2)
             if getattr(config.agent, "output_schema_json", None)
             else ""
+        ),
+        _native_task_planning_backend=native_task_planning_backend,
+        _require_native_plan_first=bool(
+            native_task_planning_backend
+            and getattr(config.agent, "require_task_steps_manager_init_first", True)
         ),
         _output_schema_strict=bool(
             getattr(config.agent, "output_schema_strict", True)

@@ -174,6 +174,7 @@ from .serpapi_web_search import (
 )
 from .social_network_agent import SocialNetworkAgentTool, get_social_network_research_tool
 from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
+from .native_planning import uses_native_planning
 from .travel_search import (
     TravelSearchTool,
     get_amadeus_hotel_prices_tool,
@@ -356,7 +357,13 @@ class AgentsToolset:
             exec_helper = ExecTool(self.config)
             tools.append(get_exec_tool(exec_helper))
 
-        if getattr(self.config, "task_steps_manager_enabled", True):
+        # Codex and Claude Code already expose better-integrated native planning
+        # tools.  Keep Chack's manager as the compatibility fallback for backends
+        # without native plans; native events are mirrored into the same store.
+        if (
+            getattr(self.config, "task_steps_manager_enabled", True)
+            and not uses_native_planning(self.model_provider)
+        ):
             task_helper = TaskStepsManagerTool(self.config)
             tools.append(get_task_steps_manager_tool(task_helper))
 
