@@ -1242,7 +1242,6 @@ class Chack:
         tools_append: Optional[list[Any]] = None,
         exec_cwd: Optional[str] = None,
         output_schema_json_override: Optional[Dict[str, Any]] = None,
-        reuse_session: bool = False,
     ):
         config = self.config
         exec_cwd_value = str(exec_cwd or "").strip()
@@ -1263,7 +1262,7 @@ class Chack:
         memory_max_messages = int(self.config.session.memory_max_messages)
         memory_reset_to_messages = int(self.config.session.memory_reset_to_messages)
         memory_summary_max_chars = int(self.config.session.memory_summary_max_chars)
-        if (tools_override is not None or tools_append is not None) and not reuse_session:
+        if tools_override is not None or tools_append is not None:
             return build_executor(
                 config,
                 system_prompt=system_prompt_override or self.config.system_prompt,
@@ -1276,21 +1275,7 @@ class Chack:
             )
 
         schema_cache_key = json.dumps(output_schema_json_override, sort_keys=True) if output_schema_json_override else ""
-
-        def _tools_cache_key(tools: Optional[list[Any]]) -> str:
-            if tools is None:
-                return "none"
-            if not tools:
-                return "empty"
-            return ",".join(
-                f"{getattr(tool, '__module__', '')}.{getattr(tool, '__qualname__', type(tool).__qualname__)}:{id(tool)}"
-                for tool in tools
-            )
-
-        cache_key = (
-            f"{session_id}:{system_prompt_override or ''}:{exec_cwd_value}:{schema_cache_key}:"
-            f"{_tools_cache_key(tools_override)}:{_tools_cache_key(tools_append)}"
-        )
+        cache_key = f"{session_id}:{system_prompt_override or ''}:{exec_cwd_value}:{schema_cache_key}"
         executor = self._executors.get(cache_key)
         if executor is None:
             self.logger.info(
@@ -1308,8 +1293,6 @@ class Chack:
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
                 memory_summary_max_chars=memory_summary_max_chars,
-                tools_override=tools_override,
-                tools_append=tools_append,
             )
             self._executors[cache_key] = executor
         else:
@@ -1439,27 +1422,6 @@ class Chack:
     async def areset_session(self, session_id: str, *, finalize_long_term_memory: bool = True) -> None:
         if finalize_long_term_memory:
             await self._finalize_long_term_memory(session_id)
-        matching_executors = {
-            id(value): value
-            for key, value in self._executors.items()
-            if key.startswith(f"{session_id}:")
-        }
-        for executor in matching_executors.values():
-            if not _runtime_cleanup_enabled(executor):
-                continue
-            try:
-                cleanup_runtime_artifacts = getattr(
-                    executor, "cleanup_runtime_artifacts", None
-                )
-                if callable(cleanup_runtime_artifacts):
-                    cleanup_runtime_artifacts()
-            except Exception:
-                self.logger.warning(
-                    "Session runtime artifact cleanup failed: session=%s ts=%s.",
-                    session_id,
-                    _log_timestamp(),
-                    exc_info=True,
-                )
         self._executors = {
             k: v for k, v in self._executors.items() if not k.startswith(f"{session_id}:")
         }
@@ -1492,7 +1454,6 @@ class Chack:
         stop_requested: Optional[Callable[[], bool]] = None,
         compact_before_resume: bool = False,
         resume_compaction_instructions: Optional[str] = None,
-        reuse_session: bool = False,
     ) -> RunResult:
         return await asyncio.to_thread(
             self.run,
@@ -1516,7 +1477,6 @@ class Chack:
             stop_requested=stop_requested,
             compact_before_resume=compact_before_resume,
             resume_compaction_instructions=resume_compaction_instructions,
-            reuse_session=reuse_session,
         )
 
     def run(
@@ -1544,7 +1504,6 @@ class Chack:
         output_schema_json_override: Optional[Dict[str, Any]] = None,
         compact_before_resume: bool = False,
         resume_compaction_instructions: Optional[str] = None,
-        reuse_session: bool = False,
     ) -> RunResult:
         log_token = set_log_context(
             main_action=str(self.config.agent.main_action or ""),
@@ -1592,9 +1551,6 @@ class Chack:
             )
 
             self._prepare_session_for_run(session_id)
-            resuming_live_session = bool(
-                reuse_session and self.has_session(session_id)
-            )
             executor = self._get_executor(
                 session_id,
                 system_prompt_override=system_prompt_override,
@@ -1602,16 +1558,7 @@ class Chack:
                 tools_append=tools_append,
                 exec_cwd=exec_cwd,
                 output_schema_json_override=output_schema_json_override,
-                reuse_session=reuse_session,
             )
-            if resuming_live_session:
-                suppress_system_prompt = getattr(
-                    executor,
-                    "suppress_system_prompt_for_next_invocation",
-                    None,
-                )
-                if callable(suppress_system_prompt):
-                    suppress_system_prompt()
             self._last_activity_at[session_id] = time.time()
             run_started_at = self._last_activity_at[session_id]
             max_runtime_minutes = max(0, int(self.config.agent.max_runtime_minutes or 0))
@@ -3069,11 +3016,7 @@ class Chack:
                         _log_timestamp(),
                         exc_info=True,
                     )
-            if (
-                executor is not None
-                and not reuse_session
-                and _runtime_cleanup_enabled(executor)
-            ):
+            if executor is not None and _runtime_cleanup_enabled(executor):
                 try:
                     cleanup_runtime_artifacts = getattr(
                         executor, "cleanup_runtime_artifacts", None
