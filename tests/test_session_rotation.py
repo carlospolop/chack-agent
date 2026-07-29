@@ -85,3 +85,98 @@ def test_reset_clears_all_session_lifecycle_state() -> None:
     assert not agent.has_session("chat")
     assert "chat" not in agent._session_started_at
     assert "chat" not in agent._last_activity_at
+
+
+def test_reset_cleans_retained_runtime_artifacts() -> None:
+    class RetainedExecutor:
+        def __init__(self):
+            self.cleaned = 0
+
+        def _runtime_env_value(self, name, default=""):
+            assert name == "CHACK_CLEANUP_CODEX_HOME_AFTER_RUN"
+            return "true"
+
+        def cleanup_runtime_artifacts(self):
+            self.cleaned += 1
+
+    agent = _agent()
+    executor = RetainedExecutor()
+    agent._executors["chat:retained"] = executor
+
+    agent.reset_session("chat", finalize_long_term_memory=False)
+
+    assert executor.cleaned == 1
+    assert not agent.has_session("chat")
+
+
+def test_reuse_session_caches_executor_with_empty_tool_override(monkeypatch) -> None:
+    agent = _agent()
+    built = []
+    executor = object()
+
+    def fake_build_executor(*args, **kwargs):
+        built.append((args, kwargs))
+        return executor
+
+    monkeypatch.setattr("chack_agent.agent.build_executor", fake_build_executor)
+
+    first = agent._get_executor(
+        "chat",
+        tools_override=[],
+        reuse_session=True,
+    )
+    second = agent._get_executor(
+        "chat",
+        tools_override=[],
+        reuse_session=True,
+    )
+
+    assert first is executor
+    assert second is executor
+    assert len(built) == 1
+    assert built[0][1]["tools_override"] == []
+
+
+def test_reused_live_session_suppresses_repeated_system_prompt(monkeypatch) -> None:
+    class RetainedExecutor:
+        def __init__(self):
+            self.suppressed = 0
+            self.inputs = []
+
+        def suppress_system_prompt_for_next_invocation(self):
+            self.suppressed += 1
+
+        def invoke(self, payload, context=None):
+            del context
+            self.inputs.append(payload["input"])
+            return {
+                "output": "ok",
+                "intermediate_steps": [],
+                "raw_result": None,
+            }
+
+        def _runtime_env_value(self, _name, default=""):
+            return default
+
+    agent = _agent()
+    executor = RetainedExecutor()
+    monkeypatch.setattr(
+        "chack_agent.agent.build_executor",
+        lambda *_args, **_kwargs: executor,
+    )
+
+    agent.run(
+        "chat",
+        "first full request",
+        tools_override=[],
+        reuse_session=True,
+    )
+    agent.run(
+        "chat",
+        "short continuation",
+        tools_override=[],
+        reuse_session=True,
+    )
+
+    assert executor.inputs == ["first full request", "short continuation"]
+    assert executor.suppressed == 1
