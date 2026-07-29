@@ -299,6 +299,7 @@ def _async_cancel_job(job_id: str) -> dict[str, Any]:
 RESEARCHER_REGISTRY: dict[str, tuple[str, str]] = {
     "deepchatgpt": ("deepchatgpt_enabled", "deepchatgpt_researcher"),
     "prochatgpt": ("prochatgpt_enabled", "prochatgpt_researcher"),
+    "chatgptxhigh": ("chatgptxhigh_enabled", "chatgptxhigh"),
     "scientific": ("scientific_enabled", "scientific_research"),
     "business": ("business_enabled", "business_research"),
     "product": ("product_enabled", "product_research"),
@@ -319,6 +320,9 @@ _RESEARCHER_ALIASES = {
     "chatgpt_deep": "deepchatgpt",
     "pro_chatgpt": "prochatgpt",
     "chatgpt_pro": "prochatgpt",
+    "xhigh": "chatgptxhigh",
+    "extra_high": "chatgptxhigh",
+    "chatgpt_xhigh": "chatgptxhigh",
     "web": "websearcher",
     "webresearcher": "websearcher",
     "websearch": "websearcher",
@@ -383,8 +387,8 @@ _ADMINISTRATOR_SYSTEM_PROMPT = """### RULES
 - Only launch researcher tools that are actually available in this run's capability map. If the user requested a source family whose researcher is not enabled, record it as a coverage gap instead of attempting an unavailable tool.
 - Do not launch researchers that are not materially related to the topic. For example, a normal question about a famous football player likely needs web/news/social/business/entity research, not scientific or religious research unless the user specifically asks for those angles.
 - In that first wave, prefer breadth over repeating one researcher type: normally run 3-5 different relevant researcher types before relaunching the same type, unless the request is genuinely narrow.
-- `run_researchers_batch` and `start_researchers_async` can queue several relevant researchers, but this in-process tool server executes them one at a time to keep evidence folders isolated and auditable. Use async when a researcher may take a long time and you want to poll progress, cross-pollinate leads, or cancel stalled/no-longer-useful work. After any async launch, immediately poll once. For ordinary researchers use `poll_researchers_async(wait_seconds=30-120)`; for ChatGPT Pro/Deep browser jobs use completion-aware long polls of 300-600 seconds. The wait returns early when the job completes, so never burn one tool call per minute for an hour. Queued async tasks may need a few minutes to start because child Codex/Claude sessions and MCP tools initialize; do not declare research failure merely because tasks are still queued/running for only a minute or two unless runtime is nearly exhausted. Reserve the final third of runtime for synthesis: cancel or stop waiting on slow tasks once enough evidence exists to answer with explicit gaps.
-- ChatGPT `deepchatgpt_researcher` and `prochatgpt_researcher` are an exception to the normal "reserve the final third" rule because they are legitimately long-running browser jobs. Prefer `start_researchers_async` plus `poll_researchers_async` for them. If a direct invocation is already running in an execution cell, keep waiting in long intervals until it returns, reports a terminal error, or reaches the configured hard runtime limit. Never use `wait(..., terminate=true)`, `cancel_researchers_async`, or any process-kill action merely because a ChatGPT researcher has run for many minutes or appears to be finalizing; Pro and Deep Research may take 45-90 minutes. Cancellation is only valid after an explicit user cancellation, a proven terminal browser/tool error, or the configured hard timeout. A running job with an enabled stop control or continuing progress is not stalled.
+- `run_researchers_batch` and `start_researchers_async` can queue several relevant researchers, but this in-process tool server executes them one at a time to keep evidence folders isolated and auditable. Use async when a researcher may take a long time and you want to poll progress, cross-pollinate leads, or cancel stalled/no-longer-useful work. After any async launch, immediately poll once. For ordinary researchers use `poll_researchers_async(wait_seconds=30-120)`; for ChatGPT Pro/Extra High/Deep browser jobs use completion-aware long polls of 300-600 seconds. The wait returns early when the job completes, so never burn one tool call per minute for an hour. Queued async tasks may need a few minutes to start because child Codex/Claude sessions and MCP tools initialize; do not declare research failure merely because tasks are still queued/running for only a minute or two unless runtime is nearly exhausted. Reserve the final third of runtime for synthesis: cancel or stop waiting on slow tasks once enough evidence exists to answer with explicit gaps.
+- ChatGPT `deepchatgpt_researcher`, `prochatgpt_researcher`, and `chatgptxhigh` are an exception to the normal "reserve the final third" rule because they are legitimately long-running browser jobs. Prefer `start_researchers_async` plus `poll_researchers_async` for them. If a direct invocation is already running in an execution cell, keep waiting in long intervals until it returns, reports a terminal error, or reaches the configured hard runtime limit. Never use `wait(..., terminate=true)`, `cancel_researchers_async`, or any process-kill action merely because a ChatGPT researcher has run for many minutes or appears to be finalizing; these authenticated browser modes may take 45-90 minutes. Cancellation is only valid after an explicit user cancellation, a proven terminal browser/tool error, or the configured hard timeout. A running job with an enabled stop control or continuing progress is not stalled.
 - You may launch as many researcher runs as needed, including several runs of the same researcher type with different or more focused prompts, so that no source or angle is missed.
 - Every sub-researcher runs blind to the others. After each batch returns, review the conclusions and cross-pollinate: if one researcher surfaced leads that belong to another domain (e.g. the web researcher found papers the scientific researcher never checked, or a company the business researcher should verify), launch that other researcher again with the new leads. When you suggest a researcher lean harder on specific tools/sources, say so explicitly in its prompt.
 - Keep launching follow-up researchers until the evidence is well covered and additional runs stop producing materially new findings; only then finish. Do not stop after one thin batch when the topic clearly spans multiple evidence domains, but also synthesize with explicit gaps rather than timing out when the useful evidence gathered is already enough for a defensible answer.
@@ -1314,7 +1318,7 @@ class ResearcherAdministratorAgentTool:
             # The exposed researcher is itself the browser-backed capability; it
             # does not spin up another Chack subagent with internal tools.
             return []
-        elif short == "prochatgpt":
+        elif short in {"prochatgpt", "chatgptxhigh"}:
             return []
         elif short == "websearcher":
             from .websearcher_agent import WebSearcherAgentTool
@@ -1477,6 +1481,11 @@ class ResearcherAdministratorAgentTool:
             if short == "prochatgpt":
                 lines.append(
                     f"- {short} via `{exposed_tool}`: authenticated ChatGPT Web Pro-mode selection, terminal-state monitoring, full response extraction, and artifact preservation"
+                )
+                continue
+            if short == "chatgptxhigh":
+                lines.append(
+                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Web Extra High reasoning-mode selection, terminal-state monitoring, full response extraction, and artifact preservation"
                 )
                 continue
             try:
@@ -1987,7 +1996,8 @@ class ResearcherAdministratorAgentTool:
                 tasks.append(row)
             statuses = [str(t.get("status") or "") for t in tasks]
             has_browser_researcher = any(
-                str(t.get("researcher_tool") or "") in {"deepchatgpt_researcher", "prochatgpt_researcher"}
+                str(t.get("researcher_tool") or "")
+                in {"deepchatgpt_researcher", "prochatgpt_researcher", "chatgptxhigh"}
                 for t in tasks
             )
             complete = bool(tasks) and all(s in {"done", "error", "cancelled"} for s in statuses)
@@ -2098,11 +2108,15 @@ class ResearcherAdministratorAgentTool:
             all_tools.append(tool)
 
         tools_by_name = {self._name_of_tool(tool): tool for tool in all_tools}
-        long_browser_researchers = {"deepchatgpt", "prochatgpt"}.intersection(enabled_researchers)
+        long_browser_researchers = {
+            "deepchatgpt",
+            "prochatgpt",
+            "chatgptxhigh",
+        }.intersection(enabled_researchers)
         synchronous_researchers = [short for short in enabled_researchers if short not in long_browser_researchers]
         synchronous_tool_names = {RESEARCHER_REGISTRY[short][1] for short in synchronous_researchers}
 
-        # ChatGPT Pro/Deep can run for 45-90 minutes. Never expose those direct
+        # ChatGPT Pro/Extra High/Deep can run for 45-90 minutes. Never expose those direct
         # blocking tools (or a synchronous batch containing them) to the Codex
         # administrator, because Codex execution cells can be manually terminated
         # before the researcher reaches terminal output. Keep the direct tools

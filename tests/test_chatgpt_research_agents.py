@@ -11,6 +11,7 @@ from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.chatgpt_research_agents import (
     CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS,
     CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS,
+    CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS,
     ChatGPTWebResearchAgentTool,
     ChatGPTWebResearchError,
     resolve_chatgpt_timeout_seconds,
@@ -31,21 +32,111 @@ def test_chatgpt_research_tools_register_only_when_enabled():
     off = AgentsToolset(ToolsConfig(), model_provider="openai", default_model="gpt-5-mini")
     assert "deepchatgpt_researcher" not in _tool_names(off.tools)
     assert "prochatgpt_researcher" not in _tool_names(off.tools)
+    assert "chatgptxhigh" not in _tool_names(off.tools)
 
     on = AgentsToolset(
-        ToolsConfig(deepchatgpt_enabled=True, prochatgpt_enabled=True),
+        ToolsConfig(
+            deepchatgpt_enabled=True,
+            prochatgpt_enabled=True,
+            chatgptxhigh_enabled=True,
+        ),
         model_provider="openai",
         default_model="gpt-5-mini",
     )
-    assert {"deepchatgpt_researcher", "prochatgpt_researcher"} <= _tool_names(on.tools)
+    assert {
+        "deepchatgpt_researcher",
+        "prochatgpt_researcher",
+        "chatgptxhigh",
+    } <= _tool_names(on.tools)
 
 
 def test_chatgpt_modes_have_distinct_total_output_deadlines():
     config = ToolsConfig()
     assert resolve_chatgpt_timeout_seconds(config, "pro") == 90 * 60
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 90 * 60
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 75 * 60
     assert CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS == 5400
+    assert CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS == 5400
     assert CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS == 4500
+
+
+class _ModeLocator:
+    def __init__(self, page, role, pattern, label=""):
+        self.page = page
+        self.role = role
+        self.pattern = pattern
+        self.label = label
+
+    def count(self):
+        if self.role == "button":
+            return 1 if self.pattern.search(self.page.selected) else 0
+        if self.role == "menuitemradio":
+            return 1 if self.page.menu_open and self.label else 0
+        return 0
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self):
+        return True
+
+    def click(self, timeout=0):
+        assert timeout == 5000
+        if self.role == "button":
+            self.page.menu_open = True
+            self.page.clicks.append(f"open:{self.page.selected}")
+        else:
+            self.page.selected = self.label
+            self.page.menu_open = False
+            self.page.clicks.append(f"select:{self.label}")
+
+
+class _EmptyLocator:
+    def count(self):
+        return 0
+
+
+class _ModePage:
+    options = ("Instant", "Medium", "High", "Extra High", "Pro")
+
+    def __init__(self, selected):
+        self.selected = selected
+        self.menu_open = False
+        self.clicks = []
+
+    def get_by_role(self, role, name):
+        if role == "button":
+            return _ModeLocator(self, role, name)
+        if role == "menuitemradio":
+            label = next((value for value in self.options if name.search(value)), "")
+            return _ModeLocator(self, role, name, label)
+        return _EmptyLocator()
+
+    def get_by_text(self, _name):
+        return _EmptyLocator()
+
+    def locator(self, _selector):
+        return _EmptyLocator()
+
+    def wait_for_timeout(self, milliseconds):
+        assert milliseconds == 500
+
+
+@pytest.mark.parametrize(
+    ("mode", "starting", "expected"),
+    [
+        ("pro", "Extra High", "Pro"),
+        ("pro", "Pro", "Pro"),
+        ("xhigh", "Pro", "Extra High"),
+        ("xhigh", "Extra High", "Extra High"),
+    ],
+)
+def test_reasoning_mode_is_explicitly_selected_and_verified_every_launch(mode, starting, expected):
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode=mode)
+    page = _ModePage(starting)
+    helper._select_reasoning_mode(page)
+    assert page.selected == expected
+    assert page.clicks == [f"open:{starting}", f"select:{expected}"]
 
 
 def test_chatgpt_research_tool_accepts_and_runs_five_prompts_in_parallel(monkeypatch):
@@ -76,30 +167,43 @@ def test_chatgpt_research_tool_accepts_and_runs_five_prompts_in_parallel(monkeyp
 def test_mode_specific_timeout_overrides_legacy_shared_timeout():
     config = ToolsConfig(
         chatgpt_pro_timeout_seconds=321,
+        chatgpt_xhigh_timeout_seconds=987,
         chatgpt_deep_timeout_seconds=654,
         chatgpt_research_timeout_seconds=999,
     )
     assert resolve_chatgpt_timeout_seconds(config, "pro") == 321
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 987
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 654
 
 
 def test_legacy_shared_timeout_remains_a_compatibility_fallback():
     config = ToolsConfig(chatgpt_research_timeout_seconds=777)
     assert resolve_chatgpt_timeout_seconds(config, "pro") == 777
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 777
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 777
 
 
 def test_chatgpt_aliases_are_accepted_by_administrator():
     assert normalize_researcher_name("chatgpt-deep") == "deepchatgpt"
     assert normalize_researcher_name("prochatgpt_researcher") == "prochatgpt"
+    assert normalize_researcher_name("chatgpt_xhigh") == "chatgptxhigh"
+    assert normalize_researcher_name("chatgptxhigh") == "chatgptxhigh"
 
     helper = ResearcherAdministratorAgentTool(
-        ToolsConfig(deepchatgpt_enabled=True, prochatgpt_enabled=True),
+        ToolsConfig(
+            deepchatgpt_enabled=True,
+            prochatgpt_enabled=True,
+            chatgptxhigh_enabled=True,
+        ),
         model_provider="openai",
         fallback_model="gpt-5-mini",
-        researchers=["chatgpt_deep", "chatgpt_pro"],
+        researchers=["chatgpt_deep", "chatgpt_pro", "chatgpt_xhigh"],
     )
-    assert helper._enabled_researchers() == ["deepchatgpt", "prochatgpt"]
+    assert helper._enabled_researchers() == [
+        "deepchatgpt",
+        "prochatgpt",
+        "chatgptxhigh",
+    ]
 
 
 def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
@@ -228,6 +332,43 @@ def test_remote_backend_submits_polls_and_preserves_result(monkeypatch, tmp_path
     assert metadata["execution_backend"] == "remote"
     assert metadata["remote_status"] == "SUCCEEDED"
     assert json.loads(run_state.read_text())["remote_job_id"].startswith("job_")
+
+
+def test_xhigh_remote_backend_submits_exact_mode_and_preserves_result(monkeypatch, tmp_path):
+    class FakeClient:
+        def submit(self, **kwargs):
+            assert kwargs["mode"] == "xhigh"
+            assert kwargs["output_timeout_seconds"] == 5400
+            return {
+                "job_id": "job_00000000-0000-0000-0000-000000000002",
+                "status": "QUEUED",
+            }
+
+        def status(self, _job_id):
+            return {"status": "SUCCEEDED", "stage": "extracted", "answer_chars": 300}
+
+        def result(self, _job_id):
+            return {
+                "status": "SUCCEEDED",
+                "result": "XHIGH_OK " + ("R" * 300),
+                "partial_result": "",
+                "metadata": {"mode": "xhigh", "terminal_state": "extracted"},
+            }
+
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_execution_backend="remote"),
+        mode="xhigh",
+    )
+    monkeypatch.setattr(helper, "_async_client", lambda: FakeClient())
+    answer, url, metadata = helper._remote_research(
+        "P" * 500,
+        run_state_path=tmp_path / "run.json",
+        partial_path=tmp_path / "partial.md",
+    )
+    assert answer.startswith("XHIGH_OK")
+    assert url == ""
+    assert metadata["mode"] == "xhigh"
+    assert helper.tool_name == "chatgptxhigh"
 
 
 def test_async_client_sends_bearer_secret_only_in_header():

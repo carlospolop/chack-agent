@@ -396,7 +396,7 @@ Most tools require API keys. Provide them via env vars (recommended) or your own
 | `FORUMSCOUT_BASE_URL` | ForumScout API base URL | Optional override |
 | `CHACK_AWS_PROFILES` | Base64 of an AWS credentials file | AWS profile injection |
 
-### Remote ChatGPT Pro / Deep worker
+### Remote ChatGPT Pro / Extra High / Deep worker
 
 Cloud applications do not need Chrome and must not try to reach a workstation directly. Configure them with the
 authenticated asynchronous broker's HTTPS origin and its client-only secret:
@@ -406,7 +406,7 @@ export CHACK_CHATGPT_ASYNC_API_URL="https://broker.example.com"
 export CHACK_CHATGPT_ASYNC_API_SECRET="<client bearer secret>"
 ```
 
-When either broker variable is present, the Pro and Deep researcher tools use only the broker. Incomplete broker
+When either broker variable is present, the Pro, Extra High, and Deep researcher tools use only the broker. Incomplete broker
 configuration is a hard failure; it never falls back to a local browser.
 
 Run the separate outbound worker on the PC that has the authenticated ChatGPT Chrome profile. Give this process the

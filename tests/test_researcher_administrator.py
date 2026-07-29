@@ -61,13 +61,14 @@ def test_chatgpt_researchers_are_structurally_async_only():
         researcher_administrator_enabled=True,
         deepchatgpt_enabled=True,
         prochatgpt_enabled=True,
+        chatgptxhigh_enabled=True,
         chatgpt_cdp_url="http://127.0.0.1:9226",
     )
     helper = ResearcherAdministratorAgentTool(
         cfg,
         model_provider="openai",
         fallback_model="m",
-        researchers=["deepchatgpt", "prochatgpt"],
+        researchers=["deepchatgpt", "prochatgpt", "chatgptxhigh"],
     )
 
     inner = _tool_names(helper._build_subagent_tools(helper._enabled_researchers()))
@@ -75,6 +76,7 @@ def test_chatgpt_researchers_are_structurally_async_only():
     assert "poll_researchers_async" in inner
     assert "deepchatgpt_researcher" not in inner
     assert "prochatgpt_researcher" not in inner
+    assert "chatgptxhigh" not in inner
     assert "run_researchers_batch" not in inner
     assert "cancel_researchers_async" not in inner
 

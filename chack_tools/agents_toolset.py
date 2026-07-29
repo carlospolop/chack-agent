@@ -194,6 +194,7 @@ from .travel_search import (
 from .websearcher_agent import WebSearcherAgentTool, get_websearcher_research_tool
 from .cli_research_agent import CliResearchAgentTool, get_cli_research_tool
 from .chatgpt_research_agents import (
+    get_chatgptxhigh_tool,
     get_deepchatgpt_researcher_tool,
     get_prochatgpt_researcher_tool,
     resolve_chatgpt_timeout_seconds,
@@ -718,6 +719,9 @@ class AgentsToolset:
         if self.config.prochatgpt_enabled:
             tools.append(get_prochatgpt_researcher_tool(self.config))
 
+        if self.config.chatgptxhigh_enabled:
+            tools.append(get_chatgptxhigh_tool(self.config))
+
         if self.config.subchack_enabled:
             subchack_helper = SubChackResearchAgentTool(
                 self.config,
@@ -836,13 +840,19 @@ class AgentsToolset:
                 int(getattr(self.config, "researcher_queue_max_runtime_minutes", 0) or 0) * 60,
             )
             pro_browser_timeout = resolve_chatgpt_timeout_seconds(self.config, "pro")
+            xhigh_browser_timeout = resolve_chatgpt_timeout_seconds(self.config, "xhigh")
             deep_browser_timeout = resolve_chatgpt_timeout_seconds(self.config, "deep")
-            if queue_runtime_seconds > 0 and {"deepchatgpt", "prochatgpt"}.intersection(queue_researchers):
+            if queue_runtime_seconds > 0 and {
+                "deepchatgpt",
+                "prochatgpt",
+                "chatgptxhigh",
+            }.intersection(queue_researchers):
                 # The Pro Answer-now recovery window is already contained within
                 # its total output deadline. Keep only a post-browser synthesis
                 # reserve before the administrator's own hard runtime.
                 max_browser_timeout = max(60, queue_runtime_seconds - 300)
                 pro_browser_timeout = min(pro_browser_timeout, max_browser_timeout)
+                xhigh_browser_timeout = min(xhigh_browser_timeout, max_browser_timeout)
                 deep_browser_timeout = min(deep_browser_timeout, max_browser_timeout)
             # The queue owns a private administrator (force-enabled) that researches
             # each merged request. Force it off recursion just like the standalone one.
@@ -853,6 +863,7 @@ class AgentsToolset:
                 researcher_administrator_required_researchers=queue_required_researchers,
                 researcher_administrator_max_tools_used=queue_admin_budget,
                 chatgpt_pro_timeout_seconds=pro_browser_timeout,
+                chatgpt_xhigh_timeout_seconds=xhigh_browser_timeout,
                 chatgpt_deep_timeout_seconds=deep_browser_timeout,
                 chatgpt_research_timeout_seconds=0,
                 researcher_administrator_agent={

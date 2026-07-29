@@ -38,10 +38,16 @@ except ImportError:  # pragma: no cover - mirrors the other researcher modules
     function_tool = None
 
 
-Mode = Literal["deep", "pro"]
+Mode = Literal["deep", "pro", "xhigh"]
 
 CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 90 * 60
+CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS = 90 * 60
 CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS = 75 * 60
+_MODE_TOOL_NAMES: dict[Mode, str] = {
+    "deep": "deepchatgpt_researcher",
+    "pro": "prochatgpt_researcher",
+    "xhigh": "chatgptxhigh",
+}
 _REMOTE_METADATA_FIELDS = {
     "mode",
     "started_at",
@@ -61,15 +67,22 @@ def resolve_chatgpt_timeout_seconds(config: ToolsConfig, mode: Mode) -> int:
     Mode-specific configuration is authoritative. The old shared setting is
     retained as a compatibility fallback for callers that have not migrated.
     """
-    field_name = "chatgpt_deep_timeout_seconds" if mode == "deep" else "chatgpt_pro_timeout_seconds"
+    field_name = {
+        "deep": "chatgpt_deep_timeout_seconds",
+        "pro": "chatgpt_pro_timeout_seconds",
+        "xhigh": "chatgpt_xhigh_timeout_seconds",
+    }[mode]
     configured = getattr(config, field_name, None)
     if configured is not None and int(configured or 0) > 0:
         return max(60, int(configured))
     legacy = int(getattr(config, "chatgpt_research_timeout_seconds", 0) or 0)
     if legacy > 0:
         return max(60, legacy)
-    default = CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS if mode == "deep" else CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS
-    return default
+    return {
+        "deep": CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS,
+        "pro": CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS,
+        "xhigh": CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS,
+    }[mode]
 
 
 class ChatGPTWebResearchError(RuntimeError):
@@ -81,17 +94,17 @@ def _compact(payload: Any) -> str:
 
 
 class ChatGPTWebResearchAgentTool:
-    """Launch a Deep Research or Pro request in an existing Chrome session."""
+    """Launch a Deep Research, Pro, or Extra High request in Chrome."""
 
     def __init__(self, config: ToolsConfig, *, mode: Mode):
-        if mode not in {"deep", "pro"}:
+        if mode not in {"deep", "pro", "xhigh"}:
             raise ValueError(f"Unsupported ChatGPT research mode: {mode}")
         self.config = config
         self.mode: Mode = mode
 
     @property
     def tool_name(self) -> str:
-        return f"{self.mode}chatgpt_researcher"
+        return _MODE_TOOL_NAMES[self.mode]
 
     def _cdp_url(self) -> str:
         configured = str(getattr(self.config, "chatgpt_cdp_url", "") or "").strip()
@@ -335,7 +348,13 @@ class ChatGPTWebResearchAgentTool:
                 except Exception:
                     continue
 
-    def _select_pro(self, page) -> None:
+    def _select_reasoning_mode(self, page) -> None:
+        if self.mode not in {"pro", "xhigh"}:
+            raise ChatGPTWebResearchError(
+                f"ChatGPT selector is not valid for mode {self.mode}."
+            )
+        target_label = "Pro" if self.mode == "pro" else "Extra High"
+        target_pattern = re.compile(rf"^\s*{re.escape(target_label)}\s*$", re.I)
         # Current ChatGPT UI exposes the selected reasoning level as a compact
         # menu button (commonly "Medium"). Prefer that exact visible control so
         # the many conversation-option menus in the sidebar are never inspected.
@@ -374,18 +393,45 @@ class ChatGPTWebResearchAgentTool:
                 if opened:
                     break
         if not opened:
-            raise ChatGPTWebResearchError("Could not open the ChatGPT model/mode selector required for Pro mode.")
+            raise ChatGPTWebResearchError(
+                f"Could not open the ChatGPT model/mode selector required for {target_label} mode."
+            )
 
-        pro = page.get_by_text(re.compile(r"^\s*Pro\s*$", re.I))
-        for index in reversed(range(pro.count())):
+        options = page.get_by_role("menuitemradio", name=target_pattern)
+        if not options.count():
+            options = page.get_by_text(target_pattern)
+        for index in reversed(range(options.count())):
             try:
-                if pro.nth(index).is_visible():
-                    pro.nth(index).click(timeout=5000)
+                if options.nth(index).is_visible():
+                    options.nth(index).click(timeout=5000)
                     page.wait_for_timeout(500)
+                    break
+            except Exception:
+                continue
+        else:
+            raise ChatGPTWebResearchError(
+                f"The {target_label} option was not present in the ChatGPT model selector."
+            )
+
+        # Do not trust the click alone: the mode must be visibly selected before
+        # a potentially expensive prompt is submitted. This also catches a stale
+        # menu or account-level UI change instead of silently using another mode.
+        selected = page.get_by_role("button", name=target_pattern)
+        for index in reversed(range(selected.count())):
+            try:
+                if selected.nth(index).is_visible():
                     return
             except Exception:
                 continue
-        raise ChatGPTWebResearchError("The Pro option was not present in the ChatGPT model selector.")
+        raise ChatGPTWebResearchError(
+            f"ChatGPT did not confirm {target_label} mode after selection; refusing to send."
+        )
+
+    def _select_pro(self, page) -> None:
+        """Backward-compatible helper retained for integrations/tests."""
+        if self.mode != "pro":
+            raise ChatGPTWebResearchError("_select_pro is only valid for Pro mode.")
+        self._select_reasoning_mode(page)
 
     @staticmethod
     def _send(page, prompt: str) -> None:
@@ -729,7 +775,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             # deadline. It must never extend a broken browser request beyond the
             # configured total output deadline.
             if (
-                self.mode == "pro"
+                self.mode in {"pro", "xhigh"}
                 and not forced_answer
                 and now >= force_at
                 and self._click_answer_now_if_present(page)
@@ -858,7 +904,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     if not re.search(r"deep research|full report|detailed report|investigaci[oó]n profunda|informe detallado", body, re.I):
                         raise ChatGPTWebResearchError("The /deep-research route did not expose Deep Research mode; refusing to send a normal chat.")
                 else:
-                    self._select_pro(page)
+                    self._select_reasoning_mode(page)
                 self._send(page, prompt)
                 page.wait_for_timeout(1000)
                 try:
@@ -1057,7 +1103,11 @@ def _make_tool(helper: ChatGPTWebResearchAgentTool):
     if function_tool is None:
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
-    mode_label = "Deep Research" if helper.mode == "deep" else "Pro mode"
+    mode_label = {
+        "deep": "Deep Research",
+        "pro": "Pro mode",
+        "xhigh": "Extra High reasoning mode",
+    }[helper.mode]
     description = f"""Run one authenticated ChatGPT Web {mode_label} research agent in a clean Chrome tab and wait for the complete extracted response.
 
 Use it for an independent ChatGPT {mode_label} research or reasoning pass. Give a self-contained prompt with the topic, scope, source/evidence requirements, uncertainties to test, and expected output. Normal clients submit through the configured authenticated async HTTPS broker; only the outbound workstation worker uses the signed-in local Chrome/CDP executor.
@@ -1101,3 +1151,7 @@ def get_deepchatgpt_researcher_tool(config: ToolsConfig):
 
 def get_prochatgpt_researcher_tool(config: ToolsConfig):
     return _make_tool(ChatGPTWebResearchAgentTool(config, mode="pro"))
+
+
+def get_chatgptxhigh_tool(config: ToolsConfig):
+    return _make_tool(ChatGPTWebResearchAgentTool(config, mode="xhigh"))

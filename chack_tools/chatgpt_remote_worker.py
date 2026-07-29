@@ -111,10 +111,15 @@ class ChatGPTRemoteWorker:
             "chatgpt_cdp_url": self.cdp_url,
             "chatgpt_research_poll_seconds": int(os.environ.get("CHACK_CHATGPT_BROWSER_POLL_SECONDS", "15")),
         }
-        if mode == "pro":
-            kwargs["chatgpt_pro_timeout_seconds"] = output_timeout_seconds
-        else:
-            kwargs["chatgpt_deep_timeout_seconds"] = output_timeout_seconds
+        timeout_fields = {
+            "pro": "chatgpt_pro_timeout_seconds",
+            "xhigh": "chatgpt_xhigh_timeout_seconds",
+            "deep": "chatgpt_deep_timeout_seconds",
+        }
+        field_name = timeout_fields.get(mode)
+        if not field_name:
+            raise ValueError(f"Unsupported ChatGPT worker mode: {mode}")
+        kwargs[field_name] = output_timeout_seconds
         return ToolsConfig(**kwargs)
 
     def _pending_path(self, job_id: str) -> Path:
@@ -223,8 +228,9 @@ class ChatGPTRemoteWorker:
         lease_id = str(lease.get("lease_id") or "")
         mode = str(lease.get("mode") or "")
         prompt = str(lease.get("prompt") or "")
-        output_timeout = int(lease.get("output_timeout_seconds") or (5400 if mode == "pro" else 4500))
-        if not job_id or not lease_id or mode not in {"pro", "deep"} or not prompt:
+        default_timeout = 4500 if mode == "deep" else 5400
+        output_timeout = int(lease.get("output_timeout_seconds") or default_timeout)
+        if not job_id or not lease_id or mode not in {"pro", "xhigh", "deep"} or not prompt:
             LOG.error("broker returned an invalid lease payload")
             return
 
