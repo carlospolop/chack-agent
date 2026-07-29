@@ -110,6 +110,14 @@ def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _runtime_cleanup_enabled(executor: Any = None) -> bool:
+    raw = os.environ.get("CHACK_CLEANUP_CODEX_HOME_AFTER_RUN", "")
+    runtime_value = getattr(executor, "_runtime_env_value", None)
+    if callable(runtime_value):
+        raw = runtime_value("CHACK_CLEANUP_CODEX_HOME_AFTER_RUN", raw)
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _build_initial_system_prompt(
     *,
     task_steps_manager_enabled: bool,
@@ -1510,6 +1518,7 @@ class Chack:
         metrics_thread: Optional[threading.Thread] = None
         inherited_cancel_event = current_cancellation_event()
         run_cancel_event = inherited_cancel_event or threading.Event()
+        executor = None
         try:
             def _coerce_nonnegative_int(value: Any, default: int = 0) -> int:
                 try:
@@ -3004,6 +3013,26 @@ class Chack:
                         "Run cleanup failed: session=%s task_session=%s ts=%s.",
                         session_id,
                         task_session_id,
+                        _log_timestamp(),
+                        exc_info=True,
+                    )
+            if executor is not None and _runtime_cleanup_enabled(executor):
+                try:
+                    cleanup_runtime_artifacts = getattr(
+                        executor, "cleanup_runtime_artifacts", None
+                    )
+                    if callable(cleanup_runtime_artifacts):
+                        cleanup_runtime_artifacts()
+                    self._executors = {
+                        key: value
+                        for key, value in self._executors.items()
+                        if value is not executor
+                    }
+                except Exception:
+                    self.logger.warning(
+                        "Runtime artifact cleanup failed: session=%s task_session=%s ts=%s.",
+                        session_id,
+                        telemetry_task_session_id or task_session_id,
                         _log_timestamp(),
                         exc_info=True,
                     )

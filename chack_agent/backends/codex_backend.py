@@ -47,6 +47,26 @@ from .tool_payloads import (
 
 _LOGGER = logging.getLogger("chack.codex_backend")
 
+
+def _cleanup_isolated_codex_home(codex_home: str, home_base: str) -> bool:
+    """Remove one isolated Codex home without ever deleting its parent or an outside path."""
+    raw_target = str(codex_home or "").strip()
+    raw_base = str(home_base or "").strip()
+    if not raw_target or not raw_base:
+        return False
+    target = os.path.realpath(os.path.abspath(os.path.expanduser(raw_target)))
+    base = os.path.realpath(os.path.abspath(os.path.expanduser(raw_base)))
+    try:
+        if target == base or os.path.commonpath([target, base]) != base:
+            return False
+    except ValueError:
+        return False
+    if not os.path.lexists(target):
+        return True
+    shutil.rmtree(target)
+    return True
+
+
 # Per-run codex process timeout, selected by the agent's sub_action so different roles
 # (verifiers vs research administrators vs sub-researchers) get different wall-clock caps.
 # CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION is a JSON map {sub_action: seconds, "default": n};
@@ -1239,6 +1259,19 @@ class CodexExecutor:
         self._write_codex_config(base)
         self._write_codex_auth(base)
         self._write_output_schema_file(base)
+
+    def cleanup_runtime_artifacts(self) -> bool:
+        """Remove the isolated Codex home created for this executor."""
+        if not self._codex_home:
+            return False
+        home_base = self._runtime_env_value(
+            "CHACK_CODEX_HOME_BASE", os.path.expanduser("~/.codex/chack")
+        ).strip() or os.path.expanduser("~/.codex/chack")
+        cleaned = _cleanup_isolated_codex_home(self._codex_home, home_base)
+        if cleaned:
+            self._codex_home = None
+            self._output_schema_path = None
+        return cleaned
 
     def _write_codex_config(self, codex_home: str) -> None:
         os.makedirs(codex_home, exist_ok=True)
