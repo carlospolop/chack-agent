@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal
 
-from .chatgpt_async_client import ChatGPTAsyncApiClient
+from .chatgpt_async_client import ChatGPTAsyncApiClient, ChatGPTAsyncApiError
 from .config import ToolsConfig
 from .research_artifacts import cleanup_research_artifacts
 from .subagent_config import (
@@ -59,6 +59,11 @@ _REMOTE_METADATA_FIELDS = {
     "output_timeout_seconds",
     "execution_backend",
 }
+# Rolling-deployment compatibility for brokers that predate the native xhigh
+# enum. The authenticated worker strips this transport marker before sending the
+# prompt and still selects the real Extra High UI mode. Native xhigh submission
+# remains the first and preferred path.
+_XHIGH_COMPAT_PROMPT_PREFIX = "__CHACK_CHATGPT_XHIGH_V1__\n"
 
 
 def resolve_chatgpt_timeout_seconds(config: ToolsConfig, mode: Mode) -> int:
@@ -170,12 +175,29 @@ class ChatGPTWebResearchAgentTool:
         """Submit through the cloud broker and poll without touching local CDP."""
         client = self._async_client()
         output_timeout_seconds = self._timeout_seconds()
-        submitted = client.submit(
-            mode=self.mode,
-            prompt=prompt,
-            idempotency_key=str(uuid.uuid4()),
-            output_timeout_seconds=output_timeout_seconds,
-        )
+        idempotency_key = str(uuid.uuid4())
+        try:
+            submitted = client.submit(
+                mode=self.mode,
+                prompt=prompt,
+                idempotency_key=idempotency_key,
+                output_timeout_seconds=output_timeout_seconds,
+            )
+        except ChatGPTAsyncApiError as exc:
+            if not (
+                self.mode == "xhigh"
+                and exc.status_code == 400
+                and exc.error_code == "invalid_mode"
+            ):
+                raise
+            # A stale broker can transport the request as Pro during a rolling
+            # deployment; the updated worker restores xhigh before browser use.
+            submitted = client.submit(
+                mode="pro",
+                prompt=_XHIGH_COMPAT_PROMPT_PREFIX + prompt,
+                idempotency_key=idempotency_key,
+                output_timeout_seconds=output_timeout_seconds,
+            )
         job_id = str(submitted.get("job_id") or "")
         if not job_id:
             raise ChatGPTWebResearchError("ChatGPT async API did not return a job id.")

@@ -12,11 +12,12 @@ from chack_tools.chatgpt_research_agents import (
     CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS,
     CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS,
     CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS,
+    _XHIGH_COMPAT_PROMPT_PREFIX,
     ChatGPTWebResearchAgentTool,
     ChatGPTWebResearchError,
     resolve_chatgpt_timeout_seconds,
 )
-from chack_tools.chatgpt_async_client import ChatGPTAsyncApiClient
+from chack_tools.chatgpt_async_client import ChatGPTAsyncApiClient, ChatGPTAsyncApiError
 from chack_tools.config import ToolsConfig
 from chack_tools.researcher_administrator_agent import (
     ResearcherAdministratorAgentTool,
@@ -369,6 +370,49 @@ def test_xhigh_remote_backend_submits_exact_mode_and_preserves_result(monkeypatc
     assert url == ""
     assert metadata["mode"] == "xhigh"
     assert helper.tool_name == "chatgptxhigh"
+
+
+def test_xhigh_remote_backend_rolls_through_a_stale_broker_without_losing_real_mode(monkeypatch, tmp_path):
+    class FakeClient:
+        def __init__(self):
+            self.submissions = []
+
+        def submit(self, **kwargs):
+            self.submissions.append(kwargs)
+            if len(self.submissions) == 1:
+                raise ChatGPTAsyncApiError(
+                    "old broker",
+                    status_code=400,
+                    error_code="invalid_mode",
+                )
+            return {"job_id": "job_00000000-0000-0000-0000-000000000003"}
+
+        def status(self, _job_id):
+            return {"status": "SUCCEEDED", "stage": "extracted", "answer_chars": 300}
+
+        def result(self, _job_id):
+            return {
+                "status": "SUCCEEDED",
+                "result": "XHIGH_COMPAT_OK " + ("R" * 300),
+                "metadata": {"mode": "xhigh", "terminal_state": "extracted"},
+            }
+
+    client = FakeClient()
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_execution_backend="remote"),
+        mode="xhigh",
+    )
+    monkeypatch.setattr(helper, "_async_client", lambda: client)
+    answer, _, metadata = helper._remote_research(
+        "P" * 500,
+        run_state_path=tmp_path / "run.json",
+        partial_path=tmp_path / "partial.md",
+    )
+    assert answer.startswith("XHIGH_COMPAT_OK")
+    assert metadata["mode"] == "xhigh"
+    assert [call["mode"] for call in client.submissions] == ["xhigh", "pro"]
+    assert client.submissions[1]["prompt"] == _XHIGH_COMPAT_PROMPT_PREFIX + ("P" * 500)
+    assert client.submissions[0]["idempotency_key"] == client.submissions[1]["idempotency_key"]
 
 
 def test_async_client_sends_bearer_secret_only_in_header():

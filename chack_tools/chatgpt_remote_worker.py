@@ -22,7 +22,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from .chatgpt_async_client import ChatGPTAsyncApiClient, ChatGPTAsyncApiError
-from .chatgpt_research_agents import ChatGPTWebResearchAgentTool, Mode
+from .chatgpt_research_agents import (
+    _XHIGH_COMPAT_PROMPT_PREFIX,
+    ChatGPTWebResearchAgentTool,
+    Mode,
+)
 from .config import ToolsConfig
 
 LOG = logging.getLogger("chack-chatgpt-worker")
@@ -228,6 +232,9 @@ class ChatGPTRemoteWorker:
         lease_id = str(lease.get("lease_id") or "")
         mode = str(lease.get("mode") or "")
         prompt = str(lease.get("prompt") or "")
+        if mode == "pro" and prompt.startswith(_XHIGH_COMPAT_PROMPT_PREFIX):
+            mode = "xhigh"
+            prompt = prompt[len(_XHIGH_COMPAT_PROMPT_PREFIX):]
         default_timeout = 4500 if mode == "deep" else 5400
         output_timeout = int(lease.get("output_timeout_seconds") or default_timeout)
         if not job_id or not lease_id or mode not in {"pro", "xhigh", "deep"} or not prompt:
