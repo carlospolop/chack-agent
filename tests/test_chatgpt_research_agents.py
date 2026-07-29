@@ -412,6 +412,33 @@ def test_async_client_rejects_non_origin_or_credential_bearing_urls():
             ChatGPTAsyncApiClient(url, "known-secret")
 
 
+def test_deep_connector_discovery_accepts_current_hyphenated_target_url(monkeypatch):
+    target = {
+        "type": "iframe",
+        "id": "connector-target",
+        "parentId": "parent-target",
+        "url": "https://connector-openai-deep-research.web-sandbox.oaiusercontent.com/",
+        "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/connector-target",
+    }
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps([target]).encode()
+
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="deep")
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.urllib.request.urlopen",
+        lambda *_args, **_kwargs: Response(),
+    )
+    assert helper._deep_connector_target("parent-target", timeout_seconds=1) == target
+
+
 def test_deep_research_counter_noise_is_removed_without_touching_normal_numbered_answers():
     noisy = (
         "Research completed in 8m ·\n"

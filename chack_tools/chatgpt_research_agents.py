@@ -636,7 +636,11 @@ class ChatGPTWebResearchAgentTool:
                         for target in targets
                         if target.get("type") == "iframe"
                         and target.get("parentId") == parent_target_id
-                        and "connector_openai_deep_research" in str(target.get("url") or "")
+                        and re.search(
+                            r"connector[-_]openai[-_]deep[-_]research",
+                            str(target.get("url") or ""),
+                            re.I,
+                        )
                         and target.get("webSocketDebuggerUrl")
                     ),
                     None,
