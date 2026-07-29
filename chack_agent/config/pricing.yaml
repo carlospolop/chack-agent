@@ -57,11 +57,21 @@ models:
     cache_read: 1
     cache_write: 12.5
     output: 50
+  anthropic/claude-fable-5:batch:
+    input: 5
+    cache_read: 0.5
+    cache_write: 6.25
+    output: 25
   anthropic/claude-haiku-4.5:
     input: 1
     cache_read: 0.1
     cache_write: 1.25
     output: 5
+  anthropic/claude-haiku-4.5:batch:
+    input: 0.5
+    cache_read: 0.05
+    cache_write: 0.625
+    output: 2.5
   anthropic/claude-opus-4:
     input: 15
     cache_read: 1.5
@@ -72,16 +82,31 @@ models:
     cache_read: 1.5
     cache_write: 18.75
     output: 75
+  anthropic/claude-opus-4.1:batch:
+    input: 7.5
+    cache_read: 0.75
+    cache_write: 9.375
+    output: 37.5
   anthropic/claude-opus-4.5:
     input: 5
     cache_read: 0.5
     cache_write: 6.25
     output: 25
+  anthropic/claude-opus-4.5:batch:
+    input: 2.5
+    cache_read: 0.25
+    cache_write: 3.125
+    output: 12.5
   anthropic/claude-opus-4.6:
     input: 5
     cache_read: 0.5
     cache_write: 6.25
     output: 25
+  anthropic/claude-opus-4.6:batch:
+    input: 2.5
+    cache_read: 0.25
+    cache_write: 3.125
+    output: 12.5
   anthropic/claude-opus-4.7:
     input: 5
     cache_read: 0.5
@@ -92,6 +117,11 @@ models:
     cache_read: 3
     cache_write: 37.5
     output: 150
+  anthropic/claude-opus-4.7:batch:
+    input: 2.5
+    cache_read: 0.25
+    cache_write: 3.125
+    output: 12.5
   anthropic/claude-opus-4.8:
     input: 5
     cache_read: 0.5
@@ -102,6 +132,11 @@ models:
     cache_read: 1
     cache_write: 12.5
     output: 50
+  anthropic/claude-opus-4.8:batch:
+    input: 2.5
+    cache_read: 0.25
+    cache_write: 3.125
+    output: 12.5
   anthropic/claude-opus-5:
     input: 5
     cache_read: 0.5
@@ -122,6 +157,11 @@ models:
     cache_read: 0.3
     cache_write: 3.75
     output: 15
+  anthropic/claude-sonnet-4.5:batch:
+    input: 1.5
+    cache_read: 0.15
+    cache_write: 1.875
+    output: 7.5
   anthropic/claude-sonnet-4.6:
     input: 3
     cache_read: 0.3
@@ -132,6 +172,11 @@ models:
     cache_read: 0.2
     cache_write: 2.5
     output: 10
+  anthropic/claude-sonnet-5:batch:
+    input: 1
+    cache_read: 0.1
+    cache_write: 1.25
+    output: 5
   arcee-ai/trinity-large-thinking:
     input: 0.22
     cache_read: 0.06
@@ -251,6 +296,14 @@ models:
     cache_read: 0.01
     cache_write: 0.08333333333333334
     output: 0.4
+  google/gemini-2.5-flash-lite:batch:
+    input: 0.05
+    cache_read: 0.01
+    output: 0.2
+  google/gemini-2.5-flash:batch:
+    input: 0.15
+    cache_read: 0.03
+    output: 1.25
   google/gemini-2.5-pro:
     input: 1.25
     cache_read: 0.125
@@ -266,11 +319,19 @@ models:
     cache_read: 0.125
     cache_write: 0.375
     output: 10
+  google/gemini-2.5-pro:batch:
+    input: 0.625
+    cache_read: 0.125
+    output: 5
   google/gemini-3-flash-preview:
     input: 0.5
     cache_read: 0.05
     cache_write: 0.08333333333333334
     output: 3
+  google/gemini-3-flash-preview:batch:
+    input: 0.25
+    cache_read: 0.25
+    output: 1.5
   google/gemini-3-pro-image:
     input: 2
     cache_read: 0.2
@@ -303,6 +364,10 @@ models:
     cache_read: 0.025
     cache_write: 0.08333333333333334
     output: 1.5
+  google/gemini-3.1-flash-lite:batch:
+    input: 0.125
+    cache_read: 0.0125
+    output: 0.75
   google/gemini-3.1-pro-preview:
     input: 2
     cache_read: 0.2
@@ -313,6 +378,10 @@ models:
     cache_read: 0.2
     cache_write: 0.375
     output: 12
+  google/gemini-3.1-pro-preview:batch:
+    input: 1
+    cache_read: 1
+    output: 6
   google/gemini-3.5-flash:
     input: 1.5
     cache_read: 0.15
@@ -323,11 +392,24 @@ models:
     cache_read: 0.03
     cache_write: 0.08333333333333334
     output: 2.5
+  google/gemini-3.5-flash-lite:batch:
+    input: 0.15
+    cache_read: 0.015
+    output: 1.25
+  google/gemini-3.5-flash:batch:
+    input: 0.75
+    cache_read: 0.075
+    output: 4.5
   google/gemini-3.6-flash:
     input: 1.5
     cache_read: 0.15
     cache_write: 0.08333333333333334
     output: 7.5
+  google/gemini-3.6-flash:batch:
+    input: 0.75
+    cache_read: 0.075
+    cache_write: 0.08333333333333334
+    output: 3.75
   google/gemma-2-27b-it:
     input: 0.65
     cache_read: 0.65
@@ -349,9 +431,9 @@ models:
     cache_read: 0.06
     output: 0.12
   google/gemma-4-26b-a4b-it:
-    input: 0.14
-    cache_read: 0.05
-    output: 0.42
+    input: 0.15
+    cache_read: 0.15
+    output: 0.6
   google/gemma-4-26b-a4b-it:free:
     input: 0
     cache_read: 0
@@ -500,6 +582,10 @@ models:
     input: 0.3
     cache_read: 0.06
     output: 1.2
+  minimax/minimax-m3:batch:
+    input: 0.15
+    cache_read: 0.03
+    output: 0.6
   mistralai/codestral-2508:
     input: 0.3
     cache_read: 0.03
@@ -638,7 +724,7 @@ models:
     output: 0.4
   nvidia/nemotron-3-nano-30b-a3b:
     input: 0.05
-    cache_read: 0.05
+    cache_read: 0.025
     output: 0.2
   nvidia/nemotron-3-nano-30b-a3b:free:
     input: 0
@@ -657,9 +743,9 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3-ultra-550b-a55b:
-    input: 0.6
-    cache_read: 0.2
-    output: 3.6
+    input: 0.5
+    cache_read: 0.1
+    output: 2.2
   nvidia/nemotron-3-ultra-550b-a55b:free:
     input: 0
     cache_read: 0
@@ -760,10 +846,18 @@ models:
     input: 0.25
     cache_read: 0.025
     output: 2
+  openai/gpt-5-mini:batch:
+    input: 0.125
+    cache_read: 0.0125
+    output: 1
   openai/gpt-5-nano:
     input: 0.05
     cache_read: 0.005
     output: 0.4
+  openai/gpt-5-nano:batch:
+    input: 0.025
+    cache_read: 0.0025
+    output: 0.2
   openai/gpt-5-pro:
     input: 15
     cache_read: 15
@@ -788,6 +882,10 @@ models:
     input: 0.25
     cache_read: 0.03
     output: 2
+  openai/gpt-5.1:batch:
+    input: 0.625
+    cache_read: 0.0625
+    output: 5
   openai/gpt-5.2:
     input: 1.75
     cache_read: 0.175
@@ -804,6 +902,10 @@ models:
     input: 21
     cache_read: 21
     output: 168
+  openai/gpt-5.2:batch:
+    input: 0.875
+    cache_read: 0.0875
+    output: 7
   openai/gpt-5.3-chat:
     input: 1.75
     cache_read: 0.175
@@ -824,14 +926,26 @@ models:
     input: 0.75
     cache_read: 0.075
     output: 4.5
+  openai/gpt-5.4-mini:batch:
+    input: 0.375
+    cache_read: 0.0375
+    output: 2.25
   openai/gpt-5.4-nano:
     input: 0.2
     cache_read: 0.02
     output: 1.25
+  openai/gpt-5.4-nano:batch:
+    input: 0.1
+    cache_read: 0.01
+    output: 0.625
   openai/gpt-5.4-pro:
     input: 30
     cache_read: 30
     output: 180
+  openai/gpt-5.4:batch:
+    input: 1.25
+    cache_read: 0.125
+    output: 7.5
   openai/gpt-5.5:
     input: 5
     cache_read: 0.5
@@ -840,6 +954,10 @@ models:
     input: 30
     cache_read: 30
     output: 180
+  openai/gpt-5.5:batch:
+    input: 2.5
+    cache_read: 0.25
+    output: 15
   openai/gpt-5.6-luna:
     input: 0.5
     cache_read: 0.05
@@ -870,6 +988,10 @@ models:
     cache_read: 0.125
     cache_write: 1.5625
     output: 7.5
+  openai/gpt-5:batch:
+    input: 0.625
+    cache_read: 0.0625
+    output: 5
   openai/gpt-audio:
     input: 2.5
     cache_read: 2.5
@@ -889,7 +1011,7 @@ models:
   openai/gpt-oss-20b:
     input: 0.03
     cache_read: 0.03
-    output: 0.14
+    output: 0.13
   openai/gpt-oss-20b:free:
     input: 0
     cache_read: 0
@@ -986,14 +1108,6 @@ models:
     input: 2
     cache_read: 2
     output: 8
-  poolside/laguna-m.1:
-    input: 0.2
-    cache_read: 0.1
-    output: 0.4
-  poolside/laguna-m.1:free:
-    input: 0
-    cache_read: 0
-    output: 0
   poolside/laguna-s-2.1:
     input: 0.1
     cache_read: 0.01
@@ -1032,10 +1146,10 @@ models:
     cache_read: 0.26
     output: 0.78
   qwen/qwen-plus-2025-07-28:thinking:
-    input: 0.26
-    cache_read: 0.26
-    cache_write: 0.325
-    output: 0.78
+    input: 0.4
+    cache_read: 0.4
+    cache_write: 0.5
+    output: 1.2
   qwen/qwen2.5-vl-72b-instruct:
     input: 0.8
     cache_read: 0.4
@@ -1065,9 +1179,9 @@ models:
     cache_read: 0.04815
     output: 0.19305
   qwen/qwen3-30b-a3b-thinking-2507:
-    input: 0.13
-    cache_read: 0.13
-    output: 1.56
+    input: 0.2
+    cache_read: 0.2
+    output: 2.4
   qwen/qwen3-32b:
     input: 0.08
     cache_read: 0.08
@@ -1090,9 +1204,9 @@ models:
     cache_write: 0.24375
     output: 0.975
   qwen/qwen3-coder-next:
-    input: 0.11
-    cache_read: 0.07
-    output: 0.8
+    input: 0.18
+    cache_read: 0.036
+    output: 0.9
   qwen/qwen3-coder-plus:
     input: 0.65
     cache_read: 0.13
@@ -1112,25 +1226,25 @@ models:
     cache_read: 0.07
     output: 1.1
   qwen/qwen3-next-80b-a3b-thinking:
-    input: 0.0975
-    cache_read: 0.0975
-    output: 0.78
+    input: 0.15
+    cache_read: 0.15
+    output: 1.2
   qwen/qwen3-vl-235b-a22b-instruct:
     input: 0.21
     cache_read: 0.1
     output: 1.9
   qwen/qwen3-vl-235b-a22b-thinking:
-    input: 0.26
-    cache_read: 0.26
-    output: 2.6
+    input: 0.4
+    cache_read: 0.4
+    output: 4
   qwen/qwen3-vl-30b-a3b-instruct:
     input: 0.15
     cache_read: 0.15
     output: 0.6
   qwen/qwen3-vl-30b-a3b-thinking:
-    input: 0.13
-    cache_read: 0.13
-    output: 1.56
+    input: 0.2
+    cache_read: 0.2
+    output: 2.4
   qwen/qwen3-vl-32b-instruct:
     input: 0.104
     cache_read: 0.104
@@ -1140,9 +1254,9 @@ models:
     cache_read: 0.117
     output: 0.455
   qwen/qwen3-vl-8b-thinking:
-    input: 0.117
-    cache_read: 0.117
-    output: 1.365
+    input: 0.18
+    cache_read: 0.18
+    output: 2.1
   qwen/qwen3.5-122b-a10b:
     input: 0.26
     cache_read: 0.26
@@ -1152,8 +1266,8 @@ models:
     cache_read: 0.195
     output: 1.56
   qwen/qwen3.5-35b-a3b:
-    input: 0.14
-    cache_read: 0.14
+    input: 0.15
+    cache_read: 0.05
     output: 1
   qwen/qwen3.5-397b-a17b:
     input: 0.39
@@ -1205,10 +1319,10 @@ models:
     cache_write: 0.038
     output: 0.13
   qwen/qwen3.7-max:
-    input: 1.475
-    cache_read: 0.295
-    cache_write: 1.84375
-    output: 4.425
+    input: 1.25
+    cache_read: 0.25
+    cache_write: 1.5625
+    output: 3.75
   qwen/qwen3.7-plus:
     input: 0.32
     cache_read: 0.064
@@ -1367,9 +1481,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.7266
-    cache_read: 0.13494
-    output: 2.2836
+    input: 0.7574
+    cache_read: 0.14066
+    output: 2.3804
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
