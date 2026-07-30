@@ -11,9 +11,12 @@ import subprocess
 import sys
 import time
 import base64
+import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Optional
+
+import requests
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import (
@@ -52,7 +55,11 @@ from .prompt_cache import (
 
 
 _LOGGER = logging.getLogger("chack.codex_backend")
-_EXPLICIT_CACHE_WARNING_MODELS: set[str] = set()
+_DIRECT_CACHE_SESSION_NAMESPACE = uuid.UUID("d74fb76e-9f4c-4ffc-97bb-74ef0e4cc4b8")
+_DIRECT_CACHE_INSTRUCTIONS = (
+    "You are an automated Chack agent. Follow the developer and user messages "
+    "exactly and return only the requested result."
+)
 
 
 def _cleanup_isolated_codex_home(codex_home: str, home_base: str) -> bool:
@@ -682,19 +689,6 @@ class CodexExecutor:
                 len(self._cacheable_developer_prompt),
                 self._prompt_cache_prefix_key,
             )
-            if (
-                openai_model_requires_explicit_prompt_cache(self._model_name)
-                and self._model_name not in _EXPLICIT_CACHE_WARNING_MODELS
-            ):
-                _EXPLICIT_CACHE_WARNING_MODELS.add(self._model_name)
-                _LOGGER.warning(
-                    "Codex model %s requires prompt_cache_key plus an explicit "
-                    "provider breakpoint for reliable prompt caching, but the "
-                    "current Codex CLI does not expose those request fields. "
-                    "The stable prompt layout is active; do not treat it as a "
-                    "confirmed cache hit without cached-token telemetry.",
-                    self._model_name,
-                )
             return cache_parts.dynamic_suffix
 
         self._cacheable_developer_prompt = ""
@@ -707,7 +701,345 @@ class CodexExecutor:
 
     def _run_codex(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_codex_home_and_config()
+        if self._should_use_direct_prompt_cache():
+            direct_result = self._run_direct_cached_response(prompt)
+            if not str(direct_result[0] or "").startswith(
+                "ERROR: Codex direct cached request"
+            ):
+                return direct_result
+            _LOGGER.warning(
+                "Direct cached Codex transport failed; falling back to Codex CLI: %s",
+                _preview_text(direct_result[0], max_chars=500),
+            )
         return self._run_codex_once(prompt, allow_api_key_fallback=True)
+
+    def _should_use_direct_prompt_cache(self) -> bool:
+        mode = self._runtime_env_value(
+            "CHACK_CODEX_DIRECT_CACHE_TRANSPORT",
+            "auto",
+        ).strip().lower()
+        if mode in {"0", "false", "no", "off", "disabled"}:
+            return False
+        if self._uses_openrouter_route:
+            return False
+        if not openai_model_requires_explicit_prompt_cache(self._model_name):
+            return False
+        if not self._cacheable_developer_prompt or not self._prompt_cache_prefix_key:
+            return False
+        if self._has_configured_tools() or self._thread_id or self._conversation:
+            return False
+        try:
+            self._direct_cache_credentials()
+        except Exception:
+            return False
+        return True
+
+    def _direct_cache_credentials(self) -> tuple[str, str, str]:
+        """Return ``(auth_mode, bearer_token, account_id)`` without logging secrets."""
+        if self._use_codex_access_token and self._codex_access_token:
+            claims = self._decode_jwt_claims(self._codex_access_token)
+            auth_claims = claims.get("https://api.openai.com/auth")
+            if not isinstance(auth_claims, dict):
+                auth_claims = {}
+            account_id = str(
+                auth_claims.get("chatgpt_account_id", "")
+                or self._runtime_env_value("CODEX_ACCOUNT_ID")
+                or ""
+            ).strip()
+            if not account_id:
+                raise ValueError("Codex ChatGPT account id is unavailable")
+            return "chatgpt", self._codex_access_token, account_id
+
+        if self._use_existing_codex_auth_file and self._existing_codex_auth_file:
+            with open(self._existing_codex_auth_file, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                raise ValueError("Codex auth.json is not a JSON object")
+            auth_mode = str(payload.get("auth_mode", "") or "").strip().lower()
+            if auth_mode == "chatgpt":
+                tokens = payload.get("tokens")
+                if not isinstance(tokens, dict):
+                    tokens = {}
+                bearer = str(tokens.get("access_token", "") or "").strip()
+                account_id = str(tokens.get("account_id", "") or "").strip()
+                if not bearer or not account_id:
+                    raise ValueError("Codex ChatGPT auth tokens are incomplete")
+                return "chatgpt", bearer, account_id
+            api_key = str(payload.get("OPENAI_API_KEY", "") or "").strip()
+            if api_key:
+                return "api_key", api_key, ""
+
+        api_key = str(self._openai_api_key or "").strip()
+        if api_key:
+            return "api_key", api_key, ""
+        raise ValueError("No credential is available for direct cached Codex transport")
+
+    def _direct_cache_output_schema(self) -> dict[str, Any] | None:
+        if not self._output_schema_strict:
+            return None
+        raw = str(self._output_schema_json or "").strip()
+        if not raw:
+            return None
+        try:
+            schema = json.loads(raw)
+        except Exception:
+            return None
+        if not isinstance(schema, dict):
+            return None
+        return self._normalize_codex_output_schema(
+            schema,
+            force_all_required=True,
+        )
+
+    def _direct_cache_request(
+        self,
+        prompt: str,
+    ) -> tuple[str, dict[str, str], dict[str, Any]]:
+        auth_mode, bearer_token, account_id = self._direct_cache_credentials()
+        session_id = str(
+            uuid.uuid5(
+                _DIRECT_CACHE_SESSION_NAMESPACE,
+                self._prompt_cache_prefix_key,
+            )
+        )
+        headers = {
+            "Authorization": f"Bearer {bearer_token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "originator": "chack_agent",
+            # ChatGPT's Codex endpoint uses this header together with
+            # prompt_cache_key for sticky cache routing. It must be stable
+            # across fresh processes that share the exact prefix.
+            "session_id": session_id,
+        }
+
+        stable_content: dict[str, Any] = {
+            "type": "input_text",
+            "text": self._cacheable_developer_prompt,
+        }
+        request_body: dict[str, Any] = {
+            "model": self._model_name,
+            "instructions": _DIRECT_CACHE_INSTRUCTIONS,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [stable_content],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                },
+            ],
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "reasoning": {
+                "effort": codex_thinking_effort(self._thinking_effort),
+                "summary": "auto",
+            },
+            "store": False,
+            "stream": True,
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": self._prompt_cache_prefix_key,
+        }
+        output_schema = self._direct_cache_output_schema()
+        if output_schema is not None:
+            request_body["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "strict": True,
+                    "schema": output_schema,
+                    "name": "chack_output_schema",
+                }
+            }
+
+        if auth_mode == "chatgpt":
+            headers["ChatGPT-Account-ID"] = account_id
+            # The subscription endpoint currently rejects the public API's
+            # prompt_cache_options and prompt_cache_breakpoint fields for
+            # gpt-5.6-sol. Stable prompt_cache_key + session_id is its
+            # compatible sticky-routing mechanism.
+            url = "https://chatgpt.com/backend-api/codex/responses"
+        else:
+            # The public GPT-5.6 API supports and recommends an explicit
+            # breakpoint after the stable content plus explicit-only policy.
+            stable_content["prompt_cache_breakpoint"] = {"mode": "explicit"}
+            request_body["prompt_cache_options"] = {
+                "mode": "explicit",
+                "ttl": "30m",
+            }
+            base_url = str(
+                self._runtime_env_value(
+                    "OPENAI_BASE_URL",
+                    "https://api.openai.com/v1",
+                )
+                or "https://api.openai.com/v1"
+            ).rstrip("/")
+            url = f"{base_url}/responses"
+        return url, headers, request_body
+
+    def _run_direct_cached_response(
+        self,
+        prompt: str,
+    ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        try:
+            url, headers, request_body = self._direct_cache_request(prompt)
+        except Exception as exc:
+            return (
+                f"ERROR: Codex direct cached request setup failed: {type(exc).__name__}: {exc}",
+                [],
+                _RawResult(raw_responses=[]),
+            )
+
+        timeout_seconds = _resolve_codex_exec_timeout(
+            self._sub_action,
+            self._runtime_env(),
+        )
+        started_at = time.monotonic()
+        time_to_first_token_seconds: float | None = None
+        output_parts: list[str] = []
+        completed_response: dict[str, Any] = {}
+        error_message = ""
+        response: requests.Response | None = None
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=request_body,
+                stream=True,
+                timeout=(30, timeout_seconds),
+            )
+            if int(response.status_code) != 200:
+                return (
+                    "ERROR: Codex direct cached request failed "
+                    f"(status={response.status_code}): "
+                    f"{_preview_text(response.text, max_chars=1000)}",
+                    [],
+                    _RawResult(raw_responses=[]),
+                )
+            for raw_line in response.iter_lines():
+                if cancellation_requested():
+                    response.close()
+                    return (
+                        "ERROR: Codex direct cached request cancelled.",
+                        [],
+                        _RawResult(raw_responses=[]),
+                    )
+                if isinstance(raw_line, bytes):
+                    line = raw_line.decode("utf-8", errors="replace")
+                else:
+                    line = str(raw_line or "")
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(data)
+                except Exception:
+                    continue
+                event_type = str(event.get("type", "") or "")
+                if event_type == "response.output_text.delta":
+                    delta = str(event.get("delta", "") or "")
+                    if delta:
+                        if time_to_first_token_seconds is None:
+                            time_to_first_token_seconds = max(
+                                0.0,
+                                time.monotonic() - started_at,
+                            )
+                        output_parts.append(delta)
+                elif event_type == "response.completed":
+                    raw_completed = event.get("response")
+                    if isinstance(raw_completed, dict):
+                        completed_response = raw_completed
+                elif event_type in {"error", "response.failed"}:
+                    raw_error = event.get("error")
+                    if isinstance(raw_error, dict):
+                        error_message = str(
+                            raw_error.get("message", "")
+                            or raw_error.get("code", "")
+                            or raw_error
+                        )
+                    else:
+                        error_message = str(
+                            event.get("message", "")
+                            or raw_error
+                            or event_type
+                        )
+        except requests.RequestException as exc:
+            return (
+                f"ERROR: Codex direct cached request failed: {type(exc).__name__}: {exc}",
+                [],
+                _RawResult(raw_responses=[]),
+            )
+        finally:
+            if response is not None:
+                response.close()
+
+        if error_message:
+            return (
+                f"ERROR: Codex direct cached request failed: {error_message}",
+                [],
+                _RawResult(raw_responses=[]),
+            )
+        output = "".join(output_parts).strip()
+        usage = (
+            completed_response.get("usage")
+            if isinstance(completed_response.get("usage"), dict)
+            else {}
+        )
+        input_details = (
+            usage.get("input_tokens_details")
+            if isinstance(usage.get("input_tokens_details"), dict)
+            else {}
+        )
+        usage_payload = {
+            "input_tokens": int(usage.get("input_tokens", 0) or 0),
+            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+            "input_tokens_details": {
+                "cached_tokens": int(input_details.get("cached_tokens", 0) or 0),
+                "cache_write_tokens": int(
+                    input_details.get("cache_write_tokens", 0) or 0
+                ),
+            },
+        }
+        if not output or not usage_payload["input_tokens"]:
+            return (
+                "ERROR: Codex direct cached request produced no usable response.",
+                [],
+                _RawResult(raw_responses=[]),
+            )
+        report_live_usage(
+            self._model_name,
+            prompt_tokens=usage_payload["input_tokens"],
+            completion_tokens=usage_payload["output_tokens"],
+            cached_prompt_tokens=usage_payload["input_tokens_details"][
+                "cached_tokens"
+            ],
+            cache_write_tokens=usage_payload["input_tokens_details"][
+                "cache_write_tokens"
+            ],
+        )
+        _LOGGER.info(
+            "Completed direct cached Codex request: model=%s key=%s "
+            "input_tokens=%d cached_tokens=%d cache_write_tokens=%d",
+            self._model_name,
+            self._prompt_cache_prefix_key,
+            usage_payload["input_tokens"],
+            usage_payload["input_tokens_details"]["cached_tokens"],
+            usage_payload["input_tokens_details"]["cache_write_tokens"],
+        )
+        return (
+            output,
+            [],
+            _RawResult(
+                raw_responses=[{"usage": usage_payload}],
+                time_to_first_token_seconds=time_to_first_token_seconds,
+                time_to_first_token_source="responses_output_text_delta",
+            ),
+        )
 
     def _run_codex_once(
         self,

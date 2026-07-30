@@ -20,16 +20,24 @@ marker before inference and uses the same split for both CLI providers:
 - Claude Code receives the stable side through its cached system layer and the
   changing side through stdin. No-tool agents replace the generic coding
   system prompt; tool-using agents append to it.
-- Codex receives the stable side as developer instructions and the changing
-  side through stdin. GPT-5.4 uses automatic prefix caching.
+- Codex GPT-5.4 and older receive the stable side as developer instructions and
+  the changing side through stdin for automatic prefix caching.
+- No-tool Codex GPT-5.6+ agents use Chack's direct Responses transport. Public
+  API-key requests use `prompt_cache_key`, an explicit breakpoint after the
+  stable developer content, and explicit cache mode. ChatGPT/Codex subscription
+  requests use the same deterministic `prompt_cache_key` and `session_id`
+  across fresh agents because that endpoint rejects the public explicit-cache
+  fields. Tool-using agents and direct-transport failures safely retain the
+  Codex CLI path.
 
 Everything before the marker must be byte-identical for requests intended to
 share a cache. Put check inventories, round notes, focus instructions,
 timestamps, budgets, and retry data after it. A text marker is not itself a
-provider cache directive. GPT-5.6 and later require a stable
-`prompt_cache_key` plus an explicit API breakpoint for reliable caching; do not
-upgrade a Codex CLI workflow until its deployed version exposes those controls,
-or route it through a Responses API backend that does.
+provider cache directive; Chack converts it to the appropriate provider
+request boundary. Set `CHACK_CODEX_DIRECT_CACHE_TRANSPORT=off` only to disable
+the GPT-5.6+ direct path for diagnosis. Cache behavior must be verified from
+reported `cached_prompt_tokens`/`cache_write_prompt_tokens`, not inferred from
+the prompt layout.
 
 Backends log a deterministic prefix key so cache-read/cache-write telemetry can
 be grouped without logging the prompt. When an agent resolves to zero tools,
