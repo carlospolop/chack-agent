@@ -116,6 +116,33 @@ def test_api_key_direct_request_uses_documented_explicit_cache_fields():
     }
 
 
+def test_direct_cache_routing_key_includes_structured_output_schema():
+    first = _executor()
+    second = _executor()
+    first._output_schema_json = json.dumps(
+        {
+            "type": "object",
+            "properties": {"first": {"type": "string"}},
+            "required": ["first"],
+            "additionalProperties": False,
+        }
+    )
+    second._output_schema_json = json.dumps(
+        {
+            "type": "object",
+            "properties": {"second": {"type": "string"}},
+            "required": ["second"],
+            "additionalProperties": False,
+        }
+    )
+
+    _, first_headers, first_body = first._direct_cache_request("task")
+    _, second_headers, second_body = second._direct_cache_request("task")
+
+    assert first_body["prompt_cache_key"] != second_body["prompt_cache_key"]
+    assert first_headers["session_id"] != second_headers["session_id"]
+
+
 def test_direct_response_reports_real_cache_read_telemetry(monkeypatch):
     executor = _executor()
     response = _Response()

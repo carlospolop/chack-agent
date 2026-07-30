@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from chack_agent.backends.claude_code_backend import (
     ClaudeCodeExecutor,
+    _normalized_claude_usage,
     _seconds_until_claude_quota_reset,
 )
 
@@ -79,8 +80,29 @@ def test_claude_command_forces_configured_output_schema() -> None:
     assert "--allow-dangerously-skip-permissions" in command
     assert "--dangerously-skip-permissions" in command
     assert prompt not in command
-    assert "Use schema name: attack_surface_entrypoints" in prompt
-    assert "Your response must strictly match the JSON schema." in prompt
+    assert "Use schema name: attack_surface_entrypoints" in executor._cacheable_system_prompt
+    assert "Your response must strictly match the JSON schema." in executor._cacheable_system_prompt
+
+
+def test_claude_usage_preserves_cache_reads_and_writes_for_pricing() -> None:
+    usage = _normalized_claude_usage(
+        {
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "cache_read_input_tokens": 700,
+            "cache_creation_input_tokens": 200,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 200,
+            },
+        }
+    )
+
+    assert usage["input_tokens"] == 1000
+    assert usage["output_tokens"] == 25
+    assert usage["input_tokens_details"] == {
+        "cached_tokens": 700,
+        "cache_write_tokens": 200,
+    }
 
 
 def test_claude_command_removes_unsupported_json_schema_dialect_declarations() -> None:
@@ -426,6 +448,21 @@ def test_claude_cache_breakpoint_uses_system_prompt_without_tools() -> None:
     assert "changing checks" not in cached_prefix
 
 
+def test_claude_unmarked_prompt_still_caches_shared_system_layer() -> None:
+    executor = _build_executor("")
+    executor._base_system_prompt = "Stable Naxus instructions."
+
+    prompt = executor._compose_prompt("changing task")
+    command = executor._build_command(prompt)
+
+    assert prompt == "changing task"
+    assert executor._cacheable_system_prompt.startswith(
+        "Stable Naxus instructions."
+    )
+    assert executor._prompt_cache_prefix_key.startswith("chack-")
+    assert "--system-prompt" in command
+
+
 def test_claude_followup_prompt_only_suppresses_system_once() -> None:
     executor = _build_executor("")
     executor._base_system_prompt = "SYSTEM SHOULD NOT REPEAT"
@@ -435,7 +472,8 @@ def test_claude_followup_prompt_only_suppresses_system_once() -> None:
 
     assert prompt == "original request\n\ntry harder"
     assert "SYSTEM SHOULD NOT REPEAT" not in prompt
-    assert "SYSTEM SHOULD NOT REPEAT" in executor._compose_prompt("normal")
+    assert executor._compose_prompt("normal") == "normal"
+    assert "SYSTEM SHOULD NOT REPEAT" in executor._cacheable_system_prompt
 
 
 def test_claude_prompt_maps_custom_tools_to_exact_mcp_names() -> None:
@@ -446,10 +484,10 @@ def test_claude_prompt_maps_custom_tools_to_exact_mcp_names() -> None:
 
     prompt = executor._compose_prompt("audit checks")
 
-    assert "`read_context_lines` -> `mcp__chack_tools__read_context_lines`" in prompt
-    assert "`search_context` -> `mcp__chack_tools__search_context`" in prompt
-    assert "`mark_check_checked` -> `mcp__chack_tools__mark_check_checked`" in prompt
-    assert "do not call their unprefixed aliases" in prompt
+    assert "`read_context_lines` -> `mcp__chack_tools__read_context_lines`" in executor._cacheable_system_prompt
+    assert "`search_context` -> `mcp__chack_tools__search_context`" in executor._cacheable_system_prompt
+    assert "`mark_check_checked` -> `mcp__chack_tools__mark_check_checked`" in executor._cacheable_system_prompt
+    assert "do not call their unprefixed aliases" in executor._cacheable_system_prompt
 
 
 def test_claude_task_manager_policy_uses_exact_mcp_name() -> None:
@@ -459,7 +497,7 @@ def test_claude_task_manager_policy_uses_exact_mcp_name() -> None:
 
     prompt = executor._compose_prompt("audit checks")
 
-    assert "call `mcp__chack_tools__task_steps_manager`" in prompt
+    assert "call `mcp__chack_tools__task_steps_manager`" in executor._cacheable_system_prompt
 
 
 def test_claude_vulnerability_fallback_collects_only_new_files() -> None:
@@ -500,8 +538,8 @@ def test_claude_save_policy_forbids_internal_store_writes() -> None:
 
     prompt = executor._compose_prompt("audit checks")
 
-    assert "Never write directly to AISEC_LOCAL_VULN_STORE_PATH" in prompt
-    assert "/tmp/aisec_local_vulnerabilities_*" in prompt
+    assert "Never write directly to AISEC_LOCAL_VULN_STORE_PATH" in executor._cacheable_system_prompt
+    assert "/tmp/aisec_local_vulnerabilities_*" in executor._cacheable_system_prompt
 
 
 def test_claude_oauth_auth_failure_retries_once_with_api_key(monkeypatch) -> None:

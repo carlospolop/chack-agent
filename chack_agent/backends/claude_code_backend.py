@@ -93,6 +93,48 @@ def _claude_cli_json_schema(schema_json: str) -> str:
     return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
 
 
+def _normalized_claude_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    """Map Claude usage into Chack's total/read/write token convention.
+
+    Anthropic reports ordinary input, cache creation, and cache reads as
+    disjoint counters. Chack's ``prompt_tokens`` is the total effective input,
+    with read/write subsets carried in ``input_tokens_details`` for pricing.
+    Claude Code versions have emitted a few aliases, so accept all observed
+    wire names without double-counting the nested cache-creation breakdown.
+    """
+
+    ordinary = int(usage.get("input_tokens", 0) or 0)
+    output = int(usage.get("output_tokens", 0) or 0)
+    cache_read = int(
+        usage.get(
+            "cache_read_input_tokens",
+            usage.get("cached_input_tokens", usage.get("cached_tokens", 0)),
+        )
+        or 0
+    )
+    raw_cache_write = usage.get(
+        "cache_creation_input_tokens",
+        usage.get("cache_write_input_tokens"),
+    )
+    if raw_cache_write is None:
+        creation = usage.get("cache_creation")
+        if isinstance(creation, dict):
+            raw_cache_write = sum(
+                int(value or 0)
+                for key, value in creation.items()
+                if str(key).endswith("_input_tokens")
+            )
+    cache_write = int(raw_cache_write or 0)
+    return {
+        "input_tokens": ordinary + cache_read + cache_write,
+        "output_tokens": output,
+        "input_tokens_details": {
+            "cached_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+        },
+    }
+
+
 def _seconds_until_claude_quota_reset(
     output: str,
     *,
@@ -622,10 +664,30 @@ class ClaudeCodeExecutor:
             )
             return cache_parts.dynamic_suffix
 
-        self._cacheable_system_prompt = ""
-        self._prompt_cache_prefix_key = ""
-        prompt_parts = [p for p in (base, user_input, policy_block, schema_block) if p.strip()]
-        return "\n".join(prompt_parts)
+        # Claude caches prompt prefixes in tools -> system -> messages order.
+        # Always keep Chack's immutable runtime/system, policy, and output
+        # contract in Claude Code's system layer, even when the YAML has no
+        # task-specific breakpoint. The changing task stays in the user
+        # message. Explicit markers can still extend this stable layer with
+        # large per-task context.
+        system_parts = [
+            part
+            for part in (base, policy_block, schema_block)
+            if part.strip()
+        ]
+        self._cacheable_system_prompt = "\n".join(system_parts)
+        self._prompt_cache_prefix_key = (
+            prompt_cache_key(self._cacheable_system_prompt)
+            if self._cacheable_system_prompt
+            else ""
+        )
+        if self._cacheable_system_prompt:
+            _LOGGER.info(
+                "Using cache-stable Claude system prefix: chars=%d key=%s",
+                len(self._cacheable_system_prompt),
+                self._prompt_cache_prefix_key,
+            )
+        return str(user_input or "")
 
     def _run_claude(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         result = self._run_claude_once(prompt)
@@ -859,29 +921,9 @@ class ClaudeCodeExecutor:
                     if "usage" in event and isinstance(event.get("usage"), dict):
                         usage_dict = event["usage"]
                         if isinstance(usage_dict, dict):
-                            usage = {
-                                "input_tokens": int(usage_dict.get("input_tokens", 0) or 0),
-                                "output_tokens": int(usage_dict.get("output_tokens", 0) or 0),
-                                "input_tokens_details": {
-                                    "cached_tokens": int(
-                                        usage_dict.get("cached_tokens", usage_dict.get("cache_read_input_tokens", 0))
-                                        or 0
-                                    ),
-                                    "cache_write_tokens": 0,
-                                },
-                            }
+                            usage = _normalized_claude_usage(usage_dict)
                     elif "input_tokens" in event or "output_tokens" in event:
-                        usage = {
-                            "input_tokens": int(event.get("input_tokens", 0) or 0),
-                            "output_tokens": int(event.get("output_tokens", 0) or 0),
-                            "input_tokens_details": {
-                                "cached_tokens": int(
-                                    event.get("cached_input_tokens", event.get("cache_read_input_tokens", 0))
-                                    or 0
-                                ),
-                                "cache_write_tokens": 0,
-                            },
-                        }
+                        usage = _normalized_claude_usage(event)
                     if usage:
                         report_live_usage(
                             self._model_name,

@@ -944,8 +944,8 @@ class Chack:
                 )
         return delta
 
-    @staticmethod
     def _estimate_model_cost(
+        self,
         pricing,
         model_name: str,
         prompt_tokens: int,
@@ -960,7 +960,18 @@ class Chack:
             completion_tokens=completion_tokens,
             cached_prompt_tokens=cached_prompt_tokens,
             cache_write_tokens=cache_write_tokens,
+            cache_write_rate_multiplier=self._cache_write_rate_multiplier(),
         )
+
+    def _cache_write_rate_multiplier(self) -> float:
+        """Account for Claude Code's one-hour cache-write pricing."""
+
+        try:
+            # Anthropic's one-hour writes cost 2x base input. The shared
+            # pricing table stores the five-minute 1.25x write rate.
+            return 1.6 if resolve_backend_type(self.config) == "claude" else 1.0
+        except Exception:
+            return 1.0
 
     @staticmethod
     def _stop_thread(thread_obj: threading.Thread) -> None:
@@ -2823,7 +2834,7 @@ class Chack:
             tools_used = run1_tools_used + run2_tools_used
 
             model_name = self.config.model.primary
-            main_cost = estimate_cost(
+            main_cost = self._estimate_model_cost(
                 self._pricing,
                 model_name,
                 prompt_tokens=prompt_tokens,
@@ -2834,6 +2845,7 @@ class Chack:
             nested_cost, _missing_nested_models = estimate_costs_by_model(
                 self._pricing,
                 nested_usage_by_model,
+                cache_write_rate_multiplier=self._cache_write_rate_multiplier(),
             )
             if main_cost is None and nested_cost == 0:
                 total_cost = None

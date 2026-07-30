@@ -244,9 +244,11 @@ def test_backend_compose_prompts_use_native_planning_policy() -> None:
 
     codex_prompt = CodexExecutor._compose_prompt(codex, "do work")
     claude_prompt = ClaudeCodeExecutor._compose_prompt(claude, "do work")
-    assert "built-in `update_plan`" in codex_prompt
-    assert "`TodoWrite` or `TaskCreate`/`TaskUpdate`" in claude_prompt
-    assert "mcp__chack_tools__task_steps_manager" not in claude_prompt
+    assert codex_prompt == "do work"
+    assert claude_prompt == "do work"
+    assert "built-in `update_plan`" in codex._cacheable_developer_prompt
+    assert "`TodoWrite` or `TaskCreate`/`TaskUpdate`" in claude._cacheable_system_prompt
+    assert "mcp__chack_tools__task_steps_manager" not in claude._cacheable_system_prompt
 
 
 def test_native_planning_calls_do_not_count_as_non_task_tools() -> None:
