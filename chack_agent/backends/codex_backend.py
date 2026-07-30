@@ -777,6 +777,10 @@ class CodexExecutor:
                 "timed out",
                 "connection error",
                 "connection reset",
+                "chunkedencodingerror",
+                "response ended prematurely",
+                "remote disconnected",
+                "broken pipe",
             )
         )
 

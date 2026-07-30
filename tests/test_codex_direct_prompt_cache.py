@@ -191,7 +191,8 @@ def test_direct_transport_retries_transient_overload_before_cli_fallback(monkeyp
                 _RawResult(raw_responses=[]),
             ),
             (
-                "ERROR: Codex direct cached request failed: status=503",
+                "ERROR: Codex direct cached request failed: ChunkedEncodingError: "
+                "Response ended prematurely",
                 [],
                 _RawResult(raw_responses=[]),
             ),
