@@ -44,9 +44,15 @@ from .tool_payloads import (
     serialize_tools_payload,
     write_payload_to_file,
 )
+from .prompt_cache import (
+    openai_model_requires_explicit_prompt_cache,
+    prompt_cache_key,
+    split_prompt_cache_breakpoint,
+)
 
 
 _LOGGER = logging.getLogger("chack.codex_backend")
+_EXPLICIT_CACHE_WARNING_MODELS: set[str] = set()
 
 
 def _cleanup_isolated_codex_home(codex_home: str, home_base: str) -> bool:
@@ -299,6 +305,8 @@ class CodexExecutor:
     _travel_model: str = ""
     _travel_max_turns: int = 50
     _runtime_env_json: str = "{}"
+    _cacheable_developer_prompt: str = ""
+    _prompt_cache_prefix_key: str = ""
 
     def _runtime_env(self) -> dict[str, str]:
         try:
@@ -312,6 +320,13 @@ class CodexExecutor:
     def _runtime_env_value(self, name: str, default: str = "") -> str:
         runtime_env = self._runtime_env()
         return str(runtime_env.get(name, os.environ.get(name, default)) or default)
+
+    def _has_configured_tools(self) -> bool:
+        try:
+            names = json.loads(self._allowed_tools_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return True
+        return bool(names) if isinstance(names, list) else True
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
         self._prompt_only_next_invocation = True
@@ -624,6 +639,8 @@ class CodexExecutor:
     def _compose_prompt(self, user_input: str) -> str:
         if self._prompt_only_next_invocation:
             self._prompt_only_next_invocation = False
+            self._cacheable_developer_prompt = ""
+            self._prompt_cache_prefix_key = ""
             return str(user_input or "")
         base = str(self._base_system_prompt or "").strip()
         policy_lines: list[str] = []
@@ -649,6 +666,39 @@ class CodexExecutor:
         if policy_lines:
             policy_block = "\n\n### TOOL USAGE POLICY\n" + "\n".join(policy_lines)
 
+        cache_parts = split_prompt_cache_breakpoint(user_input)
+        if cache_parts.has_breakpoint:
+            developer_parts = [
+                part
+                for part in (base, policy_block, cache_parts.stable_prefix)
+                if part.strip()
+            ]
+            self._cacheable_developer_prompt = "\n".join(developer_parts)
+            self._prompt_cache_prefix_key = prompt_cache_key(
+                self._cacheable_developer_prompt
+            )
+            _LOGGER.info(
+                "Using cache-stable Codex developer prefix: chars=%d key=%s",
+                len(self._cacheable_developer_prompt),
+                self._prompt_cache_prefix_key,
+            )
+            if (
+                openai_model_requires_explicit_prompt_cache(self._model_name)
+                and self._model_name not in _EXPLICIT_CACHE_WARNING_MODELS
+            ):
+                _EXPLICIT_CACHE_WARNING_MODELS.add(self._model_name)
+                _LOGGER.warning(
+                    "Codex model %s requires prompt_cache_key plus an explicit "
+                    "provider breakpoint for reliable prompt caching, but the "
+                    "current Codex CLI does not expose those request fields. "
+                    "The stable prompt layout is active; do not treat it as a "
+                    "confirmed cache hit without cached-token telemetry.",
+                    self._model_name,
+                )
+            return cache_parts.dynamic_suffix
+
+        self._cacheable_developer_prompt = ""
+        self._prompt_cache_prefix_key = ""
         if not base:
             return f"{user_input}{policy_block}" if policy_block else user_input
         if not user_input:
@@ -1099,6 +1149,16 @@ class CodexExecutor:
             "--config",
             f'model_reasoning_effort="{codex_thinking_effort(self._thinking_effort)}"',
         ]
+        stable_prompt_args: list[str] = []
+        if self._cacheable_developer_prompt:
+            # Codex accepts developer_instructions as a real developer message.
+            # json.dumps emits a TOML-compatible quoted string while safely
+            # preserving newlines and quotes in large context blocks.
+            stable_prompt_args = [
+                "--config",
+                "developer_instructions="
+                + json.dumps(self._cacheable_developer_prompt, ensure_ascii=False),
+            ]
         if self._thread_id:
             output_schema_args: list[str] = []
             if self._output_schema_path:
@@ -1113,6 +1173,7 @@ class CodexExecutor:
             ]
             args.extend(self._disabled_native_tool_args())
             args.extend(effort_args)
+            args.extend(stable_prompt_args)
             if output_schema_args:
                 args.extend(output_schema_args)
             args.extend(
@@ -1138,6 +1199,7 @@ class CodexExecutor:
         ]
         args.extend(self._disabled_native_tool_args())
         args.extend(effort_args)
+        args.extend(stable_prompt_args)
         args.extend(
             [
                 "--model",
@@ -1455,16 +1517,22 @@ class CodexExecutor:
         # System-level instructions to prevent the model from calling
         # non-existent built-in tools like `report_intent` instead of the
         # real MCP tools.
-        instructions_text = (
-            "CRITICAL: You do NOT have a tool called `report_intent`. "
-            "It does not exist. Never attempt to call it. "
-            "To report or save a vulnerability finding you MUST call the MCP tool "
-            "`chack_tools-save_discovered_vulnerability`. "
-            "Any call to `report_intent` will silently discard your finding. "
-            "Do not call MCP resource browser helpers such as `list_mcp_resources`, "
-            "`list_mcp_resource_templates`, or `read_mcp_resource`; use only the "
-            "explicit task tools listed in the prompt."
-        )
+        if self._has_configured_tools():
+            instructions_text = (
+                "CRITICAL: You do NOT have a tool called `report_intent`. "
+                "It does not exist. Never attempt to call it. "
+                "To report or save a vulnerability finding you MUST call the MCP tool "
+                "`chack_tools-save_discovered_vulnerability`. "
+                "Any call to `report_intent` will silently discard your finding. "
+                "Do not call MCP resource browser helpers such as `list_mcp_resources`, "
+                "`list_mcp_resource_templates`, or `read_mcp_resource`; use only the "
+                "explicit task tools listed in the prompt."
+            )
+        else:
+            instructions_text = (
+                "This is a no-tools task. Do not call or request tools; complete it "
+                "solely from the context embedded in the prompt."
+            )
         config_lines.append(f"instructions = {_toml_string(instructions_text)}")
         chack_mcp_startup_timeout = int(
             self._runtime_env_value("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "120")
@@ -1503,7 +1571,7 @@ class CodexExecutor:
             self._runtime_env_value("CHACK_MCP_TOOL_TIMEOUT_SECONDS", "3600") or "3600"
         )
         chack_shared_mcp_url = self._runtime_env_value("CHACK_CODEX_MCP_URL").strip()
-        if chack_shared_mcp_url:
+        if self._has_configured_tools() and chack_shared_mcp_url:
             # Point every codex agent at ONE shared streamable-HTTP MCP server (e.g. a
             # host-process server that holds a shared queue / board), instead of each
             # agent spawning its own stdio server. Custom tools then live on that server.
@@ -1525,7 +1593,7 @@ class CodexExecutor:
                 ]
             )
             config_lines.extend(shared_mcp_lines)
-        else:
+        elif self._has_configured_tools():
             config_lines.extend(
                 [
                     "",
@@ -1537,6 +1605,10 @@ class CodexExecutor:
                     f"startup_timeout_sec = {chack_mcp_startup_timeout}",
                     f"tool_timeout_sec = {chack_mcp_tool_timeout}",
                 ]
+            )
+        else:
+            _LOGGER.info(
+                "Skipping Codex chack_tools MCP server because this agent has no tools."
             )
         if self._playwright_mcp_enabled():
             playwright_server = playwright_mcp_server_config()

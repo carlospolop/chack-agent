@@ -45,6 +45,7 @@ from .tool_payloads import (
     serialize_tools_payload,
     write_payload_to_file,
 )
+from .prompt_cache import prompt_cache_key, split_prompt_cache_breakpoint
 
 
 _LOGGER = logging.getLogger("chack.claude_code_backend")
@@ -293,9 +294,18 @@ class ClaudeCodeExecutor:
     _thinking_effort: str = "high"
     _travel_model: str = ""
     _travel_max_turns: int = 50
+    _cacheable_system_prompt: str = ""
+    _prompt_cache_prefix_key: str = ""
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
         self._prompt_only_next_invocation = True
+
+    def _has_configured_tools(self) -> bool:
+        try:
+            names = json.loads(self._allowed_tools_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return True
+        return bool(names) if isinstance(names, list) else True
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
@@ -500,6 +510,8 @@ class ClaudeCodeExecutor:
     def _compose_prompt(self, user_input: str) -> str:
         if self._prompt_only_next_invocation:
             self._prompt_only_next_invocation = False
+            self._cacheable_system_prompt = ""
+            self._prompt_cache_prefix_key = ""
             return str(user_input or "")
         base = str(self._base_system_prompt or "").strip()
 
@@ -587,6 +599,31 @@ class ClaudeCodeExecutor:
         if schema_lines:
             schema_block = "\n" + "\n".join(schema_lines)
 
+        cache_parts = split_prompt_cache_breakpoint(user_input)
+        if cache_parts.has_breakpoint:
+            system_parts = [
+                part
+                for part in (
+                    base,
+                    policy_block,
+                    schema_block,
+                    cache_parts.stable_prefix,
+                )
+                if part.strip()
+            ]
+            self._cacheable_system_prompt = "\n".join(system_parts)
+            self._prompt_cache_prefix_key = prompt_cache_key(
+                self._cacheable_system_prompt
+            )
+            _LOGGER.info(
+                "Using cache-stable Claude system prefix: chars=%d key=%s",
+                len(self._cacheable_system_prompt),
+                self._prompt_cache_prefix_key,
+            )
+            return cache_parts.dynamic_suffix
+
+        self._cacheable_system_prompt = ""
+        self._prompt_cache_prefix_key = ""
         prompt_parts = [p for p in (base, user_input, policy_block, schema_block) if p.strip()]
         return "\n".join(prompt_parts)
 
@@ -1314,7 +1351,8 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "--allow-dangerously-skip-permissions",
             "--dangerously-skip-permissions",
         ]
-        if resume_compaction:
+        has_cli_tools = self._has_configured_tools() or self._playwright_mcp_enabled()
+        if resume_compaction or not has_cli_tools:
             args.extend(["--tools", ""])
         else:
             args.extend(
@@ -1332,7 +1370,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         # names as shell commands. Leave the normal tool registry intact when
         # execution is enabled; when it is disabled, deny only native Bash so
         # MCP tools remain discoverable and callable.
-        if not resume_compaction and not _exec_enabled:
+        if not resume_compaction and has_cli_tools and not _exec_enabled:
             args.extend(["--disallowedTools", "Bash"])
 
         if resume_compaction:
@@ -1362,6 +1400,18 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             args.extend(["--betas", _CLAUDE_1M_CONTEXT_BETA])
         if self._model_name:
             args.extend(["--model", self._model_name])
+        if self._cacheable_system_prompt and not resume_compaction:
+            # Claude Code owns the provider cache_control blocks. Appended
+            # system content is part of its stable system cache layer, while
+            # the changing suffix continues to arrive as the user message.
+            system_prompt_flag = (
+                "--append-system-prompt"
+                if has_cli_tools
+                else "--system-prompt"
+            )
+            args.extend(
+                [system_prompt_flag, self._cacheable_system_prompt]
+            )
         if self._claude_session_id:
             args.extend(["--resume", self._claude_session_id])
         if self._output_schema_json and not resume_compaction:

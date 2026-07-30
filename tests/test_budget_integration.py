@@ -596,8 +596,28 @@ def test_codex_build_command_resumes_captured_thread_for_followup_prompt():
     assert command[-1] == "-"
 
 
+def test_codex_cache_breakpoint_uses_developer_instructions() -> None:
+    from chack_agent.backends.prompt_cache import PROMPT_CACHE_BREAKPOINT
+
+    executor = _make_stub_codex_executor()
+    prompt = executor._compose_prompt(
+        f"stable repository context\n{PROMPT_CACHE_BREAKPOINT}\nchanging checks"
+    )
+    command = executor._build_command()
+
+    assert prompt == "\nchanging checks"
+    assert PROMPT_CACHE_BREAKPOINT not in prompt
+    assert "stable repository context" in executor._cacheable_developer_prompt
+    developer_arg = next(
+        arg for arg in command if arg.startswith("developer_instructions=")
+    )
+    assert "stable repository context" in developer_arg
+    assert "changing checks" not in developer_arg
+
+
 def test_codex_mcp_startup_timeout_is_configurable(monkeypatch, tmp_path):
     executor = _make_stub_codex_executor()
+    executor._allowed_tools_json = '["read_context"]'
 
     monkeypatch.setenv("CHACK_CODEX_HOME_BASE", str(tmp_path))
     monkeypatch.setenv("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "180")
@@ -606,6 +626,17 @@ def test_codex_mcp_startup_timeout_is_configurable(monkeypatch, tmp_path):
     config_path = os.path.join(executor._codex_home, "config.toml")
     body = open(config_path, "r", encoding="utf-8").read()
     assert "startup_timeout_sec = 180" in body
+
+
+def test_codex_skips_mcp_server_when_agent_has_no_tools(monkeypatch, tmp_path):
+    executor = _make_stub_codex_executor()
+
+    monkeypatch.setenv("CHACK_CODEX_HOME_BASE", str(tmp_path))
+    executor._ensure_codex_home_and_config()
+
+    config_path = os.path.join(executor._codex_home, "config.toml")
+    body = open(config_path, "r", encoding="utf-8").read()
+    assert "[mcp_servers.chack_tools]" not in body
 
 
 def test_codex_followup_prompt_only_suppresses_system_once():

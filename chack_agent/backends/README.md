@@ -9,6 +9,34 @@ This folder contains 7 runtime backends:
 - `claude_code_backend.py`
 - `copilot_cli_backend.py`
 
+## Prompt-cache boundary
+
+Agent prompts that run repeatedly with a large immutable prefix may place one
+visible `<!-- CHACK_PROMPT_CACHE_BREAKPOINT -->` marker between that prefix and
+their changing suffix. Keep the real stable text and variables in the YAML;
+do not hide them behind a generated prefix placeholder. Chack removes the
+marker before inference and uses the same split for both CLI providers:
+
+- Claude Code receives the stable side through its cached system layer and the
+  changing side through stdin. No-tool agents replace the generic coding
+  system prompt; tool-using agents append to it.
+- Codex receives the stable side as developer instructions and the changing
+  side through stdin. GPT-5.4 uses automatic prefix caching.
+
+Everything before the marker must be byte-identical for requests intended to
+share a cache. Put check inventories, round notes, focus instructions,
+timestamps, budgets, and retry data after it. A text marker is not itself a
+provider cache directive. GPT-5.6 and later require a stable
+`prompt_cache_key` plus an explicit API breakpoint for reliable caching; do not
+upgrade a Codex CLI workflow until its deployed version exposes those controls,
+or route it through a Responses API backend that does.
+
+Backends log a deterministic prefix key so cache-read/cache-write telemetry can
+be grouped without logging the prompt. When an agent resolves to zero tools,
+the Codex and Claude CLI backends also skip the Chack MCP server/tool registry;
+this removes startup and schema-token overhead without changing agent
+capabilities.
+
 ## Explicit pre-resume compaction
 
 `Chack.run(..., compact_before_resume=True)` asks the live executor to compact
