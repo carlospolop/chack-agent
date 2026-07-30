@@ -702,16 +702,94 @@ class CodexExecutor:
     def _run_codex(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_codex_home_and_config()
         if self._should_use_direct_prompt_cache():
-            direct_result = self._run_direct_cached_response(prompt)
-            if not str(direct_result[0] or "").startswith(
-                "ERROR: Codex direct cached request"
-            ):
-                return direct_result
+            try:
+                max_attempts = max(
+                    1,
+                    min(
+                        6,
+                        int(
+                            self._runtime_env_value(
+                                "CHACK_CODEX_DIRECT_CACHE_MAX_ATTEMPTS",
+                                "4",
+                            )
+                            or 4
+                        ),
+                    ),
+                )
+            except (TypeError, ValueError):
+                max_attempts = 4
+            direct_result: tuple[
+                str,
+                list[tuple[ToolAction, Any]],
+                _RawResult,
+            ] = ("", [], _RawResult(raw_responses=[]))
+            for attempt in range(1, max_attempts + 1):
+                direct_result = self._run_direct_cached_response(prompt)
+                direct_error = str(direct_result[0] or "")
+                if not direct_error.startswith(
+                    "ERROR: Codex direct cached request"
+                ):
+                    return direct_result
+                if (
+                    attempt >= max_attempts
+                    or not self._direct_cache_error_is_retryable(direct_error)
+                ):
+                    break
+                retry_delay = self._direct_cache_retry_delay(attempt)
+                _LOGGER.warning(
+                    "Retrying transient direct cached Codex failure "
+                    "(attempt=%d/%d delay=%.1fs): %s",
+                    attempt,
+                    max_attempts,
+                    retry_delay,
+                    _preview_text(direct_error, max_chars=500),
+                )
+                deadline = time.monotonic() + retry_delay
+                while time.monotonic() < deadline:
+                    if cancellation_requested():
+                        break
+                    time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                if cancellation_requested():
+                    break
             _LOGGER.warning(
                 "Direct cached Codex transport failed; falling back to Codex CLI: %s",
                 _preview_text(direct_result[0], max_chars=500),
             )
         return self._run_codex_once(prompt, allow_api_key_fallback=True)
+
+    @staticmethod
+    def _direct_cache_error_is_retryable(error_text: str) -> bool:
+        normalized = str(error_text or "").lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "currently overloaded",
+                "overloaded",
+                "temporarily unavailable",
+                "try again later",
+                "rate limit",
+                "status=429",
+                "status=500",
+                "status=502",
+                "status=503",
+                "status=504",
+                "timeout",
+                "timed out",
+                "connection error",
+                "connection reset",
+            )
+        )
+
+    def _direct_cache_retry_delay(self, attempt: int) -> float:
+        base_delays = (2.0, 5.0, 10.0, 20.0, 30.0)
+        base = base_delays[min(max(1, attempt), len(base_delays)) - 1]
+        key = str(self._prompt_cache_prefix_key or "0")
+        try:
+            offset = (max(1, attempt) - 1) * 2
+            jitter = int((key[offset : offset + 2] or key[:2] or "0"), 16) % 5
+        except ValueError:
+            jitter = 0
+        return base + float(jitter)
 
     def _should_use_direct_prompt_cache(self) -> bool:
         mode = self._runtime_env_value(
@@ -806,7 +884,10 @@ class CodexExecutor:
             "Authorization": f"Bearer {bearer_token}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
-            "originator": "chack_agent",
+            # Match the first-party Codex transport classification. Unknown
+            # originators are routed differently by the subscription backend
+            # and can return overload failures while the CLI route is healthy.
+            "originator": "codex_cli_rs",
             # ChatGPT's Codex endpoint uses this header together with
             # prompt_cache_key for sticky cache routing. It must be stable
             # across fresh processes that share the exact prefix.
@@ -956,6 +1037,10 @@ class CodexExecutor:
                         completed_response = raw_completed
                 elif event_type in {"error", "response.failed"}:
                     raw_error = event.get("error")
+                    if not isinstance(raw_error, dict):
+                        failed_response = event.get("response")
+                        if isinstance(failed_response, dict):
+                            raw_error = failed_response.get("error")
                     if isinstance(raw_error, dict):
                         error_message = str(
                             raw_error.get("message", "")

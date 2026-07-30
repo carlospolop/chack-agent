@@ -68,6 +68,21 @@ class _Response:
         self.closed = True
 
 
+class _FailedResponse(_Response):
+    def iter_lines(self):
+        event = {
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": "provider_failure",
+                    "message": "Exact nested provider failure",
+                }
+            },
+        }
+        yield f"data: {json.dumps(event)}".encode()
+        yield b"data: [DONE]"
+
+
 def test_chatgpt_direct_request_uses_stable_key_and_session_without_unsupported_fields():
     first = _executor()
     second = _executor()
@@ -83,6 +98,7 @@ def test_chatgpt_direct_request_uses_stable_key_and_session_without_unsupported_
     assert "prompt_cache_options" not in first_body
     assert "prompt_cache_breakpoint" not in first_body["input"][0]["content"][0]
     assert first_headers["ChatGPT-Account-ID"] == "test-account-id"
+    assert first_headers["originator"] == "codex_cli_rs"
 
 
 def test_api_key_direct_request_uses_documented_explicit_cache_fields():
@@ -155,3 +171,57 @@ def test_direct_transport_falls_back_to_codex_cli_on_provider_error():
     )
 
     assert executor._run_codex("prompt")[0] == "cli fallback"
+
+
+def test_direct_transport_retries_transient_overload_before_cli_fallback(monkeypatch):
+    executor = _executor()
+    executor._ensure_codex_home_and_config = lambda: None
+    executor._should_use_direct_prompt_cache = lambda: True
+    executor._runtime_env_value = (
+        lambda name, default="": "3"
+        if name == "CHACK_CODEX_DIRECT_CACHE_MAX_ATTEMPTS"
+        else default
+    )
+    results = iter(
+        [
+            (
+                "ERROR: Codex direct cached request failed: "
+                "Our servers are currently overloaded. Please try again later.",
+                [],
+                _RawResult(raw_responses=[]),
+            ),
+            (
+                "ERROR: Codex direct cached request failed: status=503",
+                [],
+                _RawResult(raw_responses=[]),
+            ),
+            ("cached success", [], _RawResult(raw_responses=[])),
+        ]
+    )
+    executor._run_direct_cached_response = lambda prompt: next(results)
+    executor._direct_cache_retry_delay = lambda attempt: 0
+    executor._run_codex_once = lambda prompt, allow_api_key_fallback: (
+        "unexpected CLI fallback",
+        [],
+        _RawResult(raw_responses=[]),
+    )
+    monkeypatch.setattr(codex_backend.time, "sleep", lambda seconds: None)
+
+    assert executor._run_codex("prompt")[0] == "cached success"
+
+
+def test_direct_response_surfaces_nested_response_failure(monkeypatch):
+    executor = _executor()
+    monkeypatch.setattr(
+        codex_backend.requests,
+        "post",
+        lambda *args, **kwargs: _FailedResponse(),
+    )
+
+    output, steps, raw = executor._run_direct_cached_response("round one")
+
+    assert output == (
+        "ERROR: Codex direct cached request failed: Exact nested provider failure"
+    )
+    assert steps == []
+    assert raw.raw_responses == []

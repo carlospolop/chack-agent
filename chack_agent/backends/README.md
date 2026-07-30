@@ -26,9 +26,11 @@ marker before inference and uses the same split for both CLI providers:
   API-key requests use `prompt_cache_key`, an explicit breakpoint after the
   stable developer content, and explicit cache mode. ChatGPT/Codex subscription
   requests use the same deterministic `prompt_cache_key` and `session_id`
-  across fresh agents because that endpoint rejects the public explicit-cache
-  fields. Tool-using agents and direct-transport failures safely retain the
-  Codex CLI path.
+  across fresh agents and retain the official CLI's first-party transport
+  classification because that endpoint rejects the public explicit-cache
+  fields and routes unknown originators differently. Transient overload and
+  rate-limit failures receive bounded jittered retries. Tool-using agents and
+  terminal direct-transport failures safely retain the Codex CLI path.
 
 Everything before the marker must be byte-identical for requests intended to
 share a cache. Put check inventories, round notes, focus instructions,
