@@ -23,7 +23,9 @@ _QUEUE_URL_ENV = "CHACK_LOG_QUEUE_URL"
 _QUEUE_REGION_ENV = "CHACK_LOG_QUEUE_REGION"
 _HTTP_URL_ENV = "CHACK_LOGS_HTTP_URL"
 _HTTP_TIMEOUT_ENV = "CHACK_LOGS_HTTP_TIMEOUT"
+_TOOL_RESULT_MAX_BYTES_ENV = "CHACK_TELEMETRY_TOOL_RESULT_MAX_BYTES"
 _SOURCE = "chack-agent"
+_DEFAULT_TOOL_RESULT_MAX_BYTES = 8192
 
 _LOCK = threading.Lock()
 _CLIENT = None
@@ -117,6 +119,61 @@ def _sanitize(value: Any, *, max_str_len: int = 4000) -> Any:
     return _truncate(str(value), max_str_len)
 
 
+def _serialized_size_and_preview(value: Any, *, preview_len: int = 512) -> tuple[int, str]:
+    try:
+        serialized = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+    except Exception:
+        serialized = str(value)
+    return len(serialized.encode("utf-8", errors="replace")), _truncate(
+        serialized.replace("\x00", ""),
+        preview_len,
+    )
+
+
+def _tool_result_max_bytes() -> int:
+    raw = (os.environ.get(_TOOL_RESULT_MAX_BYTES_ENV, "") or "").strip()
+    try:
+        value = int(raw) if raw else _DEFAULT_TOOL_RESULT_MAX_BYTES
+    except (TypeError, ValueError):
+        value = _DEFAULT_TOOL_RESULT_MAX_BYTES
+    return max(512, min(value, 65536))
+
+
+def _compact_tool_event_payload(
+    event_type: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Bound completed tool results in telemetry without mutating runtime data.
+
+    Tool arguments and small results stay intact so status/checkpoint recovery can
+    reconstruct successful writes. Large read/search results are replaced only in
+    the telemetry copy with their size and a short preview; the agent still receives
+    the original result.
+    """
+    if event_type != "tool_called" or not isinstance(payload, dict):
+        return payload
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict) or "result" not in tool_input:
+        return payload
+    result_size, preview = _serialized_size_and_preview(tool_input.get("result"))
+    if result_size <= _tool_result_max_bytes():
+        return payload
+    compact_input = dict(tool_input)
+    compact_input["result"] = {
+        "_telemetry_truncated": True,
+        "original_bytes": result_size,
+        "preview": preview,
+    }
+    compact_payload = dict(payload)
+    compact_payload["tool_input"] = compact_input
+    return compact_payload
+
+
 def log_event(event_type: str, payload: Optional[Dict[str, Any]] = None, **context) -> bool:
     http_url = (os.environ.get(_HTTP_URL_ENV, "") or "").strip()
     event_type = (event_type or "").strip().lower()
@@ -130,6 +187,7 @@ def log_event(event_type: str, payload: Optional[Dict[str, Any]] = None, **conte
             continue
         base_context[str(key)] = value
 
+    event_payload = _compact_tool_event_payload(event_type, payload or {})
     event = {
         "schema_version": 1,
         "source": _SOURCE,
@@ -137,7 +195,7 @@ def log_event(event_type: str, payload: Optional[Dict[str, Any]] = None, **conte
         "event_type": event_type,
         "ts": _timestamp(),
         "context": _sanitize(base_context),
-        "payload": _sanitize(payload or {}),
+        "payload": _sanitize(event_payload),
     }
 
     _emit_stdout_event(event)
