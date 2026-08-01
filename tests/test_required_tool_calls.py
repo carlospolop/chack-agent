@@ -180,6 +180,7 @@ def test_backend_failure_does_not_resume_to_satisfy_tool_requirements():
 
     assert executor.calls == 1
     assert result.output == failure
+    assert result.error == "backend_failure"
     assert result.prompt_tokens == 0
     assert result.completion_tokens == 0
 

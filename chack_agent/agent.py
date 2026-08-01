@@ -205,6 +205,7 @@ class RunResult:
     resume_compaction_method: str = ""
     resume_compaction_duration_seconds: float = 0.0
     resume_compaction_error: str = ""
+    error: str = ""
 
 
 TaskStepsSnapshotCallback = Callable[[Dict[str, Any]], None]
@@ -2935,6 +2936,7 @@ class Chack:
                     "tool_counts": dict(tool_counts),
                     "nested_tool_counts": dict(nested_counts_total),
                     "nested_usage_by_model": nested_usage_by_model,
+                    "error": str(result.get("error") or ""),
                 },
             )
 
@@ -2979,6 +2981,7 @@ class Chack:
                 resume_compaction_method=resume_compaction.method,
                 resume_compaction_duration_seconds=resume_compaction.duration_seconds,
                 resume_compaction_error=resume_compaction.error,
+                error=str(result.get("error") or ""),
             )
         except Exception as exc:
             limit_text = str(exc or "").lower()
