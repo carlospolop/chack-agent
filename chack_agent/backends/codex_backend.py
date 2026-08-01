@@ -193,9 +193,19 @@ def _log_timestamp() -> str:
 
 def _preview_text(value: Any, *, max_chars: int = 2000) -> str:
     text = str(value or "").strip()
-    if len(text) <= max_chars:
+    limit = max(1, int(max_chars))
+    if len(text) <= limit:
         return text
-    return text[:max_chars] + "...[truncated]"
+    # Codex emits a JSON event stream. Startup/context events are at the
+    # beginning, while the provider's actionable terminal error is normally
+    # at the end. Preserve both so failure telemetry remains classifiable.
+    marker = "...[truncated middle]..."
+    if limit <= len(marker) + 2:
+        return text[-limit:]
+    available = limit - len(marker)
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return text[:head_chars] + marker + text[-tail_chars:]
 
 
 def _readline_when_ready(stream: Any, wait_seconds: float) -> Optional[str]:
