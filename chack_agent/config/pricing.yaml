@@ -233,9 +233,9 @@ models:
     cache_read: 0.028
     output: 0.28
   deepseek/deepseek-v4-flash-0731:
-    input: 0.14
-    cache_read: 0.0028
-    output: 0.28
+    input: 0.09
+    cache_read: 0.018
+    output: 0.18
   deepseek/deepseek-v4-pro:
     input: 0.435
     cache_read: 0.003625
@@ -881,7 +881,7 @@ models:
   openai/gpt-oss-20b:
     input: 0.03
     cache_read: 0.03
-    output: 0.14
+    output: 0.13
   openai/gpt-oss-20b:free:
     input: 0
     cache_read: 0
@@ -1347,9 +1347,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.76006
-    cache_read: 0.141154
-    output: 2.38876
+    input: 0.385
+    cache_read: 0.0715
+    output: 1.21
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
@@ -1374,6 +1374,10 @@ models:
     cache_read: 0.2
     cache_write: 2.5
     output: 10
+  ~deepseek/deepseek-v4-flash-latest:
+    input: 0.09
+    cache_read: 0.018
+    output: 0.18
   ~google/gemini-flash-latest:
     input: 1.5
     cache_read: 0.15
