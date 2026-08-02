@@ -1525,15 +1525,20 @@ class CodexExecutor:
         return_code: int | None = None,
     ) -> None:
         preview = _preview_text(details)
+        command_executable = os.path.basename(str(command[0])) if command else ""
+        command_argument_count = max(0, len(command) - 1)
         _LOGGER.error(
-            "Codex CLI failure: type=%s provider=%s model=%s return_code=%s thread_id=%s cwd=%s command=%s details=%s ts=%s",
+            "Codex CLI failure: type=%s provider=%s model=%s return_code=%s "
+            "thread_id=%s cwd=%s command_executable=%s command_argument_count=%d "
+            "details=%s ts=%s",
             failure_type,
             self._model_provider,
             self._model_name,
             return_code,
             self._thread_id or "",
             cwd,
-            command,
+            command_executable,
+            command_argument_count,
             preview,
             _log_timestamp(),
         )
@@ -1547,7 +1552,8 @@ class CodexExecutor:
                     "return_code": return_code,
                     "thread_id": str(self._thread_id or ""),
                     "cwd": str(cwd or ""),
-                    "command": [str(part) for part in command],
+                    "command_executable": command_executable,
+                    "command_argument_count": command_argument_count,
                     "details_preview": preview,
                 },
                 task_session_id=current_session_id() or "",

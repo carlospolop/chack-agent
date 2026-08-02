@@ -255,6 +255,15 @@ def test_codex_backend_logs_codex_cli_failure_event():
     assert found is True
 
 
+def test_codex_backend_failure_event_does_not_log_prompt_bearing_command():
+    source = MODULE_PATH.read_text()
+
+    assert '"command": [str(part) for part in command]' not in source
+    assert "command_executable=%s command_argument_count=%d" in source
+    assert '"command_executable": command_executable' in source
+    assert '"command_argument_count": command_argument_count' in source
+
+
 def test_codex_backend_does_not_pass_cd_to_exec_resume():
     module_ast = ast.parse(MODULE_PATH.read_text())
 
