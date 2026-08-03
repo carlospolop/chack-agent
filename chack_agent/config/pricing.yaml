@@ -835,13 +835,13 @@ models:
   openai/gpt-5.6-luna:
     input: 0.1
     cache_read: 0.01
-    cache_write: 0.12500000000000002
-    output: 0.6000000000000001
+    cache_write: 0.125
+    output: 0.6
   openai/gpt-5.6-luna-pro:
     input: 0.1
     cache_read: 0.01
-    cache_write: 0.12500000000000002
-    output: 0.6000000000000001
+    cache_write: 0.125
+    output: 0.6
   openai/gpt-5.6-sol:
     input: 5
     cache_read: 0.5
@@ -853,12 +853,12 @@ models:
     cache_write: 6.25
     output: 30
   openai/gpt-5.6-terra:
-    input: 1.00000000000000015
+    input: 1
     cache_read: 0.1
     cache_write: 1.25
     output: 6
   openai/gpt-5.6-terra-pro:
-    input: 1.00000000000000015
+    input: 1
     cache_read: 0.1
     cache_write: 1.25
     output: 6
@@ -1025,9 +1025,9 @@ models:
     cache_read: 0.455
     output: 1.82
   qwen/qwen3-235b-a22b-2507:
-    input: 0.09
-    cache_read: 0.09
-    output: 0.55
+    input: 0.1495
+    cache_read: 0.1495
+    output: 0.598
   qwen/qwen3-235b-a22b-thinking-2507:
     input: 0.23
     cache_read: 0.23
@@ -1096,9 +1096,9 @@ models:
     cache_read: 0.1
     output: 1.9
   qwen/qwen3-vl-235b-a22b-thinking:
-    input: 0.4
-    cache_read: 0.4
-    output: 4
+    input: 0.98
+    cache_read: 0.98
+    output: 3.95
   qwen/qwen3-vl-30b-a3b-instruct:
     input: 0.13
     cache_read: 0.13
@@ -1120,9 +1120,9 @@ models:
     cache_read: 0.18
     output: 2.1
   qwen/qwen3.5-122b-a10b:
-    input: 0.26
-    cache_read: 0.26
-    output: 2.08
+    input: 0.4
+    cache_read: 0.4
+    output: 3.2
   qwen/qwen3.5-27b:
     input: 0.195
     cache_read: 0.195
@@ -1347,9 +1347,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.385
-    cache_read: 0.0715
-    output: 1.21
+    input: 1.19
+    cache_read: 0.221
+    output: 3.74
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
