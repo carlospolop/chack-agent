@@ -2540,6 +2540,11 @@ def build_executor(
 
     route = get_openrouter_route(config)
     uses_openrouter_route = route is not None
+    explicit_api_key_type = str(
+        getattr(config.model, "api_key_type", "") or ""
+    ).strip().lower()
+    explicitly_use_openai_api = explicit_api_key_type in {"openai", "openai_api"}
+    explicitly_use_codex_token = explicit_api_key_type in {"codex", "codex_token"}
     fallback_openai_api_key = (
         str(config.credentials.openai_api_key or "").strip()
         or os.environ.get("OPENAI_API_KEY", "").strip()
@@ -2548,7 +2553,15 @@ def build_executor(
         str(getattr(config.credentials, "codex_access_token", "") or "").strip()
         or os.environ.get("CODEX_ACCESS_TOKEN", "").strip()
     )
+    if explicitly_use_openai_api:
+        codex_access_token = ""
+    elif explicitly_use_codex_token:
+        # A selected account token is authoritative. Do not silently bill a
+        # different OpenAI API credential if that token fails.
+        fallback_openai_api_key = ""
     existing_codex_auth_file = "" if uses_openrouter_route else _existing_codex_auth_file()
+    if explicitly_use_openai_api:
+        existing_codex_auth_file = ""
     codex_api_key = route.api_key if route is not None else (codex_access_token or fallback_openai_api_key)
     if not codex_api_key and not existing_codex_auth_file:
         raise ValueError(

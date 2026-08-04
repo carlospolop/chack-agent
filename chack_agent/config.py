@@ -42,6 +42,10 @@ def _interpolate_env(value: Any) -> Any:
 class ModelConfig:
     primary: str
     provider: str = ""
+    # Optional explicit credential family selected by the caller. This is
+    # distinct from provider because, for example, the Codex backend supports
+    # either a Codex account token or an OpenAI API key.
+    api_key_type: str = ""
     max_context_tokens: int = 0
     social_network: str = "CHEAP_BUT_QUALITY"
     scientific: str = "CHEAP_BUT_QUALITY"
@@ -191,6 +195,25 @@ class ChackConfig:
 
 def resolve_api_key_type(config: ChackConfig) -> str:
     provider = str(getattr(config.model, "provider", "") or "").strip().lower()
+    explicit_api_key_type = str(
+        getattr(config.model, "api_key_type", "") or ""
+    ).strip().lower()
+    explicit_aliases = {
+        "codex": "codex_token",
+        "codex_token": "codex_token",
+        "openai": "openai",
+        "openai_api": "openai",
+        "anthropic": "anthropic",
+        "anthropic_api": "anthropic",
+        "claude": "anthropic",
+        "claude_token": "anthropic",
+        "openrouter": "openrouter",
+        "openrouter_api": "openrouter",
+        "gemini": "gemini",
+        "gemini_api": "gemini",
+    }
+    if explicit_api_key_type:
+        return explicit_aliases.get(explicit_api_key_type, explicit_api_key_type)
     credentials = getattr(config, "credentials", CredentialsConfig())
 
     codex_access_token = (

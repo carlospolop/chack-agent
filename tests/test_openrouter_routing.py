@@ -176,6 +176,43 @@ class OpenRouterRoutingTests(unittest.TestCase):
             else:
                 os.environ["OPENAI_API_KEY"] = previous_openai
 
+    def test_codex_executor_honors_explicit_openai_api_key_selection(self) -> None:
+        config = _make_config("codex", "gpt-5-mini")
+        config.model.api_key_type = "openai"
+        config.credentials.openrouter_api_key = ""
+        config.credentials.openai_api_key = "sk-selected-openai"
+        config.credentials.codex_access_token = _fake_chatgpt_access_token()
+
+        executor = build_codex_executor(
+            config,
+            system_prompt="system",
+            max_turns=2,
+            memory_max_messages=10,
+            memory_reset_to_messages=5,
+        )
+
+        self.assertFalse(executor._use_codex_access_token)
+        self.assertEqual(executor._openai_api_key, "sk-selected-openai")
+        self.assertEqual(executor._fallback_openai_api_key, "sk-selected-openai")
+
+    def test_codex_executor_honors_explicit_codex_token_without_api_fallback(self) -> None:
+        config = _make_config("codex", "gpt-5-mini")
+        config.model.api_key_type = "codex"
+        config.credentials.openrouter_api_key = ""
+        config.credentials.openai_api_key = "sk-unselected-openai"
+        config.credentials.codex_access_token = _fake_chatgpt_access_token()
+
+        executor = build_codex_executor(
+            config,
+            system_prompt="system",
+            max_turns=2,
+            memory_max_messages=10,
+            memory_reset_to_messages=5,
+        )
+
+        self.assertTrue(executor._use_codex_access_token)
+        self.assertEqual(executor._fallback_openai_api_key, "")
+
     def test_codex_executor_falls_back_to_openai_api_key_when_access_token_fails(self) -> None:
         config = _make_config("codex", "gpt-5-mini")
         config.credentials.openrouter_api_key = ""

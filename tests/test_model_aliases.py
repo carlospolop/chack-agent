@@ -239,6 +239,30 @@ class ModelAliasResolutionTests(unittest.TestCase):
 
         self.assertEqual(resolve_api_key_type(config), "codex_token")
 
+    def test_resolve_api_key_type_honors_explicit_openai_selection(self) -> None:
+        config_yaml = textwrap.dedent(
+            """
+            system_prompt: test system prompt
+            agent:
+              primary: gpt-5.4-mini
+              provider: codex
+              api_key_type: openai
+              main_action: test
+              sub_action: run
+            credentials:
+              codex_access_token: codex-access-token
+              openai_api_key: oa-test
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(config_yaml)
+            path = handle.name
+
+        config = load_config(path)
+
+        self.assertEqual(config.model.api_key_type, "openai")
+        self.assertEqual(resolve_api_key_type(config), "openai")
+
     def test_chack_logs_instantiation_details(self) -> None:
         config_yaml = textwrap.dedent(
             """
