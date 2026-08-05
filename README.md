@@ -101,6 +101,28 @@ result = agent.run(
 
 `tools_append` and `tools_override` work with both in-process backends and CLI backends such as `codex`, `claude`, and `gemini`.
 
+By default, a tool override creates a fresh executor for that call. For
+continuation turns that must retain both conversation memory and the overridden
+tools, opt into a session-persistent executor:
+
+```python
+first = agent.run(
+    session_id="demo",
+    text="Inspect the repository.",
+    tools_override=[my_tool],
+    reuse_session_executor=True,
+)
+correction = agent.run(
+    session_id="demo",
+    text="Return the same conclusion in the required JSON shape.",
+    tools_override=[my_tool],
+    reuse_session_executor=True,
+)
+```
+
+The first executor configuration for that session is reused until
+`reset_session()` is called.
+
 You can also require specific tools to be called before a run is accepted as
 complete. This is useful when a workflow must persist a verdict or update a
 database row:
