@@ -8,6 +8,15 @@ A configurable OpenAI Agents SDK runtime with rich tools and sub‑agent researc
 pip install chack-agent
 ```
 
+> **Naxus consumers track `master`, not a pinned commit.** AISecurityAuditor,
+> Dynamic-AIgent, and the backend all install
+> `chack-agent @ git+https://github.com/carlospolop/chack-agent.git@master`, and
+> AISecurityAuditor and Dynamic-AIgent additionally reinstall from `master` at
+> the start of every run. A commit merged to `master` therefore reaches every
+> Naxus agent on its next build or scan, with no pin to advance and no window in
+> which to catch a regression downstream. Land breaking changes behind a config
+> flag and keep `master` green.
+
 ## Quick Start
 
 ```python
