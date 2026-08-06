@@ -229,9 +229,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.14
-    cache_read: 0.028
-    output: 0.28
+    input: 0.0882
+    cache_read: 0.01764
+    output: 0.1764
   deepseek/deepseek-v4-flash-0731:
     input: 0.09
     cache_read: 0.018
@@ -400,6 +400,10 @@ models:
     input: 0.01
     cache_read: 0.002
     output: 0.03
+  inclusionai/ling-3.0-flash:
+    input: 0.075
+    cache_read: 0.015
+    output: 0.22
   inclusionai/ling-3.0-flash:free:
     input: 0
     cache_read: 0
@@ -464,6 +468,10 @@ models:
     input: 1.25
     cache_read: 0.15
     output: 4.25
+  meta/muse-spark-1.2:
+    input: 1.25
+    cache_read: 0.15
+    output: 4.25
   microsoft/phi-4:
     input: 0.07
     cache_read: 0.07
@@ -493,7 +501,7 @@ models:
     cache_read: 0.03
     output: 1.2
   minimax/minimax-m2.5:
-    input: 0.15
+    input: 0.22
     cache_read: 0.05
     output: 0.9
   minimax/minimax-m2.7:
@@ -597,7 +605,7 @@ models:
     cache_read: 0.0992
     output: 2.48
   moonshotai/kimi-k2.7-code:
-    input: 0.73
+    input: 0.7
     cache_read: 0.15
     output: 3.5
   moonshotai/kimi-k3:
@@ -1025,9 +1033,9 @@ models:
     cache_read: 0.455
     output: 1.82
   qwen/qwen3-235b-a22b-2507:
-    input: 0.1495
-    cache_read: 0.1495
-    output: 0.598
+    input: 0.09
+    cache_read: 0.09
+    output: 0.55
   qwen/qwen3-235b-a22b-thinking-2507:
     input: 0.23
     cache_read: 0.23
@@ -1153,9 +1161,9 @@ models:
     cache_write: 0.375
     output: 1.8
   qwen/qwen3.6-27b:
-    input: 0.289
-    cache_read: 0.289
-    output: 2.4
+    input: 0.6
+    cache_read: 0.12
+    output: 3.6
   qwen/qwen3.6-35b-a3b:
     input: 0.14
     cache_read: 0.14
@@ -1348,9 +1356,9 @@ models:
     cache_read: 0.24
     output: 4
   z-ai/glm-5.1:
-    input: 0.966
-    cache_read: 0.1794
-    output: 3.036
+    input: 0.952
+    cache_read: 0.1768
+    output: 2.992
   z-ai/glm-5.2:
     input: 0.76
     cache_read: 0.14
