@@ -235,6 +235,32 @@ def test_unrelated_and_malformed_rollout_lines_are_ignored(rollout):
     assert reports == []
 
 
+def test_a_rollout_that_appears_after_the_thread_starts_is_still_followed(tmp_path):
+    # Codex announces the thread and writes the rollout moments later, so the
+    # attach-time lookup can legitimately miss. Retrying it is throttled to
+    # keep the poll cheap, but it must still pick the file up.
+    reports: list = []
+    tailer = _load_tailer(reports)(str(tmp_path), "gpt-5")
+    tailer.attach(THREAD_ID)
+
+    path = tmp_path / "sessions" / "2026" / "08" / "06" / f"rollout-late-{THREAD_ID}.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("")
+    tailer.poll()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(_token_count_line(total_input=4_000, cached=0, output=60) + "\n")
+    tailer.poll()
+
+    assert reports == [
+        {
+            "prompt_tokens": 4_000,
+            "completion_tokens": 60,
+            "cached_prompt_tokens": 0,
+            "cache_write_tokens": 0,
+        }
+    ]
+
+
 def test_a_missing_rollout_leaves_the_run_exactly_as_it_was(tmp_path):
     reports: list = []
     tailer = _load_tailer(reports)(str(tmp_path), "gpt-5")

@@ -265,6 +265,12 @@ class _RolloutUsageTailer:
     """
 
     _ATTACH_TIMEOUT_SECONDS = 120.0
+    # `poll` runs once per line of Codex output, and locating the rollout means
+    # a recursive glob of the sessions tree. Codex normally has the file open by
+    # the time the thread is announced, so this only bounds the case where it
+    # never appears: a retry per output line for two minutes would spend real
+    # CPU searching for a file that is not there.
+    _LOCATE_RETRY_SECONDS = 0.5
 
     def __init__(self, codex_home: str, model_name: str) -> None:
         home = str(codex_home or "").strip()
@@ -277,6 +283,7 @@ class _RolloutUsageTailer:
         self._baseline: dict[str, int] = {}
         self._reported = {field: 0 for field in _ROLLOUT_USAGE_FIELDS}
         self._give_up_after = 0.0
+        self._next_locate_at = 0.0
         self._disabled = not self._sessions_dir
 
     def attach(self, thread_id: str) -> None:
@@ -290,6 +297,7 @@ class _RolloutUsageTailer:
         self._partial = ""
         self._baseline = {}
         self._give_up_after = time.monotonic() + self._ATTACH_TIMEOUT_SECONDS
+        self._next_locate_at = 0.0
         # Snapshot the baseline now rather than on the first poll: a round that
         # completed in between would otherwise be read as pre-existing usage and
         # never reported. Codex usually has the rollout open by `thread.started`;
@@ -308,8 +316,13 @@ class _RolloutUsageTailer:
         if self._disabled or not self._thread_id:
             return
         try:
-            if self._path is None and not self._locate():
-                return
+            if self._path is None:
+                now = time.monotonic()
+                if now < self._next_locate_at:
+                    return
+                self._next_locate_at = now + self._LOCATE_RETRY_SECONDS
+                if not self._locate():
+                    return
             totals = self._read_new_totals()
         except LiveCostLimitExceeded:
             raise
