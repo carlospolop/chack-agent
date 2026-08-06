@@ -889,6 +889,13 @@ class CodexExecutor:
             policy_block = "\n\n### TOOL USAGE POLICY\n" + "\n".join(policy_lines)
 
         cache_parts = split_prompt_cache_breakpoint(user_input)
+        if cache_parts.has_breakpoint and not cache_parts.dynamic_suffix.strip():
+            # Everything the caller wrote sits above the boundary. Honouring it
+            # would send an empty prompt on stdin, and `codex exec -` rejects that
+            # outright ("No prompt provided via stdin"), so this run goes uncached
+            # rather than not running at all.
+            user_input = cache_parts.stable_prefix
+            cache_parts = split_prompt_cache_breakpoint(user_input)
         if cache_parts.has_breakpoint:
             developer_parts = [
                 part

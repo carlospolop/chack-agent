@@ -686,3 +686,31 @@ def _make_stub_copilot_executor():
         require_task_steps_manager_init_first=False,
         output_schema_json="",
     )
+
+
+def test_codex_prompt_cache_boundary_never_sends_an_empty_prompt():
+    """A prompt whose cache boundary is last would put nothing on codex's stdin.
+
+    `codex exec -` refuses that with "No prompt provided via stdin", so the run
+    dies before it starts. Better to lose the cache for one call than the call.
+    """
+    from chack_agent.backends.prompt_cache import PROMPT_CACHE_BREAKPOINT
+
+    executor = _make_stub_codex_executor()
+
+    composed = executor._compose_prompt(
+        f"### TASK\n\nRepository Path: /tmp/repo\n\n{PROMPT_CACHE_BREAKPOINT}\n\n"
+    )
+
+    assert composed.strip()
+    assert "Repository Path: /tmp/repo" in composed
+    assert PROMPT_CACHE_BREAKPOINT not in composed
+    assert executor._cacheable_developer_prompt == ""
+
+    # A boundary with real content after it still caches everything above it.
+    cached = executor._compose_prompt(
+        f"### TASK\n\nRepository Path: /tmp/repo\n\n{PROMPT_CACHE_BREAKPOINT}\n\nDo the analysis."
+    )
+
+    assert cached.strip() == "Do the analysis."
+    assert "Repository Path: /tmp/repo" in executor._cacheable_developer_prompt
