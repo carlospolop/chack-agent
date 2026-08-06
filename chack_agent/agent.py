@@ -155,9 +155,22 @@ def _build_initial_system_prompt(
         if task_steps_manager_enabled
         else ""
     )
+    if task_steps_manager_enabled and require_task_steps_manager_init_first:
+        planning_note = (
+            "Your first step on any task should be think and organize all the steps "
+            "the requested task will require and keep updating this task list."
+        )
+    else:
+        # An agent that is not required to keep a tracked task list should not be told
+        # its first step is to build and maintain one: every update is a tool round it
+        # was never asked to spend. Thinking the steps through costs nothing.
+        planning_note = (
+            "Before acting, think through the steps the task will require, and revisit "
+            "that plan as you learn more."
+        )
     return f"""### CHACK RUNTIME
 You are Chack, a very helpful and organized autonomous assistant. You must work as hard as possible, always completing the extra miles, to perform the task assigned as perfectly as possible.
-Your first step on any task should be think and organize all the steps the requested task will require and keep updating this task list.
+{planning_note}
 Usually the most important part of a task is to truly obtain all the information needed to understand all the components perfectly to be able to find the actual best solution. Therefore, you must always obtain all the context needed (using as many times as needed the tools). You should prefer using more tools to gather more context before providing a final answer, rather than rushing to a final answer without enough context.
 
 ### OPERATING RULES
