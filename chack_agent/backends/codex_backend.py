@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
@@ -30,7 +31,7 @@ from chack_tools.cancellation import cancellation_requested, register_process, u
 from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
-from ..live_cost_state import report_live_usage
+from ..live_cost_state import LiveCostLimitExceeded, report_live_usage
 from ..openrouter_routing import get_openrouter_route
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
@@ -234,6 +235,197 @@ def _resolve_codex_exec_cwd(runtime_env: Optional[dict[str, str]] = None) -> str
     if candidate:
         return candidate
     return os.getcwd()
+
+
+_ROLLOUT_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+)
+
+
+class _RolloutUsageTailer:
+    """Report token usage while a Codex turn is still running.
+
+    `codex exec --json` carries usage only on `turn.completed`, and one exec
+    invocation is one turn however many model rounds it takes. So a 45-minute
+    turn looks free for 45 minutes: the cost half of the budget advisory can
+    never fire, `check_budget_status` answers $0.00, and the live spend ceiling
+    is unenforceable until the turn it was meant to bound has already ended.
+
+    Codex does append a `token_count` event carrying cumulative usage to its
+    rollout file after every model round, so that is what this follows. Only
+    the growth since the last report is handed to `report_live_usage`, and the
+    caller settles the difference against the authoritative `turn.completed`
+    totals, so the accounting is exact even if the tail missed rounds.
+
+    Everything here fails soft: if the rollout cannot be found, read, or parsed,
+    the run behaves exactly as it did before and usage lands once, at the end.
+    """
+
+    _ATTACH_TIMEOUT_SECONDS = 120.0
+
+    def __init__(self, codex_home: str, model_name: str) -> None:
+        home = str(codex_home or "").strip()
+        self._sessions_dir = os.path.join(home, "sessions") if home else ""
+        self._model_name = str(model_name or "")
+        self._thread_id = ""
+        self._path: Optional[str] = None
+        self._offset = 0
+        self._partial = ""
+        self._baseline: dict[str, int] = {}
+        self._reported = {field: 0 for field in _ROLLOUT_USAGE_FIELDS}
+        self._give_up_after = 0.0
+        self._disabled = not self._sessions_dir
+
+    def attach(self, thread_id: str) -> None:
+        """Start following the rollout of `thread_id` from its current end."""
+        identifier = str(thread_id or "").strip()
+        if self._disabled or not identifier or identifier == self._thread_id:
+            return
+        self._thread_id = identifier
+        self._path = None
+        self._offset = 0
+        self._partial = ""
+        self._baseline = {}
+        self._give_up_after = time.monotonic() + self._ATTACH_TIMEOUT_SECONDS
+        # Snapshot the baseline now rather than on the first poll: a round that
+        # completed in between would otherwise be read as pre-existing usage and
+        # never reported. Codex usually has the rollout open by `thread.started`;
+        # when it does not, the retry in `poll` picks it up.
+        try:
+            self._locate()
+        except Exception:
+            self._disabled = True
+
+    def poll(self) -> None:
+        """Report whatever rounds have completed since the last call.
+
+        Raises only `LiveCostLimitExceeded`, which is the live spend ceiling
+        firing and must reach the caller so it can stop the Codex process.
+        """
+        if self._disabled or not self._thread_id:
+            return
+        try:
+            if self._path is None and not self._locate():
+                return
+            totals = self._read_new_totals()
+        except LiveCostLimitExceeded:
+            raise
+        except Exception:
+            # A rollout we cannot follow is not worth failing a run over.
+            self._disabled = True
+            return
+        if not totals:
+            return
+        deltas = {
+            field: max(
+                0,
+                int(totals.get(field, 0) or 0)
+                - self._baseline.get(field, 0)
+                - self._reported[field],
+            )
+            for field in _ROLLOUT_USAGE_FIELDS
+        }
+        if not any(deltas.values()):
+            return
+        for field, value in deltas.items():
+            self._reported[field] += value
+        report_live_usage(
+            self._model_name,
+            prompt_tokens=deltas["input_tokens"],
+            completion_tokens=deltas["output_tokens"],
+            cached_prompt_tokens=deltas["cached_input_tokens"],
+            cache_write_tokens=deltas["cache_write_input_tokens"],
+        )
+
+    def settle(self, turn_usage: dict[str, Any]) -> dict[str, int]:
+        """Return the part of the turn's real totals not yet reported.
+
+        Recording the settlement matters: the rollout keeps its own copy of
+        these tokens, so a later poll would otherwise count them a second time.
+        The tail is done once the turn has reported its own totals.
+        """
+        details = turn_usage.get("input_tokens_details")
+        details = details if isinstance(details, dict) else {}
+        actual = {
+            "input_tokens": int(turn_usage.get("input_tokens", 0) or 0),
+            "cached_input_tokens": int(details.get("cached_tokens", 0) or 0),
+            "cache_write_input_tokens": int(details.get("cache_write_tokens", 0) or 0),
+            "output_tokens": int(turn_usage.get("output_tokens", 0) or 0),
+        }
+        remaining = {
+            field: max(0, actual[field] - self._reported[field])
+            for field in _ROLLOUT_USAGE_FIELDS
+        }
+        for field, value in remaining.items():
+            self._reported[field] += value
+        self._disabled = True
+        return remaining
+
+    def _locate(self) -> bool:
+        if time.monotonic() > self._give_up_after:
+            self._disabled = True
+            return False
+        matches = glob.glob(
+            os.path.join(self._sessions_dir, "**", f"*{self._thread_id}.jsonl"),
+            recursive=True,
+        )
+        if not matches:
+            # Codex creates the rollout moments after it announces the thread.
+            return False
+        path = max(matches, key=os.path.getmtime)
+        # A resumed thread appends to the rollout the previous invocations
+        # already wrote, and their tokens are counted in `estimated_cost_spent`
+        # by now. Anything already on disk is the baseline, not new spend.
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            existing = handle.read()
+            self._offset = handle.tell()
+        totals = self._last_totals(existing.splitlines())
+        self._baseline = totals or {field: 0 for field in _ROLLOUT_USAGE_FIELDS}
+        self._path = path
+        return True
+
+    def _read_new_totals(self) -> dict[str, int]:
+        assert self._path is not None
+        if os.path.getsize(self._path) <= self._offset:
+            return {}
+        with open(self._path, "r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(self._offset)
+            chunk = handle.read()
+            self._offset = handle.tell()
+        text = self._partial + chunk
+        lines = text.split("\n")
+        # The tail of a file being appended to is usually half a line.
+        self._partial = lines.pop() if lines else ""
+        return self._last_totals(lines)
+
+    @staticmethod
+    def _last_totals(lines: list[str]) -> dict[str, int]:
+        latest: dict[str, int] = {}
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or "token_count" not in stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+            except (TypeError, ValueError):
+                continue
+            payload = event.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
+            if str(payload.get("type", "") or "") != "token_count":
+                continue
+            info = payload.get("info")
+            info = info if isinstance(info, dict) else {}
+            usage = info.get("total_token_usage")
+            if not isinstance(usage, dict):
+                continue
+            latest = {
+                field: max(0, int(usage.get(field, 0) or 0))
+                for field in _ROLLOUT_USAGE_FIELDS
+            }
+        return latest
 
 
 @dataclass
@@ -1213,6 +1405,11 @@ class CodexExecutor:
         error_messages: list[str] = []
         started_at = time.monotonic()
         time_to_first_token_seconds: float | None = None
+        usage_tailer = _RolloutUsageTailer(self._codex_home or "", self._model_name)
+        # A resumed thread is already known, so its rollout can be followed from
+        # the first line of output rather than waiting for `thread.started`.
+        if self._thread_id:
+            usage_tailer.attach(self._thread_id)
 
         if process.stdin is not None:
             try:
@@ -1222,6 +1419,14 @@ class CodexExecutor:
                 pass
 
         while True:
+            try:
+                usage_tailer.poll()
+            except LiveCostLimitExceeded:
+                # The spend ceiling fired mid-turn. Stop Codex before unwinding,
+                # or the process keeps burning budget with nobody reading it.
+                _terminate_process_tree(process)
+                unregister_process(cancel_registration)
+                raise
             if cancellation_requested():
                 _terminate_process_tree(process)
                 unregister_process(cancel_registration)
@@ -1299,6 +1504,7 @@ class CodexExecutor:
                 thread_id = str(event.get("thread_id", "") or "").strip()
                 if thread_id:
                     self._thread_id = thread_id
+                    usage_tailer.attach(thread_id)
                 continue
 
             if event_type == "error":
@@ -1395,12 +1601,16 @@ class CodexExecutor:
                         "cache_write_tokens": 0,
                     },
                 }
+                # These are the authoritative totals for the turn; whatever the
+                # rollout tail already reported is subtracted so the live figure
+                # ends up exact rather than doubled.
+                remaining = usage_tailer.settle(usage_payload)
                 report_live_usage(
                     self._model_name,
-                    prompt_tokens=usage_payload["input_tokens"],
-                    completion_tokens=usage_payload["output_tokens"],
-                    cached_prompt_tokens=usage_payload["input_tokens_details"]["cached_tokens"],
-                    cache_write_tokens=0,
+                    prompt_tokens=remaining["input_tokens"],
+                    completion_tokens=remaining["output_tokens"],
+                    cached_prompt_tokens=remaining["cached_input_tokens"],
+                    cache_write_tokens=remaining["cache_write_input_tokens"],
                 )
 
         output = "\n".join(part for part in output_parts if part).strip()
@@ -1443,12 +1653,15 @@ class CodexExecutor:
                 "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
             }
             raw_responses.append({"usage": estimated})
+            # Estimated or not, this is the turn's final word on its own usage,
+            # so it settles against whatever the rollout tail already reported.
+            remaining = usage_tailer.settle(estimated)
             report_live_usage(
                 self._model_name,
-                prompt_tokens=est_input,
-                completion_tokens=est_output,
-                cached_prompt_tokens=0,
-                cache_write_tokens=0,
+                prompt_tokens=remaining["input_tokens"],
+                completion_tokens=remaining["output_tokens"],
+                cached_prompt_tokens=remaining["cached_input_tokens"],
+                cache_write_tokens=remaining["cache_write_input_tokens"],
             )
         if not output and usage_payload is None and not steps:
             details = "\n".join(error_messages or combined_output_lines).strip() or (
