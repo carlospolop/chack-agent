@@ -284,9 +284,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.0882
-    cache_read: 0.01764
-    output: 0.1764
+    input: 0.14
+    cache_read: 0.028
+    output: 0.28
   deepseek/deepseek-v4-flash-0731:
     input: 0.09
     cache_read: 0.018
@@ -697,9 +697,9 @@ models:
     cache_read: 0.095
     output: 2.85
   moonshotai/kimi-k2.6:
-    input: 0.589
-    cache_read: 0.0992
-    output: 2.48
+    input: 0.5795
+    cache_read: 0.0976
+    output: 2.44
   moonshotai/kimi-k2.7-code:
     input: 0.7
     cache_read: 0.15
@@ -757,9 +757,9 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3-super-120b-a12b:
-    input: 0.3
-    cache_read: 0.3
-    output: 0.9
+    input: 0.085
+    cache_read: 0.085
+    output: 0.4
   nvidia/nemotron-3-super-120b-a12b:free:
     input: 0
     cache_read: 0
@@ -1520,7 +1520,7 @@ models:
     cache_read: 0.17
     output: 4.05
   thinkingmachines/inkling-small:
-    input: 0.5
+    input: 0.45
     cache_read: 0.1
     output: 1.2
   thinkingmachines/inkling:batch:
@@ -1608,9 +1608,9 @@ models:
     cache_read: 0.1768
     output: 2.992
   z-ai/glm-5.2:
-    input: 0.6986
-    cache_read: 0.12974
-    output: 2.1956
+    input: 0.504
+    cache_read: 0.0936
+    output: 1.584
   z-ai/glm-5.2:batch:
     input: 0.7
     cache_read: 0.13
@@ -1654,7 +1654,7 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 2.9
+    input: 2.5
     cache_read: 0.29
     output: 14
   ~openai/gpt-latest:
