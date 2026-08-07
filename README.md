@@ -233,6 +233,55 @@ the nearest native level is used. Claude Code capabilities are detected from
 the installed CLI, and Gemini 2.5/3 receive their respective `thinkingBudget`
 or `thinkingLevel` control (never both).
 
+### Validation against the selected model
+
+Providers do not share one effort vocabulary, and levels differ between models
+of the same provider. Every configured value is therefore checked against the
+model it will actually run on — `agent.thinking_effort` against `agent.primary`,
+and each `<role>_thinking_effort` (or `tools.<role>_agent.thinking_effort`)
+against that role's own model. A mismatch fails when the config is loaded:
+
+```
+agent.thinking_effort='xhigh' is not supported by model 'claude-sonnet-4-6'.
+Supported values for this model: low, medium, high, max
+```
+
+The levels come from `chack_agent/config/thinking_effort.yaml`, which the
+Update OpenRouter Pricing workflow regenerates every night from OpenRouter's
+published `reasoning.supported_efforts` — the same run that refreshes
+`pricing.yaml`. Nothing has to be hand-maintained as models ship, and the list
+covers every vendor OpenRouter carries, not just the first-party ones:
+
+```yaml
+models:
+  claude-opus-4-6: [low, medium, high, max]
+  claude-opus-4-7: [low, medium, high, xhigh, max]
+  gpt-5-4: [none, low, medium, high, xhigh]
+  gpt-5-4-pro: [medium, high, xhigh]
+  gemini-3-flash-preview: [minimal, low, medium, high]
+```
+
+Keys are normalized, so the OpenRouter (`openrouter/anthropic/claude-opus-4.6`),
+API (`claude-opus-4-6`), Copilot (`claude-sonnet-4.6`) and Bedrock
+(`us.anthropic.claude-opus-4-6-v1:0`) spellings of one model all resolve to the
+same entry, as do dated releases like `claude-opus-4-5-20251101`.
+
+A small set of built-in family rules covers what OpenRouter does not publish:
+
+| Model | Supported levels |
+| --- | --- |
+| Gemini 2.5 Flash / Flash-Lite | every level (token-budget based, so no effort enum is published) |
+| Gemini 2.5 Pro | every level except `none` (thinking cannot be disabled) |
+| Gemini 3 Pro | `low`, `high` |
+| Claude Opus 4.5, Mythos Preview | `low`, `medium`, `high` / `+ max` |
+| o1 / o3 / o4 series | `low`, `medium`, `high` |
+| No effort control (Claude Haiku, Claude 3.x, GPT-4.x) | `high` only |
+
+`high` is the one level those last models still accept, because every provider
+defines it as "behave as if the parameter was never sent". A model neither
+source knows is not validated at all, so a brand new model works before either
+list catches up.
+
 MCP-launched researchers receive the same per-role settings through the
 serialized tools configuration. A standalone/shared MCP server can set
 `CHACK_THINKING_EFFORT` for every MCP-created agent, or a role-specific value
