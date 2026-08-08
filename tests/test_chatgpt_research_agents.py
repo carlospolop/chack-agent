@@ -100,8 +100,9 @@ class _EmptyLocator:
 class _ModePage:
     options = ("Instant", "Medium", "High", "Extra High", "Pro")
 
-    def __init__(self, selected):
+    def __init__(self, selected, options=None):
         self.selected = selected
+        self.options = options or self.options
         self.menu_open = False
         self.clicks = []
 
@@ -138,6 +139,16 @@ def test_reasoning_mode_is_explicitly_selected_and_verified_every_launch(mode, s
     helper._select_reasoning_mode(page)
     assert page.selected == expected
     assert page.clicks == [f"open:{starting}", f"select:{expected}"]
+
+
+def test_reasoning_mode_xhigh_falls_back_to_current_pro_label():
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="xhigh")
+    page = _ModePage("High", options=("Instant", "Medium", "High", "Pro"))
+
+    helper._select_reasoning_mode(page)
+
+    assert page.selected == "Pro"
+    assert page.clicks == ["open:High", "select:Pro"]
 
 
 def test_chatgpt_research_tool_accepts_and_runs_five_prompts_in_parallel(monkeypatch):

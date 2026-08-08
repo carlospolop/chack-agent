@@ -375,8 +375,11 @@ class ChatGPTWebResearchAgentTool:
             raise ChatGPTWebResearchError(
                 f"ChatGPT selector is not valid for mode {self.mode}."
             )
-        target_label = "Pro" if self.mode == "pro" else "Extra High"
-        target_pattern = re.compile(rf"^\s*{re.escape(target_label)}\s*$", re.I)
+        # Older ChatGPT builds called the maximum regular-chat level
+        # ``Extra High``. The current UI exposes the same 5/5 level as
+        # ``Pro``. Prefer the explicit Extra High label when it exists, but
+        # accept the current Pro label as the xhigh fallback.
+        target_labels = ("Pro",) if self.mode == "pro" else ("Extra High", "Pro")
         # Current ChatGPT UI exposes the selected reasoning level as a compact
         # menu button (commonly "Medium"). Prefer that exact visible control so
         # the many conversation-option menus in the sidebar are never inspected.
@@ -416,29 +419,38 @@ class ChatGPTWebResearchAgentTool:
                     break
         if not opened:
             raise ChatGPTWebResearchError(
-                f"Could not open the ChatGPT model/mode selector required for {target_label} mode."
+                f"Could not open the ChatGPT model/mode selector required for {' or '.join(target_labels)} mode."
             )
 
-        options = page.get_by_role("menuitemradio", name=target_pattern)
-        if not options.count():
-            options = page.get_by_text(target_pattern)
-        for index in reversed(range(options.count())):
-            try:
-                if options.nth(index).is_visible():
-                    options.nth(index).click(timeout=5000)
-                    page.wait_for_timeout(500)
-                    break
-            except Exception:
-                continue
-        else:
+        selected_pattern: re.Pattern[str] | None = None
+        selected_label = ""
+        for candidate in target_labels:
+            target_pattern = re.compile(rf"^\s*{re.escape(candidate)}\s*$", re.I)
+            options = page.get_by_role("menuitemradio", name=target_pattern)
+            if not options.count():
+                options = page.get_by_text(target_pattern)
+            for index in reversed(range(options.count())):
+                try:
+                    if options.nth(index).is_visible():
+                        options.nth(index).click(timeout=5000)
+                        page.wait_for_timeout(500)
+                        selected_pattern = target_pattern
+                        selected_label = candidate
+                        break
+                except Exception:
+                    continue
+            if selected_pattern is not None:
+                break
+
+        if selected_pattern is None:
             raise ChatGPTWebResearchError(
-                f"The {target_label} option was not present in the ChatGPT model selector."
+                f"None of the {' or '.join(target_labels)} options was present in the ChatGPT model selector."
             )
 
         # Do not trust the click alone: the mode must be visibly selected before
         # a potentially expensive prompt is submitted. This also catches a stale
         # menu or account-level UI change instead of silently using another mode.
-        selected = page.get_by_role("button", name=target_pattern)
+        selected = page.get_by_role("button", name=selected_pattern)
         for index in reversed(range(selected.count())):
             try:
                 if selected.nth(index).is_visible():
@@ -446,7 +458,7 @@ class ChatGPTWebResearchAgentTool:
             except Exception:
                 continue
         raise ChatGPTWebResearchError(
-            f"ChatGPT did not confirm {target_label} mode after selection; refusing to send."
+            f"ChatGPT did not confirm {selected_label} mode after selection; refusing to send."
         )
 
     def _select_pro(self, page) -> None:
