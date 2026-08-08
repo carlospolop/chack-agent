@@ -2241,10 +2241,12 @@ class CodexExecutor:
             self._runtime_env_value("CHACK_MCP_TOOL_TIMEOUT_SECONDS", "3600") or "3600"
         )
         chack_shared_mcp_url = self._runtime_env_value("CHACK_CODEX_MCP_URL").strip()
-        if self._has_configured_tools() and chack_shared_mcp_url:
+        if chack_shared_mcp_url:
             # Point every codex agent at ONE shared streamable-HTTP MCP server (e.g. a
             # host-process server that holds a shared queue / board), instead of each
-            # agent spawning its own stdio server. Custom tools then live on that server.
+            # agent spawning its own stdio server. The shared server is itself the tool
+            # source, so it must be configured even when the local allowed-tools list is
+            # intentionally empty (for example, FactChecker's non-picklable board tools).
             shared_mcp_lines = [
                 "",
                 '[mcp_servers.chack_tools]',
