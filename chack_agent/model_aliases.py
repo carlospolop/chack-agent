@@ -7,7 +7,8 @@ from typing import Any, Dict, Optional
 
 import requests
 
-OPENAI_BEST_QUALITY = "gpt-5.4"
+# Local fallback only. Runtime resolution prefers the central model-alias Lambda.
+OPENAI_BEST_QUALITY = "gpt-5.6-sol"
 OPENAI_CHEAP_BUT_QUALITY = "gpt-5.4-mini"
 OPENAI_BEST_CHEAPEST = "gpt-5.4-nano"
 ANTHROPIC_BEST_QUALITY = "claude-opus-4-6"
@@ -222,16 +223,23 @@ def _refresh_remote_alias_caches() -> None:
 
 
 def _get_model_aliases() -> Dict[str, str]:
+    """Return effective aliases, with the central Lambda taking precedence.
+
+    Local constants are deliberately only an offline fallback. This ordering is
+    operations-critical: changing an alias in the central Lambda must affect
+    every chack-agent consumer after its cache expires, without requiring a
+    package rebuild.
+    """
     _refresh_remote_alias_caches()
-    merged = dict(_REMOTE_MODEL_CACHE or {})
-    merged.update(MODEL_ALIASES)
+    merged = dict(MODEL_ALIASES)
+    merged.update(_REMOTE_MODEL_CACHE or {})
     return merged
 
 
 def _get_backend_aliases() -> Dict[str, str]:
     _refresh_remote_alias_caches()
-    merged = dict(_REMOTE_BACKEND_CACHE or {})
-    merged.update(BACKEND_ALIASES)
+    merged = dict(BACKEND_ALIASES)
+    merged.update(_REMOTE_BACKEND_CACHE or {})
     return merged
 
 
