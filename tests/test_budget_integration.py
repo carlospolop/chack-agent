@@ -639,6 +639,22 @@ def test_codex_skips_mcp_server_when_agent_has_no_tools(monkeypatch, tmp_path):
     assert "[mcp_servers.chack_tools]" not in body
 
 
+def test_codex_configures_shared_mcp_even_when_agent_has_no_local_tools(monkeypatch, tmp_path):
+    executor = _make_stub_codex_executor()
+
+    monkeypatch.setenv("CHACK_CODEX_HOME_BASE", str(tmp_path))
+    monkeypatch.setenv("CHACK_CODEX_MCP_URL", "http://127.0.0.1:8765/mcp")
+    executor._ensure_codex_home_and_config()
+
+    assert executor._codex_home is not None
+    config_path = os.path.join(executor._codex_home, "config.toml")
+    body = open(config_path, "r", encoding="utf-8").read()
+    assert "[mcp_servers.chack_tools]" in body
+    assert 'url = "http://127.0.0.1:8765/mcp"' in body
+    assert 'bearer_token_env_var = "CHACK_CODEX_MCP_BEARER_TOKEN"' in body
+    assert "required = true" in body
+
+
 def test_codex_followup_prompt_only_suppresses_system_once():
     executor = _make_stub_codex_executor()
     executor.suppress_system_prompt_for_next_invocation()
