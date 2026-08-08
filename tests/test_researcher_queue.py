@@ -3,7 +3,10 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from chack_tools.agents_toolset import AgentsToolset
+from chack_tools.agents_toolset import (
+    AgentsToolset,
+    _prepare_queue_runtime_config,
+)
 from chack_tools.config import ToolsConfig
 from chack_tools.researcher_queue_agent import (
     ResearcherQueue,
@@ -51,6 +54,41 @@ def test_queue_default_wait_is_90_minutes():
     assert ToolsConfig().researcher_queue_max_wait_seconds == 5400
     assert ToolsConfig().researcher_queue_max_cost_usd == 5.0
     assert ToolsConfig().researcher_queue_required_researchers == []
+
+
+
+def test_queue_runtime_forces_luna_max_over_legacy_aliases():
+    config = ToolsConfig(
+        researcher_queue_researchers=["scientific", "websearcher"],
+        researcher_queue_merge_model="OPENAI_CHEAP_BUT_QUALITY",
+        researcher_queue_agent={
+            "model": "OPENAI_CHEAP_BUT_QUALITY",
+            "merge_model": "OPENAI_BEST_QUALITY",
+            "thinking_effort": "low",
+            "researcher_models": {"scientific": "OPENAI_BEST_QUALITY"},
+            "researcher_thinking_efforts": {"scientific": "low"},
+        },
+        scientific_agent={"thinking_effort": "low"},
+        websearcher_agent={"thinking_effort": "low"},
+    )
+
+    queue_config, queue_agent_cfg, researchers, required, default_model = _prepare_queue_runtime_config(
+        config,
+        model_provider="openai",
+    )
+
+    assert default_model == "gpt-5.6-luna"
+    assert researchers == ["scientific", "websearcher"]
+    assert required == []
+    assert queue_agent_cfg["model"] == "gpt-5.6-luna"
+    assert queue_agent_cfg["merge_model"] == "gpt-5.6-luna"
+    assert queue_agent_cfg["thinking_effort"] == "max"
+    assert set(queue_agent_cfg["researcher_models"].values()) == {"gpt-5.6-luna"}
+    assert set(queue_agent_cfg["researcher_thinking_efforts"].values()) == {"max"}
+    assert queue_config.scientific_agent["thinking_effort"] == "max"
+    assert queue_config.websearcher_agent["thinking_effort"] == "max"
+    # The parent config is not mutated; non-queue agents may retain their own policy.
+    assert config.scientific_agent["thinking_effort"] == "low"
 
 
 def test_queue_create_returns_reusable_queue_folder():
