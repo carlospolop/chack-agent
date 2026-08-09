@@ -63,6 +63,49 @@ _DIRECT_CACHE_INSTRUCTIONS = (
 )
 
 
+def _codex_tool_instructions(
+    *,
+    sub_action: str,
+    shared_mcp_url: str,
+    has_configured_tools: bool,
+) -> str:
+    """Return system instructions consistent with the effective tool surface.
+
+    FactChecker verifiers intentionally pass no local/picklable tools because their
+    board and research tools live behind the shared MCP URL. That URL must therefore
+    count as a real tool surface; otherwise the old no-tools instruction tells Codex
+    not to call the very MCP tools it just discovered.
+    """
+    has_shared_mcp_tools = bool(
+        str(sub_action or "").strip() == "verifier" and str(shared_mcp_url or "").strip()
+    )
+    if has_shared_mcp_tools:
+        return (
+            "CRITICAL: You have explicit tools exposed through the shared MCP server. "
+            "Use those MCP tools to perform the task and obey the tool workflow in the "
+            "user/system prompt. Do not answer from the prompt alone when a tool is "
+            "required; make the actual MCP tool call. Do not call MCP resource browser "
+            "helpers such as `list_mcp_resources`, `list_mcp_resource_templates`, or "
+            "`read_mcp_resource` unless the task explicitly requires them."
+        )
+    if has_configured_tools:
+        return (
+            "CRITICAL: You do NOT have a tool called `report_intent`. "
+            "It does not exist. Never attempt to call it. "
+            "To report or save a vulnerability finding you MUST call the MCP tool "
+            "`chack_tools-save_discovered_vulnerability`. "
+            "Any call to `report_intent` will silently discard your finding. "
+            "Do not call MCP resource browser helpers such as `list_mcp_resources`, "
+            "`list_mcp_resource_templates`, or `read_mcp_resource`; use only the "
+            "explicit task tools listed in the prompt."
+        )
+    return (
+        "This is a no-tools task. Do not call or request tools; complete it "
+        "solely from the context embedded in the prompt."
+    )
+
+
+
 def _cleanup_isolated_codex_home(codex_home: str, home_base: str) -> bool:
     """Remove one isolated Codex home without ever deleting its parent or an outside path."""
     raw_target = str(codex_home or "").strip()
@@ -2184,25 +2227,13 @@ class CodexExecutor:
                 f"model_auto_compact_token_limit = {compact_at}"
             )
 
-        # System-level instructions to prevent the model from calling
-        # non-existent built-in tools like `report_intent` instead of the
-        # real MCP tools.
-        if self._has_configured_tools():
-            instructions_text = (
-                "CRITICAL: You do NOT have a tool called `report_intent`. "
-                "It does not exist. Never attempt to call it. "
-                "To report or save a vulnerability finding you MUST call the MCP tool "
-                "`chack_tools-save_discovered_vulnerability`. "
-                "Any call to `report_intent` will silently discard your finding. "
-                "Do not call MCP resource browser helpers such as `list_mcp_resources`, "
-                "`list_mcp_resource_templates`, or `read_mcp_resource`; use only the "
-                "explicit task tools listed in the prompt."
-            )
-        else:
-            instructions_text = (
-                "This is a no-tools task. Do not call or request tools; complete it "
-                "solely from the context embedded in the prompt."
-            )
+        # Shared-MCP verifiers have no local/picklable tools, but the shared URL is
+        # the effective tool surface and must not trigger the no-tools instruction.
+        instructions_text = _codex_tool_instructions(
+            sub_action=self._sub_action,
+            shared_mcp_url=self._runtime_env_value("CHACK_CODEX_MCP_URL"),
+            has_configured_tools=self._has_configured_tools(),
+        )
         config_lines.append(f"instructions = {_toml_string(instructions_text)}")
         chack_mcp_startup_timeout = int(
             self._runtime_env_value("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "120")
