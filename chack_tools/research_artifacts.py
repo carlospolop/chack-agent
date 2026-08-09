@@ -622,8 +622,15 @@ def get_research_artifact_tools(helper: ResearchArtifactsTool, *, readonly: bool
     return built
 
 
-def add_research_artifact_tools(tools: list[Any], config: ToolsConfig) -> None:
-    tools.extend(get_research_artifact_tools(ResearchArtifactsTool(config)))
+def add_research_artifact_tools(tools: list[Any], config: ToolsConfig, *, root: str = "") -> None:
+    """Add artifact tools, optionally pinned to one explicit evidence root.
+
+    Researchers normally use the ContextVar-backed root because each worker owns
+    its own evidence folder. Orchestrators that inspect a shared master folder
+    must pass ``root`` so a child researcher cannot redirect their file tools by
+    changing the inherited research context.
+    """
+    tools.extend(get_research_artifact_tools(ResearchArtifactsTool(config, root=root)))
 
 
 def get_readonly_file_tools_for_root(config: ToolsConfig, root: str) -> list[Any]:
