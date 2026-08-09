@@ -48,7 +48,8 @@ def test_administrator_system_prompt_is_compact_and_has_one_first_wave_policy():
     prompt = _ADMINISTRATOR_SYSTEM_PROMPT
 
     assert len(prompt) < 5_000
-    assert "normally 1-2 researchers, or 3 for a broad question" in prompt
+    assert "Researchers are blind to one another" in prompt
+    assert "Repeat a researcher only for a specific unresolved source gap or contradiction" in prompt
     assert "normally run 3-5" not in prompt
     assert "key_artifacts" not in prompt
     assert "CHACK_RESEARCH_DATA_DIR" not in prompt

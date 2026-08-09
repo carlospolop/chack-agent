@@ -371,6 +371,7 @@ agent:
   provider: openai
   main_action: test
   sub_action: test
+  scientific: gpt-5.4
 tools:
   scientific_agent:
     thinking_effort: max
