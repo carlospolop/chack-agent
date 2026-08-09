@@ -1503,6 +1503,37 @@ class ResearcherAdministratorAgentTool:
             lines.append(f"- {short} via `{exposed_tool}`: {capability}")
         return lines
 
+    @staticmethod
+    def _chatgpt_priority_instruction(enabled_researchers: list[str]) -> str:
+        """Prioritize the strongest, slowest ChatGPT browser researchers when available."""
+        enabled = set(enabled_researchers)
+        preferred = [
+            RESEARCHER_REGISTRY[short][1]
+            for short in ("deepchatgpt", "prochatgpt")
+            if short in enabled
+        ]
+        if preferred:
+            tools = ", ".join(f"`{name}`" for name in preferred)
+            return (
+                "Priority ChatGPT launch instruction: "
+                f"{tools} {'is' if len(preferred) == 1 else 'are'} enabled. "
+                "These browser researchers normally take the longest but produce the strongest, "
+                "most comprehensive results, so start every enabled one immediately in the first "
+                "research wave with `start_researchers_async`; do not wait for shorter researchers "
+                "to finish before starting them. Poll them with the recommended long, "
+                "completion-aware waits and give their completed findings priority in the final synthesis.\n"
+            )
+        if "chatgptxhigh" in enabled:
+            return (
+                "Priority ChatGPT launch instruction: neither `deepchatgpt_researcher` nor "
+                "`prochatgpt_researcher` is available, but `chatgptxhigh` is enabled. It is the "
+                "best available ChatGPT browser researcher in this run, so start it immediately "
+                "in the first research wave with `start_researchers_async`; do not wait for shorter "
+                "researchers to finish before starting it. Poll it with the recommended long, "
+                "completion-aware waits and give its completed findings priority in the final synthesis.\n"
+            )
+        return ""
+
     def _build_batch_tool(self, tools_by_name: dict[str, Any], enabled_researchers: list[str]):
         enabled = set(enabled_researchers)
         allowed_tool_names = {RESEARCHER_REGISTRY[short][1] for short in enabled}
@@ -2196,6 +2227,7 @@ class ResearcherAdministratorAgentTool:
             layout_lines.append(f"- {short}: {subfolder}")
         available_line = ", ".join(self._name_of_tool(tool) for tool in tools)
         capability_lines = self._researcher_capability_lines(enabled_researchers)
+        chatgpt_priority_line = self._chatgpt_priority_instruction(enabled_researchers)
         admin_tool_budget = max(0, int(getattr(self.config, "researcher_administrator_max_tools_used", 0) or 0))
         admin_runtime_tool_cap = (admin_tool_budget * 4 + 8) if admin_tool_budget > 0 else 0
         budget_line = (
@@ -2222,6 +2254,7 @@ class ResearcherAdministratorAgentTool:
             "\n\n### Research administration\n"
             f"Available researcher tools: {available_line}.\n"
             "Do not attempt any `*_research` tool absent from that available list; mark that source family as an uncovered gap instead.\n"
+            f"{chatgpt_priority_line}"
             f"{required_line}"
             f"{budget_line}"
             f"{master_line}"

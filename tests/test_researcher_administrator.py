@@ -270,6 +270,35 @@ def test_administrator_capability_map_lists_internal_researcher_tools():
     assert "download_pmc_full_text" in text
 
 
+def test_administrator_prioritizes_deep_and_pro_chatgpt_before_xhigh():
+    instruction = ResearcherAdministratorAgentTool._chatgpt_priority_instruction(
+        ["websearcher", "chatgptxhigh", "prochatgpt", "deepchatgpt"]
+    )
+
+    assert "`deepchatgpt_researcher`" in instruction
+    assert "`prochatgpt_researcher`" in instruction
+    assert "start every enabled one immediately" in instruction
+    assert "`start_researchers_async`" in instruction
+    assert "chatgptxhigh" not in instruction
+
+
+def test_administrator_prioritizes_xhigh_when_deep_and_pro_are_unavailable():
+    instruction = ResearcherAdministratorAgentTool._chatgpt_priority_instruction(
+        ["websearcher", "chatgptxhigh"]
+    )
+
+    assert "neither `deepchatgpt_researcher` nor `prochatgpt_researcher` is available" in instruction
+    assert "`chatgptxhigh` is enabled" in instruction
+    assert "start it immediately" in instruction
+    assert "`start_researchers_async`" in instruction
+
+
+def test_administrator_has_no_chatgpt_priority_without_browser_researchers():
+    assert ResearcherAdministratorAgentTool._chatgpt_priority_instruction(
+        ["websearcher", "scientific"]
+    ) == ""
+
+
 def test_administrator_forces_try_harder_for_child_researchers(monkeypatch):
     import chack_tools.agents_toolset as at
 
@@ -381,10 +410,11 @@ def test_administrator_prompt_includes_compact_tool_map_and_usage_audit(monkeypa
             researcher_administrator_max_tools_used=3,
             websearcher_enabled=True,
             scientific_enabled=True,
+            prochatgpt_enabled=True,
         ),
         model_provider="openai",
         fallback_model="m",
-        researchers=["websearcher", "scientific"],
+        researchers=["websearcher", "scientific", "prochatgpt"],
         self_critique_rounds=2,
     )
     monkeypatch.setattr(
@@ -393,6 +423,7 @@ def test_administrator_prompt_includes_compact_tool_map_and_usage_audit(monkeypa
         lambda enabled: [
             FakeTool("websearcher_research"),
             FakeTool("scientific_research"),
+            FakeTool("prochatgpt_researcher"),
             FakeTool("task_steps_manager"),
             FakeTool("run_researchers_batch"),
             FakeTool("start_researchers_async"),
@@ -448,6 +479,8 @@ def test_administrator_prompt_includes_compact_tool_map_and_usage_audit(monkeypa
     assert "recent_events" in sent_prompt
     assert "idle_seconds" in sent_prompt
     assert "cancel_researchers_async" in sent_prompt
+    assert "`prochatgpt_researcher` is enabled" in sent_prompt
+    assert "start every enabled one immediately" in sent_prompt
 
 
 def test_administrator_timeout_returns_preserved_artifact_paths(monkeypatch, tmp_path):
