@@ -982,6 +982,13 @@ class AgentsToolset:
                 fallback_model=self.default_model,
                 model_provider=self.model_provider,
                 max_turns=queue_admin_max_turns,
+                runtime_cap_minutes=max(
+                    0,
+                    int(
+                        getattr(queue_config, "researcher_queue_max_runtime_minutes", 0)
+                        or 0
+                    ),
+                ),
                 researchers=queue_researchers,
                 required_researchers=queue_required_researchers,
                 researcher_model_overrides=queue_agent_cfg.get("researcher_models"),

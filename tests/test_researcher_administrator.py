@@ -41,7 +41,24 @@ def test_chatgpt_researchers_are_never_cancelled_for_elapsed_time():
     assert "Prefer `start_researchers_async`" in prompt
     assert "Never use `wait(..., terminate=true)`" in prompt
     assert "configured hard timeout" in prompt
-    assert "45-90 minutes" in prompt
+    assert "up to 180 minutes" in prompt
+
+
+def test_administrator_runtime_cap_is_explicit_and_configurable():
+    default = ResearcherAdministratorAgentTool(
+        ToolsConfig(),
+        model_provider="openai",
+        fallback_model="m",
+    )
+    queue = ResearcherAdministratorAgentTool(
+        ToolsConfig(),
+        model_provider="openai",
+        fallback_model="m",
+        runtime_cap_minutes=180,
+    )
+
+    assert default.runtime_cap_minutes == 90
+    assert queue.runtime_cap_minutes == 180
 
 
 def test_administrator_system_prompt_is_compact_and_has_one_first_wave_policy():

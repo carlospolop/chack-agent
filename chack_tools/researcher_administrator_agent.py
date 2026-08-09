@@ -387,7 +387,7 @@ You are a research administrator tasked with a specific research and must obtain
 4. Stop when the evidence supports a defensible answer or further work has low value. Preserve enough runtime to synthesize; state remaining gaps instead of timing out while chasing completeness.
 
 ### LONG-RUNNING RESEARCHERS
-Prefer `start_researchers_async` and completion-aware `poll_researchers_async` waits for long work. Poll once immediately after launch. Ordinary jobs normally use 30-120 second waits; ChatGPT browser jobs use 300-600 seconds and may take 45-90 minutes. Queued/starting for a few minutes is not failure.
+Prefer `start_researchers_async` and completion-aware `poll_researchers_async` waits for long work. Poll once immediately after launch. Ordinary jobs normally use 30-120 second waits; ChatGPT browser jobs use 300-600 seconds and may take tens of minutes or up to 180 minutes. Queued/starting for a few minutes is not failure.
 Never use `wait(..., terminate=true)`, cancellation, or process termination on a running ChatGPT browser researcher merely because it is slow or finalizing. Cancel it only on explicit user request, a proven terminal error, or the configured hard timeout. Ordinary async work may be cancelled when clearly stalled, duplicated, or no longer useful.
 
 ### EVIDENCE AND OUTPUT
@@ -1048,6 +1048,7 @@ class ResearcherAdministratorAgentTool:
         fallback_model: str = "",
         model_provider: str = "",
         max_turns: int = 100,
+        runtime_cap_minutes: int = 90,
         researchers: Optional[list[str]] = None,
         required_researchers: Optional[list[str]] = None,
         researcher_model_overrides: Optional[dict] = None,
@@ -1086,6 +1087,11 @@ class ResearcherAdministratorAgentTool:
         if not self.model_provider:
             raise ValueError("model_provider must be defined")
         self.max_turns = max(2, int(max_turns or 100))
+        # Standalone administrators retain the historical 90-minute cap. The
+        # shared researcher queue passes its larger, explicit per-research
+        # runtime here so a long browser research cannot be cut short by a
+        # hidden administrator-only limit.
+        self.runtime_cap_minutes = max(0, int(runtime_cap_minutes or 0))
         self.self_critique_rounds = max(0, int(self_critique_rounds or 0))
         self.self_critique_enabled = bool(self_critique_enabled or self.self_critique_rounds > 0)
         self.researchers = self._normalize_researchers(researchers)
@@ -2138,7 +2144,7 @@ class ResearcherAdministratorAgentTool:
         synchronous_researchers = [short for short in enabled_researchers if short not in long_browser_researchers]
         synchronous_tool_names = {RESEARCHER_REGISTRY[short][1] for short in synchronous_researchers}
 
-        # ChatGPT Pro/Extra High/Deep can run for 45-90 minutes. Never expose those direct
+        # ChatGPT Pro/Extra High/Deep can run for tens of minutes or up to 180 minutes. Never expose those direct
         # blocking tools (or a synchronous batch containing them) to the Codex
         # administrator, because Codex execution cells can be manually terminated
         # before the researcher reaches terminal output. Keep the direct tools
@@ -2196,7 +2202,7 @@ class ResearcherAdministratorAgentTool:
             parent_remaining_runtime_minutes=float(ctx.get("remaining_runtime_minutes") or 0.0),
             parent_remaining_cost_usd=float(ctx.get("remaining_cost_usd") or 0.0),
             runtime_ratio=1.0,
-            runtime_cap_minutes=90,
+            runtime_cap_minutes=self.runtime_cap_minutes,
             cost_ratio=1.0,
         )
         parent_memory_max_messages = max(1, int(ctx.get("memory_max_messages") or 8))
