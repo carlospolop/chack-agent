@@ -2123,7 +2123,7 @@ class ResearcherAdministratorAgentTool:
             tool.description = f"{tool.description}\n\nOutput: Compact JSON."
         return [start_researchers_async, poll_researchers_async, cancel_researchers_async]
 
-    def _build_subagent_tools(self, enabled_researchers: list[str]):
+    def _build_subagent_tools(self, enabled_researchers: list[str], artifact_root: str = ""):
         if function_tool is None:
             raise RuntimeError("OpenAI Agents SDK is not available in this runtime.")
 
@@ -2216,7 +2216,7 @@ class ResearcherAdministratorAgentTool:
         if long_browser_researchers:
             async_tools = [tool for tool in async_tools if self._name_of_tool(tool) != "cancel_researchers_async"]
         tools.extend(async_tools)
-        add_research_artifact_tools(tools, self.config)
+        add_research_artifact_tools(tools, self.config, root=artifact_root)
         return tools
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
@@ -2234,9 +2234,6 @@ class ResearcherAdministratorAgentTool:
                 "ERROR: researcher_administrator has no researchers enabled. "
                 "Enable researchers in tools.researcher_administrator_researchers or at the top level."
             )
-        tools = self._build_subagent_tools(enabled_researchers)
-        if not tools:
-            return "ERROR: no researcher tools available for researcher_administrator."
         model_name = self._resolved_model() or ""
         launch_block = subagent_launch_block_reason(
             parent_original_runtime_minutes=int(ctx.get("max_runtime_minutes") or 0),
@@ -2271,6 +2268,14 @@ class ResearcherAdministratorAgentTool:
         for short in enabled_researchers:
             subfolder = os.path.join(master_dir, short)
             os.makedirs(subfolder, exist_ok=True)
+
+        # Pin the administrator's artifact tools to its shared master folder.
+        # Child researchers still receive ContextVar-scoped tools for their own
+        # subfolders, but their execution must never redirect the administrator's
+        # list/read/grep operations to the last child workspace.
+        tools = self._build_subagent_tools(enabled_researchers, artifact_root=master_dir)
+        if not tools:
+            return "ERROR: no researcher tools available for researcher_administrator."
 
         def _owned_async_job_ids() -> list[str]:
             """Merge run-local accounting with jobs found by workspace ownership."""

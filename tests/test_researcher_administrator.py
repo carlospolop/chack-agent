@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import time
 import threading
 from collections import Counter
@@ -147,7 +148,11 @@ def test_administrator_harvests_workspace_owned_job_without_contextvar_ids(monke
         researchers=["scientific"],
         required_researchers=["scientific"],
     )
-    monkeypatch.setattr(helper, "_build_subagent_tools", lambda _enabled: [FakeTool("task_steps_manager")])
+    monkeypatch.setattr(
+        helper,
+        "_build_subagent_tools",
+        lambda _enabled, **_kwargs: [FakeTool("task_steps_manager")],
+    )
 
     output = helper._run_single(
         "Research a scientific question with primary sources, exact dates, contradictions, and evidence gaps. " * 12,
@@ -251,6 +256,54 @@ def test_administrator_allowlist_force_enables_researchers():
     assert "researcher_administrator" not in inner
 
 
+def test_administrator_artifact_tools_stay_pinned_when_child_context_changes(tmp_path):
+    master_dir = tmp_path / "master"
+    child_dir = master_dir / "websearcher"
+    wrong_dir = tmp_path / "wrong-context"
+    master_dir.mkdir()
+    child_dir.mkdir()
+    wrong_dir.mkdir()
+    (master_dir / "master-evidence.txt").write_text("master evidence", encoding="utf-8")
+    (child_dir / "child-evidence.txt").write_text("child evidence", encoding="utf-8")
+    (wrong_dir / "wrong-evidence.txt").write_text("wrong context", encoding="utf-8")
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    list_tool = next(
+        tool for tool in helper._build_subagent_tools(["scientific"], artifact_root=str(master_dir))
+        if getattr(tool, "name", "") == "list_research_artifacts"
+    )
+
+    context_tokens = set_research_artifact_context(str(wrong_dir), str(wrong_dir))
+    try:
+        from agents.tool_context import ToolContext
+        from agents.usage import Usage
+
+        raw_args = json.dumps({"glob": "*", "max_results": 20})
+        tool_context = ToolContext(
+            context=None,
+            usage=Usage(),
+            tool_name="list_research_artifacts",
+            tool_call_id="pinned-root-test",
+            tool_arguments=raw_args,
+        )
+        output = asyncio.run(
+            list_tool.on_invoke_tool(
+                tool_context,
+                raw_args,
+            )
+        )
+    finally:
+        reset_research_artifact_context(context_tokens)
+
+    assert "master-evidence.txt" in output
+    assert "wrong-evidence.txt" not in output
+
+
 def test_administrator_empty_allowlist_uses_globally_enabled():
     cfg = ToolsConfig(
         researcher_administrator_enabled=True,
@@ -348,7 +401,7 @@ def test_administrator_error_output_keeps_exact_attempted_researcher_count(monke
     monkeypatch.setattr(
         helper,
         "_build_subagent_tools",
-        lambda _enabled: [SimpleNamespace(name="task_steps_manager")],
+        lambda _enabled, **_kwargs: [SimpleNamespace(name="task_steps_manager")],
     )
 
     class FakeChack:
@@ -559,7 +612,7 @@ def test_administrator_prompt_includes_compact_tool_map_and_usage_audit(monkeypa
     monkeypatch.setattr(
         helper,
         "_build_subagent_tools",
-        lambda enabled: [
+        lambda enabled, **_kwargs: [
             FakeTool("websearcher_research"),
             FakeTool("scientific_research"),
             FakeTool("prochatgpt_researcher"),
@@ -645,7 +698,7 @@ def test_administrator_timeout_returns_preserved_artifact_paths(monkeypatch, tmp
     monkeypatch.setattr(
         helper,
         "_build_subagent_tools",
-        lambda enabled: [
+        lambda enabled, **_kwargs: [
             FakeTool("websearcher_research"),
             FakeTool("task_steps_manager"),
             FakeTool("run_researchers_batch"),
@@ -736,7 +789,7 @@ def test_administrator_timeout_harvests_completed_async_researchers(monkeypatch,
     monkeypatch.setattr(
         helper,
         "_build_subagent_tools",
-        lambda enabled: [
+        lambda enabled, **_kwargs: [
             FakeTool("scientific_research"),
             FakeTool("task_steps_manager"),
             FakeTool("start_researchers_async"),
@@ -810,7 +863,7 @@ def test_administrator_timeout_harvests_persisted_async_researcher_files(monkeyp
     monkeypatch.setattr(
         helper,
         "_build_subagent_tools",
-        lambda enabled: [
+        lambda enabled, **_kwargs: [
             FakeTool("legal_research"),
             FakeTool("task_steps_manager"),
             FakeTool("start_researchers_async"),
