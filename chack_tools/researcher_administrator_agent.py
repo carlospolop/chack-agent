@@ -112,6 +112,33 @@ def _async_jobs_have_nonterminal_tasks(job_ids: list[str]) -> bool:
     return False
 
 
+def _async_job_ids_for_evidence_dir(evidence_dir: str) -> list[str]:
+    """Return every async job owned by one administrator evidence workspace.
+
+    The Agents SDK may invoke a function tool in a copied ``contextvars``
+    context.  In that case the run-local accounting ContextVar can differ from
+    the one used by the administrator finalizer, even though the process-wide
+    async job store still contains the completed job.  The evidence workspace
+    is created uniquely for one administrator run, so it is a safe ownership
+    key and lets finalization/cleanup harvest jobs without relying on ContextVar
+    propagation.
+    """
+    root = str(evidence_dir or "").strip()
+    if not root:
+        return []
+    found: list[tuple[float, str]] = []
+    with _ASYNC_RESEARCH_LOCK:
+        for job_id, job in _ASYNC_RESEARCH_JOBS.items():
+            if str(job.get("evidence_dir") or "").strip() != root:
+                continue
+            try:
+                created_at = float(job.get("created_at") or 0.0)
+            except (TypeError, ValueError):
+                created_at = 0.0
+            found.append((created_at, str(job_id)))
+    return [job_id for _created_at, job_id in sorted(found)]
+
+
 def _async_submit(fn, *args):
     return _ASYNC_RESEARCH_EXECUTOR.submit(fn, *args)
 
@@ -2221,6 +2248,21 @@ class ResearcherAdministratorAgentTool:
         for short in enabled_researchers:
             subfolder = os.path.join(master_dir, short)
             os.makedirs(subfolder, exist_ok=True)
+
+        def _owned_async_job_ids() -> list[str]:
+            """Merge run-local accounting with jobs found by workspace ownership."""
+            seen: set[str] = set()
+            merged: list[str] = []
+            for job_id in [
+                *self._launched_async_job_ids,
+                *_async_job_ids_for_evidence_dir(master_dir),
+            ]:
+                normalized = str(job_id or "").strip()
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    merged.append(normalized)
+            return merged
+
         available_line = ", ".join(self._name_of_tool(tool) for tool in tools)
         capability_lines = self._researcher_capability_lines(enabled_researchers)
         chatgpt_priority_line = self._chatgpt_priority_instruction(enabled_researchers)
@@ -2330,10 +2372,10 @@ class ResearcherAdministratorAgentTool:
                 )
             except Exception as exc:
                 combined_responses = list(researcher_responses or [])
-                combined_responses.extend(_researcher_responses_from_async_jobs(self._launched_async_job_ids))
+                combined_responses.extend(_researcher_responses_from_async_jobs(_owned_async_job_ids()))
                 combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
-                combined_failures = _researcher_failures_from_async_jobs(self._launched_async_job_ids)
-                combined_tool_counts = _researcher_call_counts_from_async_jobs(self._launched_async_job_ids)
+                combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
+                combined_tool_counts = _researcher_call_counts_from_async_jobs(_owned_async_job_ids())
                 combined_tool_counts.update(self._launched_researcher_tool_counts())
                 failure_payload = {
                     "research_worked": False,
@@ -2353,10 +2395,10 @@ class ResearcherAdministratorAgentTool:
             output = result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
             if output.startswith("ERROR:"):
                 combined_responses = list(researcher_responses or [])
-                combined_responses.extend(_researcher_responses_from_async_jobs(self._launched_async_job_ids))
+                combined_responses.extend(_researcher_responses_from_async_jobs(_owned_async_job_ids()))
                 combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
-                combined_failures = _researcher_failures_from_async_jobs(self._launched_async_job_ids)
-                combined_tool_counts = _researcher_call_counts_from_async_jobs(self._launched_async_job_ids)
+                combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
+                combined_tool_counts = _researcher_call_counts_from_async_jobs(_owned_async_job_ids())
                 combined_tool_counts.update(self._launched_researcher_tool_counts())
                 failure_payload = {
                     "research_worked": False,
@@ -2374,12 +2416,12 @@ class ResearcherAdministratorAgentTool:
                     required_researchers=self.required_researchers,
                 )
             tool_counts = result.tool_counts.copy()
-            tool_counts.update(_researcher_call_counts_from_async_jobs(self._launched_async_job_ids))
+            tool_counts.update(_researcher_call_counts_from_async_jobs(_owned_async_job_ids()))
             tool_counts.update(self._launched_researcher_tool_counts())
             combined_responses = list(researcher_responses or [])
-            combined_responses.extend(_researcher_responses_from_async_jobs(self._launched_async_job_ids))
+            combined_responses.extend(_researcher_responses_from_async_jobs(_owned_async_job_ids()))
             combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
-            combined_failures = _researcher_failures_from_async_jobs(self._launched_async_job_ids)
+            combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
             return finalize_researcher_administrator_output(
                 output,
                 evidence_dir=master_dir,
@@ -2396,7 +2438,7 @@ class ResearcherAdministratorAgentTool:
             # threads it launched. Preserve their evidence root until every task is
             # terminal instead of deleting a directory that a live browser worker
             # is still updating.
-            if not _async_jobs_have_nonterminal_tasks(self._launched_async_job_ids):
+            if not _async_jobs_have_nonterminal_tasks(_owned_async_job_ids()):
                 cleanup_research_artifacts(master_dir, save_artifacts=save_artifacts)
             reset_research_artifact_context(artifact_context_tokens)
             # Restore the inherited master dir so standalone researchers launched
