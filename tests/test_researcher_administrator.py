@@ -44,6 +44,16 @@ def test_chatgpt_researchers_are_never_cancelled_for_elapsed_time():
     assert "45-90 minutes" in prompt
 
 
+def test_administrator_system_prompt_is_compact_and_has_one_first_wave_policy():
+    prompt = _ADMINISTRATOR_SYSTEM_PROMPT
+
+    assert len(prompt) < 5_000
+    assert "normally 1-2 researchers, or 3 for a broad question" in prompt
+    assert "normally run 3-5" not in prompt
+    assert "key_artifacts" not in prompt
+    assert "CHACK_RESEARCH_DATA_DIR" not in prompt
+
+
 def test_administrator_registered_only_when_enabled():
     off = AgentsToolset(ToolsConfig(scientific_enabled=True), model_provider="openai", default_model="m")
     assert "researcher_administrator" not in _tool_names(off.tools)
@@ -464,23 +474,21 @@ def test_administrator_prompt_includes_compact_tool_map_and_usage_audit(monkeypa
 
     assert payload["research_worked"] is True
     assert captured["max_tools_used_override"] == 20
-    assert "budget for this run: 3 total `*_research` calls" in sent_prompt
-    assert "not on management polls/status checks" in sent_prompt
-    assert "Internal tools available to each researcher in this run:" in sent_prompt
+    assert "Researcher-call budget: 3 launches" in sent_prompt
+    assert "management polls/status do not count" in sent_prompt
+    assert "Researcher capabilities:" in sent_prompt
     assert "- websearcher via `websearcher_research`: fetch_url_text, web_archive_search" in sent_prompt
     assert "- scientific via `scientific_research`: search_arxiv, download_pmc_full_text" in sent_prompt
-    assert "compare its code-added tool_call_counts against the capability map" in sent_prompt
-    assert "skipped or barely used" in sent_prompt
-    assert "relaunch that researcher with explicit missing tool names" in sent_prompt
+    assert "Compare `tool_call_counts` with the capabilities above" in sent_prompt
+    assert "focused follow-up only for a material missing source/tool family" in sent_prompt
     assert "try-harder self-critique for 2 round(s)" in sent_prompt
     assert "start_researchers_async" in sent_prompt
     assert "poll_researchers_async" in sent_prompt
-    assert "ChatGPT Pro/Deep use 300-600 seconds" in sent_prompt
-    assert "recent_events" in sent_prompt
-    assert "idle_seconds" in sent_prompt
-    assert "cancel_researchers_async" in sent_prompt
+    assert "ChatGPT browser 300-600s" in sent_prompt
     assert "`prochatgpt_researcher` is enabled" in sent_prompt
     assert "start every enabled one immediately" in sent_prompt
+    assert "### Evidence collection" not in sent_prompt
+    assert len(sent_prompt) - len(prompt) < 4_000
 
 
 def test_administrator_timeout_returns_preserved_artifact_paths(monkeypatch, tmp_path):

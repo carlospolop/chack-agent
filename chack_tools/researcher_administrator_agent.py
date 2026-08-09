@@ -17,9 +17,7 @@ from typing import Any, Optional
 
 from .config import ToolsConfig
 from .subagent_config import (
-    OBJECTIVE_EVIDENCE_RULES,
     aggregate_tool_call_counts,
-    append_evidence_dir_instruction,
     begin_researcher_response_collection,
     build_subagent_config,
     create_research_master_dir,
@@ -379,27 +377,23 @@ def researcher_administrator_output_schema(*, preserve_artifacts: bool) -> dict:
     return deepcopy(RESEARCHER_ADMINISTRATOR_OUTPUT_SCHEMA)
 
 
-_ADMINISTRATOR_SYSTEM_PROMPT = """### RULES
-- You are a research administrator. You have no search tools of your own: you gather evidence by orchestrating the specialized `*_research` sub-agents you have available and synthesizing their findings. Never answer from your own prior knowledge or assumptions; the only exception is the trivially certain case described below.
-- Your main goal is to find all the relevant information in every source about the requested topic.
-- Start with a coverage map: identify the entities, jurisdictions, timeframe, technical/scientific/business/travel/legal/social/data/news angles, and which researcher type should cover each angle.
-- Launch a first wave of complementary researchers for any broad or uncertain request. Include `websearcher_research` for open-web grounding unless the task is explicitly non-web, then add domain researchers such as scientific, legal, business, product, travel, data/statistics, news/media, social network, knowledge graph, religious, or cli when their source families could matter.
-- Only launch researcher tools that are actually available in this run's capability map. If the user requested a source family whose researcher is not enabled, record it as a coverage gap instead of attempting an unavailable tool.
-- Do not launch researchers that are not materially related to the topic. For example, a normal question about a famous football player likely needs web/news/social/business/entity research, not scientific or religious research unless the user specifically asks for those angles.
-- In that first wave, prefer breadth over repeating one researcher type: normally run 3-5 different relevant researcher types before relaunching the same type, unless the request is genuinely narrow.
-- `run_researchers_batch` and `start_researchers_async` can queue several relevant researchers, but this in-process tool server executes them one at a time to keep evidence folders isolated and auditable. Use async when a researcher may take a long time and you want to poll progress, cross-pollinate leads, or cancel stalled/no-longer-useful work. After any async launch, immediately poll once. For ordinary researchers use `poll_researchers_async(wait_seconds=30-120)`; for ChatGPT Pro/Extra High/Deep browser jobs use completion-aware long polls of 300-600 seconds. The wait returns early when the job completes, so never burn one tool call per minute for an hour. Queued async tasks may need a few minutes to start because child Codex/Claude sessions and MCP tools initialize; do not declare research failure merely because tasks are still queued/running for only a minute or two unless runtime is nearly exhausted. Reserve the final third of runtime for synthesis: cancel or stop waiting on slow tasks once enough evidence exists to answer with explicit gaps.
-- ChatGPT `deepchatgpt_researcher`, `prochatgpt_researcher`, and `chatgptxhigh` are an exception to the normal "reserve the final third" rule because they are legitimately long-running browser jobs. Prefer `start_researchers_async` plus `poll_researchers_async` for them. If a direct invocation is already running in an execution cell, keep waiting in long intervals until it returns, reports a terminal error, or reaches the configured hard runtime limit. Never use `wait(..., terminate=true)`, `cancel_researchers_async`, or any process-kill action merely because a ChatGPT researcher has run for many minutes or appears to be finalizing; these authenticated browser modes may take 45-90 minutes. Cancellation is only valid after an explicit user cancellation, a proven terminal browser/tool error, or the configured hard timeout. A running job with an enabled stop control or continuing progress is not stalled.
-- You may launch as many researcher runs as needed, including several runs of the same researcher type with different or more focused prompts, so that no source or angle is missed.
-- Every sub-researcher runs blind to the others. After each batch returns, review the conclusions and cross-pollinate: if one researcher surfaced leads that belong to another domain (e.g. the web researcher found papers the scientific researcher never checked, or a company the business researcher should verify), launch that other researcher again with the new leads. When you suggest a researcher lean harder on specific tools/sources, say so explicitly in its prompt.
-- Keep launching follow-up researchers until the evidence is well covered and additional runs stop producing materially new findings; only then finish. Do not stop after one thin batch when the topic clearly spans multiple evidence domains, but also synthesize with explicit gaps rather than timing out when the useful evidence gathered is already enough for a defensible answer.
-- All researchers you launch automatically save their downloads into a shared per-type subfolder inside the master evidence folder, so researchers of the same type build on each other's artifacts during the run. Use artifacts during reasoning; the runtime appends preserved evidence paths after you finish when requested.
-- Each researcher result is returned with code-added `tool_call_counts`. Use those counts to detect which source/detail/fetch/download tools were used, underused, or skipped; if coverage is weak or a researcher only searched without fetching/downloading specific sources, relaunch with explicit missing tools, source leads, and sharper questions.
-- The only reason to not launch any researcher and generate the final response yourself is if you can know the exact answer with 1000% accuracy and no doubt: e.g. "What time is it?" when you have access to the current time.
-- Give each sub-researcher a long, detailed prompt of at least 500 characters (better closer to 2000): scope, entities, aliases, timeframe, jurisdictions, source/tool families to try, leads from previous researchers, disconfirming/antagonist angles, expected comparisons, and caveats. Vague prompts waste a run.
-- In the final synthesis, separate established facts, contradicted claims, weakly evidenced claims, and remaining gaps. Prefer primary/official/source-level evidence over commentary, but do not dismiss unusual claims until the relevant researcher has checked direct evidence against them.
-- Do not fabricate findings. Base `administrator_conclusions` strictly on what the researchers actually returned.
-- Return only your compact administrator conclusions JSON. Do not copy researcher JSONs, tool counts, or evidence folder paths into your own answer; the runtime appends those exact records after you finish.
-""" + OBJECTIVE_EVIDENCE_RULES
+_ADMINISTRATOR_SYSTEM_PROMPT = """### ROLE
+You are a research administrator tasked with a specific research and must obtain evidence only by orchestrating the available specialized researchers, then synthesize their results. Do not answer from prior knowledge except for a trivially certain request that genuinely needs no research. And be always ciritcal checking things from all angles taking into account all kind of edge cases.
+
+### WORKFLOW
+1. Map the needed coverage: entities, aliases, timeframe, jurisdictions, claims, and relevant web/scientific/business/product/travel/legal/social/data/news/entity or other source families.
+2. Give each researcher a focused prompt of at least 500 characters (better close to 2000) covering scope, sources/tools to prioritize, disconfirming angles, expected comparisons, caveats, and any leads from earlier results.
+3. Researchers are blind to one another. Review every result and its `tool_call_counts`; inspect saved evidence when useful. Cross-pollinate material leads into another researcher or a focused follow-up. Repeat a researcher only for a specific unresolved source gap or contradiction, not for generic extra coverage.
+4. Stop when the evidence supports a defensible answer or further work has low value. Preserve enough runtime to synthesize; state remaining gaps instead of timing out while chasing completeness.
+
+### LONG-RUNNING RESEARCHERS
+Prefer `start_researchers_async` and completion-aware `poll_researchers_async` waits for long work. Poll once immediately after launch. Ordinary jobs normally use 30-120 second waits; ChatGPT browser jobs use 300-600 seconds and may take 45-90 minutes. Queued/starting for a few minutes is not failure.
+Never use `wait(..., terminate=true)`, cancellation, or process termination on a running ChatGPT browser researcher merely because it is slow or finalizing. Cancel it only on explicit user request, a proven terminal error, or the configured hard timeout. Ordinary async work may be cancelled when clearly stalled, duplicated, or no longer useful.
+
+### EVIDENCE AND OUTPUT
+Stay source-first and objective. Prefer primary or directly inspectable evidence, preserve contradictions, distinguish source claims from inference, and actively consider disconfirming evidence. Never fabricate or fill gaps from assumptions.
+In `administrator_conclusions`, distinguish established, contradicted, weakly supported, and unresolved claims, with confidence and important caveats. Return only the configured compact JSON. Do not copy researcher JSON, counts, or evidence paths; runtime code appends them exactly.
+"""
 
 
 def _json_from_output(output: str) -> dict[str, Any] | None:
@@ -1475,17 +1469,17 @@ class ResearcherAdministratorAgentTool:
             exposed_tool = RESEARCHER_REGISTRY[short][1]
             if short == "deepchatgpt":
                 lines.append(
-                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Web Deep Research browser launch, terminal-state monitoring, full response extraction, and artifact preservation"
+                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Deep Research browser; full response and artifacts"
                 )
                 continue
             if short == "prochatgpt":
                 lines.append(
-                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Web Pro-mode selection, terminal-state monitoring, full response extraction, and artifact preservation"
+                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Pro browser; full response and artifacts"
                 )
                 continue
             if short == "chatgptxhigh":
                 lines.append(
-                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Web Extra High reasoning-mode selection, terminal-state monitoring, full response extraction, and artifact preservation"
+                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Extra High browser; full response and artifacts"
                 )
                 continue
             try:
@@ -1515,22 +1509,19 @@ class ResearcherAdministratorAgentTool:
         if preferred:
             tools = ", ".join(f"`{name}`" for name in preferred)
             return (
-                "Priority ChatGPT launch instruction: "
+                "ChatGPT priority: "
                 f"{tools} {'is' if len(preferred) == 1 else 'are'} enabled. "
-                "These browser researchers normally take the longest but produce the strongest, "
-                "most comprehensive results, so start every enabled one immediately in the first "
-                "research wave with `start_researchers_async`; do not wait for shorter researchers "
-                "to finish before starting them. Poll them with the recommended long, "
-                "completion-aware waits and give their completed findings priority in the final synthesis.\n"
+                "They are the slowest and strongest researchers: start every enabled one immediately "
+                "in the first wave with `start_researchers_async`, before shorter work. Use long "
+                "completion-aware polls and prioritize their completed findings.\n"
             )
         if "chatgptxhigh" in enabled:
             return (
-                "Priority ChatGPT launch instruction: neither `deepchatgpt_researcher` nor "
+                "ChatGPT priority: neither `deepchatgpt_researcher` nor "
                 "`prochatgpt_researcher` is available, but `chatgptxhigh` is enabled. It is the "
-                "best available ChatGPT browser researcher in this run, so start it immediately "
-                "in the first research wave with `start_researchers_async`; do not wait for shorter "
-                "researchers to finish before starting it. Poll it with the recommended long, "
-                "completion-aware waits and give its completed findings priority in the final synthesis.\n"
+                "best available ChatGPT researcher: start it immediately in the first wave with "
+                "`start_researchers_async`, before shorter work. Use long completion-aware polls "
+                "and prioritize its completed findings.\n"
             )
         return ""
 
@@ -2218,77 +2209,55 @@ class ResearcherAdministratorAgentTool:
             os.makedirs(master_dir, exist_ok=True)
         else:
             master_dir = create_research_master_dir(parent_root_session_id)
-        # Pre-create one subfolder per researcher type so the tree is visible even
-        # before a researcher runs, and describe the layout for the administrator.
-        layout_lines = []
+        # Pre-create one subfolder per researcher type. The prompt can describe
+        # the deterministic <master>/<researcher> layout without listing every
+        # absolute path separately.
         for short in enabled_researchers:
             subfolder = os.path.join(master_dir, short)
             os.makedirs(subfolder, exist_ok=True)
-            layout_lines.append(f"- {short}: {subfolder}")
         available_line = ", ".join(self._name_of_tool(tool) for tool in tools)
         capability_lines = self._researcher_capability_lines(enabled_researchers)
         chatgpt_priority_line = self._chatgpt_priority_instruction(enabled_researchers)
         admin_tool_budget = max(0, int(getattr(self.config, "researcher_administrator_max_tools_used", 0) or 0))
         admin_runtime_tool_cap = (admin_tool_budget * 4 + 8) if admin_tool_budget > 0 else 0
         budget_line = (
-            f"Administrator researcher-call budget for this run: {admin_tool_budget} total `*_research` calls. "
-            "Treat this as a hard cap on researcher launches, not on management polls/status checks. If it is 3 or fewer, do not relaunch the same researcher type unless its previous call failed completely; synthesize after the cap with explicit gaps.\n"
+            f"Researcher-call budget: {admin_tool_budget} launches (hard cap; management polls/status do not count). "
+            "With a budget of 3 or fewer, repeat a researcher only after complete failure.\n"
             if admin_tool_budget > 0
-            else "Administrator researcher-call budget for this run: unlimited by configuration, but still avoid wasteful repeated calls.\n"
+            else "Researcher-call budget: no configured cap; still avoid low-value repeats.\n"
         )
         master_line = (
-            f"Preserved master evidence folder for this run (runtime appends it after you finish; do not report it in your JSON): {master_dir}\n"
+            f"Evidence workspace (preserved; runtime appends the path): {master_dir}\n"
             if save_artifacts
-            else f"Temporary master evidence folder for this run (do not report it in the final JSON): {master_dir}\n"
+            else f"Evidence workspace (temporary; do not report its path): {master_dir}\n"
         )
         required_line = (
-            "The caller requires successful results from every one of these researcher types: "
+            "Required successful researchers: "
             + ", ".join(self.required_researchers)
-            + ". Launch each at least once, wait for terminal output (including long ChatGPT browser jobs), "
-            "and do not report research_worked=true unless all required researchers returned research_worked=true.\n"
+            + ". Launch and await each; `research_worked` must be false if any fails.\n"
             if self.required_researchers
             else ""
         )
 
         admin_context = (
-            "\n\n### Research administration\n"
-            f"Available researcher tools: {available_line}.\n"
-            "Do not attempt any `*_research` tool absent from that available list; mark that source family as an uncovered gap instead.\n"
+            "\n\n### RUN CONFIGURATION\n"
+            f"Available tools: {available_line}. Do not call anything absent from this list.\n"
             f"{chatgpt_priority_line}"
             f"{required_line}"
             f"{budget_line}"
             f"{master_line}"
-            "Each researcher type writes its downloads into its own subfolder here:\n"
-            + "\n".join(layout_lines)
-            + "\n\nInternal tools available to each researcher in this run:\n"
+            "Researchers share evidence in `<workspace>/<researcher-short-name>`; use artifact list/read/grep tools when inspection is useful.\n"
+            "Researcher capabilities:\n"
             + "\n".join(capability_lines)
-            + "\nUse run_researchers_batch only for small, obviously short queued batches where waiting for every researcher is acceptable. "
-            "This in-process server executes child researchers one at a time to keep evidence folders isolated. For broad, slow, multi-domain, or preserved-artifact runs, prefer start_researchers_async plus poll_researchers_async so you can monitor progress, cross-pollinate partial leads, and cancel stalled or no-longer-useful work. "
-            "After any async launch, immediately poll once. For ordinary researchers use completion-aware waits of 30-120 seconds; for ChatGPT Pro/Deep use 300-600 seconds. The poll returns early on completion, so never spend one management tool call per minute for a long browser job. Queued async tasks may need a few minutes to start because child sessions and MCP tools initialize; do not declare failure merely because all tasks are still queued/running for only a minute or two unless runtime is nearly exhausted. Reserve the final third of runtime for synthesis: cancel unfinished slow tasks once completed evidence is sufficient, and answer with explicit gaps rather than timing out without conclusions. "
-            "When artifacts are preserved, inspect the master folder with list_research_artifacts, grep_research_artifacts, or read_research_artifact before declaring that no evidence was collected or that a researcher made no progress; files can appear even when live telemetry is sparse. "
-            "For cost and latency control, start with the smallest set of clearly relevant researchers that can cover the task; because execution is serialized, the first wave should usually be 1-2 researchers, and 3 only for broad questions with enough runtime. "
-            "Once half the runtime is gone, prefer synthesizing from completed results plus explicit gaps instead of launching more researchers. "
-            "Do not launch researchers just because they are enabled unless they are explicitly listed as required, and do not duplicate a researcher by default. "
-            "Only launch two runs of the same researcher when the user explicitly asks for split/complementary duplicate research, or after the first result shows a material skipped source family that matters to the answer. "
-            "If you intentionally repeat a researcher, include `Duplicate reason:` in that researcher prompt with at least 80 characters explaining the material new gap or contradiction. "
-            "For split-priority duplicates, give both runs all essential detail/fetch/download utilities and split only the discovery/source-priority emphasis. "
-            "For long-running researchers, use start_researchers_async, keep orchestrating, and poll_researchers_async for status/results. "
-            "When using async researchers, monitor poll_researchers_async recent_events, live tool_call_counts, latest_action, elapsed_seconds, and idle_seconds; cancel a task only when it is no longer useful, duplicated by better evidence, or clearly stalled. "
-            "If an async task is clearly no longer useful or stuck, use cancel_researchers_async; it cancels queued work and requests termination of registered running Codex/Claude process trees. "
-            f"Every researcher you launch automatically runs try-harder self-critique for {self._researcher_self_critique_rounds()} round(s). "
-            "After each researcher result, compare its code-added tool_call_counts against the capability map above. "
-            "Be demanding but selective: if a relevant source/detail/fetch/download tool family was skipped or barely used, relaunch that researcher with explicit missing tool names and sharper leads only when the missing source family is material to the answer and the budget cap allows it. "
-            "Use the capability map above to choose the right researchers and to ask them to use specific source/detail/fetch/download tools when needed. "
-            "Launch researchers, review every returned review, cross-pollinate leads between "
-            "researcher types, and relaunch as needed before finishing."
+            + "\nExecution is serialized. Use `run_researchers_batch` for short work and "
+            "`start_researchers_async`/`poll_researchers_async` for long work. Polling: ordinary "
+            "30-120s; ChatGPT browser 300-600s, completion-aware. "
+            f"Children run try-harder self-critique for {self._researcher_self_critique_rounds()} round(s). "
+            "Compare `tool_call_counts` with the capabilities above; request a focused follow-up only for a material missing source/tool family. "
+            "A repeated researcher prompt must include `Duplicate reason:` with at least 80 characters.\n"
+            "Now plan the research and launch the needed researchers."
         )
-        prompt = append_evidence_dir_instruction(
-            f"{str(prompt or '').rstrip()}{admin_context}",
-            master_dir,
-            "Now plan the research and start launching the needed researchers.",
-            save_artifacts=save_artifacts,
-            request_artifact_metadata=False,
-        )
+        prompt = f"{str(prompt or '').rstrip()}{admin_context}"
 
         overrides = {
             "agent": {
