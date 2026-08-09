@@ -61,6 +61,113 @@ def test_administrator_runtime_cap_is_explicit_and_configurable():
     assert queue.runtime_cap_minutes == 180
 
 
+def test_async_jobs_can_be_harvested_by_unique_evidence_workspace():
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    evidence_dir = "/tmp/chack-ledger-workspace-test"
+    job_id = "research-job-owned-by-workspace"
+    admin_mod._async_job_store(
+        job_id,
+        {
+            "job_id": job_id,
+            "created_at": time.time(),
+            "evidence_dir": evidence_dir,
+            "tasks": {},
+        },
+    )
+
+    assert admin_mod._async_job_ids_for_evidence_dir(evidence_dir) == [job_id]
+    assert admin_mod._async_job_ids_for_evidence_dir(evidence_dir + "-other") == []
+
+
+def test_administrator_harvests_workspace_owned_job_without_contextvar_ids(monkeypatch, tmp_path):
+    import chack_agent
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    job_id = "research-job-workspace-harvest"
+    tool_name = "scientific_research"
+
+    class FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeChack:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self, **kwargs):
+            admin_mod._async_job_store(
+                job_id,
+                {
+                    "job_id": job_id,
+                    "created_at": time.time(),
+                    "evidence_dir": str(tmp_path),
+                    "tasks": {
+                        "task-0": {
+                            "task_id": "task-0",
+                            "researcher": "scientific",
+                            "researcher_tool": tool_name,
+                            "status": "done",
+                            "result": {
+                                "researcher_tool": tool_name,
+                                "parsed_response": {
+                                    "research_worked": True,
+                                    "failure_reason": "",
+                                    "final_research_review": "workspace-harvested review",
+                                    "tool_call_counts": {"search_europe_pmc": 2},
+                                    "total_tool_calls": 2,
+                                },
+                            },
+                        }
+                    },
+                },
+            )
+            return SimpleNamespace(
+                output=json.dumps(
+                    {
+                        "research_worked": True,
+                        "failure_reason": "",
+                        "administrator_conclusions": "workspace-harvested conclusions",
+                    },
+                    separators=(",", ":"),
+                ),
+                tool_counts=Counter(),
+                all_steps=[],
+            )
+
+    monkeypatch.setattr(chack_agent, "Chack", FakeChack)
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+        required_researchers=["scientific"],
+    )
+    monkeypatch.setattr(helper, "_build_subagent_tools", lambda _enabled: [FakeTool("task_steps_manager")])
+
+    output = helper._run_single(
+        "Research a scientific question with primary sources, exact dates, contradictions, and evidence gaps. " * 12,
+        {
+            "max_turns": 20,
+            "max_runtime_minutes": 0,
+            "remaining_runtime_minutes": 0,
+            "max_cost_usd": 0,
+            "remaining_cost_usd": 0,
+            "memory_max_messages": 8,
+            "memory_reset_to_messages": 8,
+            "session_id": "workspace-harvest-test",
+            "research_master_dir": str(tmp_path),
+        },
+        save_artifacts=False,
+    )
+    payload = json.loads(output)
+
+    assert payload["research_worked"] is True
+    assert payload["required_researchers_satisfied"] is True
+    assert payload["researcher_call_counts"] == {tool_name: 1}
+    assert payload["researcher_responses"][0]["researcher_tool"] == tool_name
+
+
 def test_administrator_system_prompt_is_compact_and_has_one_first_wave_policy():
     prompt = _ADMINISTRATOR_SYSTEM_PROMPT
 
