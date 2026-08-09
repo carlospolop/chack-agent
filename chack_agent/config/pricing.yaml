@@ -597,9 +597,9 @@ models:
     cache_read: 0.05
     output: 0.9
   minimax/minimax-m2.7:
-    input: 0.27
-    cache_read: 0.054
-    output: 1.08
+    input: 0.3
+    cache_read: 0.06
+    output: 1.2
   minimax/minimax-m3:
     input: 0.3
     cache_read: 0.06
@@ -757,9 +757,9 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3-super-120b-a12b:
-    input: 0.085
-    cache_read: 0.085
-    output: 0.4
+    input: 0.3
+    cache_read: 0.3
+    output: 0.9
   nvidia/nemotron-3-super-120b-a12b:free:
     input: 0
     cache_read: 0
@@ -1409,7 +1409,7 @@ models:
     cache_read: 0.12
     output: 3.6
   qwen/qwen3.6-35b-a3b:
-    input: 0.14
+    input: 0.15
     cache_read: 0.05
     output: 1
   qwen/qwen3.6-flash:
@@ -1608,9 +1608,9 @@ models:
     cache_read: 0.1768
     output: 2.992
   z-ai/glm-5.2:
-    input: 0.378
-    cache_read: 0.0702
-    output: 1.188
+    input: 0.098
+    cache_read: 0.0182
+    output: 0.308
   z-ai/glm-5.2:batch:
     input: 0.7
     cache_read: 0.13
@@ -1640,9 +1640,9 @@ models:
     cache_write: 2.5
     output: 10
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.09
-    cache_read: 0.018
-    output: 0.18
+    input: 0.079996
+    cache_read: 0.0252
+    output: 0.252
   ~google/gemini-flash-latest:
     input: 1.5
     cache_read: 0.15
@@ -1654,7 +1654,7 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 2.5
+    input: 2.8
     cache_read: 0.29
     output: 14
   ~openai/gpt-latest:
