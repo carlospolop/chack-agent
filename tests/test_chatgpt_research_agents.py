@@ -71,8 +71,6 @@ class _ModeLocator:
     def count(self):
         if self.role == "button":
             return 1 if self.pattern.search(self.page.selected) else 0
-        if self.role == "menuitemradio":
-            return 1 if self.page.menu_open and self.label else 0
         return 0
 
     def nth(self, _index):
@@ -81,15 +79,65 @@ class _ModeLocator:
     def is_visible(self):
         return True
 
+    def inner_text(self, timeout=0):
+        return self.page.selected
+
+    def get_attribute(self, name):
+        if name == "aria-label":
+            return self.page.selected
+        return None
+
     def click(self, timeout=0):
         assert timeout == 5000
-        if self.role == "button":
-            self.page.menu_open = True
-            self.page.clicks.append(f"open:{self.page.selected}")
-        else:
-            self.page.selected = self.label
-            self.page.menu_open = False
-            self.page.clicks.append(f"select:{self.label}")
+        self.page.menu_open = True
+        self.page.clicks.append(f"open:{self.page.selected}")
+
+
+class _TextLocator:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1 if self.page.menu_open else 0
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self):
+        return True
+
+    def inner_text(self, timeout=0):
+        return f"{self.page.selected}, {self.page.power + 1} of 5. Use Left and Right arrow keys to adjust power."
+
+
+class _SliderLocator:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1 if self.page.menu_open else 0
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self):
+        return True
+
+    def get_attribute(self, name):
+        return {
+            "aria-valuemin": "0",
+            "aria-valuemax": "4",
+            "aria-valuenow": str(self.page.power),
+        }.get(name)
+
+    def press(self, key, timeout=0):
+        assert timeout == 5000
+        if key == "ArrowRight":
+            self.page.power = min(4, self.page.power + 1)
+        elif key == "ArrowLeft":
+            self.page.power = max(0, self.page.power - 1)
+        self.page.selected = self.page.options[self.page.power]
+        self.page.clicks.append(f"power:{key}")
 
 
 class _EmptyLocator:
@@ -101,43 +149,49 @@ class _ModePage:
     options = ("Instant", "Medium", "High", "Extra High", "Pro")
 
     def __init__(self, selected):
+        self.power = self.options.index(selected)
         self.selected = selected
         self.menu_open = False
         self.clicks = []
 
-    def get_by_role(self, role, name):
+    def get_by_role(self, role, name=None):
         if role == "button":
             return _ModeLocator(self, role, name)
-        if role == "menuitemradio":
-            label = next((value for value in self.options if name.search(value)), "")
-            return _ModeLocator(self, role, name, label)
+        if role == "menu":
+            return _TextLocator(self)
         return _EmptyLocator()
 
     def get_by_text(self, _name):
         return _EmptyLocator()
 
-    def locator(self, _selector):
+    def locator(self, selector):
+        if "role='slider'" in selector:
+            return _SliderLocator(self)
+        if "composer-model-picker-slider-simple-view" in selector or "[role='menu']" in selector:
+            return _TextLocator(self)
         return _EmptyLocator()
 
     def wait_for_timeout(self, milliseconds):
-        assert milliseconds == 500
+        assert milliseconds in {250, 500}
 
 
 @pytest.mark.parametrize(
-    ("mode", "starting", "expected"),
+    ("mode", "starting", "expected", "expected_power"),
     [
-        ("pro", "Extra High", "Pro"),
-        ("pro", "Pro", "Pro"),
-        ("xhigh", "Pro", "Extra High"),
-        ("xhigh", "Extra High", "Extra High"),
+        ("pro", "Extra High", "Pro", "5/5"),
+        ("pro", "Pro", "Pro", "5/5"),
+        ("xhigh", "Pro", "Extra High", "4/5"),
+        ("xhigh", "High", "Extra High", "4/5"),
     ],
 )
-def test_reasoning_mode_is_explicitly_selected_and_verified_every_launch(mode, starting, expected):
+def test_current_power_picker_selects_distinct_pro_and_xhigh_levels(mode, starting, expected, expected_power):
     helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode=mode)
     page = _ModePage(starting)
-    helper._select_reasoning_mode(page)
+    selected = helper._select_reasoning_mode(page)
     assert page.selected == expected
-    assert page.clicks == [f"open:{starting}", f"select:{expected}"]
+    assert selected["selected_effort"] == expected
+    assert selected["selected_power"] == expected_power
+    assert page.clicks[0] == f"open:{starting}"
 
 
 def test_chatgpt_research_tool_accepts_and_runs_five_prompts_in_parallel(monkeypatch):
