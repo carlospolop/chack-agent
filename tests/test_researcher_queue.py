@@ -56,6 +56,34 @@ def test_queue_default_wait_is_90_minutes():
     assert ToolsConfig().researcher_queue_required_researchers == []
 
 
+def test_queue_passes_its_runtime_cap_to_the_nested_administrator(monkeypatch):
+    import chack_tools.agents_toolset as agents_toolset_module
+
+    seen = {}
+
+    class FakeAdministrator:
+        def __init__(self, *args, **kwargs):
+            seen.update(kwargs)
+            self.max_turns = kwargs.get("max_turns", 30)
+
+    monkeypatch.setattr(
+        agents_toolset_module,
+        "ResearcherAdministratorAgentTool",
+        FakeAdministrator,
+    )
+    AgentsToolset(
+        ToolsConfig(
+            researcher_queue_enabled=True,
+            researcher_queue_researchers=["scientific"],
+            researcher_queue_max_runtime_minutes=180,
+        ),
+        model_provider="openai",
+        default_model="m",
+    )
+
+    assert seen["runtime_cap_minutes"] == 180
+
+
 
 def test_queue_runtime_forces_luna_max_over_legacy_aliases():
     config = ToolsConfig(
