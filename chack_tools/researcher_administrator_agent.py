@@ -30,7 +30,14 @@ from .subagent_config import (
     subagent_launch_block_reason,
 )
 from .task_steps_manager_state import current_session_id
-from .research_artifacts import add_research_artifact_tools, cleanup_research_artifacts, reset_research_artifact_context, set_research_artifact_context
+from .research_artifacts import (
+    add_research_artifact_tools,
+    cleanup_research_artifacts,
+    research_artifacts_master_root,
+    research_artifacts_root,
+    reset_research_artifact_context,
+    set_research_artifact_context,
+)
 from .cancellation import request_cancel, reset_cancellation_event, set_cancellation_event
 from .telemetry import current_log_context, reset_log_context, run_with_tool_logging, set_log_context
 
@@ -1831,6 +1838,7 @@ class ResearcherAdministratorAgentTool:
             save_artifacts: bool,
             semaphore: threading.Semaphore,
             cancel_event: threading.Event,
+            evidence_dir: str,
         ) -> dict[str, Any]:
             with semaphore:
                 started_at = time.time()
@@ -1847,6 +1855,7 @@ class ResearcherAdministratorAgentTool:
                     )
                 )
                 cancel_token = set_cancellation_event(cancel_event)
+                artifact_token = set_research_artifact_context(evidence_dir, evidence_dir)
                 try:
                     output = self._invoke_tool_sync(
                         tools_by_name[tool_name],
@@ -1860,6 +1869,7 @@ class ResearcherAdministratorAgentTool:
                             "finished_at": time.time(),
                         }
                 finally:
+                    reset_research_artifact_context(artifact_token)
                     reset_cancellation_event(cancel_token)
                     reset_log_context(log_token)
                 parsed = researcher_response_from_output(tool_name, output)
@@ -1873,6 +1883,10 @@ class ResearcherAdministratorAgentTool:
                     result["tool_call_counts"] = parsed.get("tool_call_counts") or {}
                     result["total_tool_calls"] = parsed.get("total_tool_calls") or 0
                 return result
+
+        def _run_one_in_context(run_context: contextvars.Context, *args) -> dict[str, Any]:
+            """Run one task with a private copy of the administrator's ContextVars."""
+            return run_context.run(_run_one, *args)
 
         def _task_done(job_id: str, task_id: str, future) -> None:
             _async_mark_task_done(job_id, task_id, future)
@@ -1911,13 +1925,19 @@ class ResearcherAdministratorAgentTool:
             self._launched_async_job_ids.append(job_id)
             parallel_limit = 1
             semaphore = threading.Semaphore(parallel_limit)
+            evidence_dir = research_artifacts_master_root() or research_artifacts_root()
+            if not evidence_dir:
+                evidence_dir = (
+                    os.environ.get("CHACK_RESEARCH_MASTER_DIR", "").strip()
+                    or os.environ.get("CHACK_RESEARCH_DATA_DIR", "").strip()
+                )
+            parent_context = contextvars.copy_context()
             job: dict[str, Any] = {
                 "job_id": job_id,
                 "created_at": time.time(),
                 "save_artifacts": bool(save_artifacts),
                 "max_parallel": parallel_limit,
-                "evidence_dir": os.environ.get("CHACK_RESEARCH_MASTER_DIR", "").strip()
-                or os.environ.get("CHACK_RESEARCH_DATA_DIR", "").strip(),
+                "evidence_dir": evidence_dir,
                 "completion_event": threading.Event(),
                 "expected_task_count": len(normalized),
                 "tasks": {},
@@ -1953,8 +1973,10 @@ class ResearcherAdministratorAgentTool:
                 )
 
             for task_id, row, cancel_event in prepared_tasks:
+                task_context = parent_context.copy()
                 future = _async_submit(
-                    _run_one,
+                    _run_one_in_context,
+                    task_context,
                     job_id,
                     task_id,
                     row["tool_name"],
@@ -1962,6 +1984,7 @@ class ResearcherAdministratorAgentTool:
                     bool(save_artifacts),
                     semaphore,
                     cancel_event,
+                    evidence_dir,
                 )
                 _async_set_task_future(job_id, task_id, future)
                 future.add_done_callback(lambda fut, jid=job_id, tid=task_id: _task_done(jid, tid, fut))

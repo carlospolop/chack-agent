@@ -10,7 +10,11 @@ import pytest
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
-from chack_tools.research_artifacts import cleanup_research_artifacts
+from chack_tools.research_artifacts import (
+    cleanup_research_artifacts,
+    reset_research_artifact_context,
+    set_research_artifact_context,
+)
 from chack_tools.cancellation import (
     current_cancellation_event,
     register_process,
@@ -930,6 +934,89 @@ def test_administrator_async_research_tools_start_and_poll():
     assert task["tool_call_counts"] == {"search_arxiv": 1}
     assert task["total_tool_calls"] == 1
     assert any(event["tool"] == "search_arxiv" for event in task["recent_events"])
+
+
+def test_async_researchers_keep_the_administrator_artifact_context_isolated(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            researcher_administrator_enabled=True,
+            news_media_enabled=True,
+            chatgptxhigh_enabled=True,
+            chatgpt_cdp_url="http://127.0.0.1:9226",
+        ),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["news_media", "chatgptxhigh"],
+    )
+    master_dir = str(tmp_path / "administrator-workspace")
+    seen: list[tuple[str, str, str]] = []
+    seen_lock = threading.Lock()
+
+    class FakeResearchTool:
+        def __init__(self, name):
+            self.name = name
+
+        async def on_invoke_tool(self, ctx, raw_args):
+            from chack_tools.research_artifacts import (
+                research_artifacts_master_root,
+                research_artifacts_root,
+            )
+
+            with seen_lock:
+                seen.append((self.name, research_artifacts_root(), research_artifacts_master_root()))
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "final_research_review": f"{self.name} review",
+                    "tool_call_counts": {},
+                    "total_tool_calls": 0,
+                },
+                separators=(",", ":"),
+            )
+
+    tools = helper._build_async_tools(
+        {
+            "news_media_research": FakeResearchTool("news_media_research"),
+            "chatgptxhigh": FakeResearchTool("chatgptxhigh"),
+        },
+        ["news_media", "chatgptxhigh"],
+    )
+    by_name = {tool.name: tool for tool in tools}
+    prompts = [
+        {"researcher": "news_media", "prompt": "Research current media evidence with primary sources and exact timestamps. " * 12},
+        {"researcher": "chatgptxhigh", "prompt": "Research the same question with independent browser evidence and caveats. " * 12},
+    ]
+    context_tokens = set_research_artifact_context(master_dir, master_dir)
+    try:
+        started = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {
+                    "requests_json": json.dumps(prompts, separators=(",", ":")),
+                    "save_artifacts": False,
+                },
+            )
+        )
+        assert started["async_started"] is True
+        job = admin_mod._async_job_get(started["job_id"])
+        assert job is not None
+        assert job["evidence_dir"] == master_dir
+        payload = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": started["job_id"], "include_outputs": False, "wait_seconds": 900},
+            )
+        )
+    finally:
+        reset_research_artifact_context(context_tokens)
+
+    assert payload["complete"] is True
+    assert {row[0] for row in seen} == {"news_media_research", "chatgptxhigh"}
+    assert all(data_dir == master_dir for _, data_dir, _ in seen)
+    assert all(parent_dir == master_dir for _, _, parent_dir in seen)
 
 
 def test_async_poll_unknown_job_returns_without_waiting():
