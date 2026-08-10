@@ -85,6 +85,46 @@ def test_async_jobs_can_be_harvested_by_unique_evidence_workspace():
     assert admin_mod._async_job_ids_for_evidence_dir(evidence_dir + "-other") == []
 
 
+def test_async_harvest_waits_for_nonterminal_job_before_return():
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    job_id = "research-job-harvest-waits"
+    completion = threading.Event()
+    admin_mod._async_job_store(
+        job_id,
+        {
+            "job_id": job_id,
+            "created_at": time.time(),
+            "completion_event": completion,
+            "expected_task_count": 1,
+            "tasks": {
+                "task-1": {
+                    "task_id": "task-1",
+                    "researcher_tool": "scientific_research",
+                    "status": "running",
+                }
+            },
+        },
+    )
+
+    def finish_job():
+        time.sleep(0.05)
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            admin_mod._ASYNC_RESEARCH_JOBS[job_id]["tasks"]["task-1"]["status"] = "done"
+        completion.set()
+
+    worker = threading.Thread(target=finish_job)
+    worker.start()
+    try:
+        pending = admin_mod._wait_for_async_jobs_terminal([job_id], time.monotonic() + 2)
+    finally:
+        worker.join(timeout=2)
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+
+    assert pending == []
+
+
 def test_administrator_harvests_workspace_owned_job_without_contextvar_ids(monkeypatch, tmp_path):
     import chack_agent
     import chack_tools.researcher_administrator_agent as admin_mod
