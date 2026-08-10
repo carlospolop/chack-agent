@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal
 
+from .cancellation import cancellation_requested
 from .chatgpt_async_client import ChatGPTAsyncApiClient, ChatGPTAsyncApiError
 from .config import ToolsConfig
 from .research_artifacts import cleanup_research_artifacts
@@ -41,7 +42,7 @@ except ImportError:  # pragma: no cover - mirrors the other researcher modules
 Mode = Literal["deep", "pro", "xhigh"]
 
 CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 90 * 60
-CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS = 90 * 60
+CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS = 10 * 60
 CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS = 75 * 60
 _MODE_TOOL_NAMES: dict[Mode, str] = {
     "deep": "deepchatgpt_researcher",
@@ -219,6 +220,16 @@ class ChatGPTWebResearchAgentTool:
         last_stage = "queued"
         last_chars = 0
         while True:
+            if cancellation_requested():
+                try:
+                    client.cancel(job_id)
+                except Exception:
+                    pass
+                metadata.update({"terminal_state": "cancelled", "finished_at": time.time()})
+                self._write_json(run_state_path, metadata)
+                raise ChatGPTWebResearchError(
+                    f"Remote ChatGPT {self.mode} job was cancelled by its owning async task."
+                )
             if time.monotonic() >= deadline:
                 try:
                     client.cancel(job_id)
