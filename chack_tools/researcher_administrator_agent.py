@@ -1842,8 +1842,20 @@ class ResearcherAdministratorAgentTool:
             return [], errors
         return normalized, errors
 
-    def _build_async_tools(self, tools_by_name: dict[str, Any], enabled_researchers: list[str]):
+    def _build_async_tools(
+        self,
+        tools_by_name: dict[str, Any],
+        enabled_researchers: list[str],
+        *,
+        artifact_root: str = "",
+    ):
         enabled = set(enabled_researchers)
+        # The administrator workspace is the authoritative ownership boundary.
+        # Async tools can be invoked through the shared MCP server, where the
+        # caller's ContextVars and process environment are not guaranteed to be
+        # present. Capture the root in this closure instead of inferring it from
+        # ambient state at invocation time.
+        owner_artifact_root = str(artifact_root or "").strip()
 
         def _compact_progress_event(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
             tool_input = payload.get("tool_input")
@@ -1966,7 +1978,7 @@ class ResearcherAdministratorAgentTool:
             self._launched_async_job_ids.append(job_id)
             parallel_limit = 1
             semaphore = threading.Semaphore(parallel_limit)
-            evidence_dir = research_artifacts_master_root() or research_artifacts_root()
+            evidence_dir = owner_artifact_root or research_artifacts_master_root() or research_artifacts_root()
             if not evidence_dir:
                 evidence_dir = (
                     os.environ.get("CHACK_RESEARCH_MASTER_DIR", "").strip()
@@ -2253,7 +2265,11 @@ class ResearcherAdministratorAgentTool:
                 if name in synchronous_tool_names
             }
             tools.append(self._build_batch_tool(synchronous_tools, synchronous_researchers))
-        async_tools = self._build_async_tools(tools_by_name, enabled_researchers)
+        async_tools = self._build_async_tools(
+            tools_by_name,
+            enabled_researchers,
+            artifact_root=artifact_root,
+        )
         if long_browser_researchers:
             async_tools = [tool for tool in async_tools if self._name_of_tool(tool) != "cancel_researchers_async"]
         tools.extend(async_tools)
