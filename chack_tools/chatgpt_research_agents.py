@@ -42,7 +42,10 @@ except ImportError:  # pragma: no cover - mirrors the other researcher modules
 Mode = Literal["deep", "pro", "xhigh"]
 
 CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 90 * 60
-CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS = 10 * 60
+# Extra High research can legitimately spend well over ten minutes in the
+# browser before exposing an extractable answer. Keep a finite deadline, but
+# give it the same 30-minute window configured for the factchecker contract.
+CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS = 30 * 60
 CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS = 75 * 60
 _MODE_TOOL_NAMES: dict[Mode, str] = {
     "deep": "deepchatgpt_researcher",
@@ -159,10 +162,10 @@ class ChatGPTWebResearchAgentTool:
         environment = int(os.environ.get("CHACK_CHATGPT_ASYNC_MAX_WAIT_SECONDS", "0") or 0)
         wait_seconds = max(self._timeout_seconds(), configured or environment or 900)
         if self.mode == "xhigh":
-            # Extra High has a strict 600s browser deadline plus a 300s grace
-            # period.  Do not let a stale environment/config value (the former
-            # default was 10800s) keep the owning async task alive indefinitely
-            # after the remote worker has timed out.
+            # Extra High has a strict 1800s browser deadline plus a 300s grace
+            # period. Do not let a stale environment/config value keep the
+            # owning async task alive indefinitely after the remote worker has
+            # timed out.
             wait_seconds = min(
                 wait_seconds,
                 self._timeout_seconds() + self._force_answer_grace_seconds(),

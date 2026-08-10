@@ -55,10 +55,10 @@ def test_chatgpt_research_tools_register_only_when_enabled():
 def test_chatgpt_modes_have_distinct_total_output_deadlines():
     config = ToolsConfig()
     assert resolve_chatgpt_timeout_seconds(config, "pro") == 90 * 60
-    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 10 * 60
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 30 * 60
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 75 * 60
     assert CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS == 5400
-    assert CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS == 600
+    assert CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS == 1800
     assert CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS == 4500
 
 
@@ -236,20 +236,20 @@ def test_default_xhigh_timeout_and_async_wait_are_bounded():
     config = ToolsConfig()
     helper = ChatGPTWebResearchAgentTool(config, mode="xhigh")
     assert config.chatgpt_xhigh_timeout_seconds is None
-    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 600
-    assert helper._async_max_wait_seconds() == 900
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 1800
+    assert helper._async_max_wait_seconds() == 2100
 
 
 def test_xhigh_async_wait_caps_stale_legacy_values_at_timeout_plus_grace():
     helper = ChatGPTWebResearchAgentTool(
         ToolsConfig(
-            chatgpt_xhigh_timeout_seconds=600,
+            chatgpt_xhigh_timeout_seconds=1800,
             chatgpt_async_max_wait_seconds=10800,
             chatgpt_force_answer_grace_seconds=300,
         ),
         mode="xhigh",
     )
-    assert helper._async_max_wait_seconds() == 900
+    assert helper._async_max_wait_seconds() == 2100
 
 
 def test_legacy_shared_timeout_remains_a_compatibility_fallback():
@@ -414,7 +414,7 @@ def test_xhigh_remote_backend_submits_exact_mode_and_preserves_result(monkeypatc
     class FakeClient:
         def submit(self, **kwargs):
             assert kwargs["mode"] == "xhigh"
-            assert kwargs["output_timeout_seconds"] == 600
+            assert kwargs["output_timeout_seconds"] == 1800
             return {
                 "job_id": "job_00000000-0000-0000-0000-000000000002",
                 "status": "QUEUED",

@@ -12,6 +12,7 @@ from chack_tools.researcher_queue_agent import (
     ResearcherQueue,
     ResearcherQueueAgentTool,
     _QueueWaiter,
+    _researcher_usage_for,
     get_researcher_queue_tool,
 )
 
@@ -589,6 +590,39 @@ def test_process_batch_aggregates_exact_private_researcher_usage(monkeypatch):
     }
 
 
+def test_researcher_usage_preserves_known_counts_when_one_admin_is_partial():
+    usage = _researcher_usage_for(
+        [
+            {
+                "researcher_call_counts": {"websearcher_research": 2, "news_media_research": 1},
+                "researcher_responses": [
+                    {"researcher_tool": "websearcher_research", "research_worked": True},
+                    {"researcher_tool": "news_media_research", "research_worked": True},
+                ],
+                "researcher_usage_complete": True,
+            },
+            {
+                "researcher_call_counts": {"chatgptxhigh": 1},
+                "researcher_failures": [
+                    {"researcher_tool": "chatgptxhigh", "failure_reason": "BROWSER_OUTPUT_TIMEOUT"}
+                ],
+                "researcher_usage_complete": False,
+            },
+        ]
+    )
+
+    assert usage["researcher_call_counts"] == {
+        "chatgptxhigh": 1,
+        "news_media_research": 1,
+        "websearcher_research": 2,
+    }
+    assert usage["total_researcher_calls"] == 4
+    assert usage["successful_researcher_tools"] == ["news_media_research", "websearcher_research"]
+    assert usage["failed_researcher_tools"] == ["chatgptxhigh"]
+    assert usage["researcher_failure_details"] == {"chatgptxhigh": "BROWSER_OUTPUT_TIMEOUT"}
+    assert usage["complete"] is False
+
+
 def test_process_batch_includes_evidence_paths_when_artifacts_are_preserved(monkeypatch):
     helper = _make_helper()
     monkeypatch.setattr(helper, "_merge_prompts", lambda prompts: [("merged with artifacts", [0])])
@@ -859,7 +893,8 @@ def test_run_admin_marks_required_researcher_failure_as_incomplete():
     assert out["research_worked"] is False
     assert out["required_researchers_satisfied"] is False
     assert out["researcher_usage_complete"] is False
-    assert out["conclusions"].startswith("Research failed:")
+    assert out["conclusions"] == "partial web-only conclusions"
+    assert "prochatgpt_researcher" in out["failure_reason"]
 
 
 def test_queue_research_context_uses_fixed_queue_limits_not_requester_context():
