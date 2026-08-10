@@ -18,6 +18,7 @@ from chack_tools.chatgpt_research_agents import (
     resolve_chatgpt_timeout_seconds,
 )
 from chack_tools.chatgpt_async_client import ChatGPTAsyncApiClient, ChatGPTAsyncApiError
+from chack_tools.cancellation import reset_cancellation_event, set_cancellation_event
 from chack_tools.config import ToolsConfig
 from chack_tools.researcher_administrator_agent import (
     ResearcherAdministratorAgentTool,
@@ -54,10 +55,10 @@ def test_chatgpt_research_tools_register_only_when_enabled():
 def test_chatgpt_modes_have_distinct_total_output_deadlines():
     config = ToolsConfig()
     assert resolve_chatgpt_timeout_seconds(config, "pro") == 90 * 60
-    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 90 * 60
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 10 * 60
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 75 * 60
     assert CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS == 5400
-    assert CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS == 5400
+    assert CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS == 600
     assert CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS == 4500
 
 
@@ -231,6 +232,14 @@ def test_mode_specific_timeout_overrides_legacy_shared_timeout():
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 654
 
 
+def test_default_xhigh_timeout_and_async_wait_are_bounded():
+    config = ToolsConfig()
+    helper = ChatGPTWebResearchAgentTool(config, mode="xhigh")
+    assert config.chatgpt_xhigh_timeout_seconds is None
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 600
+    assert helper._async_max_wait_seconds() == 900
+
+
 def test_legacy_shared_timeout_remains_a_compatibility_fallback():
     config = ToolsConfig(chatgpt_research_timeout_seconds=777)
     assert resolve_chatgpt_timeout_seconds(config, "pro") == 777
@@ -393,7 +402,7 @@ def test_xhigh_remote_backend_submits_exact_mode_and_preserves_result(monkeypatc
     class FakeClient:
         def submit(self, **kwargs):
             assert kwargs["mode"] == "xhigh"
-            assert kwargs["output_timeout_seconds"] == 5400
+            assert kwargs["output_timeout_seconds"] == 600
             return {
                 "job_id": "job_00000000-0000-0000-0000-000000000002",
                 "status": "QUEUED",
@@ -424,6 +433,43 @@ def test_xhigh_remote_backend_submits_exact_mode_and_preserves_result(monkeypatc
     assert url == ""
     assert metadata["mode"] == "xhigh"
     assert helper.tool_name == "chatgptxhigh"
+
+
+def test_remote_backend_honors_async_cancellation(monkeypatch, tmp_path):
+    class FakeClient:
+        def __init__(self):
+            self.cancelled = []
+
+        def submit(self, **_kwargs):
+            return {"job_id": "job_cancelled"}
+
+        def cancel(self, job_id):
+            self.cancelled.append(job_id)
+            return {"status": "CANCELLED"}
+
+    client = FakeClient()
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(
+            chatgpt_execution_backend="remote",
+            chatgpt_async_api_url="https://broker.example",
+            chatgpt_async_api_secret="test-secret",
+        ),
+        mode="xhigh",
+    )
+    monkeypatch.setattr(helper, "_async_client", lambda: client)
+    event = threading.Event()
+    event.set()
+    token = set_cancellation_event(event)
+    try:
+        with pytest.raises(ChatGPTWebResearchError, match="cancelled"):
+            helper._remote_research(
+                "P" * 500,
+                run_state_path=tmp_path / "run.json",
+                partial_path=tmp_path / "partial.md",
+            )
+    finally:
+        reset_cancellation_event(token)
+    assert client.cancelled == ["job_cancelled"]
 
 
 def test_xhigh_remote_backend_rolls_through_a_stale_broker_without_losing_real_mode(monkeypatch, tmp_path):

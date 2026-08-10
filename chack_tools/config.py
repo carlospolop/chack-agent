@@ -165,7 +165,8 @@ class ToolsConfig:
     chatgpt_cdp_url: str = ""
     # Total browser-output deadlines. Mode-specific values take precedence over
     # the deprecated shared timeout below. Zero/None means use the built-in
-    # defaults: 90 minutes for Pro/Extra High and 75 minutes for Deep Research.
+    # defaults: 90 minutes for Pro, 10 minutes for Extra High, and 75 minutes
+    # for Deep Research.
     chatgpt_pro_timeout_seconds: Optional[int] = None
     chatgpt_xhigh_timeout_seconds: Optional[int] = None
     chatgpt_deep_timeout_seconds: Optional[int] = None
@@ -179,7 +180,7 @@ class ToolsConfig:
     chatgpt_async_api_url: str = ""
     chatgpt_async_api_secret: str = ""
     chatgpt_async_poll_seconds: int = 10
-    chatgpt_async_max_wait_seconds: int = 10800
+    chatgpt_async_max_wait_seconds: int = 900
     chatgpt_async_request_timeout_seconds: int = 30
     # Pro requests click "Answer now" this many seconds before their total
     # output deadline; this is part of, not added after, the Pro timeout.
