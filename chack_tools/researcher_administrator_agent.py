@@ -2050,7 +2050,7 @@ class ResearcherAdministratorAgentTool:
                     "max_parallel": parallel_limit,
                     "next_step": (
                         "Call poll_researchers_async with this job_id immediately. Then use completion-aware "
-                        "wait_seconds=300-600 for ChatGPT Pro/Deep jobs, or 30-120 for ordinary researchers. "
+                        "wait_seconds=300-1800 for ChatGPT browser jobs, or 30-120 for ordinary researchers. "
                         "The wait returns early on completion. Tasks run one at a time in this process "
                         "to keep evidence folders isolated; queued/running for 1-2 minutes can be normal. "
                         "Cancel only when stale, irrelevant, or near the runtime limit."
@@ -2067,7 +2067,7 @@ class ResearcherAdministratorAgentTool:
                 include_outputs: If true, include raw output/parsed JSON for completed tasks.
                     If false, return only compact status, tool counts, errors, and timings.
                 wait_seconds: Optional completion-aware seconds to wait before polling,
-                    clamped to 0-900. Use 300-600 for ChatGPT Pro/Deep browser jobs and
+                    clamped to 0-2100. Use 300-1800 for ChatGPT browser jobs and
                     30-120 for ordinary researchers. The call returns early when every
                     task reaches a terminal state.
 
@@ -2080,7 +2080,7 @@ class ResearcherAdministratorAgentTool:
             job = _async_job_snapshot(job_key)
             if not job:
                 return _compact_json({"job_found": False, "job_id": job_id, "error": "Unknown async researcher job id."})
-            wait = max(0, min(int(wait_seconds or 0), 900))
+            wait = max(0, min(int(wait_seconds or 0), 2100))
             wait_started = time.monotonic()
             if wait:
                 initial_tasks = (job.get("tasks") or {}).values()
@@ -2136,7 +2136,7 @@ class ResearcherAdministratorAgentTool:
                 next_step = "Review completed researcher outputs/tool counts, then synthesize or launch focused follow-ups if material gaps remain."
             elif any(s == "running" for s in statuses):
                 next_step = (
-                    "Some researchers are running. Continue with completion-aware wait_seconds=300-600; cancel only duplicated, clearly stalled, or no-longer-useful tasks."
+                    "Some researchers are running. Continue with completion-aware wait_seconds=300-1800; cancel only duplicated, clearly stalled, or no-longer-useful tasks."
                     if has_browser_researcher else
                     "Some researchers are running. Continue polling with wait_seconds=30-120; cancel only duplicated, clearly stalled, or no-longer-useful tasks."
                 )
