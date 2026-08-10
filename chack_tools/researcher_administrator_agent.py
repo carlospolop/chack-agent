@@ -119,6 +119,47 @@ def _async_jobs_have_nonterminal_tasks(job_ids: list[str]) -> bool:
     return False
 
 
+def _async_nonterminal_job_ids(job_ids: list[str]) -> list[str]:
+    """Return owned jobs that still have work capable of changing their evidence."""
+    terminal = {"done", "error", "cancelled"}
+    pending: list[str] = []
+    with _ASYNC_RESEARCH_LOCK:
+        for job_id in job_ids:
+            normalized = str(job_id or "").strip()
+            if not normalized:
+                continue
+            job = _ASYNC_RESEARCH_JOBS.get(normalized)
+            tasks = (job or {}).get("tasks") or {}
+            if tasks and any(str(task.get("status") or "") not in terminal for task in tasks.values()):
+                pending.append(normalized)
+    return pending
+
+
+def _wait_for_async_jobs_terminal(job_ids: list[str], deadline: float) -> list[str]:
+    """Wait for owned async jobs before harvesting their responses.
+
+    The administrator can return a valid-looking synthesis while its async
+    researcher futures are still running.  Harvesting at that point loses the
+    required responses and leaves writers alive after the queue call returns.
+    Wait on completion events until the administrator's own deadline, then
+    return the still-pending jobs so the caller can fail closed and cancel them.
+    """
+    pending = _async_nonterminal_job_ids(job_ids)
+    while pending:
+        remaining = float(deadline) - time.monotonic()
+        if remaining <= 0:
+            break
+        # Wake periodically to re-check every job: one slow job must not hide
+        # another job that completed while its event was being awaited.
+        wait_seconds = min(5, int(remaining))
+        if wait_seconds > 0:
+            _async_wait_for_completion(pending[0], wait_seconds)
+        else:
+            time.sleep(min(0.1, remaining))
+        pending = _async_nonterminal_job_ids(job_ids)
+    return pending
+
+
 def _async_job_ids_for_evidence_dir(evidence_dir: str) -> list[str]:
     """Return every async job owned by one administrator evidence workspace.
 
@@ -2291,6 +2332,45 @@ class ResearcherAdministratorAgentTool:
                     merged.append(normalized)
             return merged
 
+        # The administrator's model can stop after writing a synthesis even
+        # though a completion-aware researcher job is still running.  Do not
+        # harvest that partial snapshot: the queue's required-researcher check
+        # must observe terminal task results, and the evidence writer must not
+        # outlive the queue call.  The deadline includes the model run itself,
+        # preserving the configured queue/administrator runtime cap.
+        admin_deadline = time.monotonic() + max(0, int(effective_runtime_minutes or 0)) * 60
+
+        def _harvest_async_jobs() -> list[dict[str, str]]:
+            job_ids = _owned_async_job_ids()
+            pending = _wait_for_async_jobs_terminal(job_ids, admin_deadline)
+            if pending:
+                # At the administrator deadline, stop queued/running work
+                # fail-closed and keep any partial artifacts for diagnosis.
+                for job_id in pending:
+                    _async_cancel_job(job_id)
+                pending = _wait_for_async_jobs_terminal(job_ids, time.monotonic() + 5)
+            if not pending:
+                return []
+            failures: list[dict[str, str]] = []
+            for job_id in pending:
+                snapshot = _async_job_snapshot(job_id) or {}
+                for task in (snapshot.get("tasks") or {}).values():
+                    status = str(task.get("status") or "unknown")
+                    if status in {"done", "error", "cancelled"}:
+                        continue
+                    failures.append(
+                        {
+                            "researcher_tool": str(task.get("researcher_tool") or "unknown"),
+                            "status": "deadline_exceeded",
+                            "task_id": str(task.get("task_id") or ""),
+                            "failure_reason": (
+                                f"Async researcher job {job_id} remained non-terminal at the "
+                                f"administrator deadline (status={status})."
+                            ),
+                        }
+                    )
+            return failures
+
         available_line = ", ".join(self._name_of_tool(tool) for tool in tools)
         capability_lines = self._researcher_capability_lines(enabled_researchers)
         chatgpt_priority_line = self._chatgpt_priority_instruction(enabled_researchers)
@@ -2399,10 +2479,12 @@ class ResearcherAdministratorAgentTool:
                     usage_session_id=parent_task_session_id,
                 )
             except Exception as exc:
+                async_deadline_failures = _harvest_async_jobs()
                 combined_responses = list(researcher_responses or [])
                 combined_responses.extend(_researcher_responses_from_async_jobs(_owned_async_job_ids()))
                 combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
                 combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
+                combined_failures.extend(async_deadline_failures)
                 combined_tool_counts = _researcher_call_counts_from_async_jobs(_owned_async_job_ids())
                 combined_tool_counts.update(self._launched_researcher_tool_counts())
                 failure_payload = {
@@ -2422,10 +2504,12 @@ class ResearcherAdministratorAgentTool:
                 )
             output = result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
             if output.startswith("ERROR:"):
+                async_deadline_failures = _harvest_async_jobs()
                 combined_responses = list(researcher_responses or [])
                 combined_responses.extend(_researcher_responses_from_async_jobs(_owned_async_job_ids()))
                 combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
                 combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
+                combined_failures.extend(async_deadline_failures)
                 combined_tool_counts = _researcher_call_counts_from_async_jobs(_owned_async_job_ids())
                 combined_tool_counts.update(self._launched_researcher_tool_counts())
                 failure_payload = {
@@ -2443,6 +2527,7 @@ class ResearcherAdministratorAgentTool:
                     steps=result.all_steps,
                     required_researchers=self.required_researchers,
                 )
+            async_deadline_failures = _harvest_async_jobs()
             tool_counts = result.tool_counts.copy()
             tool_counts.update(_researcher_call_counts_from_async_jobs(_owned_async_job_ids()))
             tool_counts.update(self._launched_researcher_tool_counts())
@@ -2450,6 +2535,7 @@ class ResearcherAdministratorAgentTool:
             combined_responses.extend(_researcher_responses_from_async_jobs(_owned_async_job_ids()))
             combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
             combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
+            combined_failures.extend(async_deadline_failures)
             return finalize_researcher_administrator_output(
                 output,
                 evidence_dir=master_dir,
