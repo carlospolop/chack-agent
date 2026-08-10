@@ -344,6 +344,54 @@ def test_administrator_artifact_tools_stay_pinned_when_child_context_changes(tmp
     assert "wrong-evidence.txt" not in output
 
 
+def test_async_tools_capture_explicit_administrator_artifact_root(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    class FakeResearcher:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "final_research_review": "root-capture test",
+                    "tool_call_counts": {"search_europe_pmc": 1},
+                    "total_tool_calls": 1,
+                }
+            )
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    root = str(tmp_path / "administrator-root")
+    tools = helper._build_async_tools(
+        {"scientific_research": FakeResearcher()},
+        ["scientific"],
+        artifact_root=root,
+    )
+    start_tool = next(tool for tool in tools if getattr(tool, "name", "") == "start_researchers_async")
+    prompt = "Investigate this scientific question with primary sources, exact dates, contradictions, and evidence gaps. " * 12
+    output = helper._invoke_tool_sync(
+        start_tool,
+        {
+            "requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}]),
+            "save_artifacts": True,
+            "max_parallel": 1,
+        },
+    )
+    payload = json.loads(output)
+    job_id = payload["job_id"]
+    try:
+        assert admin_mod._async_job_get(job_id)["evidence_dir"] == root
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+
+
 def test_administrator_empty_allowlist_uses_globally_enabled():
     cfg = ToolsConfig(
         researcher_administrator_enabled=True,
