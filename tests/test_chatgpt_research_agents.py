@@ -240,6 +240,18 @@ def test_default_xhigh_timeout_and_async_wait_are_bounded():
     assert helper._async_max_wait_seconds() == 900
 
 
+def test_xhigh_async_wait_caps_stale_legacy_values_at_timeout_plus_grace():
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(
+            chatgpt_xhigh_timeout_seconds=600,
+            chatgpt_async_max_wait_seconds=10800,
+            chatgpt_force_answer_grace_seconds=300,
+        ),
+        mode="xhigh",
+    )
+    assert helper._async_max_wait_seconds() == 900
+
+
 def test_legacy_shared_timeout_remains_a_compatibility_fallback():
     config = ToolsConfig(chatgpt_research_timeout_seconds=777)
     assert resolve_chatgpt_timeout_seconds(config, "pro") == 777

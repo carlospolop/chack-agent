@@ -157,7 +157,17 @@ class ChatGPTWebResearchAgentTool:
     def _async_max_wait_seconds(self) -> int:
         configured = int(getattr(self.config, "chatgpt_async_max_wait_seconds", 0) or 0)
         environment = int(os.environ.get("CHACK_CHATGPT_ASYNC_MAX_WAIT_SECONDS", "0") or 0)
-        return max(self._timeout_seconds(), configured or environment or 10800)
+        wait_seconds = max(self._timeout_seconds(), configured or environment or 900)
+        if self.mode == "xhigh":
+            # Extra High has a strict 600s browser deadline plus a 300s grace
+            # period.  Do not let a stale environment/config value (the former
+            # default was 10800s) keep the owning async task alive indefinitely
+            # after the remote worker has timed out.
+            wait_seconds = min(
+                wait_seconds,
+                self._timeout_seconds() + self._force_answer_grace_seconds(),
+            )
+        return wait_seconds
 
     def _async_client(self) -> ChatGPTAsyncApiClient:
         url = self._async_api_url()
