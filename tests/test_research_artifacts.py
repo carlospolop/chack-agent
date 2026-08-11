@@ -1,5 +1,6 @@
 from pathlib import Path
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import json
 
 import pytest
@@ -84,6 +85,35 @@ def test_record_research_artifact_deduplicates_identical_manifest_rows(monkeypat
 
     lines = (root / ARTIFACT_MANIFEST_FILENAME).read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
+
+
+def test_concurrent_artifact_manifest_writes_remain_valid(monkeypatch, tmp_path):
+    root = tmp_path / "evidence"
+    root.mkdir(parents=True)
+    artifacts = []
+    for index in range(16):
+        artifact = root / f"source-{index}.txt"
+        artifact.write_text(f"source {index}", encoding="utf-8")
+        artifacts.append(artifact)
+    monkeypatch.setenv("CHACK_RESEARCH_DATA_DIR", str(root))
+
+    def register(artifact):
+        record_research_artifact(
+            artifact,
+            source_url=f"https://example.com/source-{artifact.stem}.txt",
+            provenance="concurrent test",
+            tool="fetch_url_text",
+            kind="web",
+            label=artifact.name,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(register, artifacts))
+
+    lines = (root / ARTIFACT_MANIFEST_FILENAME).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == len(artifacts)
+    rows = [json.loads(line) for line in lines]
+    assert {row["filename"] for row in rows} == {artifact.name for artifact in artifacts}
 
 
 def test_research_artifact_reader_rejects_paths_outside_root(monkeypatch, tmp_path):
