@@ -644,6 +644,7 @@ def test_codex_writes_finalized_dynamic_tool_environment_explicitly(monkeypatch,
     body = open(config_path, "r", encoding="utf-8").read()
     assert body.count("[mcp_servers.chack_tools.env]") == 1
     assert 'CHACK_MODEL_PROVIDER = "codex"' in body
+    assert "CHACK_MCP_STARTUP_STATUS_PATH = " in body
     assert "CHACK_TOOLS_OVERRIDE_B64_PATH = " in body
     assert "CHACK_TOOLS_OVERRIDE_B64 = " not in body
 

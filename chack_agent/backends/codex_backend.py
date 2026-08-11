@@ -1684,6 +1684,20 @@ class CodexExecutor:
         unregister_process(cancel_registration)
         if return_code != 0:
             details = "\n".join(combined_output_lines).strip() or "No error output captured."
+            startup_status_path = str(
+                env.get("CHACK_MCP_STARTUP_STATUS_PATH", "") or ""
+            ).strip()
+            if startup_status_path:
+                try:
+                    with open(startup_status_path, "r", encoding="utf-8") as handle:
+                        startup_status = json.load(handle)
+                    details += "\nMCP startup status: " + json.dumps(
+                        startup_status,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    )
+                except (FileNotFoundError, OSError, ValueError, TypeError):
+                    pass
             self._log_codex_failure(
                 "codex_exec_failed",
                 command=command,
@@ -2030,6 +2044,16 @@ class CodexExecutor:
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        if self._codex_home and self._has_configured_tools():
+            startup_status_path = os.path.join(
+                self._codex_home,
+                "mcp_startup_status.json",
+            )
+            try:
+                os.unlink(startup_status_path)
+            except FileNotFoundError:
+                pass
+            env["CHACK_MCP_STARTUP_STATUS_PATH"] = startup_status_path
         return env
 
     def _set_env_or_file(
@@ -2094,6 +2118,7 @@ class CodexExecutor:
             "CHACK_TOOLS_OVERRIDE_B64_PATH",
             "CHACK_TOOLS_APPEND_B64",
             "CHACK_TOOLS_APPEND_B64_PATH",
+            "CHACK_MCP_STARTUP_STATUS_PATH",
             "CHACK_CHATGPT_ASYNC_API_URL",
             "CHACK_CHATGPT_ASYNC_API_SECRET",
             "PYTHONPATH",
