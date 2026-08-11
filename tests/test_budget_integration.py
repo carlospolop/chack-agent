@@ -625,7 +625,33 @@ def test_codex_mcp_startup_timeout_is_configurable(monkeypatch, tmp_path):
 
     config_path = os.path.join(executor._codex_home, "config.toml")
     body = open(config_path, "r", encoding="utf-8").read()
+    assert os.stat(executor._codex_home).st_mode & 0o777 == 0o700
+    assert os.stat(config_path).st_mode & 0o777 == 0o600
     assert "startup_timeout_sec = 180" in body
+
+
+def test_codex_writes_finalized_dynamic_tool_environment_explicitly(monkeypatch, tmp_path):
+    executor = _make_stub_codex_executor()
+    executor._allowed_tools_json = '["read_context"]'
+    executor._serialized_tools_override_b64 = "x" * 25000
+
+    monkeypatch.setenv("CHACK_CODEX_HOME_BASE", str(tmp_path))
+    executor._ensure_codex_home_and_config()
+    env = executor._build_env()
+    executor._write_codex_explicit_mcp_env(env)
+
+    config_path = os.path.join(executor._codex_home, "config.toml")
+    body = open(config_path, "r", encoding="utf-8").read()
+    assert body.count("[mcp_servers.chack_tools.env]") == 1
+    assert 'CHACK_MODEL_PROVIDER = "codex"' in body
+    assert "CHACK_TOOLS_OVERRIDE_B64_PATH = " in body
+    assert "CHACK_TOOLS_OVERRIDE_B64 = " not in body
+
+    # Retrying the same executor replaces the generated table instead of
+    # appending a duplicate TOML section.
+    executor._write_codex_explicit_mcp_env(env)
+    body = open(config_path, "r", encoding="utf-8").read()
+    assert body.count("[mcp_servers.chack_tools.env]") == 1
 
 
 def test_codex_skips_mcp_server_when_agent_has_no_tools(monkeypatch, tmp_path):
