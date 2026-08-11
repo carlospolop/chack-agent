@@ -1053,7 +1053,7 @@ def test_administrator_async_research_tools_start_and_poll():
     started = json.loads(start)
     assert started["async_started"] is True
     assert started["max_parallel"] == 1
-    assert "one at a time" in started["next_step"]
+    assert "up to 1 concurrent workers" in started["next_step"]
     job_id = started["job_id"]
 
     poll_started = time.monotonic()
@@ -1155,9 +1155,85 @@ def test_async_researchers_keep_the_administrator_artifact_context_isolated(tmp_
         reset_research_artifact_context(context_tokens)
 
     assert payload["complete"] is True
+    assert started["max_parallel"] == 2
     assert {row[0] for row in seen} == {"news_media_research", "chatgptxhigh"}
     assert all(data_dir == master_dir for _, data_dir, _ in seen)
     assert all(parent_dir == master_dir for _, _, parent_dir in seen)
+
+
+def test_required_researcher_async_request_rejects_missing_researchers():
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True, business_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific", "business"],
+        required_researchers=["scientific", "business"],
+    )
+    prompt = "Research this required source family with primary evidence, exact dates, contradictions, and limitations. " * 12
+
+    normalized, errors = helper._normalize_researcher_requests(
+        json.dumps([{"researcher": "scientific", "prompt": prompt}]),
+        enabled={"scientific", "business"},
+        tools_by_name={"scientific_research": object(), "business_research": object()},
+        required_researchers={"scientific", "business"},
+    )
+
+    assert normalized == []
+    assert any("business" in str(error.get("error")) for error in errors)
+
+
+def test_required_researcher_batch_request_rejects_missing_researchers():
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True, business_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific", "business"],
+        required_researchers=["scientific", "business"],
+    )
+
+    class FakeResearchTool:
+        def __init__(self, name):
+            self.name = name
+
+        async def on_invoke_tool(self, ctx, raw_args):
+            return json.dumps({"research_worked": True, "failure_reason": "", "final_research_review": "ok"})
+
+    tool = helper._build_batch_tool(
+        {
+            "scientific_research": FakeResearchTool("scientific_research"),
+            "business_research": FakeResearchTool("business_research"),
+        },
+        ["scientific", "business"],
+    )
+    prompt = "Research this required source family with primary evidence, exact dates, contradictions, and limitations. " * 12
+    output = helper._invoke_tool_sync(
+        tool,
+        {
+            "requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}]),
+            "save_artifacts": False,
+            "max_parallel": 2,
+        },
+    )
+    payload = json.loads(output)
+
+    assert payload["batch_worked"] is False
+    assert any("business" in str(error.get("error")) for error in payload["errors"])
+
+
+def test_required_researcher_mode_hides_direct_sync_tools():
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True, business_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific", "business"],
+        required_researchers=["scientific", "business"],
+    )
+
+    names = _tool_names(helper._build_subagent_tools(helper._enabled_researchers()))
+
+    assert "run_researchers_batch" in names
+    assert "scientific_research" not in names
+    assert "business_research" not in names
 
 
 def test_async_poll_unknown_job_returns_without_waiting():
