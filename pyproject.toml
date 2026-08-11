@@ -19,6 +19,8 @@ dependencies = [
   "playwright>=1.58.0",
   "PyYAML>=6.0.1",
   "pypdf>=4.0.0",
+  # Chack uses mcp.server.fastmcp, which was removed in the breaking 2.0 release.
+  "mcp>=1.19.0,<2.0.0",
   "openai-agents>=0.7.0",
   "langchain>=1.0.0",
   "langgraph>=1.0.0",
