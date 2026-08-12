@@ -86,6 +86,7 @@ models:
   qwen3-8-max: [minimal, low, medium, high, xhigh]
   ring-2-6-1t: [high, xhigh]
   sakana-namazu: [none, high]
+  seed-2-0-code: [low, medium, high]
   seed-2-0-lite: [minimal, low, medium, high]
   seed-2-0-mini: [minimal, low, medium, high]
   step-3-7-flash: [low, medium, high]
