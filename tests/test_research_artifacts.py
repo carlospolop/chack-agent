@@ -427,7 +427,11 @@ def test_researcher_tool_usage_is_appended_in_code():
     )
     payload = json.loads(enriched)
 
-    assert payload["final_research_review"] == "review"
+    assert payload["full_research_review"] == "review"
+    assert payload["overall_summary"] == "review"
+    assert payload["findings"]
+    assert payload["open_topics"] == []
+    assert "final_research_review" not in payload
     assert payload["tool_call_counts"] == {
         "fetch_url_text": 1,
         "search_google_web": 2,
@@ -445,7 +449,36 @@ def test_researcher_response_collector_parses_batched_results():
 
     responses = sc.researcher_responses_from_output("websearcher_research", batched)
 
-    assert [item["final_research_review"] for item in responses] == ["one", "two"]
+    assert [item["full_research_review"] for item in responses] == ["one", "two"]
+    assert all(item["findings"] for item in responses)
     assert responses[0]["researcher_tool"] == "websearcher_research"
     assert responses[0]["batch_result_index"] == 1
     assert sc.aggregate_tool_call_counts(responses) == {"a": 1, "b": 2}
+
+
+def test_open_topics_are_optional_bounded_followups_without_truncating_full_review():
+    full_review = "Complete raw evidence " * 1000
+    gap = "Primary evidence is unavailable for the requested historical period."
+    payload = sc.normalize_researcher_response_payload(
+        {
+            "research_worked": True,
+            "failure_reason": "",
+            "overall_summary": "Summary",
+            "findings": [],
+            "gaps": [gap],
+            "open_topics": [
+                gap,
+                "short",
+                *(f"Follow-up topic {index}: " + "x" * 400 for index in range(6)),
+            ],
+            "full_research_review": full_review,
+        }
+    )
+
+    assert len(payload["open_topics"]) == 5
+    assert all(30 <= len(topic) <= 250 for topic in payload["open_topics"])
+    assert gap not in payload["open_topics"]
+    assert payload["full_research_review"] == full_review
+    digest = sc.compact_researcher_digest(payload)
+    assert digest["open_topics"] == payload["open_topics"]
+    assert "full_research_review" not in digest

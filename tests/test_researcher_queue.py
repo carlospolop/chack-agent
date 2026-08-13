@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ from chack_tools.agents_toolset import (
     _prepare_queue_runtime_config,
 )
 from chack_tools.config import ToolsConfig
+from chack_tools.research_artifacts import ResearchArtifactsTool, get_readonly_file_tools_for_root
 from chack_tools.researcher_queue_agent import (
     ResearcherQueue,
     ResearcherQueueAgentTool,
@@ -53,6 +55,7 @@ def test_queue_registered_only_when_enabled():
 
 def test_queue_default_wait_is_90_minutes():
     assert ToolsConfig().researcher_queue_max_wait_seconds == 5400
+    assert ToolsConfig().researcher_queue_max_parallel_researches == 2
     assert ToolsConfig().researcher_queue_max_cost_usd == 5.0
     assert ToolsConfig().researcher_queue_required_researchers == []
 
@@ -179,11 +182,21 @@ def test_queue_batches_concurrent_calls_and_returns_only_matching_results():
 def test_queue_preserved_artifacts_return_queue_and_request_folders():
     q = ResearcherQueue()
     created = json.loads(q.create_queue("artifact queue"))
+    full_review = "Complete researcher review with all citations and contradictions."
+    raw_output = '{"full_research_review":"' + full_review + '"}'
 
     def processor(prompts, save_artifacts=False, queue_root="", batch_id=""):
         research_dir = Path(queue_root) / "researches" / "research-000"
         research_dir.mkdir(parents=True, exist_ok=True)
         (research_dir / "admin_output.json").write_text('{"ok":true}', encoding="utf-8")
+        researcher_dir = research_dir / "researcher_outputs"
+        researcher_dir.mkdir(exist_ok=True)
+        (researcher_dir / "001_scientific_research.json").write_text(
+            json.dumps({"full_research_review": full_review}), encoding="utf-8"
+        )
+        (researcher_dir / "raw_step_001_scientific_research.raw.txt").write_text(
+            raw_output, encoding="utf-8"
+        )
         return json.dumps(
             {
                 "queue_evidence_data_path": queue_root,
@@ -193,6 +206,10 @@ def test_queue_preserved_artifacts_return_queue_and_request_folders():
                         "conclusions": "c",
                         "members": [0],
                         "evidence_data_path": str(research_dir),
+                        "output_files": {
+                            "researcher_outputs": ["researcher_outputs/001_scientific_research.json"],
+                            "raw_researcher_outputs": ["researcher_outputs/raw_step_001_scientific_research.raw.txt"],
+                        },
                     }
                 ],
                 "count": 1,
@@ -215,8 +232,26 @@ def test_queue_preserved_artifacts_return_queue_and_request_folders():
     assert payload["queue_evidence_data_path"] == created["queue_evidence_data_path"]
     assert Path(payload["request_evidence_data_path"]).is_dir()
     assert Path(payload["request_evidence_data_path"], "matched_researches.json").is_file()
-    assert Path(payload["request_evidence_data_path"], "researches", "research-000").exists()
+    matched = json.loads(
+        Path(payload["request_evidence_data_path"], "matched_researches.json").read_text(encoding="utf-8")
+    )
+    assert matched["researches"][0]["output_files"] == payload["researches"][0]["output_files"]
+    copied_research = Path(payload["request_evidence_data_path"], "researches", "research-000")
+    assert copied_research.exists()
+    copied_raw = copied_research / "researcher_outputs" / "raw_step_001_scientific_research.raw.txt"
+    assert copied_raw.read_text(encoding="utf-8") == raw_output
     assert payload["researches"][0]["evidence_data_path"].startswith(created["queue_evidence_data_path"])
+    # These are the same pinned read-only tools exposed to the FactChecker verifiers.
+    queue_root = payload["queue_evidence_data_path"]
+    browser = ResearchArtifactsTool(ToolsConfig(), root=queue_root)
+    relative_raw = str(copied_raw.relative_to(queue_root))
+    assert raw_output in browser.read_file(relative_raw)
+    readonly_names = {tool.name for tool in get_readonly_file_tools_for_root(ToolsConfig(), queue_root)}
+    assert readonly_names == {
+        "list_research_artifacts",
+        "read_research_artifact",
+        "grep_research_artifacts",
+    }
 
 
 def test_queue_timeout_returns_artifact_paths_when_preserved():
@@ -548,6 +583,36 @@ def test_process_batch_runs_admin_per_group_and_labels_topics(monkeypatch):
         "total_researcher_calls": 0,
         "complete": False,
     }
+
+
+def test_process_batch_default_caps_administrators_at_two(monkeypatch):
+    helper = _make_helper()
+    monkeypatch.setattr(
+        helper,
+        "_merge_prompts",
+        lambda prompts: [(f"merged-{index}", [index]) for index, _prompt in enumerate(prompts)],
+    )
+    state = {"active": 0, "maximum": 0}
+    lock = threading.Lock()
+
+    def fake_admin(prompt, ctx, save_artifacts=False):
+        del ctx, save_artifacts
+        with lock:
+            state["active"] += 1
+            state["maximum"] = max(state["maximum"], state["active"])
+        try:
+            time.sleep(0.05)
+            return f"concl::{prompt}"
+        finally:
+            with lock:
+                state["active"] -= 1
+
+    monkeypatch.setattr(helper, "_run_admin", fake_admin)
+
+    payload = json.loads(helper._process_batch(["a", "b", "c", "d"]))
+
+    assert payload["count"] == 4
+    assert state["maximum"] == 2
 
 
 def test_process_batch_aggregates_exact_private_researcher_usage(monkeypatch):
@@ -959,6 +1024,86 @@ def test_merge_prompts_single_prompt_skips_merge(monkeypatch):
     monkeypatch.setattr(helper, "_run_merge_agent", lambda prompts: called.__setitem__("n", called["n"] + 1))
     assert helper._merge_prompts(["solo"]) == [("solo", [0], "single request; no merge needed")]
     assert called["n"] == 0
+
+
+def test_queue_returns_bounded_researcher_digests_and_full_output_manifest():
+    full_review = "Complete citations, source provenance, contradictions, and detailed reasoning. " * 80
+    output_files = {
+        "administrator_output": "admin_output.json",
+        "researcher_outputs": ["researcher_outputs/001_scientific_research.json"],
+        "raw_researcher_outputs": ["researcher_outputs/raw_step_001_scientific_research.raw.txt"],
+        "researcher_output_manifest": [{
+            "researcher_tool": "scientific_research",
+            "structured_path": "researcher_outputs/001_scientific_research.json",
+            "raw_path": "researcher_outputs/raw_step_001_scientific_research.raw.txt",
+        }],
+    }
+
+    class Admin:
+        def _run_single(self, *_args, **_kwargs):
+            return json.dumps({
+                "research_worked": True,
+                "failure_reason": "",
+                "administrator_conclusions": "Administrator synthesis.",
+                "researcher_call_counts": {"scientific_research": 1},
+                "researcher_failures": [],
+                "researcher_responses": [{
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "overall_summary": "The compact scientific conclusion.",
+                    "findings": [{
+                        "claim": "The primary scientific evidence supports the claim",
+                        "summary": "The researcher identified primary evidence supporting the claim while retaining methodological caveats and contradictory observations in the complete review.",
+                    }],
+                    "gaps": ["One population subgroup remains insufficiently studied."],
+                    "open_topics": [
+                        "Investigate whether the result reproduces in the understudied population subgroup."
+                    ],
+                    "full_research_review": full_review,
+                    "key_artifacts": [{"filename": "paper.txt", "source_url": "https://example.test", "description": "x" * 100}],
+                    "researcher_tool": "scientific_research",
+                }],
+                "evidence_data_path": "/tmp/research",
+                "output_files": output_files,
+            })
+
+    helper = ResearcherQueueAgentTool(
+        Admin(), config=ToolsConfig(), model_provider="openai", fallback_model="m", queue=ResearcherQueue()
+    )
+    out = helper._run_admin("prompt", {}, save_artifacts=True)
+
+    digest = out["researcher_responses"][0]
+    assert set(digest) == {
+        "research_worked", "failure_reason", "overall_summary", "findings", "gaps", "open_topics", "researcher_tool"
+    }
+    assert digest["open_topics"] == [
+        "Investigate whether the result reproduces in the understudied population subgroup."
+    ]
+    assert "full_research_review" not in digest
+    assert "key_artifacts" not in digest
+    assert out["output_files"] == output_files
+
+
+def test_queue_force_save_artifacts_cannot_be_disabled_by_caller():
+    class CaptureQueue:
+        def __init__(self):
+            self.save_artifacts = None
+
+        def submit_and_wait(self, _prompts, **kwargs):
+            self.save_artifacts = kwargs["save_artifacts"]
+            return "ok"
+
+    queue = CaptureQueue()
+    helper = ResearcherQueueAgentTool(
+        object(),
+        config=ToolsConfig(researcher_queue_force_save_artifacts=True),
+        model_provider="openai",
+        fallback_model="m",
+        queue=queue,
+    )
+
+    assert helper.run("Detailed evidence request with enough scope and context. " * 8, save_artifacts=False) == "ok"
+    assert queue.save_artifacts is True
 
 
 # ── input validation ──────────────────────────────────────────────────────────

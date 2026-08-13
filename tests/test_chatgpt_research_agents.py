@@ -238,6 +238,7 @@ def test_default_xhigh_timeout_and_async_wait_are_bounded():
     assert config.chatgpt_xhigh_timeout_seconds is None
     assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 1800
     assert helper._async_max_wait_seconds() == 2100
+    assert config.researcher_administrator_child_timeout_seconds >= helper._async_max_wait_seconds()
 
 
 def test_xhigh_async_wait_caps_stale_legacy_values_at_timeout_plus_grace():
@@ -304,7 +305,10 @@ def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
     run_dir = Path(payload["evidence_data_path"])
     assert run_dir.parent == evidence
     assert run_dir.name.startswith("run-")
-    assert payload["final_research_review"] == "A" * 2500
+    assert payload["full_research_review"] == "A" * 2500
+    assert len(payload["overall_summary"]) == 1000
+    assert 1 <= len(payload["findings"]) <= 8
+    assert "final_research_review" not in payload
     assert {row["filename"] for row in payload["key_artifacts"]} == {
         "chatgpt-pro-response.md",
         "chatgpt-request.md",
@@ -810,7 +814,8 @@ def test_failed_run_preserves_partial_response_and_conversation_url(monkeypatch,
 
     assert payload["research_worked"] is False
     assert payload["partial_result"] is True
-    assert payload["final_research_review"] == "Recovered partial evidence"
+    assert payload["full_research_review"] == "Recovered partial evidence"
+    assert payload["overall_summary"] == "Recovered partial evidence"
     assert {row["filename"] for row in payload["key_artifacts"]} == {
         "chatgpt-run.json",
         "chatgpt-request.md",

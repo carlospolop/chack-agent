@@ -214,7 +214,13 @@ def infer_tool_counts_from_artifacts(artifacts: dict[str, Any]) -> Counter[str]:
 
 
 def score_run(output: str, parsed: dict[str, Any], counts: Counter[str], artifacts: dict[str, Any], elapsed: float) -> float:
-    review = str(parsed.get("final_research_review") or parsed.get("final_review") or output or "")
+    review = str(
+        parsed.get("full_research_review")
+        or parsed.get("final_research_review")
+        or parsed.get("final_review")
+        or output
+        or ""
+    )
     worked = parsed.get("worked")
     if isinstance(worked, str):
         worked_ok = worked.strip().lower() in {"true", "yes", "1", "worked", "success"}

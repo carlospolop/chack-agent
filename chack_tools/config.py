@@ -205,6 +205,15 @@ class ToolsConfig:
     # when the caller treats researcher selection as a requirement rather than an
     # allowlist. Empty preserves the administrator's relevance-based selection.
     researcher_administrator_required_researchers: list = field(default_factory=list)
+    researcher_administrator_synthesis_reserve_minutes: int = 5
+    # Hard wall for one synchronous or asynchronous child researcher. XHigh's
+    # browser output deadline is 1800s and its remote reconciliation grace is 300s,
+    # so the safe default must not pre-empt that 2100s contract.
+    researcher_administrator_child_timeout_seconds: int = 2100
+    # Grace period after TERM before the administrator escalates an isolated
+    # researcher process group to KILL. This is deliberately short and bounded:
+    # a blocked provider call must not consume the administrator's synthesis time.
+    researcher_administrator_child_termination_grace_seconds: float = 5.0
     researcher_administrator_agent: dict = field(default_factory=dict)
 
     # Shared research queue. Several agents (threads in one process, or external
@@ -225,11 +234,15 @@ class ToolsConfig:
     researcher_queue_expected_participants: int = 0     # >0 flushes early once N callers have joined
     researcher_queue_max_requests_per_call: int = 5     # research prompts allowed per single call
     researcher_queue_max_batch_requests: int = 20       # hard ceiling of prompts per batch (0 = no ceiling)
-    researcher_queue_max_parallel_researches: int = 0   # concurrent admin researches per batch (0 = one per merged request, all at once)
+    researcher_queue_max_parallel_researches: int = 2   # concurrent admin researches per batch (0 = one per merged request, all at once)
     researcher_queue_max_wait_seconds: int = 5400       # safety cap on the blocking call (90 min)
     researcher_queue_max_runtime_minutes: int = 60      # fixed runtime cap for each queued admin research (0 = no cap)
     researcher_queue_max_cost_usd: float = 5.0          # fixed cost cap for each queued admin research (0 = no cap)
     researcher_queue_merge_model: str = ""              # empty -> default model
+    # Force preserved full/raw researcher outputs even when an LLM explicitly sends
+    # save_artifacts=false. Used by workflows whose final agents must inspect every
+    # specialist's complete evidence record.
+    researcher_queue_force_save_artifacts: bool = False
     # Researcher short-names the queue's administrator may launch. Empty means
     # "every researcher enabled above" (same semantics as the administrator).
     researcher_queue_researchers: list = field(default_factory=list)

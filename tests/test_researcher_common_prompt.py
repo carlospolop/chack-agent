@@ -67,8 +67,29 @@ def test_build_subagent_config_defaults_to_no_artifact_output_schema():
     assert set(config.agent.output_schema_json["required"]) == {
         "research_worked",
         "failure_reason",
-        "final_research_review",
+        "overall_summary",
+        "findings",
+        "gaps",
+        "open_topics",
+        "full_research_review",
     }
+    props = config.agent.output_schema_json["properties"]
+    assert props["failure_reason"]["maxLength"] == 500
+    assert props["overall_summary"]["maxLength"] == 1000
+    assert props["findings"]["maxItems"] == 8
+    assert props["findings"]["items"]["properties"]["claim"] == {
+        "type": "string",
+        "minLength": 30,
+        "maxLength": 220,
+        "description": "30-220 characters naming the concrete claim investigated.",
+    }
+    assert props["findings"]["items"]["properties"]["summary"]["maxLength"] == 600
+    assert set(props["findings"]["items"]["properties"]) == {"claim", "summary"}
+    assert props["gaps"]["maxItems"] == 5
+    assert props["gaps"]["items"]["maxLength"] == 240
+    assert props["open_topics"]["maxItems"] == 5
+    assert props["open_topics"]["items"]["minLength"] == 30
+    assert props["open_topics"]["items"]["maxLength"] == 250
 
 
 def test_build_subagent_config_uses_artifact_schema_when_preserved():
@@ -85,7 +106,11 @@ def test_build_subagent_config_uses_artifact_schema_when_preserved():
     assert set(config.agent.output_schema_json["required"]) == {
         "research_worked",
         "failure_reason",
-        "final_research_review",
+        "overall_summary",
+        "findings",
+        "gaps",
+        "open_topics",
+        "full_research_review",
         "evidence_data_path",
         "key_artifacts",
     }

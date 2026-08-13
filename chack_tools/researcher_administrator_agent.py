@@ -6,9 +6,13 @@ import re
 import time
 import asyncio
 import contextvars
+import hashlib
+import multiprocessing
+import queue
+import signal
 import uuid
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future
 from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
@@ -20,11 +24,13 @@ from .subagent_config import (
     aggregate_tool_call_counts,
     begin_researcher_response_collection,
     build_subagent_config,
+    compact_researcher_digest,
     create_research_master_dir,
     create_subagent_session_id,
     end_researcher_response_collection,
     enforce_prompt_str_or_list_schema,
     inherit_subagent_limits,
+    normalize_researcher_response_payload,
     normalize_subagent_prompts,
     researcher_response_from_output,
     subagent_launch_block_reason,
@@ -38,7 +44,13 @@ from .research_artifacts import (
     reset_research_artifact_context,
     set_research_artifact_context,
 )
-from .cancellation import request_cancel, reset_cancellation_event, set_cancellation_event
+from .cancellation import (
+    register_process,
+    request_cancel,
+    reset_cancellation_event,
+    set_cancellation_event,
+    unregister_process,
+)
 from .telemetry import current_log_context, reset_log_context, run_with_tool_logging, set_log_context
 
 try:
@@ -51,9 +63,679 @@ except ImportError:
     Usage = None
 
 
-_ASYNC_RESEARCH_EXECUTOR = ThreadPoolExecutor(max_workers=16)
+class _DaemonThreadPoolExecutor:
+    """Minimal daemon executor that never joins abandoned work at interpreter exit.
+
+    The stdlib executor registers workers in a private exit-time join table, so
+    merely setting ``Thread.daemon`` does not contain a blocked researcher. This
+    implementation intentionally exposes only the ``submit`` and ``shutdown``
+    operations needed by the researcher orchestrator.
+    """
+
+    def __init__(self, max_workers: int, thread_name_prefix: str = "research-worker") -> None:
+        self._max_workers = max(1, int(max_workers))
+        self._thread_name_prefix = str(thread_name_prefix or "research-worker")
+        self._work_queue: queue.Queue[Any] = queue.Queue()
+        self._threads: list[threading.Thread] = []
+        self._lock = threading.Lock()
+        self._shutdown = False
+
+    def _worker(self) -> None:
+        while True:
+            item = self._work_queue.get()
+            if item is None:
+                return
+            future, fn, args, kwargs = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:
+                future.set_exception(exc)
+
+    def _ensure_workers_locked(self) -> None:
+        while len(self._threads) < self._max_workers:
+            index = len(self._threads)
+            thread = threading.Thread(
+                name=f"{self._thread_name_prefix}_{index}",
+                target=self._worker,
+                daemon=True,
+            )
+            self._threads.append(thread)
+            thread.start()
+
+    def submit(self, fn, /, *args, **kwargs) -> Future:
+        with self._lock:
+            if self._shutdown:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            self._ensure_workers_locked()
+            future: Future = Future()
+            self._work_queue.put((future, fn, args, kwargs))
+            return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        with self._lock:
+            if not self._shutdown:
+                self._shutdown = True
+                if cancel_futures:
+                    while True:
+                        try:
+                            item = self._work_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if item is not None:
+                            item[0].cancel()
+                for _thread in self._threads:
+                    self._work_queue.put(None)
+            threads = list(self._threads)
+        if wait:
+            for thread in threads:
+                thread.join()
+
+
+_ASYNC_RESEARCH_EXECUTOR = _DaemonThreadPoolExecutor(
+    max_workers=16,
+    thread_name_prefix="async-research",
+)
 _ASYNC_RESEARCH_LOCK = threading.Lock()
 _ASYNC_RESEARCH_JOBS: dict[str, dict[str, Any]] = {}
+_RESEARCHER_TERMINAL_STATUSES = {"done", "error", "cancelled", "deadline_exceeded"}
+_BROWSER_RESEARCHER_TOOLS = {"deepchatgpt_researcher", "prochatgpt_researcher", "chatgptxhigh"}
+_RESEARCH_WRITER_LOCK = threading.Lock()
+_ACTIVE_RESEARCH_WRITERS: dict[str, int] = {}
+_PENDING_RESEARCH_CLEANUPS: dict[str, bool] = {}
+_DEFAULT_SYNTHESIS_RESERVE_MINUTES = 5
+_DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS = 5.0
+_PROCESS_CONTEXT_WARM_LOCK = threading.Lock()
+_PROCESS_CONTEXT_WARMED: set[str] = set()
+_CURRENT_RESEARCH_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "chack_current_research_deadline",
+    default=None,
+)
+
+
+
+def _async_task_is_terminal(task: dict[str, Any] | None) -> bool:
+    """Return the logical terminal state published to async management tools.
+
+    A cancelled/deadline task may remain physically active while its isolated
+    supervisor unwinds. Callers that must return from the administrator use the
+    separate physical-writer/process checks below; status polling intentionally
+    exposes that distinction through ``execution_active``/``health``.
+    """
+    return str((task or {}).get("status") or "") in _RESEARCHER_TERMINAL_STATUSES
+
+
+def _async_task_is_unwound_terminal(task: dict[str, Any] | None) -> bool:
+    """Return true only when a logical terminal task has stopped executing."""
+    row = task or {}
+    return _async_task_is_terminal(row) and not bool(row.get("execution_active"))
+
+
+def _researcher_process_context():
+    """Return a clean, killable multiprocessing context.
+
+    ``fork`` is unsafe from the multithreaded MCP/Agents host.  Prefer the
+    forkserver on POSIX: the server is started cleanly and later children are
+    forked from that single-purpose process, not from the live host.  Spawn is
+    the portable fallback and remains the Windows/default-safe option.
+    """
+    # Keep the forkserver warm when possible. Its first startup imports the
+    # application graph once; subsequent isolated researchers then start in
+    # tens of milliseconds instead of repeatedly paying a multi-second spawn
+    # import cost. The worker itself is still forked only by the clean server.
+    for method in ("forkserver", "spawn"):
+        try:
+            if method == "forkserver" and hasattr(multiprocessing, "set_forkserver_preload"):
+                multiprocessing.set_forkserver_preload(["chack_tools.researcher_administrator_agent"])
+            return multiprocessing.get_context(method)
+        except ValueError:
+            continue
+    raise RuntimeError(
+        "Independent researcher processes require forkserver or spawn support."
+    )
+
+
+def _researcher_process_warmup() -> None:
+    """No-op target used to pay forkserver/spawn startup before a deadline starts."""
+    return
+
+
+def _warm_researcher_process_context() -> Any:
+    """Start the clean process server once, outside a child deadline.
+
+    The first forkserver child has to import the application module graph. If
+    that cost is charged to a researcher's deadline, short tests and real queued
+    jobs can lose their entire first polling window before the provider call has
+    even begun. Warmup is serialized and bounded; actual researchers remain
+    separate processes with their own process groups.
+    """
+    context = _researcher_process_context()
+    method = str(getattr(context, "get_start_method", lambda: "")())
+    if method in _PROCESS_CONTEXT_WARMED:
+        return context
+    with _PROCESS_CONTEXT_WARM_LOCK:
+        if method in _PROCESS_CONTEXT_WARMED:
+            return context
+        process = context.Process(target=_researcher_process_warmup, name="chack-researcher-warmup")
+        process.daemon = False
+        process.start()
+        process.join(timeout=30.0)
+        if process.is_alive():
+            try:
+                process.kill()
+            except Exception:
+                process.terminate()
+            process.join(timeout=2.0)
+            raise RuntimeError("Researcher process-server warmup did not terminate.")
+        if process.exitcode != 0:
+            raise RuntimeError(f"Researcher process-server warmup failed (exitcode={process.exitcode}).")
+        _PROCESS_CONTEXT_WARMED.add(method)
+    return context
+
+
+def _serialize_researcher_tool(tool: Any) -> bytes:
+    """Serialize one researcher tool for a clean child interpreter.
+
+    OpenAI Agents function tools are dynamically-created closures and therefore
+    cannot use stdlib pickle.  cloudpickle is already a runtime dependency for
+    CLI/MCP tool transport and preserves both production tools and local test
+    doubles without inheriting the parent's locks or ContextVars.
+    """
+    try:
+        import cloudpickle  # type: ignore
+
+        return cloudpickle.dumps(tool)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Researcher tool {getattr(tool, 'name', 'unknown')!r} could not be serialized for isolated execution: {exc}"
+        ) from exc
+
+
+def _deserialize_researcher_tool(payload: bytes) -> Any:
+    try:
+        import cloudpickle  # type: ignore
+
+        return cloudpickle.loads(payload)
+    except Exception as exc:
+        raise RuntimeError(f"Isolated researcher tool could not be deserialized: {exc}") from exc
+
+
+def _send_researcher_process_message(connection: Any, payload: dict[str, Any]) -> None:
+    try:
+        connection.send(payload)
+    except (BrokenPipeError, EOFError, OSError):
+        # The administrator may have killed the child and closed the pipe while
+        # it was unwinding. This is an expected cancellation path.
+        return
+
+
+def _live_process_group_members(pgid: int) -> list[int]:
+    """Return non-zombie PIDs currently belonging to ``pgid`` on Linux.
+
+    ``Process.is_alive()`` only observes the direct child.  A researcher can
+    exit while a browser/HTTP descendant remains in the private session, so
+    group termination must be verified independently of the multiprocessing
+    object.  The fallback ``killpg(..., 0)`` is retained for non-/proc POSIX
+    environments.
+    """
+    try:
+        group = int(pgid or 0)
+    except (TypeError, ValueError):
+        return []
+    if group <= 1:
+        return []
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        members: list[int] = []
+        try:
+            entries = list(proc_root.iterdir())
+        except OSError:
+            entries = []
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+                close = stat.rfind(")")
+                if close < 0:
+                    continue
+                fields = stat[close + 2 :].split()
+                # After comm: state, ppid, pgrp, ...
+                if len(fields) < 3 or fields[0] == "Z" or int(fields[2]) != group:
+                    continue
+                members.append(int(entry.name))
+            except (OSError, ValueError):
+                continue
+        return members
+    try:
+        os.killpg(group, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        return []
+    return [group]
+
+
+def _researcher_process_entry(
+    connection: Any,
+    serialized_tool: bytes,
+    payload: dict[str, Any],
+    evidence_dir: str,
+) -> None:
+    """Invoke one researcher inside a separate, administrator-killable process."""
+    try:
+        # Every subprocess launched by the researcher inherits this private
+        # session/process group and is terminated together with the child.
+        os.setsid()
+    except OSError:
+        pass
+    # TERM is cooperative first: async researchers can observe the event and
+    # unwind provider/browser resources. The supervisor retains the hard kill
+    # boundary when the call ignores this handler.
+    child_cancel_event = threading.Event()
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _request_child_shutdown(_signum: int, _frame: Any) -> None:
+        child_cancel_event.set()
+
+    try:
+        signal.signal(signal.SIGTERM, _request_child_shutdown)
+    except (ValueError, OSError):
+        pass
+    cancellation_token = set_cancellation_event(child_cancel_event)
+    artifact_token = set_research_artifact_context(evidence_dir, evidence_dir)
+
+    def _progress(event_type: str, event_payload: dict[str, Any]) -> None:
+        compact: dict[str, Any] = {
+            "event": str(event_type or ""),
+            "tool": str(event_payload.get("tool") or ""),
+        }
+        for key in ("duration_ms", "error", "stage", "answer_chars", "running"):
+            value = event_payload.get(key)
+            if value is not None:
+                compact[key] = value
+        _send_researcher_process_message(connection, {"kind": "progress", "event": compact})
+
+    log_token = set_log_context(_chack_tool_progress_callback=_progress)
+    try:
+        _send_researcher_process_message(
+            connection,
+            {"kind": "started", "pid": os.getpid(), "process_group_id": os.getpgrp()},
+        )
+        tool = _deserialize_researcher_tool(serialized_tool)
+        output = ResearcherAdministratorAgentTool._invoke_tool_sync(tool, payload)
+        _send_researcher_process_message(
+            connection,
+            {"kind": "result", "output": output, "finished_at": time.time()},
+        )
+    except BaseException as exc:
+        _send_researcher_process_message(
+            connection,
+            {"kind": "error", "error": f"{type(exc).__name__}: {exc}", "finished_at": time.time()},
+        )
+    finally:
+        reset_log_context(log_token)
+        reset_research_artifact_context(artifact_token)
+        reset_cancellation_event(cancellation_token)
+
+        try:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+        except (ValueError, OSError):
+            pass
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+
+def _terminate_researcher_process(
+    process: Any,
+    *,
+    grace_seconds: float = _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS,
+) -> dict[str, Any]:
+    """Terminate a child and its private descendant process group.
+
+    The child reports the PGID created by ``setsid`` through the supervision pipe.
+    Until that report arrives, never guess that the child's PID is a process-group
+    leader: use ``Process.terminate`` for the race-safe fallback.  Returning the
+    signal/exit metadata makes physical termination auditable in task state and
+    acceptance tests.
+    """
+    info: dict[str, Any] = {
+        "term_sent": False,
+        "kill_sent": False,
+        "process_alive_after": False,
+        "process_exitcode": None,
+        "descendant_pids_after_term": [],
+        "descendant_pids_after": [],
+    }
+    if process is None:
+        return info
+    try:
+        pid = int(getattr(process, "pid", 0) or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    info["process_pid"] = pid
+    try:
+        pgid = int(getattr(process, "_chack_process_group_id", 0) or 0)
+    except (TypeError, ValueError):
+        pgid = 0
+    # The started IPC message can race with cancellation. Discover the group
+    # from the live PID when possible, but only trust a group that is distinct
+    # from the supervisor's own group. Before ``setsid`` the child inherits our
+    # group and therefore remains on the safe Process.terminate fallback.
+    if pgid <= 1 and pid > 1:
+        try:
+            discovered_pgid = int(os.getpgid(pid))
+        except (ProcessLookupError, PermissionError, OSError, TypeError, ValueError):
+            discovered_pgid = 0
+        if discovered_pgid > 1 and discovered_pgid != os.getpgrp():
+            pgid = discovered_pgid
+    # The supervisor itself must never be included in a killpg call.  A reported
+    # PGID is only trusted when it is a valid private group distinct from ours.
+    if pgid <= 1 or pgid == os.getpgrp():
+        pgid = 0
+    info["process_group_id"] = pgid or None
+    if pid <= 1:
+        return info
+    try:
+        alive = bool(process.is_alive())
+    except Exception:
+        alive = False
+    group_members_before = _live_process_group_members(pgid) if pgid > 1 else []
+    if not alive and not group_members_before:
+        try:
+            process.join(timeout=0)
+        except Exception:
+            pass
+        info["process_exitcode"] = getattr(process, "exitcode", None)
+        return info
+
+    try:
+        if pgid > 1:
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            process.terminate()
+        info["term_sent"] = True
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            process.terminate()
+            info["term_sent"] = True
+        except Exception:
+            pass
+    try:
+        process.join(timeout=max(0.0, float(grace_seconds)))
+    except Exception:
+        pass
+    try:
+        still_alive = bool(process.is_alive())
+    except Exception:
+        still_alive = False
+    group_members = _live_process_group_members(pgid) if pgid > 1 else []
+    info["descendant_pids_after_term"] = list(group_members)
+    if still_alive or group_members:
+        try:
+            if pgid > 1:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                process.kill()
+            info["kill_sent"] = True
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                process.kill()
+                info["kill_sent"] = True
+            except Exception:
+                pass
+        try:
+            process.join(timeout=2.0)
+        except Exception:
+            pass
+        deadline = time.monotonic() + 2.0
+        while pgid > 1 and _live_process_group_members(pgid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    remaining_group_members = _live_process_group_members(pgid) if pgid > 1 else []
+    info["descendant_pids_after"] = list(remaining_group_members)
+    try:
+        info["process_alive_after"] = bool(process.is_alive())
+    except Exception:
+        info["process_alive_after"] = False
+    info["process_exitcode"] = getattr(process, "exitcode", None)
+    return info
+
+
+def _run_researcher_in_process(
+    tool: Any,
+    payload: dict[str, Any],
+    *,
+    evidence_dir: str,
+    cancel_event: threading.Event,
+    termination_grace_seconds: float = _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS,
+    on_process_started: Any = None,
+    on_progress: Any = None,
+) -> dict[str, Any]:
+    """Supervise one isolated researcher until it returns or is terminated."""
+    if cancel_event.is_set():
+        return {"cancelled": True, "finished_at": time.time()}
+    # Warm the process server before the caller's child deadline starts. The
+    # actual researcher remains a fresh, independently killable process below.
+    context = _warm_researcher_process_context()
+    parent_connection, child_connection = context.Pipe(duplex=False)
+    serialized_tool = _serialize_researcher_tool(tool)
+    process = context.Process(
+        target=_researcher_process_entry,
+        args=(child_connection, serialized_tool, payload, str(evidence_dir or "")),
+        name="chack-researcher-child",
+    )
+    process.daemon = False
+    registration = None
+    latest_message: dict[str, Any] | None = None
+    termination_info: dict[str, Any] = {}
+    termination_lock = threading.Lock()
+    process_started_notified = False
+
+    def _terminate_registered_child(child: Any) -> dict[str, Any]:
+        """Run one serialized TERM → grace → KILL sequence for this child.
+
+        Cancellation can arrive through the registry callback while the
+        supervisor loop is observing the same event. Without serialization, a
+        second caller can observe the already-reaped process and overwrite the
+        first caller's authoritative ``kill_sent=true`` metadata with a weaker
+        no-op record. That made physical termination reporting race-dependent
+        even though the process-group kill had already happened.
+        """
+        nonlocal termination_info
+        with termination_lock:
+            if termination_info:
+                return dict(termination_info)
+            result = _terminate_researcher_process(
+                child,
+                grace_seconds=termination_grace_seconds,
+            )
+            termination_info = dict(result)
+            try:
+                child._chack_termination_info = dict(termination_info)
+            except Exception:
+                pass
+            return dict(termination_info)
+
+    def _capture_external_termination_info() -> None:
+        """Copy metadata when cancellation terminated the child externally.
+
+        ``request_cancel`` can invoke the registered process callback from a
+        different thread while the supervisor is blocked in ``poll``/``join``.
+        In that race the supervisor observes an already-dead process and would
+        otherwise return an empty ``termination`` object even though the
+        callback performed the physical TERM/KILL escalation.
+        """
+        nonlocal termination_info
+        if termination_info:
+            return
+        try:
+            external = getattr(process, "_chack_termination_info", None)
+        except Exception:
+            external = None
+        if isinstance(external, dict) and external:
+            termination_info = dict(external)
+
+    try:
+        process.start()
+        child_connection.close()
+        # Register the actual child, not the supervisor future. Cancellation can
+        # now physically terminate a provider call blocked inside the child.
+        registration = register_process(process, _terminate_registered_child)
+        connection_open = True
+        while True:
+            if connection_open:
+                while parent_connection.poll(0.05):
+                    try:
+                        message = parent_connection.recv()
+                    except (EOFError, OSError):
+                        connection_open = False
+                        break
+                    if not isinstance(message, dict):
+                        continue
+                    kind = str(message.get("kind") or "")
+                    if kind == "progress" and callable(on_progress):
+                        event = message.get("event")
+                        on_progress(event if isinstance(event, dict) else {})
+                    elif kind == "started":
+                        try:
+                            process._chack_process_group_id = int(message.get("process_group_id") or 0)
+                        except (AttributeError, TypeError, ValueError):
+                            pass
+                        if callable(on_process_started) and not process_started_notified:
+                            process_started_notified = True
+                            started_pid = int(message.get("pid") or process.pid or 0)
+                            started_pgid = int(
+                                message.get("process_group_id")
+                                or getattr(process, "_chack_process_group_id", 0)
+                                or started_pid
+                            )
+                            try:
+                                on_process_started(started_pid, started_pgid)
+                            except TypeError:
+                                # Preserve compatibility with the original
+                                # one-argument callback used by integrations.
+                                on_process_started(started_pid)
+                    elif kind in {"result", "error"}:
+                        latest_message = message
+            if cancel_event.is_set() and process.is_alive():
+                _terminate_registered_child(process)
+            if not process.is_alive():
+                _capture_external_termination_info()
+                break
+            # A child may close its pipe while its interpreter is still
+            # unwinding. Continue supervising its process state without spinning
+            # on a permanently readable HUP pipe.
+            if not connection_open:
+                time.sleep(0.05)
+        process.join(timeout=0.5)
+        _capture_external_termination_info()
+        while parent_connection.poll():
+            try:
+                message = parent_connection.recv()
+            except (EOFError, OSError):
+                break
+            if isinstance(message, dict) and str(message.get("kind") or "") in {"result", "error"}:
+                latest_message = message
+        if cancel_event.is_set():
+            return {
+                "cancelled": True,
+                "finished_at": time.time(),
+                "process_pid": int(process.pid or 0),
+                "process_exitcode": process.exitcode,
+                "process_group_id": getattr(process, "_chack_process_group_id", None),
+                "termination": dict(termination_info),
+            }
+        if latest_message and latest_message.get("kind") == "result":
+            return {
+                "output": latest_message.get("output"),
+                "finished_at": latest_message.get("finished_at") or time.time(),
+                "process_pid": int(process.pid or 0),
+                "process_exitcode": process.exitcode,
+                "process_group_id": getattr(process, "_chack_process_group_id", None),
+                "termination": dict(termination_info),
+            }
+        if latest_message and latest_message.get("kind") == "error":
+            return {
+                "error": str(latest_message.get("error") or "Researcher child failed."),
+                "finished_at": latest_message.get("finished_at") or time.time(),
+                "process_pid": int(process.pid or 0),
+                "process_exitcode": process.exitcode,
+                "process_group_id": getattr(process, "_chack_process_group_id", None),
+                "termination": dict(termination_info),
+            }
+        return {
+            "error": f"Researcher child exited without a terminal result (exitcode={process.exitcode}).",
+            "finished_at": time.time(),
+            "process_pid": int(process.pid or 0),
+            "process_exitcode": process.exitcode,
+            "process_group_id": getattr(process, "_chack_process_group_id", None),
+            "termination": dict(termination_info),
+        }
+    finally:
+        _capture_external_termination_info()
+        if process.is_alive():
+            _terminate_researcher_process(process, grace_seconds=termination_grace_seconds)
+            _capture_external_termination_info()
+        unregister_process(registration)
+        try:
+            parent_connection.close()
+        except Exception:
+            pass
+        try:
+            child_connection.close()
+        except Exception:
+            pass
+        try:
+            process.close()
+        except Exception:
+            pass
+
+
+def _normalized_artifact_root(path: str) -> str:
+    value = str(path or "").strip()
+    if not value:
+        return ""
+    try:
+        return str(Path(value).expanduser().resolve())
+    except Exception:
+        return value
+
+
+def _research_writer_started(evidence_dir: str) -> None:
+    root = _normalized_artifact_root(evidence_dir)
+    if not root:
+        return
+    with _RESEARCH_WRITER_LOCK:
+        _ACTIVE_RESEARCH_WRITERS[root] = int(_ACTIVE_RESEARCH_WRITERS.get(root, 0)) + 1
+
+
+def _research_writer_finished(evidence_dir: str) -> None:
+    root = _normalized_artifact_root(evidence_dir)
+    if not root:
+        return
+    pending_cleanup: bool | None = None
+    with _RESEARCH_WRITER_LOCK:
+        remaining = max(0, int(_ACTIVE_RESEARCH_WRITERS.get(root, 0)) - 1)
+        if remaining:
+            _ACTIVE_RESEARCH_WRITERS[root] = remaining
+        else:
+            _ACTIVE_RESEARCH_WRITERS.pop(root, None)
+            pending_cleanup = _PENDING_RESEARCH_CLEANUPS.pop(root, None)
+    if pending_cleanup is not None:
+        cleanup_research_artifacts(root, save_artifacts=bool(pending_cleanup))
+
+
+def _cleanup_research_artifacts_when_idle(path: str, *, save_artifacts: bool) -> None:
+    """Clean a temporary workspace only after every late child writer has stopped."""
+    root = _normalized_artifact_root(path)
+    if not root:
+        return
+    with _RESEARCH_WRITER_LOCK:
+        if int(_ACTIVE_RESEARCH_WRITERS.get(root, 0)) > 0:
+            _PENDING_RESEARCH_CLEANUPS[root] = bool(save_artifacts)
+            return
+    cleanup_research_artifacts(root, save_artifacts=save_artifacts)
 
 
 class _AdministratorRunAccounting:
@@ -86,15 +768,119 @@ def _async_job_snapshot(job_id: str) -> dict[str, Any] | None:
             return None
         return {
             "job_id": raw_job.get("job_id"),
+            "kind": raw_job.get("kind"),
             "created_at": raw_job.get("created_at"),
+            "save_artifacts": bool(raw_job.get("save_artifacts")),
+            "max_parallel": raw_job.get("max_parallel"),
+            "evidence_dir": raw_job.get("evidence_dir"),
+            "expected_task_count": raw_job.get("expected_task_count"),
             "tasks": {
                 task_id: {
                     k: v for k, v in task.items()
-                    if k not in {"future", "cancel_event"}
+                    if k not in {"future", "cancel_event", "deadline_timer"}
+                    and not str(k).startswith("_")
                 }
                 for task_id, task in (raw_job.get("tasks") or {}).items()
             },
         }
+
+
+def _researcher_artifact_count(evidence_dir: str, researcher: str) -> int:
+    root = Path(str(evidence_dir or "")).expanduser()
+    short = normalize_researcher_name(researcher)
+    candidate = root / short if short else root
+    try:
+        if not candidate.is_dir():
+            return 0
+        return sum(1 for path in candidate.rglob("*") if path.is_file())
+    except Exception:
+        return 0
+
+
+def _async_completion_event_if_terminal_locked(job: dict[str, Any] | None) -> threading.Event | None:
+    tasks = (job or {}).get("tasks") or {}
+    expected = int((job or {}).get("expected_task_count") or 0)
+    if expected > 0 and len(tasks) == expected and all(
+            _async_task_is_terminal(row)
+            for row in tasks.values()
+        ):
+        event = (job or {}).get("completion_event")
+        return event if isinstance(event, threading.Event) else None
+    return None
+
+
+def _persist_async_job_ledger(job_id: str) -> None:
+    """Persist compact child state without prompts, raw outputs, or runtime objects."""
+    with _ASYNC_RESEARCH_LOCK:
+        job = _ASYNC_RESEARCH_JOBS.get(str(job_id or "").strip())
+        if not job:
+            return
+        evidence_dir = str(job.get("evidence_dir") or "").strip()
+        tasks: list[dict[str, Any]] = []
+        for task in (job.get("tasks") or {}).values():
+            tasks.append(
+                {
+                    key: task.get(key)
+                    for key in (
+                        "task_id",
+                        "researcher",
+                        "researcher_tool",
+                        "status",
+                        "created_at",
+                        "started_at",
+                        "finished_at",
+                        "last_progress_at",
+                        "deadline_at",
+                        "deadline_seconds",
+                        "current_tool",
+                        "artifact_count",
+                        "failure_reason",
+                        "latest_action",
+                        "execution_active",
+                    )
+                }
+            )
+        payload = {
+            "job_id": str(job.get("job_id") or job_id),
+            "kind": str(job.get("kind") or "async"),
+            "created_at": job.get("created_at"),
+            "updated_at": time.time(),
+            "complete": bool(tasks) and all(_async_task_is_terminal(task) for task in tasks),
+            "tasks": sorted(tasks, key=lambda row: str(row.get("task_id") or "")),
+        }
+    if not evidence_dir:
+        return
+    try:
+        ledger_dir = Path(evidence_dir).expanduser() / "researcher_jobs"
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        path = ledger_dir / f"{_async_output_name(job_id)}.json"
+        temporary = ledger_dir / f".{path.name}.{threading.get_ident()}.{uuid.uuid4().hex[:6]}.tmp"
+        temporary.write_text(_compact_json(payload), encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception:
+        return
+
+
+def _async_refresh_artifact_counts(job_id: str) -> None:
+    with _ASYNC_RESEARCH_LOCK:
+        job = _ASYNC_RESEARCH_JOBS.get(str(job_id or "").strip())
+        if not job:
+            return
+        evidence_dir = str(job.get("evidence_dir") or "")
+        researchers = {
+            str(task_id): str(task.get("researcher") or "")
+            for task_id, task in (job.get("tasks") or {}).items()
+        }
+    counts = {
+        task_id: _researcher_artifact_count(evidence_dir, researcher)
+        for task_id, researcher in researchers.items()
+    }
+    with _ASYNC_RESEARCH_LOCK:
+        job = _ASYNC_RESEARCH_JOBS.get(str(job_id or "").strip())
+        for task_id, count in counts.items():
+            task = (job or {}).get("tasks", {}).get(task_id)
+            if task is not None:
+                task["artifact_count"] = int(count)
 
 
 def _async_wait_for_completion(job_id: str, timeout_seconds: int) -> bool:
@@ -109,19 +895,22 @@ def _async_wait_for_completion(job_id: str, timeout_seconds: int) -> bool:
 
 def _async_jobs_have_nonterminal_tasks(job_ids: list[str]) -> bool:
     """Return true while any administrator-owned async task can still write evidence."""
-    terminal = {"done", "error", "cancelled"}
     with _ASYNC_RESEARCH_LOCK:
         for job_id in job_ids:
             job = _ASYNC_RESEARCH_JOBS.get(str(job_id or "").strip())
             tasks = (job or {}).get("tasks") or {}
-            if tasks and any(str(task.get("status") or "") not in terminal for task in tasks.values()):
+            if tasks and any(not _async_task_is_unwound_terminal(task) for task in tasks.values()):
                 return True
     return False
 
 
 def _async_nonterminal_job_ids(job_ids: list[str]) -> list[str]:
-    """Return owned jobs that still have work capable of changing their evidence."""
-    terminal = {"done", "error", "cancelled"}
+    """Return jobs that are not logically terminal to the caller.
+
+    Cancellation and deadline expiry are published immediately so polling can
+    return and late output cannot revive a task. Physical process/writer
+    unwinding is tracked separately by ``_async_unwound_job_ids``.
+    """
     pending: list[str] = []
     with _ASYNC_RESEARCH_LOCK:
         for job_id in job_ids:
@@ -130,19 +919,32 @@ def _async_nonterminal_job_ids(job_ids: list[str]) -> list[str]:
                 continue
             job = _ASYNC_RESEARCH_JOBS.get(normalized)
             tasks = (job or {}).get("tasks") or {}
-            if tasks and any(str(task.get("status") or "") not in terminal for task in tasks.values()):
+            if tasks and any(not _async_task_is_terminal(task) for task in tasks.values()):
+                pending.append(normalized)
+    return pending
+
+
+def _async_unwound_job_ids(job_ids: list[str]) -> list[str]:
+    """Return jobs whose children or evidence writers are still unwinding."""
+    pending: list[str] = []
+    with _ASYNC_RESEARCH_LOCK:
+        for job_id in job_ids:
+            normalized = str(job_id or "").strip()
+            if not normalized:
+                continue
+            job = _ASYNC_RESEARCH_JOBS.get(normalized)
+            tasks = (job or {}).get("tasks") or {}
+            if tasks and any(not _async_task_is_unwound_terminal(task) for task in tasks.values()):
                 pending.append(normalized)
     return pending
 
 
 def _wait_for_async_jobs_terminal(job_ids: list[str], deadline: float) -> list[str]:
-    """Wait for owned async jobs before harvesting their responses.
+    """Wait for owned async jobs to become logically terminal.
 
-    The administrator can return a valid-looking synthesis while its async
-    researcher futures are still running.  Harvesting at that point loses the
-    required responses and leaves writers alive after the queue call returns.
-    Wait on completion events until the administrator's own deadline, then
-    return the still-pending jobs so the caller can fail closed and cancel them.
+    A terminal cancellation/deadline is visible immediately; this function must
+    not block on a provider call that the physical supervisor is still killing.
+    Use ``_wait_for_async_jobs_unwound`` only for bounded cleanup decisions.
     """
     pending = _async_nonterminal_job_ids(job_ids)
     while pending:
@@ -151,12 +953,24 @@ def _wait_for_async_jobs_terminal(job_ids: list[str], deadline: float) -> list[s
             break
         # Wake periodically to re-check every job: one slow job must not hide
         # another job that completed while its event was being awaited.
-        wait_seconds = min(5, int(remaining))
+        wait_seconds = 5 if remaining == float("inf") else min(5, int(remaining))
         if wait_seconds > 0:
             _async_wait_for_completion(pending[0], wait_seconds)
         else:
             time.sleep(min(0.1, remaining))
         pending = _async_nonterminal_job_ids(job_ids)
+    return pending
+
+
+def _wait_for_async_jobs_unwound(job_ids: list[str], deadline: float) -> list[str]:
+    """Wait boundedly for physical child/writer cleanup after terminality."""
+    pending = _async_unwound_job_ids(job_ids)
+    while pending:
+        remaining = float(deadline) - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.05, remaining))
+        pending = _async_unwound_job_ids(job_ids)
     return pending
 
 
@@ -192,22 +1006,50 @@ def _async_submit(fn, *args):
 
 
 def _async_mark_task_running_or_cancelled(job_id: str, task_id: str, tool_name: str, started_at: float) -> bool:
+    should_run = False
+    completion_event = None
     with _ASYNC_RESEARCH_LOCK:
         job = _ASYNC_RESEARCH_JOBS.get(job_id)
         task = job["tasks"].get(task_id) if job else None
-        if task and task.get("cancel_requested"):
-            task["status"] = "cancelled"
-            task["started_at"] = started_at
+        task_deadline = float(task.get("deadline_at") or 0.0) if task else 0.0
+        if task and task_deadline > 0 and started_at >= task_deadline:
+            task["status"] = "deadline_exceeded"
+            task["deadline_exceeded"] = True
+            task["cancel_requested"] = True
             task["finished_at"] = started_at
+            task["failure_reason"] = "Researcher deadline elapsed before it acquired an execution slot."
+            task["latest_action"] = "deadline exceeded before process launch"
+            task["execution_active"] = False
             task["last_activity_at"] = started_at
-            task["latest_action"] = "cancelled before start"
-            return False
-        if task:
+            task["last_progress_at"] = started_at
+            completion_event = _async_completion_event_if_terminal_locked(job)
+        elif task and (
+            task.get("cancel_requested")
+            or str(task.get("status") or "") in _RESEARCHER_TERMINAL_STATUSES
+        ):
+            if str(task.get("status") or "") not in _RESEARCHER_TERMINAL_STATUSES:
+                task["status"] = "cancelled"
+                task["finished_at"] = started_at
+                task["failure_reason"] = "Researcher cancelled before start."
+            task["started_at"] = task.get("started_at") or started_at
+            task["execution_active"] = False
+            task["last_activity_at"] = started_at
+            task["last_progress_at"] = started_at
+            task["latest_action"] = str(task.get("status") or "cancelled")
+            completion_event = _async_completion_event_if_terminal_locked(job)
+        elif task:
             task["status"] = "running"
             task["started_at"] = started_at
+            task["execution_active"] = True
             task["last_activity_at"] = started_at
+            task["last_progress_at"] = started_at
+            task["current_tool"] = tool_name
             task["latest_action"] = f"running {tool_name}"
-    return True
+            should_run = True
+    if isinstance(completion_event, threading.Event):
+        completion_event.set()
+    _persist_async_job_ledger(job_id)
+    return should_run
 
 
 def _async_record_task_progress(job_id: str, task_id: str, event: dict[str, Any]) -> None:
@@ -222,11 +1064,15 @@ def _async_record_task_progress(job_id: str, task_id: str, event: dict[str, Any]
         events.append(event)
         if len(events) > 20:
             del events[:-20]
-        task["last_activity_at"] = time.time()
+        now = time.time()
+        task["last_activity_at"] = now
+        task["last_progress_at"] = now
+        task["current_tool"] = str(tool or task.get("current_tool") or "")
         task["latest_action"] = f"{event_type} {tool}".strip()
         if event_type == "tool_started" and tool:
             live_counts = task.setdefault("live_tool_call_counts", {})
             live_counts[tool] = int(live_counts.get(tool, 0)) + 1
+    _persist_async_job_ledger(job_id)
 
 
 def _async_register_task(job_id: str, task_id: str, task: dict[str, Any]) -> None:
@@ -235,6 +1081,7 @@ def _async_register_task(job_id: str, task_id: str, task: dict[str, Any]) -> Non
         if not job:
             return
         job.setdefault("tasks", {})[task_id] = task
+    _persist_async_job_ledger(job_id)
 
 
 def _async_set_task_future(job_id: str, task_id: str, future: Any) -> None:
@@ -260,18 +1107,31 @@ def _persist_async_researcher_output(
         return
     parsed = result.get("parsed_response") if isinstance(result.get("parsed_response"), dict) else None
     if parsed is not None:
-        response = deepcopy(parsed)
+        response = normalize_researcher_response_payload(parsed)
         response.setdefault("researcher_tool", tool_name)
     else:
         response = researcher_response_from_output(tool_name, result.get("output"))
     if response is None:
-        return
+        response = {
+            "research_worked": False,
+            "failure_reason": "Researcher did not return parseable JSON.",
+            "overall_summary": "The unparseable researcher response was preserved in the paired raw output file.",
+            "findings": [],
+            "gaps": ["The researcher response could not be parsed into the configured structured output."],
+            "open_topics": [],
+            "full_research_review": str(result.get("output") or ""),
+            "researcher_tool": tool_name,
+        }
     root = Path(str(evidence_dir or "")).expanduser()
     try:
         output_dir = root / "researcher_outputs"
         output_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"async_{_async_output_name(task_id)}_{_async_output_name(tool_name)}.json"
-        (output_dir / filename).write_text(_compact_json(response), encoding="utf-8")
+        stem = f"async_{_async_output_name(task_id)}_{_async_output_name(tool_name)}"
+        (output_dir / f"{stem}.json").write_text(_compact_json(response), encoding="utf-8")
+        if result.get("output") is not None:
+            raw_value = result.get("output")
+            raw_text = raw_value if isinstance(raw_value, str) else _compact_json(raw_value)
+            (output_dir / f"{stem}.raw.txt").write_text(raw_text, encoding="utf-8")
     except Exception:
         return
 
@@ -279,49 +1139,298 @@ def _persist_async_researcher_output(
 def _async_mark_task_done(job_id: str, task_id: str, future: Any) -> None:
     try:
         result = future.result()
-        status = "cancelled" if result.get("cancelled") else "done"
-        error = ""
+        if not isinstance(result, dict):
+            result = {"output": result}
+        if result.get("cancelled"):
+            proposed_status = "cancelled"
+            proposed_error = ""
+        elif result.get("error"):
+            proposed_status = "error"
+            proposed_error = str(result.get("error") or "Researcher failed.")
+        elif not isinstance(result.get("parsed_response"), dict):
+            proposed_status = "error"
+            proposed_error = "Researcher did not return parseable final researcher JSON."
+        else:
+            proposed_status = "done"
+            proposed_error = ""
     except Exception as exc:
         result = {}
-        status = "cancelled" if future.cancelled() else "error"
-        error = f"{type(exc).__name__}: {exc}"
+        proposed_status = "cancelled" if future.cancelled() else "error"
+        proposed_error = f"{type(exc).__name__}: {exc}"
+
     evidence_dir = ""
+    researcher = ""
     tool_name = ""
+    terminal_status = ""
+    deadline_timer = None
+    writer_registered = False
+    termination_metadata: dict[str, Any] = {}
     with _ASYNC_RESEARCH_LOCK:
         job = _ASYNC_RESEARCH_JOBS.get(job_id)
         task = job["tasks"].get(task_id) if job else None
         evidence_dir = str((job or {}).get("evidence_dir") or "")
         if task:
+            researcher = str(task.get("researcher") or "")
             tool_name = str(task.get("researcher_tool") or result.get("researcher_tool") or "")
+            if isinstance(result.get("termination"), dict):
+                termination_metadata = deepcopy(result["termination"])
+            terminal_status = str(task.get("status") or "")
+            deadline_timer = task.get("deadline_timer")
+            deadline_at = float(task.get("deadline_at") or 0.0)
+            if terminal_status not in _RESEARCHER_TERMINAL_STATUSES:
+                if deadline_at > 0 and time.time() >= deadline_at:
+                    terminal_status = "deadline_exceeded"
+                    task["deadline_exceeded"] = True
+                    task["status"] = terminal_status
+                    task["failure_reason"] = str(task.get("failure_reason") or task.get("error") or "Researcher child exceeded its deadline.")
+                else:
+                    task["completion_claimed"] = True
+    if isinstance(deadline_timer, threading.Timer):
+        deadline_timer.cancel()
 
-    # Persist successful output before publishing a terminal task state or waking
-    # completion-aware polls. Otherwise a poll can observe "done" while the
-    # durable result file is still absent.
-    if status == "done" and result:
+    # Persist every returned payload before publishing its terminal state. Parseable
+    # success, unparseable failure, cancellation diagnostics, and late post-deadline
+    # output all remain auditable; only a status="done" response counts as coverage.
+    if result:
         _persist_async_researcher_output(evidence_dir, task_id, tool_name, result)
 
+    artifact_count = _researcher_artifact_count(evidence_dir, researcher)
     completion_event = None
     with _ASYNC_RESEARCH_LOCK:
         job = _ASYNC_RESEARCH_JOBS.get(job_id)
         task = job["tasks"].get(task_id) if job else None
         if task:
-            task["status"] = status
-            task["finished_at"] = time.time()
-            task["last_activity_at"] = task["finished_at"]
-            task["latest_action"] = status
-            if error:
-                task["error"] = error
-            if result:
-                task["result"] = result
-        tasks = (job or {}).get("tasks") or {}
-        expected = int((job or {}).get("expected_task_count") or 0)
-        if expected > 0 and len(tasks) == expected and all(
-            str(row.get("status") or "") in {"done", "error", "cancelled"}
-            for row in tasks.values()
-        ):
-            completion_event = (job or {}).get("completion_event")
+            now = time.time()
+            existing_status = str(task.get("status") or terminal_status)
+            writer_registered = bool(task.get("writer_registered"))
+            task["writer_registered"] = False
+            task["execution_active"] = False
+            task["current_tool"] = ""
+            task["artifact_count"] = artifact_count
+            task["last_activity_at"] = now
+            task["last_progress_at"] = max(float(task.get("last_progress_at") or 0.0), now)
+            task["completion_claimed"] = False
+            if termination_metadata:
+                task["termination"] = termination_metadata
+                for key in (
+                    "process_pid",
+                    "process_group_id",
+                    "process_exitcode",
+                    "process_alive_after",
+                    "descendant_pids_after_term",
+                    "descendant_pids_after",
+                ):
+                    if termination_metadata.get(key) is not None:
+                        task[key] = termination_metadata[key]
+            if existing_status in {"deadline_exceeded", "cancelled"}:
+                task["status"] = existing_status
+                task["late_finished_at"] = now
+                task["latest_action"] = f"{existing_status}; worker unwound"
+                task.pop("result", None)
+            else:
+                task["status"] = proposed_status
+                task["finished_at"] = now
+                task["latest_action"] = proposed_status
+                if proposed_error:
+                    task["error"] = proposed_error
+                    task["failure_reason"] = proposed_error
+                elif proposed_status == "cancelled":
+                    task["failure_reason"] = str(task.get("failure_reason") or "Researcher cancelled.")
+                if result and proposed_status in {"done", "error", "cancelled"}:
+                    # Keep diagnostics losslessly even when the result is invalid or
+                    # cancelled. Status remains non-success, so it cannot count as
+                    # researcher coverage or revive a timed-out task.
+                    task["result"] = result
+                else:
+                    task.pop("result", None)
+            completion_event = _async_completion_event_if_terminal_locked(job)
     if isinstance(completion_event, threading.Event):
         completion_event.set()
+    _persist_async_job_ledger(job_id)
+    if writer_registered:
+        _research_writer_finished(evidence_dir)
+
+
+def _async_request_task_deadline(
+    job_id: str,
+    task_id: str,
+    cancel_event: threading.Event,
+    timeout_seconds: int,
+) -> None:
+    """Publish a logical deadline and request physical child termination."""
+    should_cancel = False
+    future = None
+    completion_event = None
+    evidence_dir = ""
+    researcher = ""
+    with _ASYNC_RESEARCH_LOCK:
+        job = _ASYNC_RESEARCH_JOBS.get(str(job_id or "").strip())
+        task = (job or {}).get("tasks", {}).get(str(task_id or "").strip())
+        if (
+            not task
+            or str(task.get("status") or "") in _RESEARCHER_TERMINAL_STATUSES
+            or bool(task.get("completion_claimed"))
+        ):
+            return
+        now = time.time()
+        evidence_dir = str((job or {}).get("evidence_dir") or "")
+        researcher = str(task.get("researcher") or "")
+        task["deadline_exceeded"] = True
+        task["cancel_requested"] = True
+        task["deadline_seconds"] = int(timeout_seconds)
+        task["error"] = f"Researcher child exceeded its {int(timeout_seconds)}s deadline."
+        task["failure_reason"] = task["error"]
+        task["status"] = "deadline_exceeded"
+        task["finished_at"] = now
+        task["latest_action"] = "deadline exceeded; cancellation requested"
+        task["last_activity_at"] = now
+        task["last_progress_at"] = max(float(task.get("last_progress_at") or 0.0), now)
+        future = task.get("future")
+        should_cancel = True
+        completion_event = _async_completion_event_if_terminal_locked(job)
+    artifact_count = _researcher_artifact_count(evidence_dir, researcher)
+    with _ASYNC_RESEARCH_LOCK:
+        job = _ASYNC_RESEARCH_JOBS.get(str(job_id or "").strip())
+        task = (job or {}).get("tasks", {}).get(str(task_id or "").strip())
+        if task is not None:
+            task["artifact_count"] = artifact_count
+    if future is not None:
+        future.cancel()
+    if should_cancel:
+        request_cancel(cancel_event)
+    if isinstance(completion_event, threading.Event):
+        completion_event.set()
+    _persist_async_job_ledger(job_id)
+
+
+def _async_task_health(task: dict[str, Any], *, now: float | None = None) -> str:
+    """Return a deterministic operational health label without guessing success."""
+    current = float(now if now is not None else time.time())
+    status = str(task.get("status") or "unknown")
+    execution_active = bool(task.get("execution_active"))
+    if status in _RESEARCHER_TERMINAL_STATUSES:
+        if execution_active:
+            return "unwinding"
+        if status == "done":
+            return "succeeded"
+        if status == "cancelled":
+            return "cancelled"
+        return "failed"
+    try:
+        deadline_at = float(task.get("deadline_at") or 0.0)
+    except (TypeError, ValueError):
+        deadline_at = 0.0
+    if deadline_at and deadline_at <= current:
+        return "deadline_due"
+    if deadline_at and deadline_at - current <= 120:
+        return "deadline_near"
+    if status == "queued":
+        return "waiting"
+    try:
+        last_progress = float(task.get("last_progress_at") or task.get("started_at") or current)
+    except (TypeError, ValueError):
+        last_progress = current
+    idle_seconds = max(0.0, current - last_progress)
+    tool_name = str(task.get("researcher_tool") or "")
+    stale_after = 900 if tool_name in _BROWSER_RESEARCHER_TOOLS else 300
+    if status == "running" and idle_seconds >= stale_after:
+        # This is an observation, not proof that the provider is dead. The hard
+        # deadline remains authoritative, especially for browser researchers.
+        return "no_recent_progress"
+    return "healthy"
+
+
+def _async_cancel_task(
+    job_id: str,
+    task_id: str,
+    *,
+    reason: str,
+    allow_running_browser: bool = False,
+) -> dict[str, Any]:
+    """Cancel one task while preserving siblings and terminal-state accounting."""
+    job_key = str(job_id or "").strip()
+    task_key = str(task_id or "").strip()
+    clean_reason = " ".join(str(reason or "").split())[:500]
+    future = None
+    timer = None
+    cancel_event = None
+    completion_event = None
+    was_active = False
+    with _ASYNC_RESEARCH_LOCK:
+        job = _ASYNC_RESEARCH_JOBS.get(job_key)
+        if not job:
+            return {"job_found": False, "job_id": job_id, "error": "Unknown async researcher job id."}
+        task = (job.get("tasks") or {}).get(task_key)
+        if not task:
+            return {
+                "job_found": True,
+                "task_found": False,
+                "job_id": job_id,
+                "task_id": task_id,
+                "error": "Unknown researcher task id for this job.",
+            }
+        status = str(task.get("status") or "unknown")
+        was_active = bool(task.get("execution_active"))
+        tool_name = str(task.get("researcher_tool") or "")
+        if status in _RESEARCHER_TERMINAL_STATUSES:
+            return {
+                "job_found": True,
+                "task_found": True,
+                "job_id": job_id,
+                "task_id": task_id,
+                "status": status,
+                "execution_active": was_active,
+                "cancellation_requested": False,
+                "already_terminal": True,
+            }
+        if was_active and tool_name in _BROWSER_RESEARCHER_TOOLS and not allow_running_browser:
+            return {
+                "job_found": True,
+                "task_found": True,
+                "job_id": job_id,
+                "task_id": task_id,
+                "status": status,
+                "health": _async_task_health(task),
+                "cancellation_requested": False,
+                "protected": True,
+                "error": (
+                    "Running ChatGPT browser researchers are protected from model-initiated cancellation; "
+                    "their configured hard deadline or the outer caller owns termination."
+                ),
+            }
+        now = time.time()
+        task["cancel_requested"] = True
+        task["status"] = "cancelled"
+        task["finished_at"] = now
+        task["last_activity_at"] = now
+        task["last_progress_at"] = max(float(task.get("last_progress_at") or 0.0), now)
+        task["failure_reason"] = f"Researcher cancelled by administrator: {clean_reason}"
+        task["latest_action"] = "cancelled; worker termination requested" if was_active else "cancelled before start"
+        future = task.get("future")
+        timer = task.get("deadline_timer")
+        cancel_event = task.get("cancel_event")
+        completion_event = _async_completion_event_if_terminal_locked(job)
+    if isinstance(timer, threading.Timer):
+        timer.cancel()
+    if future is not None:
+        future.cancel()
+    process_kill_requested = False
+    if isinstance(cancel_event, threading.Event):
+        process_kill_requested = request_cancel(cancel_event)
+    if isinstance(completion_event, threading.Event):
+        completion_event.set()
+    _persist_async_job_ledger(job_key)
+    return {
+        "job_found": True,
+        "task_found": True,
+        "job_id": job_id,
+        "task_id": task_id,
+        "status": "cancelled",
+        "execution_active": was_active,
+        "cancellation_requested": True,
+        "process_kill_requested": process_kill_requested,
+        "reason": clean_reason,
+    }
 
 
 def _async_cancel_job(job_id: str) -> dict[str, Any]:
@@ -330,33 +1439,52 @@ def _async_cancel_job(job_id: str) -> dict[str, Any]:
     already_finished: list[str] = []
     process_kill_requested: list[str] = []
     cancel_events: list[tuple[str, threading.Event]] = []
+    futures: list[Any] = []
+    timers: list[threading.Timer] = []
+    completion_event = None
     with _ASYNC_RESEARCH_LOCK:
         job = _ASYNC_RESEARCH_JOBS.get(str(job_id or "").strip())
         if not job:
             return {"job_found": False, "job_id": job_id, "error": "Unknown async researcher job id."}
         for task_id, task in (job.get("tasks") or {}).items():
-            if task.get("status") in {"done", "error", "cancelled"}:
+            if task.get("status") in _RESEARCHER_TERMINAL_STATUSES:
                 already_finished.append(task_id)
                 continue
+            now = time.time()
+            was_active = bool(task.get("execution_active"))
+            task["cancel_requested"] = True
+            task["status"] = "cancelled"
+            task["finished_at"] = now
+            task["last_activity_at"] = now
+            task["last_progress_at"] = max(float(task.get("last_progress_at") or 0.0), now)
+            task["failure_reason"] = "Researcher cancellation requested."
+            task["latest_action"] = "cancelled; worker termination requested" if was_active else "cancelled before start"
             future = task.get("future")
-            if future is not None and future.cancel():
-                task["status"] = "cancelled"
-                task["latest_action"] = "cancelled before start"
-                task["finished_at"] = time.time()
-                task["last_activity_at"] = task["finished_at"]
-                cancelled.append(task_id)
-            else:
-                task["cancel_requested"] = True
-                task["status"] = "cancelling"
-                task["latest_action"] = "cancellation requested"
-                task["last_activity_at"] = time.time()
-                cancel_event = task.get("cancel_event")
+            if future is not None:
+                futures.append(future)
+            timer = task.get("deadline_timer")
+            if isinstance(timer, threading.Timer):
+                timers.append(timer)
+            cancel_event = task.get("cancel_event")
+            if isinstance(cancel_event, threading.Event):
+                cancel_events.append((task_id, cancel_event))
+            if was_active:
                 cancellation_requested.append(task_id)
-                if isinstance(cancel_event, threading.Event):
-                    cancel_events.append((task_id, cancel_event))
+            else:
+                cancelled.append(task_id)
+        completion_event = _async_completion_event_if_terminal_locked(job)
+    for timer in timers:
+        timer.cancel()
+    # Future.cancel() may synchronously invoke callbacks that acquire the job lock;
+    # it must therefore never be called while _ASYNC_RESEARCH_LOCK is held.
+    for future in futures:
+        future.cancel()
     for task_id, cancel_event in cancel_events:
         if request_cancel(cancel_event):
             process_kill_requested.append(task_id)
+    if isinstance(completion_event, threading.Event):
+        completion_event.set()
+    _persist_async_job_ledger(job_id)
     return {
         "job_found": True,
         "job_id": job_id,
@@ -364,7 +1492,7 @@ def _async_cancel_job(job_id: str) -> dict[str, Any]:
         "cancellation_requested": cancellation_requested,
         "process_kill_requested": process_kill_requested,
         "already_finished": already_finished,
-        "note": "Queued tasks are cancelled before start. Running Codex/Claude subprocess trees are terminated when the backend has registered them for this async task.",
+        "note": "Cancellation is terminal immediately; registered subprocess trees and remote browser jobs are terminated while in-process cleanup unwinds.",
     }
 
 # Canonical registry of the researchers the administrator can orchestrate.
@@ -468,7 +1596,9 @@ You are a research administrator tasked with a specific research and must obtain
 4. Stop when the evidence supports a defensible answer or further work has low value. Preserve enough runtime to synthesize; state remaining gaps instead of timing out while chasing completeness.
 
 ### LONG-RUNNING RESEARCHERS
-Prefer `start_researchers_async` and completion-aware `poll_researchers_async` waits for long work. Poll once immediately after launch. Ordinary jobs normally use 30-120 second waits; ChatGPT browser jobs use 300-600 seconds and may take tens of minutes or up to 180 minutes. Queued/starting for a few minutes is not failure.
+Prefer `start_researchers_async` and completion-aware `poll_researchers_async` waits for long work. Poll once immediately after launch. `poll_researchers_async` is status-only by default (`include_outputs=false`): this preserves every full result outside your conversation while returning only lifecycle, health, heartbeat, tool counts, artifact counts, and failures. Do not set `include_outputs=true` during routine polling; that compatibility option injects each finished child's bounded digest again on every poll. A valid result contains only `research_worked`, `failure_reason`, `overall_summary`, `findings[{claim,summary}]`, `gaps`, and `open_topics`; unparseable results fall back to raw text. Treat open topics as optional leads, not mandatory tasks: launch a follow-up only when it can materially improve the requested conclusion within the remaining budget. Ordinary jobs normally use 30-120 second waits; ChatGPT browser jobs use 300-600 seconds and may take tens of minutes or up to 180 minutes. Queued/starting for a few minutes is not failure.
+Use `list_researcher_jobs` if you lose a job id. Use `get_researcher_task` for one child's current diagnostics. When a child is done, call `get_researcher_result` with `view=summary` first. Read the lossless `parsed` or exact `raw` view page by page using `next_offset` whenever detailed evidence, citations, contradictions, provenance, or omitted context matters. Full reviews and evidence artifacts remain available even though summaries and status polls omit them.
+Use `cancel_researcher_task` to stop only a duplicated/stale ordinary child while preserving siblings, and `cancel_researchers_async` only when the whole ordinary job is no longer useful. Use `retry_researcher_task` at most once and only for a concrete transient failure or material missing source family; it privately reuses the original prompt. A `no_recent_progress` health label is a warning to inspect, not proof of death.
 Never use `wait(..., terminate=true)`, cancellation, or process termination on a running ChatGPT browser researcher merely because it is slow or finalizing. Cancel it only on explicit user request, a proven terminal error, or the configured hard timeout. Ordinary async work may be cancelled when clearly stalled, duplicated, or no longer useful.
 
 ### EVIDENCE AND OUTPUT
@@ -657,10 +1787,11 @@ def _researcher_failures_from_poll_output(output: Any) -> list[dict[str, Any]]:
             tool_name = RESEARCHER_REGISTRY.get(researcher, ("", ""))[1]
         if not tool_name:
             continue
-        if parsed is not None or researcher_response_from_output(tool_name, result.get("output")) is not None:
-            continue
         status = str(task.get("status") or result.get("status") or "unparsed")
-        if status not in {"done", "error", "cancelled", "unparsed"} and not result.get("output") and not task.get("error"):
+        parsed_ok = parsed is not None or researcher_response_from_output(tool_name, result.get("output")) is not None
+        if status == "done" and parsed_ok:
+            continue
+        if status not in {"done", "error", "cancelled", "deadline_exceeded", "unparsed"} and not result.get("output") and not task.get("error"):
             continue
         row = _researcher_failure_record(
             tool_name,
@@ -706,7 +1837,12 @@ def _researcher_failures_from_batch_output(output: Any) -> list[dict[str, Any]]:
             continue
         if isinstance(row.get("parsed_response"), dict) or researcher_response_from_output(tool_name, row.get("output")) is not None:
             continue
-        failure = _researcher_failure_record(tool_name, status="unparsed", output=row.get("output"))
+        failure = _researcher_failure_record(
+            tool_name,
+            status=str(row.get("status") or "unparsed"),
+            output=row.get("output"),
+            error=str(row.get("error") or ""),
+        )
         if failure is not None:
             failures.append(failure)
     for row in payload.get("errors") or []:
@@ -716,7 +1852,11 @@ def _researcher_failures_from_batch_output(output: Any) -> list[dict[str, Any]]:
         if not tool_name:
             researcher = normalize_researcher_name(str(row.get("researcher") or ""))
             tool_name = RESEARCHER_REGISTRY.get(researcher, ("", ""))[1]
-        failure = _researcher_failure_record(tool_name, status="error", error=str(row.get("error") or ""))
+        failure = _researcher_failure_record(
+            tool_name,
+            status=str(row.get("status") or "error"),
+            error=str(row.get("error") or ""),
+        )
         if failure is not None:
             failures.append(failure)
     return failures
@@ -767,8 +1907,19 @@ def _researcher_responses_from_poll_output(output: Any) -> list[dict[str, Any]]:
     for task in raw_tasks:
         if not isinstance(task, dict):
             continue
+        if str(task.get("status") or "") != "done":
+            continue
         result = task.get("result") if isinstance(task.get("result"), dict) else {}
         parsed = result.get("parsed_response") if isinstance(result.get("parsed_response"), dict) else None
+        # Poll projections deliberately contain the digest fields but omit the full
+        # review. Harvest the canonical response from async state/files instead of
+        # collecting this bounded copy as a second researcher result.
+        if (
+            parsed is not None
+            and "overall_summary" in parsed
+            and "full_research_review" not in parsed
+        ):
+            continue
         tool_name = str(
             task.get("researcher_tool")
             or result.get("researcher_tool")
@@ -785,6 +1936,24 @@ def _researcher_responses_from_poll_output(output: Any) -> list[dict[str, Any]]:
         else:
             response = researcher_response_from_output(tool_name, result.get("output"))
         if response is not None:
+            response.setdefault("researcher_tool", tool_name)
+            counts = task.get("tool_call_counts")
+            if not isinstance(counts, dict):
+                counts = result.get("tool_call_counts")
+            if not isinstance(counts, dict):
+                counts = response.get("tool_call_counts")
+            if isinstance(counts, dict):
+                response["tool_call_counts"] = deepcopy(counts)
+            if task.get("total_tool_calls") is not None:
+                total_calls = task.get("total_tool_calls")
+            elif result.get("total_tool_calls") is not None:
+                total_calls = result.get("total_tool_calls")
+            else:
+                total_calls = response.get("total_tool_calls")
+            if total_calls is not None:
+                response["total_tool_calls"] = int(total_calls or 0)
+            elif isinstance(counts, dict):
+                response["total_tool_calls"] = int(sum(int(value or 0) for value in counts.values()))
             responses.append(response)
     return responses
 
@@ -873,6 +2042,41 @@ def _dedupe_researcher_responses(responses: list[dict[str, Any]]) -> list[dict[s
         seen.add(marker)
         unique.append(response)
     return unique
+
+
+def _response_has_useful_evidence(response: dict[str, Any]) -> bool:
+    """Return whether a terminal researcher response contains usable evidence."""
+    if not isinstance(response, dict) or response.get("research_worked") is not True:
+        return False
+    full_review = str(response.get("full_research_review") or "").strip()
+    overall_summary = str(response.get("overall_summary") or "").strip()
+    findings = response.get("findings")
+    if not full_review and not overall_summary:
+        return False
+    if not isinstance(findings, list) or not any(
+        isinstance(item, dict)
+        and str(item.get("claim") or "").strip()
+        and str(item.get("summary") or "").strip()
+        for item in findings
+    ):
+        return False
+    return True
+
+
+def _researcher_response_is_terminal_and_parseable(response: dict[str, Any]) -> bool:
+    """Compatibility predicate for normalized terminal researcher payloads."""
+    return isinstance(response, dict) and response.get("research_worked") is True
+
+
+def _administrator_synthesis_is_valid(payload: dict[str, Any]) -> bool:
+    """Require a real administrator synthesis before allowing success."""
+    if not isinstance(payload, dict):
+        return False
+    conclusions = str(payload.get("administrator_conclusions") or "").strip()
+    if len(conclusions) < 40:
+        return False
+    normalized = re.sub(r"\s+", " ", conclusions).casefold()
+    return normalized not in {"summary", "conclusions", "n/a", "none", "ok"}
 
 
 def _researcher_call_counts(
@@ -994,6 +2198,33 @@ def _partial_artifact_failures(
     return rows
 
 
+def _persist_researcher_step_raw_outputs(evidence_dir: str, steps: list[Any]) -> list[str]:
+    """Persist exact direct/batch researcher tool outputs outside LLM-facing payloads."""
+
+    root = Path(str(evidence_dir or "")).expanduser()
+    researcher_tools = {tool_name for _short, (_attr, tool_name) in RESEARCHER_REGISTRY.items()}
+    output_dir = root / "researcher_outputs"
+    written: list[str] = []
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        index = 0
+        for step in steps or []:
+            tool_name = _step_tool_name(step)
+            if tool_name not in researcher_tools and tool_name != "run_researchers_batch":
+                continue
+            output = _step_tool_output(step)
+            if output in (None, ""):
+                continue
+            index += 1
+            raw_text = output if isinstance(output, str) else _compact_json(output)
+            filename = f"raw_step_{index:03d}_{_safe_output_name(tool_name, 'researcher')}.raw.txt"
+            (output_dir / filename).write_text(raw_text, encoding="utf-8")
+            written.append(str(Path("researcher_outputs") / filename))
+    except Exception:
+        return written
+    return written
+
+
 def finalize_researcher_administrator_output(
     output: str,
     *,
@@ -1007,9 +2238,21 @@ def finalize_researcher_administrator_output(
 ) -> str:
     payload = _json_from_output(output)
     if payload is None:
-        return output
+        # Never pass through an unparseable administrator result: callers must
+        # receive an explicit fail-closed outcome rather than infer success from
+        # a non-empty model response.
+        payload = {
+            "research_worked": False,
+            "failure_reason": "Researcher administrator did not return parseable JSON.",
+            "administrator_conclusions": "",
+        }
+    raw_responses = list(researcher_responses or []) + _researcher_responses_from_steps(steps)
     responses = _dedupe_researcher_responses(
-        list(researcher_responses or []) + _researcher_responses_from_steps(steps)
+        [
+            normalize_researcher_response_payload(response)
+            for response in raw_responses
+            if isinstance(response, dict)
+        ]
     )
     payload["researcher_responses"] = responses
     failures = list(researcher_failures or []) + _researcher_failures_from_steps(steps)
@@ -1037,7 +2280,7 @@ def finalize_researcher_administrator_output(
         successful_tools = {
             str(response.get("researcher_tool") or "").strip()
             for response in responses
-            if isinstance(response, dict) and response.get("research_worked") is True
+            if _response_has_useful_evidence(response)
         }
         missing_tools = [name for name in required_tools if name not in successful_tools]
         payload["required_researchers"] = required_tools
@@ -1047,6 +2290,40 @@ def finalize_researcher_administrator_output(
             existing_reason = str(payload.get("failure_reason") or "").strip()
             payload["research_worked"] = False
             payload["failure_reason"] = f"{existing_reason} {message}".strip()
+
+    # `research_worked=true` is a claim about the complete run, not about the
+    # administrator having emitted a schema-shaped object. Require at least one
+    # terminal, parseable researcher response with substantive evidence and a
+    # non-trivial administrator synthesis. Failed/partial researchers remain in
+    # the diagnostic fields, but cannot themselves satisfy this gate.
+    if payload.get("research_worked") is True:
+        valid_responses = [
+            response for response in responses if _response_has_useful_evidence(response)
+        ]
+        invalid_terminal_failures = [
+            failure
+            for failure in payload["researcher_failures"]
+            if str(failure.get("status") or "").strip().lower()
+            in {"queued", "running", "cancelling", "unknown", "unwinding"}
+        ]
+        reasons: list[str] = []
+        if not responses:
+            reasons.append("No terminal researcher response was collected.")
+        elif not valid_responses:
+            reasons.append("No terminal researcher response contained useful findings or evidence.")
+        if not _administrator_synthesis_is_valid(payload):
+            reasons.append("Administrator conclusions are missing or are not a substantive synthesis.")
+        if invalid_terminal_failures:
+            reasons.append("At least one researcher was still non-terminal when the result was finalized.")
+        if reasons:
+            payload["research_worked"] = False
+            existing_reason = str(payload.get("failure_reason") or "").strip()
+            payload["failure_reason"] = " ".join(
+                part for part in [existing_reason, *reasons] if part
+            )
+
+    if payload.get("research_worked") is not True and not str(payload.get("failure_reason") or "").strip():
+        payload["failure_reason"] = "Researcher administrator run did not satisfy the evidence and synthesis requirements."
     if save_artifacts:
         try:
             from .research_artifacts import register_untracked_research_artifacts
@@ -1059,6 +2336,7 @@ def finalize_researcher_administrator_output(
         except Exception:
             pass
         payload["evidence_data_path"] = evidence_dir
+        _persist_researcher_step_raw_outputs(evidence_dir, steps)
         output_files = _write_researcher_administrator_output_files(
             evidence_dir,
             payload,
@@ -1094,15 +2372,16 @@ def _write_researcher_administrator_output_files(
         admin_file = root / "admin_output.json"
         researcher_dir = root / "researcher_outputs"
         researcher_files: list[str] = []
-        admin_copy = deepcopy(admin_payload)
-        admin_copy.pop("output_files", None)
-        _write_compact_json(admin_file, admin_copy)
         records = list(researcher_responses or [])
         records.extend(
             {
                 "research_worked": False,
-                "failure_reason": str(failure.get("failure_reason") or ""),
-                "final_research_review": "",
+                "failure_reason": str(failure.get("failure_reason") or "")[:500],
+                "overall_summary": "This researcher did not complete successfully; inspect its failure metadata and any preserved raw output.",
+                "findings": [],
+                "gaps": ["The researcher did not complete a parseable full evidence review."],
+                "open_topics": [],
+                "full_research_review": "",
                 **failure,
             }
             for failure in (researcher_failures or [])
@@ -1113,10 +2392,43 @@ def _write_researcher_administrator_output_files(
             filename = f"{idx:03d}_{tool}.json"
             _write_compact_json(researcher_dir / filename, response)
             researcher_files.append(str(Path("researcher_outputs") / filename))
-        return {
+
+        raw_files = [
+            str(Path("researcher_outputs") / path.name)
+            for path in sorted(researcher_dir.glob("*.raw.txt"))
+        ]
+        unused_raw = list(raw_files)
+        batch_raw = next((path for path in raw_files if "run_researchers_batch" in path), "")
+        manifest: list[dict[str, Any]] = []
+        for response, structured_path in zip(records, researcher_files):
+            tool_name = str(response.get("researcher_tool") or "researcher").strip()
+            safe_tool = _safe_output_name(tool_name, "researcher")
+            raw_path = next((path for path in unused_raw if safe_tool in Path(path).name), "")
+            if raw_path:
+                unused_raw.remove(raw_path)
+            elif batch_raw:
+                raw_path = batch_raw
+            row: dict[str, Any] = {
+                "researcher_tool": tool_name,
+                "structured_path": structured_path,
+                "format": "full_researcher_response_v1",
+                "full_research_review_available": bool(response.get("full_research_review")),
+            }
+            if raw_path:
+                row["raw_path"] = raw_path
+            manifest.append(row)
+
+        output_files: dict[str, Any] = {
             "administrator_output": "admin_output.json",
             "researcher_outputs": researcher_files,
+            "researcher_output_manifest": manifest,
         }
+        if raw_files:
+            output_files["raw_researcher_outputs"] = raw_files
+        admin_copy = deepcopy(admin_payload)
+        admin_copy["output_files"] = deepcopy(output_files)
+        _write_compact_json(admin_file, admin_copy)
+        return output_files
     except Exception:
         return {}
 
@@ -1623,7 +2935,7 @@ class ResearcherAdministratorAgentTool:
             save_artifacts: bool = False,
             max_parallel: int = 4,
         ) -> str:
-            """Run several relevant specialized researchers sequentially and return all results.
+            """Run several relevant specialized researchers with bounded parallelism.
 
             Use this for the first wave when multiple independent researcher types are genuinely
             relevant to the topic. Do not include unrelated researchers just to increase coverage.
@@ -1743,47 +3055,439 @@ class ResearcherAdministratorAgentTool:
                 requested_parallel = MAX_RESEARCHER_PARALLELISM
             worker_count = max(1, min(requested_parallel, MAX_RESEARCHER_PARALLELISM, len(normalized)))
 
-            def _run_one(row: dict[str, str], context: contextvars.Context) -> dict[str, Any]:
+            child_timeout_seconds = max(
+                1,
+                int(
+                    getattr(
+                        self.config,
+                        "researcher_administrator_child_timeout_seconds",
+                        2100,
+                    )
+                    or 2100
+                ),
+            )
+            batch_started = time.monotonic()
+            parent_deadline = _CURRENT_RESEARCH_DEADLINE.get()
+
+            evidence_dir = research_artifacts_master_root() or research_artifacts_root()
+            batch_id = f"research-batch-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+            effective_child_timeout = child_timeout_seconds
+            if parent_deadline is not None:
+                effective_child_timeout = max(
+                    1,
+                    min(child_timeout_seconds, int(max(0.0, parent_deadline - batch_started))),
+                )
+            batch_deadline = batch_started + effective_child_timeout
+
+            state_lock = threading.Lock()
+            created_at = time.time()
+            states: dict[int, dict[str, Any]] = {
+                index: {
+                    "task_id": f"task-{index}",
+                    "researcher": normalized[index]["researcher"],
+                    "researcher_tool": normalized[index]["tool_name"],
+                    "status": "queued",
+                    "cancel_event": threading.Event(),
+                    "created_at": created_at,
+                    "started_at": None,
+                    "finished_at": None,
+                    "last_progress_at": created_at,
+                    "deadline_at": created_at + effective_child_timeout,
+                    "deadline_seconds": effective_child_timeout,
+                    "current_tool": "",
+                    "artifact_count": 0,
+                    "failure_reason": "",
+                    "execution_active": False,
+                    "latest_action": "queued",
+                }
+                for index in range(len(normalized))
+            }
+
+            def _persist_batch_ledger() -> None:
+                if not evidence_dir:
+                    return
+                with state_lock:
+                    rows = [
+                        {
+                            key: state.get(key)
+                            for key in (
+                                "task_id",
+                                "researcher",
+                                "researcher_tool",
+                                "status",
+                                "created_at",
+                                "started_at",
+                                "finished_at",
+                                "last_progress_at",
+                                "deadline_at",
+                                "deadline_seconds",
+                                "current_tool",
+                                "artifact_count",
+                                "failure_reason",
+                                "latest_action",
+                                "execution_active",
+                            )
+                        }
+                        for _index, state in sorted(states.items())
+                    ]
+                try:
+                    ledger_dir = Path(evidence_dir).expanduser() / "researcher_jobs"
+                    ledger_dir.mkdir(parents=True, exist_ok=True)
+                    path = ledger_dir / f"{_async_output_name(batch_id)}.json"
+                    temporary = ledger_dir / f".{path.name}.{threading.get_ident()}.{uuid.uuid4().hex[:6]}.tmp"
+                    temporary.write_text(
+                        _compact_json(
+                            {
+                                "job_id": batch_id,
+                                "kind": "sync_batch",
+                                "created_at": created_at,
+                                "updated_at": time.time(),
+                                "complete": bool(rows) and all(
+                                    str(row.get("status") or "") in _RESEARCHER_TERMINAL_STATUSES
+                                    for row in rows
+                                ),
+                                "tasks": rows,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    os.replace(temporary, path)
+                except Exception:
+                    return
+
+            def _request_child_timeout(index: int, reason: str) -> None:
+                cancel_event = None
+                with state_lock:
+                    state = states[index]
+                    if (
+                        state["status"] in _RESEARCHER_TERMINAL_STATUSES
+                        or bool(state.get("completion_claimed"))
+                    ):
+                        return
+                    now = time.time()
+                    state["status"] = "deadline_exceeded"
+                    state["finished_at"] = now
+                    state["last_progress_at"] = max(float(state.get("last_progress_at") or 0.0), now)
+                    state["failure_reason"] = str(reason or "Researcher child exceeded its deadline.")
+                    state["latest_action"] = "deadline exceeded; cancellation requested"
+                    state["artifact_count"] = _researcher_artifact_count(
+                        evidence_dir,
+                        str(state.get("researcher") or ""),
+                    )
+                    cancel_event = state["cancel_event"]
+                _persist_batch_ledger()
+                if isinstance(cancel_event, threading.Event):
+                    request_cancel(cancel_event)
+
+            def _run_one(index: int, row: dict[str, str], context: contextvars.Context) -> dict[str, Any]:
+                state = states[index]
+                cancel_event: threading.Event = state["cancel_event"]
+
+                def _record_progress(event_type: str, payload: dict[str, Any]) -> None:
+                    now = time.time()
+                    tool = str(payload.get("tool") or "")
+                    with state_lock:
+                        if state["status"] in _RESEARCHER_TERMINAL_STATUSES:
+                            return
+                        state["last_progress_at"] = now
+                        state["current_tool"] = tool or str(state.get("current_tool") or row["tool_name"])
+                        state["latest_action"] = f"{event_type} {tool}".strip()
+                    _persist_batch_ledger()
+
                 def _inner() -> dict[str, Any]:
                     tool_name = row["tool_name"]
-                    output = self._invoke_tool_sync(
-                        tools_by_name[tool_name],
-                        {"prompt": row["prompt"], "save_artifacts": bool(save_artifacts)},
-                    )
-                    parsed = researcher_response_from_output(tool_name, output)
-                    result: dict[str, Any] = {
-                        "researcher": row["researcher"],
-                        "researcher_tool": tool_name,
-                        "output": output,
-                    }
-                    if parsed is not None:
-                        result["parsed_response"] = parsed
-                    return result
+                    now = time.time()
+                    preflight_error: dict[str, Any] | None = None
+                    with state_lock:
+                        if (
+                            state["status"] in _RESEARCHER_TERMINAL_STATUSES
+                            or cancel_event.is_set()
+                            or now >= float(state.get("deadline_at") or 0.0)
+                        ):
+                            if state["status"] not in _RESEARCHER_TERMINAL_STATUSES:
+                                state["status"] = "deadline_exceeded"
+                                state["finished_at"] = now
+                                state["failure_reason"] = "Researcher child deadline elapsed before it acquired an execution slot."
+                            preflight_error = {
+                                "researcher": row["researcher"],
+                                "researcher_tool": tool_name,
+                                "status": str(state["status"]),
+                                "error": str(state.get("failure_reason") or "Researcher did not start before its deadline."),
+                            }
+                        else:
+                            state["status"] = "running"
+                            state["started_at"] = now
+                            state["last_progress_at"] = now
+                            state["current_tool"] = tool_name
+                            state["execution_active"] = True
+                            state["latest_action"] = f"running {tool_name}"
+                    _persist_batch_ledger()
+                    if preflight_error is not None:
+                        return preflight_error
+                    _research_writer_started(evidence_dir)
+                    cancel_token = set_cancellation_event(cancel_event)
+                    log_token = set_log_context(_chack_tool_progress_callback=_record_progress)
+                    try:
+                        def _process_started(pid: int, pgid: int = 0) -> None:
+                            with state_lock:
+                                state["process_pid"] = int(pid or 0)
+                                state["process_group_id"] = int(pgid or pid or 0)
+                                state["child_execution_boundary"] = "process"
+                                state["latest_action"] = f"running {tool_name} in process {int(pid or 0)}"
+                            _persist_batch_ledger()
+
+                        output_result = _run_researcher_in_process(
+                            tools_by_name[tool_name],
+                            {"prompt": row["prompt"], "save_artifacts": bool(save_artifacts)},
+                            evidence_dir=evidence_dir,
+                            cancel_event=cancel_event,
+                            termination_grace_seconds=float(
+                                getattr(
+                                    self.config,
+                                    "researcher_administrator_child_termination_grace_seconds",
+                                    _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS,
+                                )
+                                or _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS
+                            ),
+                            on_process_started=_process_started,
+                            on_progress=lambda event: _record_progress(
+                                str(event.get("event") or "research_progress"),
+                                event,
+                            ),
+                        )
+                        with state_lock:
+                            deadline_at = float(state.get("deadline_at") or 0.0)
+                            timed_out = (
+                                state["status"] == "deadline_exceeded"
+                                or time.time() >= deadline_at
+                            )
+                            if not timed_out and not output_result.get("cancelled"):
+                                state["completion_claimed"] = True
+                            timer = state.get("deadline_timer")
+                        if isinstance(timer, threading.Timer):
+                            timer.cancel()
+                        if timed_out:
+                            return {
+                                "researcher": row["researcher"],
+                                "researcher_tool": tool_name,
+                                "status": "deadline_exceeded",
+                                "error": str(state.get("failure_reason") or "Researcher child exceeded its deadline."),
+                            }
+                        if output_result.get("cancelled"):
+                            return {
+                                "researcher": row["researcher"],
+                                "researcher_tool": tool_name,
+                                "status": "cancelled",
+                                "error": "Researcher was cancelled by the administrator.",
+                            }
+                        if output_result.get("error"):
+                            return {
+                                "researcher": row["researcher"],
+                                "researcher_tool": tool_name,
+                                "status": "error",
+                                "error": str(output_result.get("error") or "Researcher child failed."),
+                            }
+                        output = output_result.get("output")
+                        parsed = researcher_response_from_output(tool_name, output)
+                        if parsed is None:
+                            with state_lock:
+                                state["status"] = "error"
+                                state["failure_reason"] = "Researcher did not return parseable final researcher JSON."
+                                state["finished_at"] = time.time()
+                                state["latest_action"] = "error: unparseable researcher result"
+                            return {
+                                "researcher": row["researcher"],
+                                "researcher_tool": tool_name,
+                                "status": "error",
+                                "error": "Researcher did not return parseable final researcher JSON.",
+                                "output": output,
+                            }
+                        result: dict[str, Any] = {
+                            "researcher": row["researcher"],
+                            "researcher_tool": tool_name,
+                            "status": "done",
+                            "output": output,
+                            "parsed_response": parsed,
+                        }
+                        with state_lock:
+                            state["status"] = "done"
+                            state["finished_at"] = time.time()
+                            state["completion_claimed"] = False
+                            state["failure_reason"] = ""
+                            state["latest_action"] = "done"
+                        return result
+                    except Exception as exc:
+                        with state_lock:
+                            timed_out = state["status"] == "deadline_exceeded"
+                            if not timed_out:
+                                state["status"] = "error"
+                                state["failure_reason"] = f"{type(exc).__name__}: {exc}"
+                                state["finished_at"] = time.time()
+                                state["latest_action"] = "error"
+                            state["completion_claimed"] = False
+                        return {
+                            "researcher": row["researcher"],
+                            "researcher_tool": tool_name,
+                            "status": "deadline_exceeded" if timed_out else "error",
+                            "error": str(state.get("failure_reason") or f"{type(exc).__name__}: {exc}"),
+                        }
+                    finally:
+                        with state_lock:
+                            timer = state.get("deadline_timer")
+                        if isinstance(timer, threading.Timer):
+                            timer.cancel()
+                        reset_log_context(log_token)
+                        reset_cancellation_event(cancel_token)
+                        with state_lock:
+                            state["execution_active"] = False
+                            state["current_tool"] = ""
+                            state["artifact_count"] = _researcher_artifact_count(
+                                evidence_dir,
+                                row["researcher"],
+                            )
+                            state["last_progress_at"] = max(
+                                float(state.get("last_progress_at") or 0.0),
+                                time.time(),
+                            )
+                        _persist_batch_ledger()
+                        _research_writer_finished(evidence_dir)
 
                 return context.run(_inner)
 
+            for index, state in states.items():
+                timer = threading.Timer(
+                    effective_child_timeout,
+                    _request_child_timeout,
+                    args=(
+                        index,
+                        f"Researcher child exceeded its {effective_child_timeout}s deadline.",
+                    ),
+                )
+                timer.daemon = True
+                state["deadline_timer"] = timer
+                timer.start()
+            _persist_batch_ledger()
+
             results: list[dict[str, Any]] = []
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures: dict[int, Any] = {}
+            executor = _DaemonThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="researcher-batch",
+            )
+            try:
                 futures = {
-                    executor.submit(_run_one, row, contextvars.copy_context()): row
-                    for row in normalized
+                    index: executor.submit(_run_one, index, row, contextvars.copy_context())
+                    for index, row in enumerate(normalized)
                 }
-                for future in as_completed(futures):
-                    row = futures[future]
-                    try:
-                        results.append(future.result())
-                    except Exception as exc:
-                        errors.append(
-                            {
-                                "researcher": row["researcher"],
-                                "researcher_tool": row["tool_name"],
+                pending = set(futures)
+                reported: set[int] = set()
+                while pending:
+                    for index in list(pending):
+                        future = futures[index]
+                        with state_lock:
+                            state = dict(states[index])
+                        if state["status"] == "deadline_exceeded" and not future.done():
+                            future.cancel()
+                            errors.append(
+                                {
+                                    "researcher": normalized[index]["researcher"],
+                                    "researcher_tool": normalized[index]["tool_name"],
+                                    "status": "deadline_exceeded",
+                                    "error": state["failure_reason"] or "Researcher child exceeded its deadline.",
+                                    "started_at": state["started_at"],
+                                    "deadline_at": state["deadline_at"],
+                                }
+                            )
+                            reported.add(index)
+                            pending.remove(index)
+                            continue
+                        if not future.done():
+                            continue
+                        try:
+                            result = future.result()
+                        except Exception as exc:
+                            result = {
+                                "researcher": normalized[index]["researcher"],
+                                "researcher_tool": normalized[index]["tool_name"],
+                                "status": "error",
                                 "error": f"{type(exc).__name__}: {exc}",
                             }
-                        )
+                        if result.get("status") == "done":
+                            results.append(result)
+                        else:
+                            errors.append(
+                                {
+                                    key: value
+                                    for key, value in result.items()
+                                    if key in {"researcher", "researcher_tool", "status", "error"}
+                                }
+                            )
+                        reported.add(index)
+                        pending.remove(index)
+                    if not pending:
+                        break
+                    if time.monotonic() >= batch_deadline:
+                        for index in list(pending):
+                            _request_child_timeout(
+                                index,
+                                "Researcher batch reached its parent administrator deadline.",
+                            )
+                            future = futures[index]
+                            future.cancel()
+                            with state_lock:
+                                state = dict(states[index])
+                            if index not in reported:
+                                errors.append(
+                                    {
+                                        "researcher": normalized[index]["researcher"],
+                                        "researcher_tool": normalized[index]["tool_name"],
+                                        "status": "deadline_exceeded",
+                                        "error": state["failure_reason"] or "Researcher batch deadline exceeded.",
+                                        "started_at": state["started_at"],
+                                        "deadline_at": state["deadline_at"],
+                                    }
+                                )
+                                reported.add(index)
+                        pending.clear()
+                        break
+                    time.sleep(0.05)
+            finally:
+                # Never use the context-manager form here: it performs an implicit
+                # shutdown(wait=True), which was the original batch deadlock.
+                executor.shutdown(wait=False, cancel_futures=True)
             results.sort(key=lambda item: str(item.get("researcher_tool") or ""))
+            errors.sort(key=lambda item: (str(item.get("researcher_tool") or ""), str(item.get("status") or "error")))
+            _persist_batch_ledger()
+            with state_lock:
+                task_states = [
+                    {
+                        key: state.get(key)
+                        for key in (
+                            "task_id",
+                            "researcher",
+                            "researcher_tool",
+                            "status",
+                            "created_at",
+                            "started_at",
+                            "finished_at",
+                            "last_progress_at",
+                            "deadline_at",
+                            "deadline_seconds",
+                            "current_tool",
+                            "artifact_count",
+                            "failure_reason",
+                            "execution_active",
+                        )
+                    }
+                    for _index, state in sorted(states.items())
+                ]
             return _compact_json(
                 {
-                    "batch_worked": bool(results) and not errors,
+                    "batch_id": batch_id,
+                    "batch_worked": bool(results),
+                    "batch_complete": bool(results) and not errors,
+                    "child_timeout_seconds": effective_child_timeout,
+                    "tasks": task_states,
                     "results": results,
                     "errors": errors,
                 }
@@ -1912,6 +3616,82 @@ class ResearcherAdministratorAgentTool:
         # ambient state at invocation time.
         owner_artifact_root = str(artifact_root or "").strip()
 
+        def _owned_job_ids() -> list[str]:
+            if owner_artifact_root:
+                return _async_job_ids_for_evidence_dir(owner_artifact_root)
+            # Fallback for direct/legacy use without an artifact root. Normal
+            # administrator runs always have a unique workspace.
+            return list(dict.fromkeys(str(job_id) for job_id in self._launched_async_job_ids if str(job_id)))
+
+        def _owned_job_snapshot(job_id: str) -> dict[str, Any] | None:
+            job_key = str(job_id or "").strip()
+            if not job_key or job_key not in set(_owned_job_ids()):
+                return None
+            return _async_job_snapshot(job_key)
+
+        def _not_owned(job_id: str) -> str:
+            return _compact_json(
+                {
+                    "job_found": False,
+                    "job_id": job_id,
+                    "error": "Researcher job was not found or is not owned by this administrator workspace.",
+                }
+            )
+
+        def _available_result_views(task: dict[str, Any]) -> list[str]:
+            result = task.get("result") if isinstance(task.get("result"), dict) else {}
+            views = ["summary"] if result else []
+            if result.get("parsed_response") is not None:
+                views.append("parsed")
+            if result.get("output") is not None:
+                views.append("raw")
+            return views
+
+        def _poll_result_projection(result: dict[str, Any]) -> dict[str, Any]:
+            """Expose one bounded digest, never the full/raw and parsed copies together."""
+            parsed = result.get("parsed_response")
+            if isinstance(parsed, dict):
+                digest = compact_researcher_digest(parsed)
+                digest.pop("researcher_tool", None)
+                return {"parsed_response": digest}
+            if result.get("output") is not None:
+                return {"output": result.get("output")}
+            return {}
+
+        def _compact_task_status(task_id: str, task: dict[str, Any], *, now: float) -> dict[str, Any]:
+            created_at = float(task.get("created_at") or now)
+            last_activity = float(task.get("last_activity_at") or created_at)
+            row = {
+                "task_id": task_id,
+                "researcher": task.get("researcher", ""),
+                "researcher_tool": task.get("researcher_tool", ""),
+                "status": task.get("status", "unknown"),
+                "health": _async_task_health(task, now=now),
+                "execution_active": bool(task.get("execution_active")),
+                "current_tool": task.get("current_tool", ""),
+                "latest_action": task.get("latest_action", ""),
+                "last_progress_at": task.get("last_progress_at"),
+                "deadline_at": task.get("deadline_at"),
+                "elapsed_seconds": round(max(0.0, now - created_at), 3),
+                "idle_seconds": round(max(0.0, now - last_activity), 3),
+                "artifact_count": int(task.get("artifact_count") or 0),
+                "failure_reason": task.get("failure_reason", ""),
+                "result_available": bool(task.get("result")),
+                "available_result_views": _available_result_views(task),
+            }
+            if isinstance(task.get("termination"), dict):
+                row["termination"] = deepcopy(task["termination"])
+            for key in (
+                "retry_count",
+                "retried_from_job_id",
+                "retried_from_task_id",
+                "retry_spawned_job_id",
+                "retry_spawned_task_id",
+            ):
+                if task.get(key) is not None:
+                    row[key] = task.get(key)
+            return row
+
         def _compact_progress_event(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
             tool_input = payload.get("tool_input")
             if isinstance(tool_input, dict):
@@ -1938,6 +3718,18 @@ class ResearcherAdministratorAgentTool:
             event = _compact_progress_event(event_type, payload)
             _async_record_task_progress(job_id, task_id, event)
 
+        child_timeout_seconds = max(
+            1,
+            int(
+                getattr(
+                    self.config,
+                    "researcher_administrator_child_timeout_seconds",
+                    2100,
+                )
+                or 2100
+            ),
+        )
+
         def _run_one(
             job_id: str,
             task_id: str,
@@ -1954,6 +3746,12 @@ class ResearcherAdministratorAgentTool:
                     return {"researcher_tool": tool_name, "cancelled": True, "finished_at": started_at}
                 if not _async_mark_task_running_or_cancelled(job_id, task_id, tool_name, started_at):
                     return {"researcher_tool": tool_name, "cancelled": True, "finished_at": started_at}
+                _research_writer_started(evidence_dir)
+                with _ASYNC_RESEARCH_LOCK:
+                    job = _ASYNC_RESEARCH_JOBS.get(job_id)
+                    task = (job or {}).get("tasks", {}).get(task_id)
+                    if task is not None:
+                        task["writer_registered"] = True
                 log_token = set_log_context(
                     _chack_tool_progress_callback=lambda event_type, payload: _record_progress(
                         job_id,
@@ -1965,17 +3763,50 @@ class ResearcherAdministratorAgentTool:
                 cancel_token = set_cancellation_event(cancel_event)
                 artifact_token = set_research_artifact_context(evidence_dir, evidence_dir)
                 try:
-                    output = self._invoke_tool_sync(
+                    def _process_started(pid: int, pgid: int = 0) -> None:
+                        with _ASYNC_RESEARCH_LOCK:
+                            job = _ASYNC_RESEARCH_JOBS.get(job_id)
+                            task = (job or {}).get("tasks", {}).get(task_id)
+                            if task is not None:
+                                task["process_pid"] = int(pid or 0)
+                                task["process_group_id"] = int(pgid or pid or 0)
+                                task["child_execution_boundary"] = "process"
+                                task["latest_action"] = f"running {tool_name} in process {int(pid or 0)}"
+                        _persist_async_job_ledger(job_id)
+
+                    output_result = _run_researcher_in_process(
                         tools_by_name[tool_name],
                         {"prompt": prompt, "save_artifacts": bool(save_artifacts)},
+                        evidence_dir=evidence_dir,
+                        cancel_event=cancel_event,
+                        termination_grace_seconds=float(
+                            getattr(
+                                self.config,
+                                "researcher_administrator_child_termination_grace_seconds",
+                                _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS,
+                            )
+                            or _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS
+                        ),
+                        on_process_started=_process_started,
+                        on_progress=lambda event: _record_progress(
+                            job_id,
+                            task_id,
+                            str(event.get("event") or "research_progress"),
+                            event,
+                        ),
                     )
-                    if cancel_event.is_set() and str(output or "").startswith("ERROR:"):
+                    if output_result.get("cancelled"):
                         return {
                             "researcher_tool": tool_name,
-                            "output": output,
+                            **output_result,
                             "cancelled": True,
-                            "finished_at": time.time(),
                         }
+                    if output_result.get("error"):
+                        return {
+                            "researcher_tool": tool_name,
+                            **output_result,
+                        }
+                    output = output_result.get("output")
                 finally:
                     reset_research_artifact_context(artifact_token)
                     reset_cancellation_event(cancel_token)
@@ -2010,8 +3841,9 @@ class ResearcherAdministratorAgentTool:
             Use this when a researcher may take a long time and you want to queue it,
             keep orchestrating, and later poll progress/results. This does not expose
             live chain-of-thought; while running, status is limited to started/running
-            metadata plus recent tool telemetry events. Once finished, poll output
-            includes parsed researcher JSON and code-added tool_call_counts.
+            metadata plus recent tool telemetry events. Once finished, status polling
+            only advertises result availability; use get_researcher_result to retrieve
+            one bounded summary or lossless page at a time.
 
             Args:
                 requests_json: Compact JSON array of objects with researcher and prompt.
@@ -2022,6 +3854,24 @@ class ResearcherAdministratorAgentTool:
 
             Output: Compact JSON with async_started, job_id, task ids, and validation errors.
             """
+            # Pay the one-time forkserver/spawn import cost before creating task
+            # deadlines.  A cold process server is infrastructure setup, not
+            # researcher work, and must not consume the child's hard deadline.
+            try:
+                _warm_researcher_process_context()
+            except Exception as exc:
+                return _compact_json(
+                    {
+                        "async_started": False,
+                        "errors": [
+                            {
+                                "error": f"Researcher process isolation could not be initialized: {type(exc).__name__}: {exc}"
+                            }
+                        ],
+                        "job_id": "",
+                        "tasks": [],
+                    }
+                )
             normalized, errors = self._normalize_researcher_requests(
                 requests_json,
                 enabled=enabled,
@@ -2047,6 +3897,7 @@ class ResearcherAdministratorAgentTool:
             parent_context = contextvars.copy_context()
             job: dict[str, Any] = {
                 "job_id": job_id,
+                "kind": "async",
                 "created_at": time.time(),
                 "save_artifacts": bool(save_artifacts),
                 "max_parallel": parallel_limit,
@@ -2059,21 +3910,47 @@ class ResearcherAdministratorAgentTool:
             prepared_tasks: list[tuple[str, dict[str, str], threading.Event]] = []
             _async_job_store(job_id, job)
 
+            effective_child_timeout = child_timeout_seconds
+            parent_deadline = _CURRENT_RESEARCH_DEADLINE.get()
+            if parent_deadline is not None:
+                effective_child_timeout = max(
+                    1,
+                    min(child_timeout_seconds, int(max(0.0, parent_deadline - time.monotonic()))),
+                )
+
             # Register every task before submitting any future. A fast first future
             # must never make a partially populated job appear complete and leave
             # its completion event permanently set while later tasks still run.
             for index, row in enumerate(normalized):
                 task_id = f"task-{index}-{uuid.uuid4().hex[:6]}"
                 cancel_event = threading.Event()
+                created_at = time.time()
+                deadline_timer = threading.Timer(
+                    effective_child_timeout,
+                    _async_request_task_deadline,
+                    args=(job_id, task_id, cancel_event, effective_child_timeout),
+                )
+                deadline_timer.daemon = True
                 task = {
                     "task_id": task_id,
                     "researcher": row["researcher"],
                     "researcher_tool": row["tool_name"],
+                    "_request_prompt": row["prompt"],
                     "status": "queued",
-                    "created_at": time.time(),
+                    "created_at": created_at,
+                    "started_at": None,
+                    "finished_at": None,
+                    "last_progress_at": created_at,
+                    "deadline_at": created_at + effective_child_timeout,
+                    "deadline_seconds": effective_child_timeout,
+                    "current_tool": "",
+                    "artifact_count": 0,
+                    "failure_reason": "",
+                    "execution_active": False,
                     "latest_action": "queued",
-                    "last_activity_at": time.time(),
+                    "last_activity_at": created_at,
                     "cancel_event": cancel_event,
+                    "deadline_timer": deadline_timer,
                 }
                 _async_register_task(job_id, task_id, task)
                 prepared_tasks.append((task_id, row, cancel_event))
@@ -2101,6 +3978,12 @@ class ResearcherAdministratorAgentTool:
                 )
                 _async_set_task_future(job_id, task_id, future)
                 future.add_done_callback(lambda fut, jid=job_id, tid=task_id: _task_done(jid, tid, fut))
+                with _ASYNC_RESEARCH_LOCK:
+                    stored_job = _ASYNC_RESEARCH_JOBS.get(job_id)
+                    stored_task = (stored_job or {}).get("tasks", {}).get(task_id)
+                    timer = (stored_task or {}).get("deadline_timer")
+                if isinstance(timer, threading.Timer):
+                    timer.start()
             return _compact_json(
                 {
                     "async_started": True,
@@ -2119,14 +4002,111 @@ class ResearcherAdministratorAgentTool:
                 }
             )
 
+        @function_tool(name_override="list_researcher_jobs")
+        def list_researcher_jobs(include_terminal: bool = True, max_jobs: int = 50) -> str:
+            """List every async researcher job owned by this administrator workspace.
+
+            Use this after context compaction or whenever a job id was forgotten. The
+            response is status-only and never embeds researcher outputs.
+
+            Args:
+                include_terminal: Include jobs whose tasks are all logically terminal.
+                max_jobs: Maximum newest jobs to return, clamped to 1-100.
+
+            Output: Compact JSON with job ids and per-task operational status/health.
+            """
+            limit = max(1, min(int(max_jobs or 50), 100))
+            rows: list[dict[str, Any]] = []
+            now = time.time()
+            for job_id in _owned_job_ids():
+                _async_refresh_artifact_counts(job_id)
+                job = _owned_job_snapshot(job_id)
+                if not job:
+                    continue
+                tasks = [
+                    _compact_task_status(task_id, task, now=now)
+                    for task_id, task in sorted((job.get("tasks") or {}).items())
+                ]
+                complete = bool(tasks) and all(_async_task_is_terminal(task) for task in tasks)
+                if complete and not include_terminal:
+                    continue
+                rows.append(
+                    {
+                        "job_id": job_id,
+                        "created_at": job.get("created_at"),
+                        "complete": complete,
+                        "execution_active": any(bool(task.get("execution_active")) for task in tasks),
+                        "max_parallel": job.get("max_parallel"),
+                        "tasks": tasks,
+                    }
+                )
+            rows = rows[-limit:]
+            return _compact_json({"jobs": rows, "count": len(rows), "outputs_included": False})
+
+        @function_tool(name_override="get_researcher_task")
+        def get_researcher_task(job_id: str, task_id: str, recent_event_limit: int = 10) -> str:
+            """Inspect one child task's status, heartbeat, deadline, health, and events.
+
+            This never includes the researcher output. Use get_researcher_result only
+            after result_available becomes true.
+            """
+            if not _owned_job_snapshot(job_id):
+                return _not_owned(job_id)
+            _async_refresh_artifact_counts(str(job_id or "").strip())
+            job = _owned_job_snapshot(job_id)
+            if not job:
+                return _not_owned(job_id)
+            task_key = str(task_id or "").strip()
+            task = (job.get("tasks") or {}).get(task_key)
+            if not task:
+                return _compact_json(
+                    {
+                        "job_found": True,
+                        "task_found": False,
+                        "job_id": job_id,
+                        "task_id": task_id,
+                        "error": "Unknown researcher task id for this job.",
+                    }
+                )
+            row = _compact_task_status(task_key, task, now=time.time())
+            row.update(
+                {
+                    "created_at": task.get("created_at"),
+                    "started_at": task.get("started_at"),
+                    "finished_at": task.get("finished_at"),
+                    "deadline_seconds": task.get("deadline_seconds", child_timeout_seconds),
+                }
+            )
+            if task.get("error"):
+                row["error"] = task.get("error")
+            result = task.get("result") if isinstance(task.get("result"), dict) else {}
+            counts = result.get("tool_call_counts") or task.get("live_tool_call_counts") or {}
+            if counts:
+                row["tool_call_counts"] = dict(sorted(counts.items()))
+                row["total_tool_calls"] = int(result.get("total_tool_calls") or sum(int(v) for v in counts.values()))
+            event_limit = max(0, min(int(recent_event_limit or 0), 50))
+            if event_limit:
+                row["recent_events"] = (task.get("recent_events") or [])[-event_limit:]
+            return _compact_json(
+                {
+                    "job_found": True,
+                    "task_found": True,
+                    "job_id": job_id,
+                    "task": row,
+                    "outputs_included": False,
+                }
+            )
+
         @function_tool(name_override="poll_researchers_async")
-        def poll_researchers_async(job_id: str, include_outputs: bool = True, wait_seconds: int = 0) -> str:
+        def poll_researchers_async(job_id: str, include_outputs: bool = False, wait_seconds: int = 0) -> str:
             """Poll an asynchronous researcher job.
 
             Args:
                 job_id: The id returned by start_researchers_async.
-                include_outputs: If true, include raw output/parsed JSON for completed tasks.
-                    If false, return only compact status, tool counts, errors, and timings.
+                include_outputs: Defaults to false. If explicitly true, include one
+                    bounded digest per parsed completed task, otherwise raw text when
+                    parsing failed, never both and never the full review; prefer
+                    get_researcher_result for one bounded result at a time.
                 wait_seconds: Optional completion-aware seconds to wait before polling,
                     clamped to 0-2100. Use 300-1800 for ChatGPT browser jobs and
                     30-120 for ordinary researchers. The call returns early when every
@@ -2138,35 +4118,31 @@ class ResearcherAdministratorAgentTool:
             results/tool_call_counts when available.
             """
             job_key = str(job_id or "").strip()
-            job = _async_job_snapshot(job_key)
+            job = _owned_job_snapshot(job_key)
             if not job:
-                return _compact_json({"job_found": False, "job_id": job_id, "error": "Unknown async researcher job id."})
+                return _not_owned(job_id)
             wait = max(0, min(int(wait_seconds or 0), 2100))
             wait_started = time.monotonic()
             if wait:
                 initial_tasks = (job.get("tasks") or {}).values()
                 already_complete = bool(job.get("tasks")) and all(
-                    str(task.get("status") or "") in {"done", "error", "cancelled"}
+                    str(task.get("status") or "") in _RESEARCHER_TERMINAL_STATUSES
                     for task in initial_tasks
                 )
                 if not already_complete:
                     _async_wait_for_completion(job_key, wait)
             waited = round(time.monotonic() - wait_started, 3)
-            job = _async_job_snapshot(job_key)
+            _async_refresh_artifact_counts(job_key)
+            job = _owned_job_snapshot(job_key)
             if not job:
-                return _compact_json({"job_found": False, "job_id": job_id, "error": "Async researcher job disappeared while polling."})
+                return _not_owned(job_id)
             tasks = []
             now = time.time()
             for task_id, task in sorted((job.get("tasks") or {}).items()):
-                row = {
-                    "task_id": task_id,
-                    "researcher": task.get("researcher", ""),
-                    "researcher_tool": task.get("researcher_tool", ""),
-                    "status": task.get("status", "unknown"),
-                    "latest_action": task.get("latest_action", ""),
-                    "elapsed_seconds": round(now - float(task.get("created_at") or now), 3),
-                    "idle_seconds": round(now - float(task.get("last_activity_at") or task.get("created_at") or now), 3),
-                }
+                row = _compact_task_status(task_id, task, now=now)
+                row["started_at"] = task.get("started_at")
+                row["finished_at"] = task.get("finished_at")
+                row["deadline_seconds"] = task.get("deadline_seconds", child_timeout_seconds)
                 if task.get("error"):
                     row["error"] = task.get("error")
                 result = task.get("result") or {}
@@ -2176,7 +4152,9 @@ class ResearcherAdministratorAgentTool:
                     if result.get("total_tool_calls") is not None:
                         row["total_tool_calls"] = result.get("total_tool_calls") or 0
                     if include_outputs:
-                        row["result"] = result
+                        projected_result = _poll_result_projection(result)
+                        if projected_result:
+                            row["result"] = projected_result
                 else:
                     live_counts = task.get("live_tool_call_counts") or {}
                     if live_counts:
@@ -2192,9 +4170,12 @@ class ResearcherAdministratorAgentTool:
                 in {"deepchatgpt_researcher", "prochatgpt_researcher", "chatgptxhigh"}
                 for t in tasks
             )
-            complete = bool(tasks) and all(s in {"done", "error", "cancelled"} for s in statuses)
+            complete = bool(tasks) and all(_async_task_is_terminal(task) for task in tasks)
             if complete:
-                next_step = "Review completed researcher outputs/tool counts, then synthesize or launch focused follow-ups if material gaps remain."
+                next_step = (
+                    "Use get_researcher_result on each relevant done task, preferably view=summary first; "
+                    "request parsed/raw pages only when needed, then synthesize or launch a focused follow-up."
+                )
             elif any(s == "running" for s in statuses):
                 next_step = (
                     "Some researchers are running. Continue with completion-aware wait_seconds=300-1800; cancel only duplicated, clearly stalled, or no-longer-useful tasks."
@@ -2213,7 +4194,268 @@ class ResearcherAdministratorAgentTool:
                     "tasks": tasks,
                     "requested_wait_seconds": wait,
                     "waited_seconds": waited,
+                    "outputs_included": bool(include_outputs),
                     "next_step": next_step,
+                }
+            )
+
+        @function_tool(name_override="get_researcher_result")
+        def get_researcher_result(
+            job_id: str,
+            task_id: str,
+            view: str = "summary",
+            offset: int = 0,
+            max_chars: int = 8000,
+        ) -> str:
+            """Read exactly one completed researcher result without bloating status polls.
+
+            Args:
+                job_id: Job id returned by start/list_researcher_jobs.
+                task_id: Exact task id returned by start/list/poll.
+                view: metadata, summary, parsed, or raw. Start with metadata/summary.
+                    parsed and raw are lossless and paginated.
+                offset: Character offset for the selected view.
+                max_chars: Page size, clamped to 500-12000 characters.
+
+            Output: Compact metadata or one content page with next_offset, total_chars,
+            complete, and SHA-256 so every page can be retrieved without data loss.
+            """
+            job = _owned_job_snapshot(job_id)
+            if not job:
+                return _not_owned(job_id)
+            task = (job.get("tasks") or {}).get(str(task_id or "").strip())
+            if not task:
+                return _compact_json(
+                    {
+                        "job_found": True,
+                        "task_found": False,
+                        "job_id": job_id,
+                        "task_id": task_id,
+                        "error": "Unknown researcher task id for this job.",
+                    }
+                )
+            result = task.get("result") if isinstance(task.get("result"), dict) else {}
+            parsed = result.get("parsed_response")
+            raw_value = result.get("output")
+            raw_text = "" if raw_value is None else (
+                raw_value if isinstance(raw_value, str) else _compact_json(raw_value)
+            )
+            parsed_text = "" if parsed is None else _compact_json(parsed)
+            available_views = _available_result_views(task)
+            metadata = {
+                "job_found": True,
+                "task_found": True,
+                "job_id": job_id,
+                "task_id": task_id,
+                "researcher": task.get("researcher", ""),
+                "researcher_tool": task.get("researcher_tool", ""),
+                "status": task.get("status", "unknown"),
+                "health": _async_task_health(task),
+                "result_available": bool(result),
+                "available_views": available_views,
+                "tool_call_counts": result.get("tool_call_counts") or {},
+                "total_tool_calls": int(result.get("total_tool_calls") or 0),
+                "failure_reason": task.get("failure_reason", ""),
+                "view_char_counts": {
+                    **({"raw": len(raw_text)} if raw_value is not None else {}),
+                    **({"parsed": len(parsed_text)} if parsed is not None else {}),
+                },
+            }
+            selected_view = str(view or "summary").strip().lower()
+            if selected_view == "metadata":
+                return _compact_json(metadata)
+            if not result:
+                metadata["error"] = "This task has no completed result. Inspect status/failure_reason or wait for completion."
+                return _compact_json(metadata)
+            if selected_view == "raw":
+                if raw_value is None:
+                    metadata["error"] = "Raw output is unavailable for this result."
+                    return _compact_json(metadata)
+                content = raw_text
+            elif selected_view == "parsed":
+                if parsed is None:
+                    metadata["error"] = "Parsed researcher JSON is unavailable; use raw or inspect failure metadata."
+                    return _compact_json(metadata)
+                content = parsed_text
+            elif selected_view == "summary":
+                parsed_row = parsed if isinstance(parsed, dict) else {}
+                summary = compact_researcher_digest(parsed_row)
+                summary["lossless_views"] = [name for name in ("parsed", "raw") if name in available_views]
+                content = _compact_json(summary)
+            else:
+                metadata["error"] = "view must be one of: metadata, summary, parsed, raw."
+                return _compact_json(metadata)
+            start = max(0, min(int(offset or 0), len(content)))
+            page_size = max(500, min(int(max_chars or 8000), 12000))
+            end = min(len(content), start + page_size)
+            return _compact_json(
+                {
+                    **metadata,
+                    "view": selected_view,
+                    "offset": start,
+                    "next_offset": end if end < len(content) else None,
+                    "total_chars": len(content),
+                    "complete": end >= len(content),
+                    "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    "content": content[start:end],
+                }
+            )
+
+        @function_tool(name_override="cancel_researcher_task")
+        def cancel_researcher_task(job_id: str, task_id: str, reason: str) -> str:
+            """Cancel one queued/running ordinary researcher while preserving siblings.
+
+            A concrete reason of at least 20 characters is required. Running ChatGPT
+            browser tasks are protected and remain owned by their hard deadline; queued
+            browser tasks may still be cancelled before they start.
+            """
+            if not _owned_job_snapshot(job_id):
+                return _not_owned(job_id)
+            clean_reason = " ".join(str(reason or "").split())
+            if len(clean_reason) < 20:
+                return _compact_json(
+                    {
+                        "job_found": True,
+                        "task_found": True,
+                        "job_id": job_id,
+                        "task_id": task_id,
+                        "cancellation_requested": False,
+                        "error": "Cancellation reason must contain at least 20 characters.",
+                    }
+                )
+            return _compact_json(
+                _async_cancel_task(job_id, task_id, reason=clean_reason)
+            )
+
+        @function_tool(name_override="retry_researcher_task")
+        def retry_researcher_task(job_id: str, task_id: str, reason: str) -> str:
+            """Retry one failed/cancelled/deadline child once using its original prompt.
+
+            The original prompt is retained privately and is never returned by status
+            tools. A material retry reason of at least 80 characters is required. A
+            successful task cannot be retried, and each task lineage gets at most one
+            automatic retry to prevent runaway cost.
+            """
+            if not _owned_job_snapshot(job_id):
+                return _not_owned(job_id)
+            clean_reason = " ".join(str(reason or "").split())
+            if len(clean_reason) < 80:
+                return _compact_json(
+                    {
+                        "job_found": True,
+                        "task_found": True,
+                        "job_id": job_id,
+                        "task_id": task_id,
+                        "retry_started": False,
+                        "error": "Retry reason must contain at least 80 characters describing the material gap or transient failure.",
+                    }
+                )
+            job_key = str(job_id or "").strip()
+            task_key = str(task_id or "").strip()
+            with _ASYNC_RESEARCH_LOCK:
+                raw_job = _ASYNC_RESEARCH_JOBS.get(job_key)
+                raw_task = (raw_job or {}).get("tasks", {}).get(task_key)
+                if not raw_task:
+                    return _compact_json(
+                        {
+                            "job_found": True,
+                            "task_found": False,
+                            "job_id": job_id,
+                            "task_id": task_id,
+                            "retry_started": False,
+                            "error": "Unknown researcher task id for this job.",
+                        }
+                    )
+                status = str(raw_task.get("status") or "unknown")
+                result = raw_task.get("result") if isinstance(raw_task.get("result"), dict) else {}
+                parsed = result.get("parsed_response") if isinstance(result.get("parsed_response"), dict) else {}
+                retryable = status in {"error", "cancelled", "deadline_exceeded"} or parsed.get("research_worked") is False
+                if not retryable:
+                    return _compact_json(
+                        {
+                            "job_found": True,
+                            "task_found": True,
+                            "job_id": job_id,
+                            "task_id": task_id,
+                            "status": status,
+                            "retry_started": False,
+                            "error": "Only failed, cancelled, deadline-exceeded, or research_worked=false tasks may be retried.",
+                        }
+                    )
+                retry_count = int(raw_task.get("retry_count") or 0)
+                if retry_count >= 1 or bool(raw_task.get("_retry_claimed")):
+                    return _compact_json(
+                        {
+                            "job_found": True,
+                            "task_found": True,
+                            "job_id": job_id,
+                            "task_id": task_id,
+                            "retry_started": False,
+                            "error": "This task lineage already used or claimed its one automatic retry.",
+                        }
+                    )
+                original_prompt = str(raw_task.get("_request_prompt") or "").strip()
+                researcher = str(raw_task.get("researcher") or "").strip()
+                save_artifacts = bool((raw_job or {}).get("save_artifacts"))
+                if not original_prompt or not researcher:
+                    return _compact_json(
+                        {
+                            "job_found": True,
+                            "task_found": True,
+                            "job_id": job_id,
+                            "task_id": task_id,
+                            "retry_started": False,
+                            "error": "Original researcher request is unavailable for a lossless retry.",
+                        }
+                    )
+                raw_task["_retry_claimed"] = True
+            retry_prompt = f"{original_prompt}\n\nDuplicate reason: Retry the original task because {clean_reason}"
+            launched_text = self._invoke_tool_sync(
+                start_researchers_async,
+                {
+                    "requests_json": _compact_json([{"researcher": researcher, "prompt": retry_prompt}]),
+                    "save_artifacts": save_artifacts,
+                    "max_parallel": 1,
+                },
+            )
+            try:
+                launched = json.loads(str(launched_text or "{}"))
+            except json.JSONDecodeError:
+                launched = {"async_started": False, "error": "Retry launcher returned non-JSON output."}
+            if not bool(launched.get("async_started")):
+                with _ASYNC_RESEARCH_LOCK:
+                    source = ((_ASYNC_RESEARCH_JOBS.get(job_key) or {}).get("tasks") or {}).get(task_key)
+                    if source is not None:
+                        source.pop("_retry_claimed", None)
+                return _compact_json(
+                    {
+                        "retry_started": False,
+                        "retried_from_job_id": job_id,
+                        "retried_from_task_id": task_id,
+                        "launcher": launched,
+                    }
+                )
+            retry_job_id = str(launched.get("job_id") or "")
+            retry_tasks = launched.get("tasks") if isinstance(launched.get("tasks"), list) else []
+            retry_task_id = str((retry_tasks[0] if retry_tasks else {}).get("task_id") or "")
+            with _ASYNC_RESEARCH_LOCK:
+                source = ((_ASYNC_RESEARCH_JOBS.get(job_key) or {}).get("tasks") or {}).get(task_key)
+                retry_task = ((_ASYNC_RESEARCH_JOBS.get(retry_job_id) or {}).get("tasks") or {}).get(retry_task_id)
+                if source is not None:
+                    source["retry_spawned_job_id"] = retry_job_id
+                    source["retry_spawned_task_id"] = retry_task_id
+                    source["latest_action"] = "one retry launched"
+                if retry_task is not None:
+                    retry_task["retry_count"] = retry_count + 1
+                    retry_task["retried_from_job_id"] = job_key
+                    retry_task["retried_from_task_id"] = task_key
+            _persist_async_job_ledger(job_key)
+            return _compact_json(
+                {
+                    **launched,
+                    "retry_started": True,
+                    "retried_from_job_id": job_id,
+                    "retried_from_task_id": task_id,
                 }
             )
 
@@ -2231,11 +4473,31 @@ class ResearcherAdministratorAgentTool:
 
             Output: Compact JSON with cancelled task ids and tasks that were already running/done.
             """
+            if not _owned_job_snapshot(job_id):
+                return _not_owned(job_id)
             return _compact_json(_async_cancel_job(job_id))
 
-        for tool in (start_researchers_async, poll_researchers_async, cancel_researchers_async):
+        for tool in (
+            start_researchers_async,
+            list_researcher_jobs,
+            get_researcher_task,
+            poll_researchers_async,
+            get_researcher_result,
+            cancel_researcher_task,
+            retry_researcher_task,
+            cancel_researchers_async,
+        ):
             tool.description = f"{tool.description}\n\nOutput: Compact JSON."
-        return [start_researchers_async, poll_researchers_async, cancel_researchers_async]
+        return [
+            start_researchers_async,
+            list_researcher_jobs,
+            get_researcher_task,
+            poll_researchers_async,
+            get_researcher_result,
+            cancel_researcher_task,
+            retry_researcher_task,
+            cancel_researchers_async,
+        ]
 
     def _build_subagent_tools(self, enabled_researchers: list[str], artifact_root: str = ""):
         if function_tool is None:
@@ -2395,6 +4657,9 @@ class ResearcherAdministratorAgentTool:
         # Child researchers still receive ContextVar-scoped tools for their own
         # subfolders, but their execution must never redirect the administrator's
         # list/read/grep operations to the last child workspace.
+        # Warm once per administrator run, before the model's hard deadline
+        # starts. The child runner itself also tolerates direct callers.
+        _warm_researcher_process_context()
         tools = self._build_subagent_tools(enabled_researchers, artifact_root=master_dir)
         if not tools:
             return "ERROR: no researcher tools available for researcher_administrator."
@@ -2419,13 +4684,43 @@ class ResearcherAdministratorAgentTool:
         # must observe terminal task results, and the evidence writer must not
         # outlive the queue call.  The deadline includes the model run itself,
         # preserving the configured queue/administrator runtime cap.
-        admin_deadline = time.monotonic() + max(0, int(effective_runtime_minutes or 0)) * 60
+        # Reserve a final synthesis window for the administrator itself. The
+        # administrator model receives normal budget warnings and, on MCP
+        # backends, can inspect `check_budget_status`; an instruction alone is
+        # not a hard guarantee, so child researchers are bounded in code.
+        synthesis_reserve_minutes = max(
+            0,
+            int(
+                getattr(
+                    self.config,
+                    "researcher_administrator_synthesis_reserve_minutes",
+                    _DEFAULT_SYNTHESIS_RESERVE_MINUTES,
+                )
+                or _DEFAULT_SYNTHESIS_RESERVE_MINUTES
+            ),
+        )
+        admin_runtime_seconds = int(effective_runtime_minutes) * 60
+        synthesis_reserve_seconds = min(
+            admin_runtime_seconds,
+            synthesis_reserve_minutes * 60,
+        )
+        researcher_deadline = (
+            time.monotonic() + max(0, admin_runtime_seconds - synthesis_reserve_seconds)
+            if int(effective_runtime_minutes or 0) > 0
+            else float("inf")
+        )
+        admin_deadline = (
+            time.monotonic() + admin_runtime_seconds
+            if int(effective_runtime_minutes or 0) > 0
+            else float("inf")
+        )
 
         def _harvest_async_jobs() -> list[dict[str, str]]:
             job_ids = _owned_async_job_ids()
-            pending = _wait_for_async_jobs_terminal(job_ids, admin_deadline)
+            pending = _wait_for_async_jobs_terminal(job_ids, researcher_deadline)
             if pending:
-                # At the administrator deadline, stop queued/running work
+                # At the researcher deadline, stop queued/running work and
+                # leave the reserved window to the administrator's synthesis.
                 # fail-closed and keep any partial artifacts for diagnosis.
                 for job_id in pending:
                     _async_cancel_job(job_id)
@@ -2437,7 +4732,7 @@ class ResearcherAdministratorAgentTool:
                 snapshot = _async_job_snapshot(job_id) or {}
                 for task in (snapshot.get("tasks") or {}).values():
                     status = str(task.get("status") or "unknown")
-                    if status in {"done", "error", "cancelled"}:
+                    if status in _RESEARCHER_TERMINAL_STATUSES:
                         continue
                     failures.append(
                         {
@@ -2463,6 +4758,19 @@ class ResearcherAdministratorAgentTool:
             if admin_tool_budget > 0
             else "Researcher-call budget: no configured cap; still avoid low-value repeats.\n"
         )
+        researcher_window_minutes = (
+            max(0, int(effective_runtime_minutes) - synthesis_reserve_minutes)
+            if int(effective_runtime_minutes or 0) > 0
+            else 0
+        )
+        time_budget_line = (
+            f"Time budget: administrator hard cap is {int(effective_runtime_minutes)} minutes; "
+            f"researcher phase has a hard stop after {researcher_window_minutes} minutes, "
+            f"leaving {synthesis_reserve_minutes} minutes reserved for your own synthesis. "
+            "Do not launch new researchers once the researcher phase ends; collect terminal results and conclude.\n"
+            if int(effective_runtime_minutes or 0) > 0
+            else "Time budget: no administrator runtime cap is configured for this run.\n"
+        )
         master_line = (
             f"Evidence workspace (preserved; runtime appends the path): {master_dir}\n"
             if save_artifacts
@@ -2485,6 +4793,7 @@ class ResearcherAdministratorAgentTool:
             f"{chatgpt_priority_line}"
             f"{required_line}"
             f"{budget_line}"
+            f"{time_budget_line}"
             f"{master_line}"
             "Researchers share evidence in `<workspace>/<researcher-short-name>`; use artifact list/read/grep tools when inspection is useful.\n"
             "Researcher capabilities:\n"
@@ -2548,6 +4857,9 @@ class ResearcherAdministratorAgentTool:
         chack = Chack(config)
         artifact_context_tokens = set_research_artifact_context(master_dir, master_dir)
         collector_token, researcher_responses = begin_researcher_response_collection()
+        research_deadline_token = _CURRENT_RESEARCH_DEADLINE.set(
+            researcher_deadline if researcher_deadline != float("inf") else None
+        )
         try:
             try:
                 result = chack.run(
@@ -2632,13 +4944,15 @@ class ResearcherAdministratorAgentTool:
                 required_researchers=self.required_researchers,
             )
         finally:
+            _CURRENT_RESEARCH_DEADLINE.reset(research_deadline_token)
             end_researcher_response_collection(collector_token)
-            # A timed-out administrator does not own the lifetime of executor
-            # threads it launched. Preserve their evidence root until every task is
-            # terminal instead of deleting a directory that a live browser worker
-            # is still updating.
-            if not _async_jobs_have_nonterminal_tasks(_owned_async_job_ids()):
-                cleanup_research_artifacts(master_dir, save_artifacts=save_artifacts)
+            # Timed-out children may still be unwinding registered subprocesses or
+            # cancellation-aware HTTP calls. Defer deletion until the last writer
+            # exits; the final writer performs the pending cleanup exactly once.
+            _cleanup_research_artifacts_when_idle(
+                master_dir,
+                save_artifacts=save_artifacts,
+            )
             reset_research_artifact_context(artifact_context_tokens)
             # Restore the inherited master dir so standalone researchers launched
             # later in the same process are not accidentally nested under it.
