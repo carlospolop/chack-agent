@@ -357,7 +357,15 @@ class ChatGPTWebResearchAgentTool:
         except Exception:
             pass
 
-    def _emit_progress(self, stage: str, *, answer_chars: int = 0, running: bool = True, forced_answer: bool = False) -> None:
+    def _emit_progress(
+        self,
+        stage: str,
+        *,
+        answer_chars: int = 0,
+        source_url_count: int = 0,
+        running: bool = True,
+        forced_answer: bool = False,
+    ) -> None:
         """Refresh async-job activity without counting a new researcher tool call."""
         callback = current_log_context().get("_chack_tool_progress_callback")
         if not callable(callback):
@@ -370,6 +378,7 @@ class ChatGPTWebResearchAgentTool:
                     "tool_start_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "stage": stage,
                     "answer_chars": int(answer_chars or 0),
+                    "source_url_count": int(source_url_count or 0),
                     "running": bool(running),
                     "forced_answer": bool(forced_answer),
                 },

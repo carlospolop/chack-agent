@@ -62,6 +62,27 @@ def test_chatgpt_modes_have_distinct_total_output_deadlines():
     assert CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS == 4500
 
 
+def test_browser_progress_can_report_source_url_count(monkeypatch):
+    events = []
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="deep")
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.current_log_context",
+        lambda: {"_chack_tool_progress_callback": lambda event, payload: events.append((event, payload))},
+    )
+
+    helper._emit_progress(
+        "answer_extracted",
+        answer_chars=1234,
+        source_url_count=7,
+        running=False,
+    )
+
+    assert events[0][0] == "research_progress"
+    assert events[0][1]["answer_chars"] == 1234
+    assert events[0][1]["source_url_count"] == 7
+    assert events[0][1]["running"] is False
+
+
 class _ModeLocator:
     def __init__(self, page, role, pattern, label=""):
         self.page = page
