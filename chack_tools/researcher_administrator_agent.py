@@ -377,6 +377,18 @@ def _safe_researcher_cgroup(path: str) -> Path | None:
         return None
     if not candidate.name.startswith("chack-researcher-"):
         return None
+    delegated_parent = _current_cgroup_v2_dir()
+    if delegated_parent is None:
+        return None
+    try:
+        parent = delegated_parent.resolve()
+    except OSError:
+        return None
+    # Never accept an arbitrary same-named cgroup elsewhere in the hierarchy.
+    # Cleanup and cancellation paths consume persisted job state, so a tampered
+    # path must not be able to target another service or user's descendants.
+    if candidate.parent != parent:
+        return None
     return candidate
 
 

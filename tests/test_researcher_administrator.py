@@ -2867,6 +2867,22 @@ def test_isolated_worker_cgroup_kills_setsided_term_ignoring_grandchild(tmp_path
                 pass
 
 
+def test_researcher_cgroup_path_is_scoped_to_current_delegation():
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    parent = admin_mod._current_cgroup_v2_dir()
+    if parent is None:
+        pytest.skip("cgroup v2 is unavailable")
+    direct = parent / "chack-researcher-path-scope-test"
+    assert admin_mod._safe_researcher_cgroup(str(direct)) == direct.resolve()
+    assert admin_mod._safe_researcher_cgroup(
+        str(parent.parent / "chack-researcher-path-scope-test")
+    ) is None
+    assert admin_mod._safe_researcher_cgroup(
+        str(parent / "nested" / "chack-researcher-path-scope-test")
+    ) is None
+
+
 def test_successful_worker_cleans_daemonized_descendant_before_return(tmp_path):
     import chack_tools.researcher_administrator_agent as admin_mod
 
