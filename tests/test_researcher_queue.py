@@ -241,7 +241,7 @@ def test_queue_preserved_artifacts_return_queue_and_request_folders():
     copied_raw = copied_research / "researcher_outputs" / "raw_step_001_scientific_research.raw.txt"
     assert copied_raw.read_text(encoding="utf-8") == raw_output
     assert payload["researches"][0]["evidence_data_path"].startswith(created["queue_evidence_data_path"])
-    # These are the same pinned read-only tools exposed to the FactChecker verifiers.
+    # These are the same pinned read-only tools exposed to shared-MCP consumers.
     queue_root = payload["queue_evidence_data_path"]
     browser = ResearchArtifactsTool(ToolsConfig(), root=queue_root)
     relative_raw = str(copied_raw.relative_to(queue_root))
