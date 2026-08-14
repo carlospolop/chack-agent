@@ -784,6 +784,7 @@ class _AdministratorRunAccounting:
 _ADMINISTRATOR_RUN_ACCOUNTING: contextvars.ContextVar[_AdministratorRunAccounting | None] = (
     contextvars.ContextVar("chack_administrator_run_accounting", default=None)
 )
+_ADMINISTRATOR_LAUNCH_GUARD_LOCK = threading.RLock()
 
 
 def _async_job_store(job_id: str, job: dict[str, Any]) -> None:
@@ -1920,7 +1921,7 @@ You are a research administrator tasked with a specific research and must obtain
 ### WORKFLOW
 1. Map the needed coverage: entities, aliases, timeframe, jurisdictions, claims, and relevant web/scientific/business/product/travel/legal/social/data/news/entity or other source families.
 2. Give each researcher a focused prompt of at least 500 characters (better close to 2000) covering scope, sources/tools to prioritize, disconfirming angles, expected comparisons, caveats, and any leads from earlier results.
-3. Researchers are blind to one another. Review every result and its `tool_call_counts`; inspect saved evidence when useful. Cross-pollinate material leads into another researcher or a focused follow-up. Repeat a researcher only for a specific unresolved source gap or contradiction, not for generic extra coverage.
+3. Researchers are blind to one another. Review every result and its `tool_call_counts`; inspect saved evidence when useful. Cross-pollinate material leads into another researcher or a focused follow-up. Repeat a researcher only for a specific unresolved source gap or contradiction, not for generic extra coverage. Every repeated researcher prompt must include `Duplicate reason:` followed by at least 80 characters explaining that material gap; unjustified sibling duplicates are rejected before they consume provider capacity.
 4. Stop when the evidence supports a defensible answer or further work has low value. Preserve enough runtime to synthesize; state remaining gaps instead of timing out while chasing completeness.
 
 ### LONG-RUNNING RESEARCHERS
@@ -3083,6 +3084,39 @@ class ResearcherAdministratorAgentTool:
             "source family, or contradiction that justifies repeating this researcher."
         )
 
+    def _reserve_researcher_requests(
+        self,
+        rows: list[dict[str, str]],
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """Atomically reserve valid researcher launches in the orchestrator process.
+
+        Researcher tools run in isolated child processes, so a guard wrapped around
+        the child tool cannot coordinate siblings or later MCP calls. Reserve here,
+        before spawning, and reject every repeated researcher unless its prompt has
+        a substantive ``Duplicate reason:`` justification.
+        """
+        accepted: list[dict[str, str]] = []
+        errors: list[dict[str, str]] = []
+        with _ADMINISTRATOR_LAUNCH_GUARD_LOCK:
+            for index, row in enumerate(rows):
+                short = normalize_researcher_name(str(row.get("researcher") or ""))
+                duplicate_error = self._duplicate_launch_error(
+                    short,
+                    {"prompt": str(row.get("prompt") or "")},
+                )
+                if duplicate_error:
+                    errors.append(
+                        {
+                            "index": str(index),
+                            "researcher": short,
+                            "error": duplicate_error,
+                        }
+                    )
+                    continue
+                self._launched_researcher_counts[short] += 1
+                accepted.append(row)
+        return accepted, errors
+
     def _guard_researcher_tool(self, tool: Any, short: str) -> Any:
         original = getattr(tool, "on_invoke_tool", None)
         if original is None:
@@ -3445,6 +3479,8 @@ class ResearcherAdministratorAgentTool:
                 )
                 return _compact_json({"batch_worked": False, "errors": errors, "results": []})
 
+            normalized, duplicate_errors = self._reserve_researcher_requests(normalized)
+            errors.extend(duplicate_errors)
             if not normalized:
                 return _compact_json({"batch_worked": False, "errors": errors, "results": []})
 
@@ -3961,6 +3997,8 @@ class ResearcherAdministratorAgentTool:
             f"{tool.description}\n\n"
             "Parameters: requests_json is a JSON array of objects with researcher and prompt; "
             "each prompt must be >=500 characters and relevant to that specific researcher. "
+            "A repeated researcher is rejected unless each repeat after the first includes "
+            "`Duplicate reason:` followed by at least 80 characters explaining a material new gap. "
             "Set save_artifacts true when source/detail artifacts should be preserved. "
             f"max_parallel is capped at {MAX_RESEARCHER_PARALLELISM}; child ContextVars and per-researcher artifact folders keep concurrent requests isolated.\n"
             "Output: Compact JSON containing lifecycle tasks, bounded digests, and errors. "
@@ -4101,7 +4139,12 @@ class ResearcherAdministratorAgentTool:
             single-task retry tool must not be forced to relaunch every required
             browser researcher and duplicate cost.
             """
-            launched: set[str] = set()
+            launched: set[str] = {
+                normalize_researcher_name(str(name or ""))
+                for name, count in self._launched_researcher_counts.items()
+                if int(count or 0) > 0
+            }
+            launched.discard("")
             for owned_job_id in _owned_job_ids():
                 snapshot = _async_job_snapshot(owned_job_id) or {}
                 for task in (snapshot.get("tasks") or {}).values():
@@ -4372,6 +4415,8 @@ class ResearcherAdministratorAgentTool:
                 tools_by_name=tools_by_name,
                 required_researchers=pending_async_required,
             )
+            normalized, duplicate_errors = self._reserve_researcher_requests(normalized)
+            errors.extend(duplicate_errors)
             if not normalized:
                 return _compact_json({"async_started": False, "errors": errors, "job_id": "", "tasks": []})
             job_id = f"research-job-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
@@ -4973,6 +5018,12 @@ class ResearcherAdministratorAgentTool:
                 return _not_owned(job_id)
             return _compact_json(_async_cancel_job(job_id))
 
+        start_researchers_async.description = (
+            f"{start_researchers_async.description}\n\n"
+            "Duplicate guard: a repeated researcher is rejected before spawning unless each repeat "
+            "after the first includes `Duplicate reason:` followed by at least 80 characters "
+            "explaining a material new source gap or contradiction."
+        )
         for tool in (
             start_researchers_async,
             list_researcher_jobs,
@@ -5047,14 +5098,11 @@ class ResearcherAdministratorAgentTool:
 
         keep = {RESEARCHER_REGISTRY[short][1] for short in enabled_researchers}
         keep.add("task_steps_manager")
-        tool_to_short = {RESEARCHER_REGISTRY[short][1]: short for short in enabled_researchers}
         all_tools = []
         for tool in (getattr(toolset, "tools", []) or []):
             name = self._name_of_tool(tool)
             if name not in keep:
                 continue
-            if name in tool_to_short:
-                tool = self._guard_researcher_tool(tool, tool_to_short[name])
             all_tools.append(tool)
 
         tools_by_name = {self._name_of_tool(tool): tool for tool in all_tools}

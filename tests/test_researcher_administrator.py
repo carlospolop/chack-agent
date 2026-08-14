@@ -1628,7 +1628,15 @@ def test_async_completion_waits_for_every_preregistered_task(tmp_path):
     by_name = {tool.name: tool for tool in tools}
     prompts = [
         {"researcher": "scientific", "prompt": "FIRST-REQUEST-MARKER First independent evidence review with primary sources and caveats. " * 12},
-        {"researcher": "scientific", "prompt": "SECOND-REQUEST-MARKER Second independent evidence review with direct sources and limitations. " * 12},
+        {
+            "researcher": "scientific",
+            "prompt": (
+                "SECOND-REQUEST-MARKER Second independent evidence review with direct sources and limitations. " * 12
+                + " Duplicate reason: This controlled concurrency test intentionally launches a second "
+                "scientific task to verify preregistration and completion ordering across materially "
+                "independent work while preserving the production duplicate guard."
+            ),
+        },
     ]
     started = json.loads(
         helper._invoke_tool_sync(
@@ -1980,11 +1988,10 @@ def test_retry_researcher_task_reuses_private_prompt_once(tmp_path):
         researchers=["scientific"],
     )
     root = str(tmp_path / "retry-workspace")
-    guarded_tool = helper._guard_researcher_tool(FlakyResearchTool(counter_path), "scientific")
     by_name = {
         tool.name: tool
         for tool in helper._build_async_tools(
-            {"scientific_research": guarded_tool},
+            {"scientific_research": FlakyResearchTool(counter_path)},
             ["scientific"],
             artifact_root=root,
         )
@@ -2139,6 +2146,125 @@ def test_async_poll_bounds_unparseable_raw_output_and_keeps_lossless_view(tmp_pa
                 timer.cancel()
 
 
+def test_async_orchestrator_blocks_unjustified_duplicate_researchers(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    counter_path = tmp_path / "duplicate-launch-count.txt"
+
+    class CountingResearchTool:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            try:
+                count = int(counter_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                count = 0
+            counter_path.write_text(str(count + 1), encoding="utf-8")
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "overall_summary": "The focused scientific pass completed.",
+                    "findings": [],
+                    "gaps": [],
+                    "open_topics": [],
+                    "full_research_review": "A complete evidence review was produced.",
+                    "tool_call_counts": {},
+                    "total_tool_calls": 0,
+                }
+            )
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    root = str(tmp_path / "duplicate-guard-workspace")
+    by_name = {
+        tool.name: tool
+        for tool in helper._build_async_tools(
+            {"scientific_research": CountingResearchTool()},
+            ["scientific"],
+            artifact_root=root,
+        )
+    }
+    base_prompt = (
+        "Investigate one bounded scientific evidence slice using primary sources, provenance, "
+        "contradictions, dates, limitations, and explicit uncertainty. "
+    ) * 6
+    requests = [
+        {"researcher": "scientific", "prompt": f"{base_prompt} Focus number {index}."}
+        for index in range(4)
+    ]
+    job_ids: list[str] = []
+    try:
+        started = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {"requests_json": json.dumps(requests), "max_parallel": 4},
+            )
+        )
+        assert started["async_started"] is True
+        assert len(started["tasks"]) == 1
+        assert len(started["errors"]) == 3
+        assert all("duplicate researcher launch blocked" in row["error"] for row in started["errors"])
+        job_ids.append(started["job_id"])
+        first_poll = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": started["job_id"], "wait_seconds": 10},
+            )
+        )
+        assert first_poll["tasks"][0]["status"] == "done"
+        assert counter_path.read_text(encoding="utf-8") == "1"
+
+        blocked = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {"requests_json": json.dumps([requests[1]])},
+            )
+        )
+        assert blocked["async_started"] is False
+        assert blocked["tasks"] == []
+        assert "duplicate researcher launch blocked" in blocked["errors"][0]["error"]
+
+        justified_prompt = (
+            f"{base_prompt}\nDuplicate reason: The first pass covered only clinical efficacy; "
+            "this follow-up must inspect a materially different primary-source family, resolve "
+            "a specific contradiction, and collect evidence absent from the original result."
+        )
+        followup = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {
+                    "requests_json": json.dumps(
+                        [{"researcher": "scientific", "prompt": justified_prompt}]
+                    )
+                },
+            )
+        )
+        assert followup["async_started"] is True
+        assert followup["errors"] == []
+        job_ids.append(followup["job_id"])
+        followup_poll = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": followup["job_id"], "wait_seconds": 10},
+            )
+        )
+        assert followup_poll["tasks"][0]["status"] == "done"
+        assert counter_path.read_text(encoding="utf-8") == "2"
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            jobs = [admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None) for job_id in job_ids]
+        for job in jobs:
+            for task in ((job or {}).get("tasks") or {}).values():
+                timer = task.get("deadline_timer")
+                if timer is not None:
+                    timer.cancel()
+
+
 def test_required_browser_initial_wave_allows_focused_followup(tmp_path):
     import chack_tools.researcher_administrator_agent as admin_mod
 
@@ -2225,12 +2351,17 @@ def test_required_browser_initial_wave_allows_focused_followup(tmp_path):
         )
         assert {task["status"] for task in initial_poll["tasks"]} == {"done"}
 
+        focused_followup_prompt = (
+            f"{deep_prompt}\nDuplicate reason: The initial browser pass left a material source-family gap; "
+            "this focused follow-up must inspect different primary documents, resolve a concrete "
+            "contradiction, and avoid repeating evidence already collected by the first wave."
+        )
         followup = json.loads(
             helper._invoke_tool_sync(
                 by_name["start_researchers_async"],
                 {
                     "requests_json": json.dumps(
-                        [{"researcher": "deepchatgpt", "prompt": deep_prompt}]
+                        [{"researcher": "deepchatgpt", "prompt": focused_followup_prompt}]
                     ),
                     "max_parallel": 1,
                 },
