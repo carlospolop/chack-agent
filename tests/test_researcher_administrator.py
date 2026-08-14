@@ -2065,6 +2065,196 @@ def test_retry_researcher_task_reuses_private_prompt_once(tmp_path):
                     timer.cancel()
 
 
+def test_async_poll_bounds_unparseable_raw_output_and_keeps_lossless_view(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    full_raw_output = "unparseable-provider-output-" * 2_000
+
+    class UnparseableResearchTool:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            return full_raw_output
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    root = str(tmp_path / "bounded-raw-workspace")
+    by_name = {
+        tool.name: tool
+        for tool in helper._build_async_tools(
+            {"scientific_research": UnparseableResearchTool()},
+            ["scientific"],
+            artifact_root=root,
+        )
+    }
+    prompt = "Investigate primary scientific evidence, contradictions, scope, dates, and provenance. " * 10
+    started = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {"requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}])},
+        )
+    )
+    job_id = started["job_id"]
+    task_id = started["tasks"][0]["task_id"]
+    try:
+        polled = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": job_id, "wait_seconds": 10, "include_outputs": True},
+            )
+        )
+        projected = polled["tasks"][0]["result"]
+        assert polled["tasks"][0]["status"] == "error"
+        assert len(projected["output"]) == 2_000
+        assert projected["output_truncated"] is True
+        assert projected["raw_total_chars"] == len(full_raw_output)
+        assert projected["raw_view_available"] is True
+        assert len(json.dumps(polled)) < 8_000
+
+        raw_page = json.loads(
+            helper._invoke_tool_sync(
+                by_name["get_researcher_result"],
+                {
+                    "job_id": job_id,
+                    "task_id": task_id,
+                    "view": "raw",
+                    "offset": 0,
+                    "max_chars": 12_000,
+                },
+            )
+        )
+        assert raw_page["total_chars"] == len(full_raw_output)
+        assert raw_page["content"] == full_raw_output[:12_000]
+        assert raw_page["next_offset"] == 12_000
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            job = admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+        for task in ((job or {}).get("tasks") or {}).values():
+            timer = task.get("deadline_timer")
+            if timer is not None:
+                timer.cancel()
+
+
+def test_required_browser_initial_wave_allows_focused_followup(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    class ImmediateBrowserResearchTool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "overall_summary": "Primary evidence was collected successfully.",
+                    "findings": [],
+                    "gaps": [],
+                    "open_topics": [],
+                    "full_research_review": "Complete browser research evidence.",
+                    "tool_call_counts": {"chatgpt_web": 1},
+                    "total_tool_calls": 1,
+                }
+            )
+
+    enabled = ["deepchatgpt", "prochatgpt"]
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            researcher_administrator_enabled=True,
+            deepchatgpt_enabled=True,
+            prochatgpt_enabled=True,
+        ),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=enabled,
+        required_researchers=enabled,
+    )
+    root = str(tmp_path / "required-browser-workspace")
+    by_name = {
+        tool.name: tool
+        for tool in helper._build_async_tools(
+            {
+                "deepchatgpt_researcher": ImmediateBrowserResearchTool("deepchatgpt_researcher"),
+                "prochatgpt_researcher": ImmediateBrowserResearchTool("prochatgpt_researcher"),
+            },
+            enabled,
+            artifact_root=root,
+        )
+    }
+    deep_prompt = "Run deep browser research with primary sources, dates, contradictions, and provenance. " * 10
+    pro_prompt = "Run Pro browser research with primary sources, dates, contradictions, and provenance. " * 10
+    job_ids: list[str] = []
+    try:
+        incomplete = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {
+                    "requests_json": json.dumps(
+                        [{"researcher": "deepchatgpt", "prompt": deep_prompt}]
+                    )
+                },
+            )
+        )
+        assert incomplete["async_started"] is False
+        assert "prochatgpt" in json.dumps(incomplete)
+
+        initial = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {
+                    "requests_json": json.dumps(
+                        [
+                            {"researcher": "deepchatgpt", "prompt": deep_prompt},
+                            {"researcher": "prochatgpt", "prompt": pro_prompt},
+                        ]
+                    )
+                },
+            )
+        )
+        assert initial["async_started"] is True
+        job_ids.append(initial["job_id"])
+        initial_poll = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": initial["job_id"], "wait_seconds": 10},
+            )
+        )
+        assert {task["status"] for task in initial_poll["tasks"]} == {"done"}
+
+        followup = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {
+                    "requests_json": json.dumps(
+                        [{"researcher": "deepchatgpt", "prompt": deep_prompt}]
+                    ),
+                    "max_parallel": 1,
+                },
+            )
+        )
+        assert followup["async_started"] is True
+        job_ids.append(followup["job_id"])
+        followup_poll = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": followup["job_id"], "wait_seconds": 10},
+            )
+        )
+        assert followup_poll["tasks"][0]["status"] == "done"
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            jobs = [admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None) for job_id in job_ids]
+        for job in jobs:
+            for task in ((job or {}).get("tasks") or {}).values():
+                timer = task.get("deadline_timer")
+                if timer is not None:
+                    timer.cancel()
+
+
 def test_administrator_duplicate_researcher_guard_blocks_unjustified_repeat():
     helper = ResearcherAdministratorAgentTool(
         ToolsConfig(researcher_administrator_enabled=True, websearcher_enabled=True),

@@ -330,8 +330,11 @@ def _live_process_group_members(pgid: int) -> list[int]:
             except (OSError, ValueError):
                 continue
         return members
+    killpg = getattr(os, "killpg", None)
+    if not callable(killpg):
+        return []
     try:
-        os.killpg(group, 0)
+        killpg(group, 0)
     except (ProcessLookupError, PermissionError, OSError):
         return []
     return [group]
@@ -347,7 +350,9 @@ def _researcher_process_entry(
     try:
         # Every subprocess launched by the researcher inherits this private
         # session/process group and is terminated together with the child.
-        os.setsid()
+        setsid = getattr(os, "setsid", None)
+        if callable(setsid):
+            setsid()
     except OSError:
         pass
     # TERM is cooperative first: async researchers can observe the event and
@@ -379,9 +384,11 @@ def _researcher_process_entry(
 
     log_token = set_log_context(_chack_tool_progress_callback=_progress)
     try:
+        getpgrp = getattr(os, "getpgrp", None)
+        process_group_id = int(getpgrp()) if callable(getpgrp) else 0
         _send_researcher_process_message(
             connection,
-            {"kind": "started", "pid": os.getpid(), "process_group_id": os.getpgrp()},
+            {"kind": "started", "pid": os.getpid(), "process_group_id": process_group_id},
         )
         tool = _deserialize_researcher_tool(serialized_tool)
         output = ResearcherAdministratorAgentTool._invoke_tool_sync(tool, payload)
@@ -441,20 +448,26 @@ def _terminate_researcher_process(
         pgid = int(getattr(process, "_chack_process_group_id", 0) or 0)
     except (TypeError, ValueError):
         pgid = 0
+    try:
+        getpgrp = getattr(os, "getpgrp", None)
+        supervisor_pgid = int(getpgrp()) if callable(getpgrp) else 0
+    except (OSError, TypeError, ValueError):
+        supervisor_pgid = 0
     # The started IPC message can race with cancellation. Discover the group
     # from the live PID when possible, but only trust a group that is distinct
     # from the supervisor's own group. Before ``setsid`` the child inherits our
     # group and therefore remains on the safe Process.terminate fallback.
     if pgid <= 1 and pid > 1:
         try:
-            discovered_pgid = int(os.getpgid(pid))
+            getpgid = getattr(os, "getpgid", None)
+            discovered_pgid = int(getpgid(pid)) if callable(getpgid) else 0
         except (ProcessLookupError, PermissionError, OSError, TypeError, ValueError):
             discovered_pgid = 0
-        if discovered_pgid > 1 and discovered_pgid != os.getpgrp():
+        if discovered_pgid > 1 and discovered_pgid != supervisor_pgid:
             pgid = discovered_pgid
     # The supervisor itself must never be included in a killpg call.  A reported
     # PGID is only trusted when it is a valid private group distinct from ours.
-    if pgid <= 1 or pgid == os.getpgrp():
+    if pgid <= 1 or (supervisor_pgid > 1 and pgid == supervisor_pgid):
         pgid = 0
     info["process_group_id"] = pgid or None
     if pid <= 1:
@@ -4080,6 +4093,23 @@ class ResearcherAdministratorAgentTool:
                 return None
             return _async_job_snapshot(job_key)
 
+        def _already_launched_researchers() -> set[str]:
+            """Return researcher types already launched by this workspace.
+
+            Required browser researchers are enforced as one complete initial
+            wave. Once that gate has been met, focused follow-ups and the
+            single-task retry tool must not be forced to relaunch every required
+            browser researcher and duplicate cost.
+            """
+            launched: set[str] = set()
+            for owned_job_id in _owned_job_ids():
+                snapshot = _async_job_snapshot(owned_job_id) or {}
+                for task in (snapshot.get("tasks") or {}).values():
+                    short = normalize_researcher_name(str(task.get("researcher") or ""))
+                    if short:
+                        launched.add(short)
+            return launched
+
         def _not_owned(job_id: str) -> str:
             return _compact_json(
                 {
@@ -4106,7 +4136,19 @@ class ResearcherAdministratorAgentTool:
                 digest.pop("researcher_tool", None)
                 return {"parsed_response": digest}
             if result.get("output") is not None:
-                return {"output": result.get("output")}
+                raw_value = result.get("output")
+                raw_text = raw_value if isinstance(raw_value, str) else _compact_json(raw_value)
+                limit = 2_000
+                projected: dict[str, Any] = {"output": raw_text[:limit]}
+                if len(raw_text) > limit:
+                    projected.update(
+                        {
+                            "output_truncated": True,
+                            "raw_total_chars": len(raw_text),
+                            "raw_view_available": True,
+                        }
+                    )
+                return projected
             return {}
 
         def _compact_task_status(task_id: str, task: dict[str, Any], *, now: float) -> dict[str, Any]:
@@ -4323,11 +4365,12 @@ class ResearcherAdministratorAgentTool:
                         "tasks": [],
                     }
                 )
+            pending_async_required = async_required - _already_launched_researchers()
             normalized, errors = self._normalize_researcher_requests(
                 requests_json,
                 enabled=enabled,
                 tools_by_name=tools_by_name,
-                required_researchers=async_required,
+                required_researchers=pending_async_required,
             )
             if not normalized:
                 return _compact_json({"async_started": False, "errors": errors, "job_id": "", "tasks": []})
@@ -5225,7 +5268,8 @@ class ResearcherAdministratorAgentTool:
             + ", ".join(self.required_researchers)
             + ". This is a hard orchestration gate, not a suggestion: across the initial "
             "short-work batch and long-work async request(s), every listed researcher must "
-            "be included; each orchestration tool rejects missing researchers from its group. "
+            "be included in the initial orchestration wave. After that gate is met, targeted "
+            "follow-ups and one-task retries may run without duplicating every required researcher. "
             "Launch and await each; `research_worked` must be false if any fails.\n"
             if self.required_researchers
             else ""
