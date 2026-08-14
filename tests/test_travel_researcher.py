@@ -812,5 +812,7 @@ def test_research_administrator_can_force_enable_travel(monkeypatch):
 
     assert helper._enabled_researchers() == ["travel"]
     names = _tool_names(helper._build_subagent_tools(["travel"]))
-    assert "travel_research" in names
+    # Ordinary researchers enter through the supervised batch boundary; the
+    # raw travel tool remains a private dependency of that batch.
+    assert "travel_research" not in names
     assert "run_researchers_batch" in names

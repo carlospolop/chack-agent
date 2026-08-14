@@ -26,6 +26,7 @@ from .research_artifacts import cleanup_research_artifacts
 from .subagent_config import (
     create_subagent_evidence_dir,
     enforce_prompt_str_or_list_schema,
+    normalize_researcher_response_payload,
     normalize_subagent_prompts,
     record_researcher_response,
     run_parallel_subagent_prompts,
@@ -1159,15 +1160,15 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             except Exception:
                 pass
             self._write_json(run_state_path, metadata)
-            payload: dict[str, Any] = {
+            payload: dict[str, Any] = normalize_researcher_response_payload({
                 "research_worked": True,
                 "failure_reason": "",
-                "final_research_review": answer,
+                "full_research_review": answer,
                 "evidence_data_path": evidence_dir if save_artifacts else "",
                 "key_artifacts": [],
                 "tool_call_counts": {"chatgpt_web": 1},
                 "total_tool_calls": 1,
-            }
+            })
             if save_artifacts:
                 payload["key_artifacts"] = [
                     {
@@ -1229,16 +1230,16 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                             "description": "Latest incrementally saved ChatGPT response text recovered before the terminal failure.",
                         }
                     )
-            payload = {
+            payload = normalize_researcher_response_payload({
                 "research_worked": False,
                 "failure_reason": str(exc),
-                "final_research_review": partial_review,
+                "full_research_review": partial_review,
                 "partial_result": bool(partial_review),
                 "evidence_data_path": evidence_dir if save_artifacts else "",
                 "key_artifacts": failure_artifacts,
                 "tool_call_counts": {"chatgpt_web": 1},
                 "total_tool_calls": 1,
-            }
+            })
             return _compact(payload)
         finally:
             cleanup_research_artifacts(evidence_dir, save_artifacts=save_artifacts)

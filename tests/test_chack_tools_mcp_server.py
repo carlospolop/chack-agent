@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 
@@ -11,10 +12,99 @@ from mcp.server.fastmcp import FastMCP
 
 from chack_agent.backends.chack_tools_mcp_server import (
     _ServerPolicyState,
+    _load_toolset,
+    _process_is_alive,
     _py_type_from_schema,
     _register_tools,
 )
 from chack_tools.subagent_config import enforce_prompt_str_or_list_schema
+
+def test_name_based_administrator_tool_reconstruction(monkeypatch) -> None:
+    monkeypatch.setenv("CHACK_MODEL_PROVIDER", "codex")
+    monkeypatch.setenv("CHACK_DEFAULT_MODEL", "gpt-test")
+    monkeypatch.setenv("CHACK_TOOLS_CONFIG_JSON", json.dumps({
+        "task_steps_manager_enabled": False,
+        "researcher_administrator_enabled": True,
+        "researcher_administrator_researchers": ["websearcher"],
+        "websearcher_enabled": True,
+    }))
+    monkeypatch.setenv("CHACK_RESEARCH_MASTER_DIR", "/tmp/chack-mcp-name-reconstruction")
+    monkeypatch.setenv(
+        "CHACK_TOOLS_OVERRIDE_NAMES_JSON",
+        json.dumps([
+            "run_researchers_batch",
+            "start_researchers_async",
+            "list_researcher_jobs",
+            "get_researcher_task",
+            "poll_researchers_async",
+            "get_researcher_result",
+            "cancel_researcher_task",
+            "retry_researcher_task",
+            "cancel_researchers_async",
+            "list_research_artifacts",
+            "read_research_artifact",
+            "grep_research_artifacts",
+            "delete_research_artifact",
+            "register_research_artifact",
+        ]),
+    )
+    monkeypatch.setenv("CHACK_ALLOWED_TOOLS_JSON", json.dumps([
+        "run_researchers_batch",
+        "start_researchers_async",
+        "list_researcher_jobs",
+        "get_researcher_task",
+        "poll_researchers_async",
+        "get_researcher_result",
+        "cancel_researcher_task",
+        "retry_researcher_task",
+        "cancel_researchers_async",
+        "list_research_artifacts",
+        "read_research_artifact",
+        "grep_research_artifacts",
+        "delete_research_artifact",
+        "register_research_artifact",
+    ]))
+
+    tools = _load_toolset()
+    names = [str(getattr(tool, "name", "") or "") for tool in tools]
+    assert names == [
+        "run_researchers_batch",
+        "start_researchers_async",
+        "list_researcher_jobs",
+        "get_researcher_task",
+        "poll_researchers_async",
+        "get_researcher_result",
+        "cancel_researcher_task",
+        "retry_researcher_task",
+        "cancel_researchers_async",
+        "list_research_artifacts",
+        "read_research_artifact",
+        "grep_research_artifacts",
+        "delete_research_artifact",
+        "register_research_artifact",
+    ]
+
+
+def test_mcp_watchdog_checks_exported_owner_not_direct_parent(monkeypatch) -> None:
+    owner_pid = 424242
+    calls: list[tuple[int, int]] = []
+
+    def fake_kill(pid: int, signal: int) -> None:
+        calls.append((pid, signal))
+
+    monkeypatch.setattr("chack_agent.backends.chack_tools_mcp_server.os.kill", fake_kill)
+
+    assert _process_is_alive(owner_pid) is True
+    assert calls == [(owner_pid, 0)]
+
+
+def test_mcp_watchdog_treats_missing_owner_as_dead(monkeypatch) -> None:
+    def fake_kill(pid: int, signal: int) -> None:
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr("chack_agent.backends.chack_tools_mcp_server.os.kill", fake_kill)
+
+    assert _process_is_alive(424242) is False
 
 
 def test_stdio_server_completes_mcp_handshake() -> None:

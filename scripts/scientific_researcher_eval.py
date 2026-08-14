@@ -104,17 +104,16 @@ TOPICS = {
 
 
 def load_env(path: Path) -> None:
-    if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+    if path.exists():
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
     os.environ.pop("CODEX_ACCESS_TOKEN", None)
     os.environ.setdefault("CHACK_DISABLE_STDOUT_EVENTS", "1")
     os.environ.setdefault("CHACK_DISABLE_CODEX_NATIVE_WEB", "1")
@@ -214,7 +213,13 @@ def infer_tool_counts_from_artifacts(artifacts: dict[str, Any]) -> Counter[str]:
 
 
 def score_run(output: str, parsed: dict[str, Any], counts: Counter[str], artifacts: dict[str, Any], elapsed: float) -> float:
-    review = str(parsed.get("final_research_review") or parsed.get("final_review") or output or "")
+    review = str(
+        parsed.get("full_research_review")
+        or parsed.get("final_research_review")
+        or parsed.get("final_review")
+        or output
+        or ""
+    )
     worked = parsed.get("worked")
     if isinstance(worked, str):
         worked_ok = worked.strip().lower() in {"true", "yes", "1", "worked", "success"}

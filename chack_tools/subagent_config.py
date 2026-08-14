@@ -32,9 +32,12 @@ You are objective and only looking for the real truth. Treat social norms and co
 - Preserve the full evidentiary trail whenever tooling allows it. Search/list tools are discovery aids; content/detail/fetch/download/transcript tools should create inspectable artifacts while the run is active.
 - Prefer primary, original, or directly inspectable sources. When using secondary sources, label them as such and keep their provenance.
 - Clearly separate observed facts, source claims, inferences, uncertainty, contradictions, and missing evidence.
-- The final answer must be useful to the parent agent: concise findings, caveats, enough provenance to audit the reasoning, and artifact filenames only when artifacts are preserved.
+- The final answer has two layers. `overall_summary`, `findings`, `gaps`, and `open_topics` are the compact digest the parent normally sees. `full_research_review` is the complete evidence-backed record used for audit and downstream synthesis.
+- Do not put source lists or assessment labels in the digest. Each `findings[].claim` names the investigated claim and its `summary` explains what was found, how it affects that claim, and any material contradiction or uncertainty. Keep citations, URLs, source provenance, and detailed reasoning in `full_research_review` and preserved artifacts.
+- `gaps` are missing evidence that limits the current conclusion. `open_topics` are optional, concrete follow-up investigations that could add value but are not required to close the current claim. Do not repeat a gap as an open topic, and return an empty list when there is no worthwhile follow-up.
+- Digest limits are strict: `failure_reason` <= 500 characters; `overall_summary` <= 1000; at most 8 findings; each claim 30-220 and each finding summary 100-600; at most 5 gaps of 20-240 characters each; at most 5 open topics of 30-250 characters each.
 - Strong evidence survives serious attempts to disprove it. Actively look for disconfirming evidence, opposing sources, methodological weaknesses, and alternative explanations before concluding.
-- Return only the configured JSON output object. When research succeeds, make `final_research_review` at least 2000 characters if the evidence reasonably supports that much detail.
+- Return only the configured JSON output object. Never omit relevant evidence from `full_research_review` merely to make the digest shorter. When research succeeds, make `full_research_review` at least 2000 characters if the evidence reasonably supports that much detail.
 """
 
 
@@ -48,11 +51,61 @@ RESEARCHER_OUTPUT_SCHEMA = {
         },
         "failure_reason": {
             "type": "string",
-            "description": "Empty when research_worked is true. If false, explain the blocker or failure clearly.",
+            "maxLength": 500,
+            "description": "Empty when research_worked is true. If false, explain the blocker or failure clearly in at most 500 characters.",
         },
-        "final_research_review": {
+        "overall_summary": {
             "type": "string",
-            "description": "The final evidence-backed research review. When research_worked is true, write at least 2000 characters if possible.",
+            "maxLength": 1000,
+            "description": "Compact overall conclusion, at most 1000 characters. Do not repeat every finding.",
+        },
+        "findings": {
+            "type": "array",
+            "maxItems": 8,
+            "description": "Up to 8 self-contained findings. No source arrays and no assessment labels.",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "claim": {
+                        "type": "string",
+                        "minLength": 30,
+                        "maxLength": 220,
+                        "description": "30-220 characters naming the concrete claim investigated.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "minLength": 100,
+                        "maxLength": 600,
+                        "description": "100-600 characters explaining what was found, how it affects the claim, and material caveats or contradictions.",
+                    },
+                },
+                "required": ["claim", "summary"],
+            },
+        },
+        "gaps": {
+            "type": "array",
+            "maxItems": 5,
+            "description": "Up to 5 unresolved evidence gaps. Empty when there are no material gaps.",
+            "items": {
+                "type": "string",
+                "minLength": 20,
+                "maxLength": 240,
+            },
+        },
+        "open_topics": {
+            "type": "array",
+            "maxItems": 5,
+            "description": "Up to 5 concrete, non-duplicative follow-up investigations that could add value beyond the current conclusion. Empty when no further research is worthwhile.",
+            "items": {
+                "type": "string",
+                "minLength": 30,
+                "maxLength": 250,
+            },
+        },
+        "full_research_review": {
+            "type": "string",
+            "description": "The complete evidence-backed review, including citations, URLs, provenance, contradictions, uncertainty, and detailed reasoning. Never shorten this to satisfy digest limits.",
         },
         "evidence_data_path": {
             "type": "string",
@@ -87,7 +140,11 @@ RESEARCHER_OUTPUT_SCHEMA = {
     "required": [
         "research_worked",
         "failure_reason",
-        "final_research_review",
+        "overall_summary",
+        "findings",
+        "gaps",
+        "open_topics",
+        "full_research_review",
         "evidence_data_path",
         "key_artifacts",
     ],
@@ -100,12 +157,20 @@ RESEARCHER_OUTPUT_SCHEMA_NO_ARTIFACTS = {
     "properties": {
         "research_worked": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["research_worked"]),
         "failure_reason": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["failure_reason"]),
-        "final_research_review": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["final_research_review"]),
+        "overall_summary": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["overall_summary"]),
+        "findings": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["findings"]),
+        "gaps": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["gaps"]),
+        "open_topics": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["open_topics"]),
+        "full_research_review": deepcopy(RESEARCHER_OUTPUT_SCHEMA["properties"]["full_research_review"]),
     },
     "required": [
         "research_worked",
         "failure_reason",
-        "final_research_review",
+        "overall_summary",
+        "findings",
+        "gaps",
+        "open_topics",
+        "full_research_review",
     ],
 }
 
@@ -152,11 +217,130 @@ def _json_dumps_compact(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _digest_text(value: Any, max_chars: int) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 1)].rstrip() + "…"
+
+
+def _legacy_digest_finding(full_review: str) -> list[dict[str, str]]:
+    excerpt = _digest_text(full_review, 470)
+    if not excerpt:
+        return []
+    first_sentence = re.split(r"(?<=[.!?])\s+", excerpt, maxsplit=1)[0].strip()
+    claim = _digest_text(first_sentence, 220)
+    if len(claim) < 30:
+        claim = "The delegated researcher returned a substantive result"
+    summary = _digest_text(
+        "The preserved full researcher review reports the following finding: "
+        f"{excerpt} Consult the complete review and artifacts for its evidence, citations, and caveats.",
+        600,
+    )
+    return [{"claim": claim, "summary": summary}]
+
+
+def normalize_researcher_response_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the canonical two-layer researcher response.
+
+    Older researchers used ``final_research_review`` as their only semantic field.
+    It is promoted losslessly to ``full_research_review`` and a bounded compatibility
+    digest is derived. The full review is never truncated; only digest fields are.
+    """
+
+    row = deepcopy(dict(payload or {}))
+    legacy_full = row.pop("final_research_review", None)
+    full_review = str(row.get("full_research_review") or legacy_full or "")
+    row["full_research_review"] = full_review
+    row["research_worked"] = row.get("research_worked") is True
+    row["failure_reason"] = _digest_text(row.get("failure_reason"), 500)
+
+    overall_summary = _digest_text(row.get("overall_summary"), 1000)
+    if not overall_summary and full_review:
+        overall_summary = _digest_text(full_review, 1000)
+    row["overall_summary"] = overall_summary
+
+    findings: list[dict[str, str]] = []
+    raw_findings = row.get("findings")
+    if isinstance(raw_findings, list):
+        for raw_finding in raw_findings[:8]:
+            if not isinstance(raw_finding, Mapping):
+                continue
+            claim = _digest_text(raw_finding.get("claim"), 220)
+            summary = _digest_text(raw_finding.get("summary"), 600)
+            if not claim or not summary:
+                continue
+            if len(claim) < 30:
+                claim = _digest_text(f"Investigated claim reported by the researcher: {claim}", 220)
+            if len(summary) < 100:
+                summary = _digest_text(
+                    f"The researcher found the following about this claim: {summary} "
+                    "The complete review retains the supporting evidence and any additional caveats.",
+                    600,
+                )
+            findings.append({"claim": claim, "summary": summary})
+    if not findings and full_review:
+        findings = _legacy_digest_finding(full_review)
+    row["findings"] = findings
+
+    gaps: list[str] = []
+    raw_gaps = row.get("gaps")
+    if isinstance(raw_gaps, list):
+        for raw_gap in raw_gaps[:5]:
+            gap = _digest_text(raw_gap, 240)
+            if not gap:
+                continue
+            if len(gap) < 20:
+                gap = _digest_text(f"Unresolved evidence gap: {gap}", 240)
+            gaps.append(gap)
+    row["gaps"] = gaps
+
+    open_topics: list[str] = []
+    gap_markers = {gap.casefold() for gap in gaps}
+    seen_topics: set[str] = set()
+    raw_open_topics = row.get("open_topics")
+    if isinstance(raw_open_topics, list):
+        for raw_topic in raw_open_topics:
+            topic = _digest_text(raw_topic, 250)
+            if not topic or topic.casefold() in gap_markers:
+                continue
+            if len(topic) < 30:
+                topic = _digest_text(f"Suggested follow-up investigation: {topic}", 250)
+            marker = topic.casefold()
+            if marker in seen_topics:
+                continue
+            seen_topics.add(marker)
+            open_topics.append(topic)
+            if len(open_topics) >= 5:
+                break
+    row["open_topics"] = open_topics
+    return row
+
+
+def compact_researcher_digest(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a full researcher response into the bounded LLM-facing digest."""
+
+    row = normalize_researcher_response_payload(payload)
+    digest: dict[str, Any] = {
+        "research_worked": row["research_worked"],
+        "failure_reason": row["failure_reason"],
+        "overall_summary": row["overall_summary"],
+        "findings": deepcopy(row["findings"]),
+        "gaps": list(row["gaps"]),
+        "open_topics": list(row["open_topics"]),
+    }
+    researcher_tool = str(row.get("researcher_tool") or "").strip()
+    if researcher_tool:
+        digest["researcher_tool"] = researcher_tool
+    return digest
+
+
 def append_research_tool_usage(output: str, tool_counts: Mapping[str, Any] | None) -> str:
     """Append tool-call counts to a researcher JSON result without asking the model to write them."""
     payload = _json_from_research_output(output)
     if payload is None:
         return output
+    payload = normalize_researcher_response_payload(payload)
     counts = _compact_counter(tool_counts)
     payload["tool_call_counts"] = counts
     payload["total_tool_calls"] = int(sum(counts.values()))
@@ -185,7 +369,11 @@ def record_researcher_response(researcher_tool: str, output: str) -> None:
         {
             "research_worked": False,
             "failure_reason": "Researcher did not return parseable JSON.",
-            "final_research_review": str(output or "").strip(),
+            "overall_summary": "The researcher returned unparseable output; the full response was preserved for inspection.",
+            "findings": [],
+            "gaps": ["The researcher response could not be parsed into the configured structured output."],
+            "open_topics": [],
+            "full_research_review": str(output or "").strip(),
             "researcher_tool": str(researcher_tool or "").strip(),
         }
     )
@@ -203,6 +391,11 @@ def researcher_responses_from_output(researcher_tool: str, output: Any) -> list[
                 "research_worked",
                 "failure_reason",
                 "final_research_review",
+                "overall_summary",
+                "findings",
+                "gaps",
+                "open_topics",
+                "full_research_review",
                 "evidence_data_path",
                 "key_artifacts",
                 "tool_call_counts",
@@ -212,7 +405,7 @@ def researcher_responses_from_output(researcher_tool: str, output: Any) -> list[
             if inner is None:
                 return []
             payload = inner
-        payload = deepcopy(payload)
+        payload = normalize_researcher_response_payload(payload)
         payload.setdefault("researcher_tool", str(researcher_tool or "").strip())
         return [payload]
 
@@ -228,7 +421,7 @@ def researcher_responses_from_output(researcher_tool: str, output: Any) -> list[
         parsed = _json_from_research_output(match.group(2))
         if parsed is None:
             continue
-        parsed = deepcopy(parsed)
+        parsed = normalize_researcher_response_payload(parsed)
         parsed.setdefault("researcher_tool", str(researcher_tool or "").strip())
         parsed.setdefault("batch_result_index", int(match.group(1)))
         responses.append(parsed)
@@ -748,7 +941,7 @@ def inherit_subagent_limits(
     parent_remaining_runtime_minutes: float,
     parent_remaining_cost_usd: float,
     runtime_ratio: float = 1.0 / 3.0,
-    runtime_cap_minutes: int = 4,
+    runtime_cap_minutes: int = 20,
     cost_ratio: float = 1.0 / 3.0,
 ) -> tuple[int, int, float]:
     # Child turns cap: 1/2 of parent max turns.

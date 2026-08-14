@@ -5,6 +5,7 @@ import json
 import keyword
 import os
 import sys
+import threading
 import traceback
 import uuid
 from dataclasses import dataclass
@@ -36,12 +37,15 @@ from .tool_payloads import (
     CHACK_TOOLS_CONFIG_JSON_PATH_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_PATH_ENV,
+    CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV,
+    CHACK_TOOLS_APPEND_NAMES_JSON_ENV,
     deserialize_tools_payload,
     read_payload_from_env_or_file,
 )
 
 
 _MCP_STARTUP_STATUS_PATH_ENV = "CHACK_MCP_STARTUP_STATUS_PATH"
+_MCP_PARENT_PID_ENV = "CHACK_MCP_PARENT_PID"
 
 
 def _write_startup_status(*, tool_names: list[str] | None = None, error: str = "") -> None:
@@ -249,6 +253,63 @@ def _truncate_tool_output(value: str) -> str:
     return f"{prefix}{marker}{suffix}"
 
 
+def _process_is_alive(pid: int) -> bool:
+    """Return whether the configured owner process still exists.
+
+    The MCP server is usually a grandchild of the Python backend: the backend
+    starts Claude Code, and Claude Code starts this stdio server. Therefore
+    ``os.getppid()`` is Claude Code's PID, not the owner PID exported by the
+    backend. Comparing those two PIDs makes a healthy server exit after the
+    first watchdog tick. ``kill(pid, 0)`` checks the exported owner directly
+    and also works after the server is reparented when the owner dies.
+    """
+    if int(pid or 0) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # An inaccessible process still exists; do not kill the MCP server
+        # merely because this check cannot inspect it.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _start_parent_watchdog() -> threading.Event:
+    """Stop an orphaned per-provider MCP server and reconcile its jobs."""
+    configured_parent = str(os.environ.get(_MCP_PARENT_PID_ENV, "") or "").strip()
+    direct_parent_pid = os.getppid()
+    try:
+        parent_pid = int(configured_parent) if configured_parent else direct_parent_pid
+    except (TypeError, ValueError):
+        parent_pid = direct_parent_pid
+    stop = threading.Event()
+
+    def _watch() -> None:
+        while not stop.wait(1.0):
+            # The exported backend PID protects against an orphaned server if
+            # the backend dies, while the direct parent protects against a
+            # normal Claude invocation ending while the backend stays alive.
+            if _process_is_alive(parent_pid) and _process_is_alive(direct_parent_pid):
+                continue
+            try:
+                from chack_tools.researcher_administrator_agent import _shutdown_all_research_jobs
+
+                _shutdown_all_research_jobs(timeout_seconds=15.0)
+            finally:
+                # The server is scoped to the provider process. Once that
+                # process is gone, keeping stdio/MCP alive would strand daemon
+                # workers and make the durable ledger lie about liveness.
+                os._exit(0)
+
+    thread = threading.Thread(target=_watch, name="chack-mcp-parent-watchdog", daemon=True)
+    thread.start()
+    return stop
+
+
 def _load_toolset() -> list[Any]:
     tools_cfg_raw = (
         read_payload_from_env_or_file(
@@ -300,6 +361,29 @@ def _load_toolset() -> list[Any]:
         os.environ.get(CHACK_TOOLS_APPEND_B64_ENV, ""),
         os.environ.get(CHACK_TOOLS_APPEND_B64_PATH_ENV, ""),
     )
+    override_names_raw = str(
+        os.environ.get(CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV, "") or ""
+    ).strip()
+    append_names_raw = str(
+        os.environ.get(CHACK_TOOLS_APPEND_NAMES_JSON_ENV, "") or ""
+    ).strip()
+    try:
+        override_names = json.loads(override_names_raw) if override_names_raw else []
+        append_names = json.loads(append_names_raw) if append_names_raw else []
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Name-based tool transport payload is not valid JSON") from exc
+    if not isinstance(override_names, list) or not all(
+        isinstance(name, str) for name in override_names
+    ):
+        raise RuntimeError(
+            f"{CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV} must be a JSON string array"
+        )
+    if not isinstance(append_names, list) or not all(
+        isinstance(name, str) for name in append_names
+    ):
+        raise RuntimeError(
+            f"{CHACK_TOOLS_APPEND_NAMES_JSON_ENV} must be a JSON string array"
+        )
     override_tools = deserialize_tools_payload(serialized_tools_override_b64)
     append_tools = deserialize_tools_payload(serialized_tools_append_b64)
 
@@ -356,10 +440,63 @@ def _load_toolset() -> list[Any]:
             }
     if str(serialized_tools_override_b64 or "").strip():
         tools = list(override_tools)
+    elif override_names:
+        helper = getattr(toolset, "_researcher_administrator_helper", None)
+        management_names = {
+            "run_researchers_batch",
+            "start_researchers_async",
+            "list_researcher_jobs",
+            "get_researcher_task",
+            "poll_researchers_async",
+            "get_researcher_result",
+            "cancel_researcher_task",
+            "retry_researcher_task",
+            "cancel_researchers_async",
+        }
+        if helper is None or not (set(override_names) & management_names):
+            raise RuntimeError(
+                "Name-based tool override requires a researcher administrator helper"
+            )
+        artifact_root = (
+            str(os.environ.get("CHACK_RESEARCH_MASTER_DIR", "") or "").strip()
+            or str(os.environ.get("CHACK_RESEARCH_DATA_DIR", "") or "").strip()
+        )
+        reconstructed = helper._build_subagent_tools(
+            helper._enabled_researchers(),
+            artifact_root=artifact_root,
+        )
+        reconstructed_by_name = {
+            str(getattr(tool, "name", "") or "").strip(): tool
+            for tool in reconstructed
+        }
+        missing = [
+            name for name in override_names if name not in reconstructed_by_name
+        ]
+        if missing:
+            raise RuntimeError(
+                "Name-based researcher administrator tool reconstruction is missing: "
+                + ", ".join(sorted(set(missing)))
+            )
+        tools = [reconstructed_by_name[name] for name in override_names]
     else:
         tools = list(getattr(toolset, "tools", []) or [])
         if append_tools:
             tools.extend(list(append_tools))
+    if append_names:
+        base_by_name = {
+            str(getattr(tool, "name", "") or "").strip(): tool
+            for tool in (getattr(toolset, "tools", []) or [])
+        }
+        for name in append_names:
+            if name not in base_by_name:
+                raise RuntimeError(
+                    f"Name-based appended tool reconstruction is missing: {name}"
+                )
+            if not any(
+                str(getattr(tool, "name", "") or "").strip() == name
+                for tool in tools
+            ):
+                tools.append(base_by_name[name])
     filtered_tools: list[Any] = []
     for tool in tools:
         name = str(getattr(tool, "name", "") or "").strip().lower()
@@ -509,6 +646,15 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
 
 
 def main() -> None:
+    parent_watchdog_stop = threading.Event()
+    transport_hint = (
+        str(os.environ.get("CHACK_MCP_TRANSPORT", "stdio") or "stdio")
+        .strip()
+        .lower()
+        .replace("_", "-")
+    )
+    if transport_hint == "stdio":
+        parent_watchdog_stop = _start_parent_watchdog()
     try:
         try:
             from chack_tools.telemetry import sqs_logger as _sqs_logger  # type: ignore
@@ -591,6 +737,18 @@ def main() -> None:
         except Exception:
             pass
         raise
+    finally:
+        # Both synchronous and async researcher jobs are owned by this MCP
+        # process, not by the provider process that launched it. Reconcile their
+        # physical child termination and persist terminal task state before
+        # stdio shutdown destroys daemon supervisor threads.
+        try:
+            from chack_tools.researcher_administrator_agent import _shutdown_all_research_jobs
+
+            _shutdown_all_research_jobs(timeout_seconds=15.0)
+        except Exception:
+            pass
+        parent_watchdog_stop.set()
 
 
 if __name__ == "__main__":

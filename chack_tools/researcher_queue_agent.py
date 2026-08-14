@@ -32,6 +32,7 @@ from .config import ToolsConfig
 from .researcher_administrator_agent import ResearcherAdministratorAgentTool
 from .subagent_config import (
     build_subagent_config,
+    compact_researcher_digest,
     enforce_prompt_str_or_list_schema,
     normalize_subagent_prompts,
 )
@@ -750,6 +751,10 @@ class ResearcherQueueAgentTool:
         )
         if error:
             return error
+        preserve_artifacts = bool(
+            save_artifacts
+            or getattr(self.config, "researcher_queue_force_save_artifacts", False)
+        )
         return self.queue.submit_and_wait(
             prompts,
             processor=self._process_batch,
@@ -757,7 +762,7 @@ class ResearcherQueueAgentTool:
             expected_participants=self.expected_participants,
             max_batch_requests=self.max_batch_requests,
             max_wait_seconds=self.max_wait_seconds,
-            save_artifacts=save_artifacts,
+            save_artifacts=preserve_artifacts,
             queue_id=queue_id,
         )
 
@@ -990,7 +995,9 @@ class ResearcherQueueAgentTool:
             # required browser job may still have a call count; do not mistake that
             # attempt for successful coverage.
             entry["researcher_usage_complete"] = (
-                isinstance(raw_counts, dict) and required_satisfied is not False
+                isinstance(raw_counts, dict)
+                and required_satisfied is not False
+                and not payload.get("researcher_failures")
             )
             for key in (
                 "researcher_responses",
@@ -1004,10 +1011,7 @@ class ResearcherQueueAgentTool:
                     continue
                 if key == "researcher_responses" and isinstance(value, list):
                     value = [
-                        {
-                            "researcher_tool": str(row.get("researcher_tool") or "").strip(),
-                            "research_worked": row.get("research_worked") is True,
-                        }
+                        compact_researcher_digest(row)
                         for row in value
                         if isinstance(row, dict) and str(row.get("researcher_tool") or "").strip()
                     ]
@@ -1178,8 +1182,9 @@ def get_researcher_queue_tool(helper: ResearcherQueueAgentTool):
                 long-lived queue evidence folder across requests. Leave empty for the
                 process-local default batching queue.
 
-        Output: compact JSON {"researches":[{"topic","conclusions"}],"count"} listing
-        every research done in the batch; "topic" indicates what each research covered.
+        Output: compact JSON listing each administrator synthesis plus one bounded
+        digest per researcher. When artifacts are preserved, output_files maps every
+        digest to its full structured response and exact raw output for on-demand use.
         """
         effective_queue_id = (
             str(queue_id or "").strip()
@@ -1202,7 +1207,7 @@ def get_researcher_queue_tool(helper: ResearcherQueueAgentTool):
         "Set save_artifacts true when the batch should preserve evidence files and return evidence_data_path. "
         "Set queue_id to a value returned by researcher_queue_create when MCP callers should share one queue artifact folder. "
         "The call blocks until the shared queue processes the batch.\n"
-        "Output: compact JSON listing relevant research for this caller (topic + conclusions, plus queue_evidence_data_path, request_evidence_data_path, and evidence_data_path when preserved)."
+        "Output: compact JSON listing relevant research for this caller (topic + administrator conclusions + bounded per-researcher digests). When preserved it also returns queue/request/evidence paths and an output manifest for the complete structured and exact raw researcher files."
     )
     return tool
 

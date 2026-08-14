@@ -1,6 +1,8 @@
 import os
 import json
 import asyncio
+import subprocess
+import sys
 import time
 import threading
 from collections import Counter
@@ -41,6 +43,16 @@ def _tool_names(tools):
     }
 
 
+def _wait_for_file(path: Path, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    candidate = Path(path)
+    while time.monotonic() < deadline:
+        if candidate.exists():
+            return True
+        time.sleep(0.02)
+    return candidate.exists()
+
+
 def test_chatgpt_researchers_are_never_cancelled_for_elapsed_time():
     prompt = _ADMINISTRATOR_SYSTEM_PROMPT
     assert "Prefer `start_researchers_async`" in prompt
@@ -64,6 +76,10 @@ def test_administrator_runtime_cap_is_explicit_and_configurable():
 
     assert default.runtime_cap_minutes == 90
     assert queue.runtime_cap_minutes == 180
+
+
+def test_administrator_synthesis_reserve_defaults_to_five_minutes():
+    assert ToolsConfig().researcher_administrator_synthesis_reserve_minutes == 5
 
 
 def test_async_jobs_can_be_harvested_by_unique_evidence_workspace():
@@ -172,7 +188,10 @@ def test_administrator_harvests_workspace_owned_job_without_contextvar_ids(monke
                     {
                         "research_worked": True,
                         "failure_reason": "",
-                        "administrator_conclusions": "workspace-harvested conclusions",
+                        "administrator_conclusions": (
+                            "The workspace-harvested scientific review provides substantive evidence "
+                            "for the administrator synthesis and records the relevant limitations."
+                        ),
                     },
                     separators=(",", ":"),
                 ),
@@ -258,11 +277,20 @@ def test_chatgpt_researchers_are_structurally_async_only():
     inner = _tool_names(helper._build_subagent_tools(helper._enabled_researchers()))
     assert "start_researchers_async" in inner
     assert "poll_researchers_async" in inner
+    assert "list_researcher_jobs" in inner
+    assert "get_researcher_task" in inner
+    assert "get_researcher_result" in inner
+    assert "cancel_researcher_task" in inner
+    assert "retry_researcher_task" in inner
     assert "deepchatgpt_researcher" not in inner
     assert "prochatgpt_researcher" not in inner
     assert "chatgptxhigh" not in inner
     assert "run_researchers_batch" not in inner
-    assert "cancel_researchers_async" not in inner
+    # Whole-job cancellation remains exposed even when the selected researchers
+    # are browser-backed. The administrator must retain an explicit control-plane
+    # path; browser jobs only reject impatient/model-driven cancellation in their
+    # worker policy, not the management capability itself.
+    assert "cancel_researchers_async" in inner
 
 
 def test_administrator_allowlist_force_enables_researchers():
@@ -277,12 +305,15 @@ def test_administrator_allowlist_force_enables_researchers():
 
     inner = _tool_names(helper._build_subagent_tools(helper._enabled_researchers()))
     assert inner == {
-        "scientific_research",
-        "business_research",
         "run_researchers_batch",
         "start_researchers_async",
         "poll_researchers_async",
         "cancel_researchers_async",
+        "list_researcher_jobs",
+        "get_researcher_task",
+        "get_researcher_result",
+        "cancel_researcher_task",
+        "retry_researcher_task",
         "list_research_artifacts",
         "read_research_artifact",
         "grep_research_artifacts",
@@ -390,6 +421,214 @@ def test_async_tools_capture_explicit_administrator_artifact_root(tmp_path):
     finally:
         with admin_mod._ASYNC_RESEARCH_LOCK:
             admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+
+
+def test_sync_researcher_batch_deadline_returns_without_executor_shutdown_wait():
+    class SlowResearcher:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            # Deliberately ignores the cooperative event: the parent must still
+            # return a terminal timeout instead of waiting for this coroutine.
+            await asyncio.sleep(4)
+            return "late output"
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            researcher_administrator_enabled=True,
+            scientific_enabled=True,
+            researcher_administrator_child_timeout_seconds=1,
+        ),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    batch = helper._build_batch_tool(
+        {"scientific_research": SlowResearcher()},
+        ["scientific"],
+    )
+    prompt = "Investigate the scientific claim with primary sources, exact dates, contradictions, and evidence gaps. " * 12
+    started = time.monotonic()
+    output = helper._invoke_tool_sync(
+        batch,
+        {
+            "requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}]),
+            "save_artifacts": False,
+            "max_parallel": 1,
+        },
+    )
+    elapsed = time.monotonic() - started
+    payload = json.loads(output)
+
+    assert elapsed < 3
+    assert payload["batch_worked"] is False
+    assert payload["batch_complete"] is False
+    assert payload["errors"][0]["status"] == "deadline_exceeded"
+    assert "deadline" in payload["errors"][0]["error"].lower()
+    task = payload["tasks"][0]
+    assert task["status"] == "deadline_exceeded"
+    assert task["started_at"] is not None
+    assert task["last_progress_at"] is not None
+    assert task["deadline_at"] > task["started_at"]
+    assert task["artifact_count"] == 0
+    assert task["failure_reason"]
+    assert task["execution_active"] is True
+
+
+def test_sync_batch_uses_exported_deadline_when_mcp_contextvar_is_missing(monkeypatch):
+    """The MCP reconstruction must retain the administrator's reserved window."""
+    class SlowResearcher:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            await asyncio.sleep(4)
+            return "late output"
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            researcher_administrator_enabled=True,
+            scientific_enabled=True,
+            researcher_administrator_child_timeout_seconds=30,
+        ),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    monkeypatch.setenv(
+        "CHACK_RESEARCHER_ADMIN_RESEARCHER_DEADLINE_EPOCH",
+        str(time.time() + 1.2),
+    )
+    batch = helper._build_batch_tool(
+        {"scientific_research": SlowResearcher()},
+        ["scientific"],
+    )
+    prompt = "Investigate the scientific claim with primary sources, exact dates, contradictions, and evidence gaps. " * 12
+    payload = json.loads(
+        helper._invoke_tool_sync(
+            batch,
+            {
+                "requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}]),
+                "save_artifacts": False,
+                "max_parallel": 1,
+            },
+        )
+    )
+
+    assert payload["child_timeout_seconds"] == 1
+    assert payload["batch_worked"] is False
+    assert payload["errors"][0]["status"] == "deadline_exceeded"
+
+
+def test_daemon_executor_does_not_join_blocked_worker_at_process_exit():
+    code = "\n".join(
+        [
+            "import threading",
+            "from chack_tools.researcher_administrator_agent import _DaemonThreadPoolExecutor",
+            "release = threading.Event()",
+            "executor = _DaemonThreadPoolExecutor(max_workers=1)",
+            "executor.submit(release.wait, 60)",
+            "executor.shutdown(wait=False, cancel_futures=True)",
+            "print('parent-returned')",
+        ]
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        text=True,
+        capture_output=True,
+        # Importing the full agents stack can take several seconds under parallel CI
+        # load. Keep this comfortably below the 60-second blocked worker while
+        # avoiding a harness-only timeout before interpreter shutdown is observed.
+        timeout=20,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "parent-returned" in completed.stdout
+
+
+def test_isolated_researcher_ignoring_term_is_killed_with_descendant_group(tmp_path):
+    """Exercise the real child supervisor, process group, TERM, and KILL path."""
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    root = tmp_path / "term-kill-acceptance"
+    root.mkdir()
+    child_started = root / "child.started"
+    descendant_pid_file = root / "descendant.pid"
+    descendant_pgid_file = root / "descendant.pgid"
+
+    class IgnoringTermResearcher:
+        name = "scientific_research"
+
+        def __init__(self, marker_root):
+            self.marker_root = str(marker_root)
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            import subprocess
+            import sys
+
+            descendant_code = "\n".join(
+                [
+                    "import os, signal, sys, time",
+                    "from pathlib import Path",
+                    "root = Path(sys.argv[1])",
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                    "(root / 'descendant.pid').write_text(str(os.getpid()))",
+                    "(root / 'descendant.pgid').write_text(str(os.getpgrp()))",
+                    "while True: time.sleep(1)",
+                ]
+            )
+            subprocess.Popen(
+                [sys.executable, "-c", descendant_code, self.marker_root],
+                close_fds=True,
+            )
+            Path(self.marker_root, "child.started").write_text(str(os.getpid()), encoding="utf-8")
+            while True:
+                await asyncio.sleep(1)
+
+    cancel_event = threading.Event()
+    cancel_token = set_cancellation_event(cancel_event)
+    trigger = threading.Thread(
+        target=lambda: (
+            _wait_for_file(child_started, 10)
+            and _wait_for_file(descendant_pid_file, 10)
+            and _wait_for_file(descendant_pgid_file, 10)
+            and request_cancel(cancel_event)
+        ),
+        daemon=True,
+    )
+    started_at = time.monotonic()
+    try:
+        trigger.start()
+        result = admin_mod._run_researcher_in_process(
+            IgnoringTermResearcher(root),
+            {"prompt": "Investigate this claim with primary evidence and explicit limitations."},
+            evidence_dir=str(root),
+            cancel_event=cancel_event,
+            termination_grace_seconds=0.25,
+        )
+    finally:
+        request_cancel(cancel_event)
+        trigger.join(timeout=2)
+        reset_cancellation_event(cancel_token)
+
+    elapsed = time.monotonic() - started_at
+    termination = result["termination"]
+    descendant_pid = int(descendant_pid_file.read_text(encoding="utf-8"))
+    descendant_pgid = int(descendant_pgid_file.read_text(encoding="utf-8"))
+
+    assert result["cancelled"] is True
+    assert termination["term_sent"] is True
+    assert termination["kill_sent"] is True
+    assert termination["process_group_id"] == descendant_pgid
+    assert termination["process_alive_after"] is False
+    assert termination["descendant_pids_after"] == []
+    assert elapsed >= 0.20
+
+    gone_deadline = time.monotonic() + 5
+    while Path(f"/proc/{descendant_pid}").exists() and time.monotonic() < gone_deadline:
+        time.sleep(0.05)
+    assert not Path(f"/proc/{descendant_pid}").exists()
+    assert admin_mod._live_process_group_members(descendant_pgid) == []
 
 
 def test_administrator_empty_allowlist_uses_globally_enabled():
@@ -525,6 +764,63 @@ def test_administrator_error_output_keeps_exact_attempted_researcher_count(monke
     assert "synthetic administrator failure" in payload["failure_reason"]
 
 
+def test_administrator_deduplicates_overlapping_launch_count_observations(monkeypatch, tmp_path):
+    import chack_agent
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    monkeypatch.setattr(
+        helper,
+        "_build_subagent_tools",
+        lambda _enabled, **_kwargs: [SimpleNamespace(name="task_steps_manager")],
+    )
+
+    class FakeChack:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self, **kwargs):
+            # The same physical launch is visible both in model telemetry and in
+            # the pre-spawn reservation ledger. It must still be reported once.
+            helper._launched_researcher_counts["scientific"] += 1
+            return SimpleNamespace(
+                output=json.dumps(
+                    {
+                        "research_worked": True,
+                        "failure_reason": "",
+                        "administrator_conclusions": (
+                            "One supervised scientific worker completed; overlapping telemetry "
+                            "sources describe that same launch rather than separate calls."
+                        ),
+                    }
+                ),
+                tool_counts=Counter({"scientific_research": 1}),
+                all_steps=[],
+            )
+
+    monkeypatch.setattr(chack_agent, "Chack", FakeChack)
+    output = helper._run_single(
+        "Research a bounded scientific question using primary evidence and explicit caveats. " * 12,
+        {
+            "max_turns": 20,
+            "max_runtime_minutes": 0,
+            "remaining_runtime_minutes": 0,
+            "max_cost_usd": 0,
+            "remaining_cost_usd": 0,
+            "research_master_dir": str(tmp_path / "count-observations"),
+        },
+        save_artifacts=True,
+    )
+    payload = json.loads(output)
+
+    assert payload["researcher_call_counts"] == {"scientific_research": 1}
+    assert payload["total_researcher_calls"] == 1
+
+
 def test_administrator_capability_map_lists_internal_researcher_tools():
     cfg = ToolsConfig(
         researcher_administrator_enabled=True,
@@ -542,10 +838,10 @@ def test_administrator_capability_map_lists_internal_researcher_tools():
     lines = helper._researcher_capability_lines(helper._enabled_researchers())
     text = "\n".join(lines)
 
-    assert "- websearcher via `websearcher_research`:" in text
+    assert "- websearcher via `run_researchers_batch` (request `websearcher_research`):" in text
     assert "fetch_url_text" in text
     assert "web_archive_search" in text
-    assert "- scientific via `scientific_research`:" in text
+    assert "- scientific via `run_researchers_batch` (request `scientific_research`):" in text
     assert "search_arxiv" in text
     assert "download_pmc_full_text" in text
 
@@ -742,7 +1038,10 @@ def test_administrator_prompt_includes_compact_tool_map_and_usage_audit(monkeypa
     payload = json.loads(out)
     sent_prompt = captured["text"]
 
-    assert payload["research_worked"] is True
+    # This fixture intentionally has no terminal researcher response and uses
+    # a placeholder synthesis. The fail-closed gate must reject it; the test
+    # itself is about the prompt contract below.
+    assert payload["research_worked"] is False
     assert captured["max_tools_used_override"] == 20
     assert "Researcher-call budget: 3 launches" in sent_prompt
     assert "management polls/status do not count" in sent_prompt
@@ -759,6 +1058,76 @@ def test_administrator_prompt_includes_compact_tool_map_and_usage_audit(monkeypa
     assert "start every enabled one immediately" in sent_prompt
     assert "### Evidence collection" not in sent_prompt
     assert len(sent_prompt) - len(prompt) < 4_000
+
+
+def test_administrator_prompt_exposes_research_and_synthesis_time_windows(monkeypatch):
+    import chack_agent
+
+    captured = {}
+
+    class FakeChack:
+        def __init__(self, _config):
+            pass
+
+        def run(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                output=json.dumps(
+                    {
+                        "research_worked": True,
+                        "failure_reason": "",
+                        "administrator_conclusions": "ok",
+                    }
+                ),
+                tool_counts=Counter(),
+                all_steps=[],
+            )
+
+    monkeypatch.setattr(chack_agent, "Chack", FakeChack)
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    monkeypatch.setattr(helper, "_build_subagent_tools", lambda _enabled, **_kwargs: [SimpleNamespace(name="scientific_research")])
+    monkeypatch.setattr(helper, "_researcher_capability_lines", lambda _enabled: [])
+
+    helper._run_single(
+        "Research this topic with primary sources, contradictions, dates, and evidence gaps. " * 12,
+        {
+            "max_turns": 20,
+            "max_runtime_minutes": 60,
+            "remaining_runtime_minutes": 60,
+            "max_cost_usd": 0,
+            "remaining_cost_usd": 0,
+            "memory_max_messages": 8,
+            "memory_reset_to_messages": 8,
+            "session_id": "admin-time-budget-test",
+        },
+    )
+
+    assert "administrator hard cap is 60 minutes" in captured["text"]
+    assert "researcher phase has a hard stop after 55 minutes" in captured["text"]
+    assert "leaving 5 minutes reserved for your own synthesis" in captured["text"]
+
+
+def test_useful_evidence_rejects_placeholder_full_review_even_with_artifacts(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    evidence = tmp_path / "evidence.txt"
+    evidence.write_text("real source evidence", encoding="utf-8")
+    response = {
+        "research_worked": True,
+        "failure_reason": "",
+        "overall_summary": "A substantive bounded summary.",
+        "findings": [{"claim": "A concrete claim with enough detail", "summary": "A substantive finding summary with caveats and provenance."}],
+        "full_research_review": "placeholder",
+        "evidence_data_path": str(tmp_path),
+        "key_artifacts": [{"filename": evidence.name}],
+    }
+
+    assert admin_mod._response_has_useful_evidence(response) is False
 
 
 def test_administrator_timeout_returns_preserved_artifact_paths(monkeypatch, tmp_path):
@@ -1092,12 +1461,10 @@ def test_async_researchers_keep_the_administrator_artifact_context_isolated(tmp_
         researchers=["news_media", "chatgptxhigh"],
     )
     master_dir = str(tmp_path / "administrator-workspace")
-    seen: list[tuple[str, str, str]] = []
-    seen_lock = threading.Lock()
-
     class FakeResearchTool:
-        def __init__(self, name):
+        def __init__(self, name, marker_root):
             self.name = name
+            self.marker_root = str(marker_root)
 
         async def on_invoke_tool(self, ctx, raw_args):
             from chack_tools.research_artifacts import (
@@ -1105,8 +1472,17 @@ def test_async_researchers_keep_the_administrator_artifact_context_isolated(tmp_
                 research_artifacts_root,
             )
 
-            with seen_lock:
-                seen.append((self.name, research_artifacts_root(), research_artifacts_master_root()))
+            record = {
+                "name": self.name,
+                "data_dir": research_artifacts_root(),
+                "master_dir": research_artifacts_master_root(),
+            }
+            record_dir = Path(self.marker_root) / "ipc_seen"
+            record_dir.mkdir(parents=True, exist_ok=True)
+            (record_dir / f"{self.name}.json").write_text(
+                json.dumps(record, separators=(",", ":")),
+                encoding="utf-8",
+            )
             return json.dumps(
                 {
                     "research_worked": True,
@@ -1120,8 +1496,8 @@ def test_async_researchers_keep_the_administrator_artifact_context_isolated(tmp_
 
     tools = helper._build_async_tools(
         {
-            "news_media_research": FakeResearchTool("news_media_research"),
-            "chatgptxhigh": FakeResearchTool("chatgptxhigh"),
+            "news_media_research": FakeResearchTool("news_media_research", master_dir),
+            "chatgptxhigh": FakeResearchTool("chatgptxhigh", master_dir),
         },
         ["news_media", "chatgptxhigh"],
     )
@@ -1156,9 +1532,13 @@ def test_async_researchers_keep_the_administrator_artifact_context_isolated(tmp_
 
     assert payload["complete"] is True
     assert started["max_parallel"] == 2
-    assert {row[0] for row in seen} == {"news_media_research", "chatgptxhigh"}
-    assert all(data_dir == master_dir for _, data_dir, _ in seen)
-    assert all(parent_dir == master_dir for _, _, parent_dir in seen)
+    records = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted((Path(master_dir) / "ipc_seen").glob("*.json"))
+    ]
+    assert {row["name"] for row in records} == {"news_media_research", "chatgptxhigh"}
+    assert all(row["data_dir"] == master_dir for row in records)
+    assert all(row["master_dir"] == master_dir for row in records)
 
 
 def test_required_researcher_async_request_rejects_missing_researchers():
@@ -1258,45 +1638,62 @@ def test_async_poll_unknown_job_returns_without_waiting():
     assert payload["job_found"] is False
 
 
-def test_async_completion_waits_for_every_preregistered_task():
+def test_async_completion_waits_for_every_preregistered_task(tmp_path):
     helper = ResearcherAdministratorAgentTool(
         ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
         model_provider="openai",
         fallback_model="m",
         researchers=["scientific"],
     )
-    call_lock = threading.Lock()
-    second_started = threading.Event()
-    release_second = threading.Event()
-    calls = 0
+    marker_root = tmp_path / "preregistered-ipc"
+    marker_root.mkdir()
+    second_started = marker_root / "second.started"
+    release_second = marker_root / "second.release"
 
     class FakeResearchTool:
         name = "scientific_research"
 
+        def __init__(self, root):
+            self.root = str(root)
+
         async def on_invoke_tool(self, ctx, raw_args):
-            nonlocal calls
-            with call_lock:
-                calls += 1
-                call_number = calls
-            if call_number == 2:
-                second_started.set()
-                release_second.wait(10)
+            request = json.loads(str(raw_args or "{}"))
+            prompt = str(request.get("prompt") or "")
+            if "SECOND-REQUEST-MARKER" in prompt:
+                Path(self.root, "second.started").touch()
+                deadline = time.monotonic() + 10
+                while not Path(self.root, "second.release").exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                review = "second review after IPC release"
+            else:
+                review = "first review completed before the second task was released"
             return json.dumps(
                 {
                     "research_worked": True,
                     "failure_reason": "",
-                    "final_research_review": f"review {call_number}",
+                    "final_research_review": review,
                     "tool_call_counts": {},
                     "total_tool_calls": 0,
                 },
                 separators=(",", ":"),
             )
 
-    tools = helper._build_async_tools({"scientific_research": FakeResearchTool()}, ["scientific"])
+    tools = helper._build_async_tools(
+        {"scientific_research": FakeResearchTool(marker_root)},
+        ["scientific"],
+    )
     by_name = {tool.name: tool for tool in tools}
     prompts = [
-        {"researcher": "scientific", "prompt": "First independent evidence review with primary sources and caveats. " * 12},
-        {"researcher": "scientific", "prompt": "Second independent evidence review with direct sources and limitations. " * 12},
+        {"researcher": "scientific", "prompt": "FIRST-REQUEST-MARKER First independent evidence review with primary sources and caveats. " * 12},
+        {
+            "researcher": "scientific",
+            "prompt": (
+                "SECOND-REQUEST-MARKER Second independent evidence review with direct sources and limitations. " * 12
+                + " Duplicate reason: This controlled concurrency test intentionally launches a second "
+                "scientific task to verify preregistration and completion ordering across materially "
+                "independent work while preserving the production duplicate guard."
+            ),
+        },
     ]
     started = json.loads(
         helper._invoke_tool_sync(
@@ -1304,7 +1701,7 @@ def test_async_completion_waits_for_every_preregistered_task():
             {"requests_json": json.dumps(prompts, separators=(",", ":")), "save_artifacts": False},
         )
     )
-    assert second_started.wait(10)
+    assert _wait_for_file(second_started, 10)
 
     wait_started = time.monotonic()
     incomplete = json.loads(
@@ -1317,7 +1714,7 @@ def test_async_completion_waits_for_every_preregistered_task():
     assert incomplete["complete"] is False
     assert sorted(task["status"] for task in incomplete["tasks"]) == ["done", "running"]
 
-    release_second.set()
+    release_second.touch()
     final_started = time.monotonic()
     complete = json.loads(
         helper._invoke_tool_sync(
@@ -1396,6 +1793,656 @@ def test_async_completion_is_signaled_after_result_persistence(monkeypatch):
     assert complete["complete"] is True
 
 
+def test_async_management_tools_are_status_only_by_default_and_lossless(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    review = "primary evidence and contradiction analysis; " * 180
+    raw_output = json.dumps(
+        {
+            "research_worked": True,
+            "failure_reason": "",
+            "final_research_review": review,
+            "key_artifacts": [],
+            "tool_call_counts": {"search_arxiv": 2, "fetch_url_text": 1},
+            "total_tool_calls": 3,
+        },
+        separators=(",", ":"),
+    )
+
+    class FakeResearchTool:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            return raw_output
+
+    root = str(tmp_path / "owned-workspace")
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    tools = helper._build_async_tools(
+        {"scientific_research": FakeResearchTool()},
+        ["scientific"],
+        artifact_root=root,
+    )
+    by_name = {tool.name: tool for tool in tools}
+    prompt = "Investigate this scientific claim using primary evidence, dates, contradictions, and limitations. " * 10
+    started = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {"requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}])},
+        )
+    )
+    job_id = started["job_id"]
+    task_id = started["tasks"][0]["task_id"]
+    try:
+        # No include_outputs argument: status polling must remain compact.
+        polled = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": job_id, "wait_seconds": 10},
+            )
+        )
+        assert polled["complete"] is True
+        assert polled["tasks"][0]["status"] == "done"
+        assert polled["tasks"][0]["result_available"] is True
+        assert polled["tasks"][0]["health"] == "succeeded"
+        assert "result" not in polled["tasks"][0]
+        assert len(json.dumps(polled)) < len(raw_output)
+
+        listed = json.loads(helper._invoke_tool_sync(by_name["list_researcher_jobs"], {}))
+        assert [row["job_id"] for row in listed["jobs"]] == [job_id]
+        assert listed["jobs"][0]["tasks"][0]["task_id"] == task_id
+
+        inspected = json.loads(
+            helper._invoke_tool_sync(
+                by_name["get_researcher_task"],
+                {"job_id": job_id, "task_id": task_id},
+            )
+        )
+        assert inspected["task"]["result_available"] is True
+        assert inspected["outputs_included"] is False
+        assert "result" not in inspected["task"]
+
+        metadata = json.loads(
+            helper._invoke_tool_sync(
+                by_name["get_researcher_result"],
+                {"job_id": job_id, "task_id": task_id, "view": "metadata"},
+            )
+        )
+        assert metadata["result_available"] is True
+        assert set(metadata["available_views"]) >= {"raw", "parsed"}
+        assert metadata["total_tool_calls"] == 3
+
+        chunks = []
+        offset = 0
+        while True:
+            page = json.loads(
+                helper._invoke_tool_sync(
+                    by_name["get_researcher_result"],
+                    {
+                        "job_id": job_id,
+                        "task_id": task_id,
+                        "view": "raw",
+                        "offset": offset,
+                        "max_chars": 1000,
+                    },
+                )
+            )
+            chunks.append(page["content"])
+            if page["complete"]:
+                break
+            offset = page["next_offset"]
+        assert "".join(chunks) == raw_output
+
+        # Explicit compatibility path: include exactly one canonical representation.
+        # Parsed JSON wins; do not duplicate it as both raw text and parsed content,
+        # and keep runtime metadata on the task row rather than inside result again.
+        full = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": job_id, "include_outputs": True},
+            )
+        )
+        full_task = full["tasks"][0]
+        assert set(full_task["result"]) == {"parsed_response"}
+        assert "output" not in full_task["result"]
+        projected = full_task["result"]["parsed_response"]
+        assert set(projected) == {
+            "research_worked",
+            "failure_reason",
+            "overall_summary",
+            "findings",
+            "gaps",
+            "open_topics",
+        }
+        assert len(projected["overall_summary"]) <= 1000
+        assert projected["findings"]
+        assert projected["open_topics"] == []
+        assert "full_research_review" not in projected
+        assert "final_research_review" not in projected
+        assert "key_artifacts" not in projected
+        assert "tool_call_counts" not in projected
+        assert "total_tool_calls" not in projected
+        assert full_task["tool_call_counts"] == {"search_arxiv": 2, "fetch_url_text": 1}
+        assert full_task["total_tool_calls"] == 3
+        # The complete review is not copied into the poll at all; lossless raw and
+        # parsed views above remain available on demand.
+        assert review not in json.dumps(full, ensure_ascii=False)
+        assert admin_mod._researcher_responses_from_poll_output(json.dumps(full)) == []
+        recovered = admin_mod._researcher_responses_from_async_jobs([job_id])
+        assert recovered[0]["full_research_review"] == review
+        assert recovered[0]["tool_call_counts"] == {"search_arxiv": 2, "fetch_url_text": 1}
+        assert recovered[0]["total_tool_calls"] == 3
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            job = admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+        for task in ((job or {}).get("tasks") or {}).values():
+            timer = task.get("deadline_timer")
+            if timer is not None:
+                timer.cancel()
+
+
+def test_async_management_tools_reject_foreign_workspace_jobs(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    owned_root = str(tmp_path / "owned")
+    tools = helper._build_async_tools({}, ["scientific"], artifact_root=owned_root)
+    by_name = {tool.name: tool for tool in tools}
+    foreign_job = "research-job-foreign"
+    foreign_task = "task-foreign"
+    admin_mod._async_job_store(
+        foreign_job,
+        {
+            "job_id": foreign_job,
+            "created_at": time.time(),
+            "evidence_dir": str(tmp_path / "foreign"),
+            "expected_task_count": 1,
+            "tasks": {
+                foreign_task: {
+                    "task_id": foreign_task,
+                    "researcher": "scientific",
+                    "researcher_tool": "scientific_research",
+                    "status": "done",
+                    "execution_active": False,
+                    "result": {"output": "secret foreign output"},
+                }
+            },
+        },
+    )
+    try:
+        listed = json.loads(helper._invoke_tool_sync(by_name["list_researcher_jobs"], {}))
+        assert listed["jobs"] == []
+        for tool_name, args in (
+            ("poll_researchers_async", {"job_id": foreign_job}),
+            ("get_researcher_task", {"job_id": foreign_job, "task_id": foreign_task}),
+            ("get_researcher_result", {"job_id": foreign_job, "task_id": foreign_task}),
+            (
+                "cancel_researcher_task",
+                {"job_id": foreign_job, "task_id": foreign_task, "reason": "Foreign task must remain isolated."},
+            ),
+            (
+                "retry_researcher_task",
+                {
+                    "job_id": foreign_job,
+                    "task_id": foreign_task,
+                    "reason": "Foreign task retries must remain isolated from this administrator workspace completely.",
+                },
+            ),
+            ("cancel_researchers_async", {"job_id": foreign_job}),
+        ):
+            payload = json.loads(helper._invoke_tool_sync(by_name[tool_name], args))
+            assert payload.get("job_found") is False
+            assert "owned" in str(payload.get("error") or "").lower()
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            admin_mod._ASYNC_RESEARCH_JOBS.pop(foreign_job, None)
+
+
+def test_retry_researcher_task_reuses_private_prompt_once(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    counter_path = tmp_path / "retry-call-counter.txt"
+
+    class FlakyResearchTool:
+        name = "scientific_research"
+
+        def __init__(self, counter):
+            self.counter = str(counter)
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            counter = Path(self.counter)
+            try:
+                calls = int(counter.read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                calls = 0
+            calls += 1
+            counter.write_text(str(calls), encoding="utf-8")
+            if calls == 1:
+                return "ERROR: transient provider failure"
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "final_research_review": "retry succeeded with primary evidence",
+                    "tool_call_counts": {},
+                    "total_tool_calls": 0,
+                }
+            )
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    root = str(tmp_path / "retry-workspace")
+    by_name = {
+        tool.name: tool
+        for tool in helper._build_async_tools(
+            {"scientific_research": FlakyResearchTool(counter_path)},
+            ["scientific"],
+            artifact_root=root,
+        )
+    }
+    private_marker = "PRIVATE-ORIGINAL-REQUEST-MARKER"
+    prompt = (private_marker + " investigate primary scientific sources and contradictions. ") * 12
+    started = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {"requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}])},
+        )
+    )
+    source_job_id = started["job_id"]
+    source_task_id = started["tasks"][0]["task_id"]
+    all_job_ids = [source_job_id]
+    try:
+        source = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": source_job_id, "wait_seconds": 10, "include_outputs": True},
+            )
+        )
+        assert source["tasks"][0]["status"] == "error"
+        assert source["tasks"][0]["result"] == {"output": "ERROR: transient provider failure"}
+        assert private_marker not in json.dumps(source)
+        failed_raw = list((Path(root) / "researcher_outputs").glob("async_*.raw.txt"))
+        assert len(failed_raw) == 1
+        assert failed_raw[0].read_text(encoding="utf-8") == "ERROR: transient provider failure"
+
+        retried = json.loads(
+            helper._invoke_tool_sync(
+                by_name["retry_researcher_task"],
+                {
+                    "job_id": source_job_id,
+                    "task_id": source_task_id,
+                    "reason": (
+                        "The first provider call returned a transient transport failure before collecting any "
+                        "sources, so one identical retry can materially recover the missing evidence."
+                    ),
+                },
+            )
+        )
+        assert retried["retry_started"] is True
+        retry_job_id = retried["job_id"]
+        all_job_ids.append(retry_job_id)
+        retry = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": retry_job_id, "wait_seconds": 10},
+            )
+        )
+        assert retry["tasks"][0]["status"] == "done"
+        assert retry["tasks"][0]["retried_from_job_id"] == source_job_id
+        assert private_marker not in json.dumps(retry)
+
+        duplicate_retry = json.loads(
+            helper._invoke_tool_sync(
+                by_name["retry_researcher_task"],
+                {
+                    "job_id": source_job_id,
+                    "task_id": source_task_id,
+                    "reason": (
+                        "A second retry should be rejected even if this explanation is intentionally long enough "
+                        "to satisfy validation, because every task lineage has a strict one-retry budget."
+                    ),
+                },
+            )
+        )
+        assert duplicate_retry["retry_started"] is False
+        assert "already used" in duplicate_retry["error"]
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            jobs = [admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None) for job_id in all_job_ids]
+        for job in jobs:
+            for task in ((job or {}).get("tasks") or {}).values():
+                timer = task.get("deadline_timer")
+                if timer is not None:
+                    timer.cancel()
+
+
+def test_async_poll_bounds_unparseable_raw_output_and_keeps_lossless_view(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    full_raw_output = "unparseable-provider-output-" * 2_000
+
+    class UnparseableResearchTool:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            return full_raw_output
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    root = str(tmp_path / "bounded-raw-workspace")
+    by_name = {
+        tool.name: tool
+        for tool in helper._build_async_tools(
+            {"scientific_research": UnparseableResearchTool()},
+            ["scientific"],
+            artifact_root=root,
+        )
+    }
+    prompt = "Investigate primary scientific evidence, contradictions, scope, dates, and provenance. " * 10
+    started = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {"requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}])},
+        )
+    )
+    job_id = started["job_id"]
+    task_id = started["tasks"][0]["task_id"]
+    try:
+        polled = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": job_id, "wait_seconds": 10, "include_outputs": True},
+            )
+        )
+        projected = polled["tasks"][0]["result"]
+        assert polled["tasks"][0]["status"] == "error"
+        assert len(projected["output"]) == 2_000
+        assert projected["output_truncated"] is True
+        assert projected["raw_total_chars"] == len(full_raw_output)
+        assert projected["raw_view_available"] is True
+        assert len(json.dumps(polled)) < 8_000
+
+        raw_page = json.loads(
+            helper._invoke_tool_sync(
+                by_name["get_researcher_result"],
+                {
+                    "job_id": job_id,
+                    "task_id": task_id,
+                    "view": "raw",
+                    "offset": 0,
+                    "max_chars": 12_000,
+                },
+            )
+        )
+        assert raw_page["total_chars"] == len(full_raw_output)
+        assert raw_page["content"] == full_raw_output[:12_000]
+        assert raw_page["next_offset"] == 12_000
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            job = admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+        for task in ((job or {}).get("tasks") or {}).values():
+            timer = task.get("deadline_timer")
+            if timer is not None:
+                timer.cancel()
+
+
+def test_async_orchestrator_blocks_unjustified_duplicate_researchers(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    counter_path = tmp_path / "duplicate-launch-count.txt"
+
+    class CountingResearchTool:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            try:
+                count = int(counter_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                count = 0
+            counter_path.write_text(str(count + 1), encoding="utf-8")
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "overall_summary": "The focused scientific pass completed.",
+                    "findings": [],
+                    "gaps": [],
+                    "open_topics": [],
+                    "full_research_review": "A complete evidence review was produced.",
+                    "tool_call_counts": {},
+                    "total_tool_calls": 0,
+                }
+            )
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    root = str(tmp_path / "duplicate-guard-workspace")
+    by_name = {
+        tool.name: tool
+        for tool in helper._build_async_tools(
+            {"scientific_research": CountingResearchTool()},
+            ["scientific"],
+            artifact_root=root,
+        )
+    }
+    base_prompt = (
+        "Investigate one bounded scientific evidence slice using primary sources, provenance, "
+        "contradictions, dates, limitations, and explicit uncertainty. "
+    ) * 6
+    requests = [
+        {"researcher": "scientific", "prompt": f"{base_prompt} Focus number {index}."}
+        for index in range(4)
+    ]
+    job_ids: list[str] = []
+    try:
+        started = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {"requests_json": json.dumps(requests), "max_parallel": 4},
+            )
+        )
+        assert started["async_started"] is True
+        assert len(started["tasks"]) == 1
+        assert len(started["errors"]) == 3
+        assert all("duplicate researcher launch blocked" in row["error"] for row in started["errors"])
+        job_ids.append(started["job_id"])
+        first_poll = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": started["job_id"], "wait_seconds": 10},
+            )
+        )
+        assert first_poll["tasks"][0]["status"] == "done"
+        assert counter_path.read_text(encoding="utf-8") == "1"
+
+        blocked = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {"requests_json": json.dumps([requests[1]])},
+            )
+        )
+        assert blocked["async_started"] is False
+        assert blocked["tasks"] == []
+        assert "duplicate researcher launch blocked" in blocked["errors"][0]["error"]
+
+        justified_prompt = (
+            f"{base_prompt}\nDuplicate reason: The first pass covered only clinical efficacy; "
+            "this follow-up must inspect a materially different primary-source family, resolve "
+            "a specific contradiction, and collect evidence absent from the original result."
+        )
+        followup = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {
+                    "requests_json": json.dumps(
+                        [{"researcher": "scientific", "prompt": justified_prompt}]
+                    )
+                },
+            )
+        )
+        assert followup["async_started"] is True
+        assert followup["errors"] == []
+        job_ids.append(followup["job_id"])
+        followup_poll = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": followup["job_id"], "wait_seconds": 10},
+            )
+        )
+        assert followup_poll["tasks"][0]["status"] == "done"
+        assert counter_path.read_text(encoding="utf-8") == "2"
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            jobs = [admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None) for job_id in job_ids]
+        for job in jobs:
+            for task in ((job or {}).get("tasks") or {}).values():
+                timer = task.get("deadline_timer")
+                if timer is not None:
+                    timer.cancel()
+
+
+def test_required_browser_initial_wave_allows_focused_followup(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    class ImmediateBrowserResearchTool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "overall_summary": "Primary evidence was collected successfully.",
+                    "findings": [],
+                    "gaps": [],
+                    "open_topics": [],
+                    "full_research_review": "Complete browser research evidence.",
+                    "tool_call_counts": {"chatgpt_web": 1},
+                    "total_tool_calls": 1,
+                }
+            )
+
+    enabled = ["deepchatgpt", "prochatgpt"]
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            researcher_administrator_enabled=True,
+            deepchatgpt_enabled=True,
+            prochatgpt_enabled=True,
+        ),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=enabled,
+        required_researchers=enabled,
+    )
+    root = str(tmp_path / "required-browser-workspace")
+    by_name = {
+        tool.name: tool
+        for tool in helper._build_async_tools(
+            {
+                "deepchatgpt_researcher": ImmediateBrowserResearchTool("deepchatgpt_researcher"),
+                "prochatgpt_researcher": ImmediateBrowserResearchTool("prochatgpt_researcher"),
+            },
+            enabled,
+            artifact_root=root,
+        )
+    }
+    deep_prompt = "Run deep browser research with primary sources, dates, contradictions, and provenance. " * 10
+    pro_prompt = "Run Pro browser research with primary sources, dates, contradictions, and provenance. " * 10
+    job_ids: list[str] = []
+    try:
+        incomplete = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {
+                    "requests_json": json.dumps(
+                        [{"researcher": "deepchatgpt", "prompt": deep_prompt}]
+                    )
+                },
+            )
+        )
+        assert incomplete["async_started"] is False
+        assert "prochatgpt" in json.dumps(incomplete)
+
+        initial = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {
+                    "requests_json": json.dumps(
+                        [
+                            {"researcher": "deepchatgpt", "prompt": deep_prompt},
+                            {"researcher": "prochatgpt", "prompt": pro_prompt},
+                        ]
+                    )
+                },
+            )
+        )
+        assert initial["async_started"] is True
+        job_ids.append(initial["job_id"])
+        initial_poll = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": initial["job_id"], "wait_seconds": 10},
+            )
+        )
+        assert {task["status"] for task in initial_poll["tasks"]} == {"done"}
+
+        focused_followup_prompt = (
+            f"{deep_prompt}\nDuplicate reason: The initial browser pass left a material source-family gap; "
+            "this focused follow-up must inspect different primary documents, resolve a concrete "
+            "contradiction, and avoid repeating evidence already collected by the first wave."
+        )
+        followup = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {
+                    "requests_json": json.dumps(
+                        [{"researcher": "deepchatgpt", "prompt": focused_followup_prompt}]
+                    ),
+                    "max_parallel": 1,
+                },
+            )
+        )
+        assert followup["async_started"] is True
+        job_ids.append(followup["job_id"])
+        followup_poll = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": followup["job_id"], "wait_seconds": 10},
+            )
+        )
+        assert followup_poll["tasks"][0]["status"] == "done"
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            jobs = [admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None) for job_id in job_ids]
+        for job in jobs:
+            for task in ((job or {}).get("tasks") or {}).values():
+                timer = task.get("deadline_timer")
+                if timer is not None:
+                    timer.cancel()
+
+
 def test_administrator_duplicate_researcher_guard_blocks_unjustified_repeat():
     helper = ResearcherAdministratorAgentTool(
         ToolsConfig(researcher_administrator_enabled=True, websearcher_enabled=True),
@@ -1438,41 +2485,44 @@ def test_administrator_duplicate_researcher_guard_blocks_unjustified_repeat():
     assert json.loads(justified)["research_worked"] is True
 
 
-def test_administrator_async_cancel_terminates_registered_running_process():
+def test_administrator_async_cancel_terminates_registered_running_process(tmp_path):
     helper = ResearcherAdministratorAgentTool(
         ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
         model_provider="openai",
         fallback_model="m",
         researchers=["scientific"],
     )
-    registered = threading.Event()
-    release = threading.Event()
-    terminated = threading.Event()
-
-    class FakeProcess:
-        killed = False
-
-    process = FakeProcess()
-
-    def terminate(proc):
-        proc.killed = True
-        terminated.set()
-        release.set()
+    root = tmp_path / "cancel-process"
+    root.mkdir()
+    started = root / "started"
+    release = root / "release"
 
     class FakeResearchTool:
         name = "scientific_research"
 
-        async def on_invoke_tool(self, ctx, raw_args):
-            assert current_cancellation_event() is not None
-            token = register_process(process, terminate)
-            registered.set()
-            try:
-                release.wait(10)
-            finally:
-                unregister_process(token)
-            return "ERROR: fake researcher cancelled" if process.killed else "{}"
+        def __init__(self, marker_root):
+            self.marker_root = str(marker_root)
 
-    tools = helper._build_async_tools({"scientific_research": FakeResearchTool()}, ["scientific"])
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            assert current_cancellation_event() is not None
+            Path(self.marker_root, "started").touch()
+            cancel_event = current_cancellation_event()
+            deadline = time.monotonic() + 30
+            while (
+                not Path(self.marker_root, "release").exists()
+                and not (cancel_event is not None and cancel_event.is_set())
+                and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(0.02)
+            if cancel_event is not None and cancel_event.is_set():
+                return "ERROR: fake researcher cancelled"
+            return "{}"
+
+    tools = helper._build_async_tools(
+        {"scientific_research": FakeResearchTool(root)},
+        ["scientific"],
+        artifact_root=str(root),
+    )
     by_name = {tool.name: tool for tool in tools}
     long_prompt = "Research cancellation of a long-running scientific researcher with exact status. " * 10
     start = helper._invoke_tool_sync(
@@ -1483,21 +2533,469 @@ def test_administrator_async_cancel_terminates_registered_running_process():
         },
     )
     job_id = json.loads(start)["job_id"]
-    assert registered.wait(10)
+    assert _wait_for_file(started, 10)
 
     cancelled = json.loads(helper._invoke_tool_sync(by_name["cancel_researchers_async"], {"job_id": job_id}))
     assert cancelled["cancellation_requested"]
-    assert terminated.wait(10)
-    assert process.killed is True
 
     payload = {}
-    for _ in range(20):
+    for _ in range(200):
         payload = json.loads(helper._invoke_tool_sync(by_name["poll_researchers_async"], {"job_id": job_id}))
-        if payload.get("complete"):
+        task = payload.get("tasks", [{}])[0]
+        if (
+            payload.get("complete")
+            and task.get("execution_active") is False
+            and isinstance(task.get("termination"), dict)
+        ):
             break
         time.sleep(0.05)
     assert payload["complete"] is True
     assert payload["tasks"][0]["status"] == "cancelled"
+    assert payload["tasks"][0]["execution_active"] is False
+    assert payload["tasks"][0]["termination"]["term_sent"] is True
+    assert payload["tasks"][0]["termination"]["process_alive_after"] is False
+
+
+def test_mcp_shutdown_reconciles_active_async_task_before_exit(tmp_path):
+    """MCP shutdown must not leave a terminal task physically active in its ledger."""
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    root = tmp_path / "mcp-shutdown"
+    root.mkdir()
+    started = root / "started"
+
+    class BlockingResearchTool:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            started.touch()
+            cancel_event = current_cancellation_event()
+            while not (cancel_event is not None and cancel_event.is_set()):
+                await asyncio.sleep(0.02)
+            return "ERROR: shutdown cancellation"
+
+    tools = helper._build_async_tools(
+        {"scientific_research": BlockingResearchTool()},
+        ["scientific"],
+        artifact_root=str(root),
+    )
+    by_name = {tool.name: tool for tool in tools}
+    prompt = "Investigate this scientific question with primary sources, exact dates, contradictions, and evidence gaps. " * 10
+    launched = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {"requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}])},
+        )
+    )
+    job_id = launched["job_id"]
+    try:
+        assert _wait_for_file(started, 10)
+        admin_mod._shutdown_async_research_jobs(timeout_seconds=10)
+        payload = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": job_id},
+            )
+        )
+        task = payload["tasks"][0]
+        assert payload["complete"] is True
+        assert task["status"] == "cancelled"
+        assert task["execution_active"] is False
+        assert task["termination"]["term_sent"] is True
+        assert task["termination"]["process_alive_after"] is False
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            job = admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+        for task in ((job or {}).get("tasks") or {}).values():
+            timer = task.get("deadline_timer")
+            if timer is not None:
+                timer.cancel()
+
+
+def test_administrator_can_cancel_one_ordinary_task_without_cancelling_siblings(tmp_path):
+    root = tmp_path / "sibling-cancel"
+    root.mkdir()
+
+    class BlockingResearcher:
+        def __init__(self, short: str, marker_root: Path):
+            self.short = short
+            self.marker_root = str(marker_root)
+            self.name = f"{short}_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            Path(self.marker_root, f"{self.short}.started").touch()
+            cancel_event = current_cancellation_event()
+            deadline = time.monotonic() + 30
+            while (
+                not Path(self.marker_root, f"{self.short}.release").exists()
+                and not (cancel_event is not None and cancel_event.is_set())
+                and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(0.02)
+            if cancel_event is not None and cancel_event.is_set():
+                return "ERROR: task cancelled"
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "final_research_review": f"{self.short} completed",
+                    "tool_call_counts": {},
+                    "total_tool_calls": 0,
+                }
+            )
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            researcher_administrator_enabled=True,
+            scientific_enabled=True,
+            business_enabled=True,
+        ),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific", "business"],
+    )
+    tools = helper._build_async_tools(
+        {
+            "scientific_research": BlockingResearcher("scientific", root),
+            "business_research": BlockingResearcher("business", root),
+        },
+        ["scientific", "business"],
+        artifact_root=str(tmp_path),
+    )
+    by_name = {tool.name: tool for tool in tools}
+    prompt = "Investigate this claim with primary sources, exact dates, contradictions, and limitations. " * 10
+    launched = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {
+                "requests_json": json.dumps(
+                    [
+                        {"researcher": "scientific", "prompt": prompt},
+                        {"researcher": "business", "prompt": prompt},
+                    ]
+                ),
+                "max_parallel": 2,
+            },
+        )
+    )
+    job_id = launched["job_id"]
+    task_by_researcher = {row["researcher"]: row["task_id"] for row in launched["tasks"]}
+    try:
+        assert _wait_for_file(root / "scientific.started", 10)
+        assert _wait_for_file(root / "business.started", 10)
+        cancelled = json.loads(
+            helper._invoke_tool_sync(
+                by_name["cancel_researcher_task"],
+                {
+                    "job_id": job_id,
+                    "task_id": task_by_researcher["scientific"],
+                    "reason": "Scientific request duplicated another source pass and is no longer needed.",
+                },
+            )
+        )
+        assert cancelled["cancellation_requested"] is True
+        assert cancelled["task_id"] == task_by_researcher["scientific"]
+        status = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": job_id},
+            )
+        )
+        rows = {row["researcher"]: row for row in status["tasks"]}
+        assert rows["scientific"]["status"] == "cancelled"
+        assert rows["business"]["status"] == "running"
+    finally:
+        (root / "scientific.release").touch()
+        (root / "business.release").touch()
+
+
+def test_running_browser_task_is_protected_from_model_initiated_target_cancel(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    root = str(tmp_path / "browser-workspace")
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, chatgptxhigh_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["chatgptxhigh"],
+    )
+    by_name = {
+        tool.name: tool
+        for tool in helper._build_async_tools({}, ["chatgptxhigh"], artifact_root=root)
+    }
+    job_id = "research-job-browser-protected"
+    task_id = "task-browser"
+    cancel_event = threading.Event()
+    now = time.time()
+    admin_mod._async_job_store(
+        job_id,
+        {
+            "job_id": job_id,
+            "kind": "async",
+            "created_at": now,
+            "evidence_dir": root,
+            "expected_task_count": 1,
+            "tasks": {
+                task_id: {
+                    "task_id": task_id,
+                    "researcher": "chatgptxhigh",
+                    "researcher_tool": "chatgptxhigh",
+                    "status": "running",
+                    "execution_active": True,
+                    "created_at": now,
+                    "started_at": now,
+                    "last_activity_at": now,
+                    "last_progress_at": now,
+                    "deadline_at": now + 1800,
+                    "cancel_event": cancel_event,
+                }
+            },
+        },
+    )
+    try:
+        cancelled = json.loads(
+            helper._invoke_tool_sync(
+                by_name["cancel_researcher_task"],
+                {
+                    "job_id": job_id,
+                    "task_id": task_id,
+                    "reason": "The browser task appears slow, but this alone must never terminate it prematurely.",
+                },
+            )
+        )
+        assert cancelled["protected"] is True
+        assert cancelled["cancellation_requested"] is False
+        assert cancel_event.is_set() is False
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            assert admin_mod._ASYNC_RESEARCH_JOBS[job_id]["tasks"][task_id]["status"] == "running"
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+
+
+def test_async_task_health_is_deterministic_and_separates_terminal_from_execution():
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    now = 10_000.0
+    assert admin_mod._async_task_health(
+        {
+            "status": "running",
+            "execution_active": True,
+            "researcher_tool": "scientific_research",
+            "started_at": now - 500,
+            "last_progress_at": now - 301,
+            "deadline_at": now + 1000,
+        },
+        now=now,
+    ) == "no_recent_progress"
+    assert admin_mod._async_task_health(
+        {
+            "status": "running",
+            "execution_active": True,
+            "researcher_tool": "chatgptxhigh",
+            "started_at": now - 500,
+            "last_progress_at": now - 301,
+            "deadline_at": now + 1000,
+        },
+        now=now,
+    ) == "healthy"
+    assert admin_mod._async_task_health(
+        {"status": "deadline_exceeded", "execution_active": True},
+        now=now,
+    ) == "unwinding"
+    assert admin_mod._async_task_health(
+        {"status": "done", "execution_active": False},
+        now=now,
+    ) == "succeeded"
+
+
+def test_async_deadline_is_terminal_immediately_and_late_result_is_rejected(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+    from concurrent.futures import Future
+
+    job_id = "research-job-deadline-terminal"
+    task_id = "task-deadline"
+    completion = threading.Event()
+    cancel_event = threading.Event()
+    future = Future()
+    future.set_running_or_notify_cancel()
+    admin_mod._async_job_store(
+        job_id,
+        {
+            "job_id": job_id,
+            "created_at": time.time(),
+            "evidence_dir": str(tmp_path),
+            "completion_event": completion,
+            "expected_task_count": 1,
+            "tasks": {
+                task_id: {
+                    "task_id": task_id,
+                    "researcher": "scientific",
+                    "researcher_tool": "scientific_research",
+                    "status": "running",
+                    "execution_active": True,
+                    "cancel_event": cancel_event,
+                    "future": future,
+                }
+            },
+        },
+    )
+    try:
+        admin_mod._async_request_task_deadline(job_id, task_id, cancel_event, 1)
+        snapshot = admin_mod._async_job_snapshot(job_id)
+        task = snapshot["tasks"][task_id]
+        assert task["status"] == "deadline_exceeded"
+        assert task["execution_active"] is True
+        assert task["finished_at"] > 0
+        assert completion.is_set()
+        assert admin_mod._wait_for_async_jobs_terminal([job_id], time.monotonic() + 0.2) == []
+        assert admin_mod._async_jobs_have_nonterminal_tasks([job_id]) is True
+
+        future.set_result(
+            {
+                "researcher_tool": "scientific_research",
+                "parsed_response": {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "final_research_review": "late output must not count",
+                },
+            }
+        )
+        admin_mod._async_mark_task_done(job_id, task_id, future)
+        snapshot = admin_mod._async_job_snapshot(job_id)
+        task = snapshot["tasks"][task_id]
+        assert task["status"] == "deadline_exceeded"
+        assert task["execution_active"] is False
+        assert "result" not in task
+        assert admin_mod._researcher_responses_from_async_jobs([job_id]) == []
+        failures = admin_mod._researcher_failures_from_async_jobs([job_id])
+        assert failures[0]["status"] == "deadline_exceeded"
+        assert admin_mod._async_jobs_have_nonterminal_tasks([job_id]) is False
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+
+
+def test_async_child_deadline_includes_time_waiting_for_parallel_slot(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    root = tmp_path / "slot-deadline"
+    root.mkdir()
+
+    class BlockingScientific:
+        name = "scientific_research"
+
+        def __init__(self, marker_root: Path):
+            self.marker_root = str(marker_root)
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            Path(self.marker_root, "scientific.started").touch()
+            cancel_event = current_cancellation_event()
+            deadline = time.monotonic() + 30
+            while (
+                not Path(self.marker_root, "release").exists()
+                and not (cancel_event is not None and cancel_event.is_set())
+                and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(0.02)
+            return "ERROR: released after deadline"
+
+    class FastBusiness:
+        name = "business_research"
+
+        def __init__(self, marker_root: Path):
+            self.marker_root = str(marker_root)
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            Path(self.marker_root, "business.started").touch()
+            return "{}"
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            researcher_administrator_enabled=True,
+            scientific_enabled=True,
+            business_enabled=True,
+            researcher_administrator_child_timeout_seconds=1,
+        ),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific", "business"],
+    )
+    tools = helper._build_async_tools(
+        {
+            "scientific_research": BlockingScientific(root),
+            "business_research": FastBusiness(root),
+        },
+        ["scientific", "business"],
+        artifact_root=str(tmp_path),
+    )
+    by_name = {tool.name: tool for tool in tools}
+    prompt = "Investigate this claim with primary evidence, dates, contradictions, and explicit limitations. " * 10
+    started = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {
+                "requests_json": json.dumps(
+                    [
+                        {"researcher": "scientific", "prompt": prompt},
+                        {"researcher": "business", "prompt": prompt},
+                    ],
+                    separators=(",", ":"),
+                ),
+                "save_artifacts": True,
+                "max_parallel": 1,
+            },
+        )
+    )
+    job_id = started["job_id"]
+    try:
+        assert _wait_for_file(root / "scientific.started", 10)
+        polled = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": job_id, "include_outputs": False, "wait_seconds": 3},
+            )
+        )
+        assert polled["complete"] is True
+        assert {task["status"] for task in polled["tasks"]} == {"deadline_exceeded"}
+        assert not (root / "business.started").exists()
+    finally:
+        (root / "release").touch()
+        deadline = time.monotonic() + 5
+        while admin_mod._async_jobs_have_nonterminal_tasks([job_id]) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            job = admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+        for task in ((job or {}).get("tasks") or {}).values():
+            timer = task.get("deadline_timer")
+            if timer is not None:
+                timer.cancel()
+
+
+def test_artifact_cleanup_is_deferred_until_late_writer_finishes(monkeypatch):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    monkeypatch.delenv("CHACK_RESEARCH_MASTER_DIR", raising=False)
+    master = sc.create_research_master_dir("deferred-cleanup")
+    token = set_research_artifact_context(master, master)
+    evidence = Path(master, "scientific", "late.txt")
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text("still writing", encoding="utf-8")
+    try:
+        admin_mod._research_writer_started(master)
+        admin_mod._cleanup_research_artifacts_when_idle(master, save_artifacts=False)
+        assert evidence.exists()
+        admin_mod._research_writer_finished(master)
+        assert not Path(master).exists()
+    finally:
+        reset_research_artifact_context(token)
+        cleanup_research_artifacts(master, save_artifacts=False)
 
 
 def test_cancellation_event_terminates_all_registered_processes():
@@ -1544,16 +3042,21 @@ def test_async_task_done_persists_researcher_output_file(tmp_path):
         },
     )
     future = Future()
+    raw_output = json.dumps(
+        {
+            "research_worked": True,
+            "failure_reason": "",
+            "final_research_review": "cli review",
+            "tool_call_counts": {"exec": 2},
+            "total_tool_calls": 2,
+        },
+        separators=(",", ":"),
+    )
     future.set_result(
         {
             "researcher_tool": "cli_research",
-            "parsed_response": {
-                "research_worked": True,
-                "failure_reason": "",
-                "final_research_review": "cli review",
-                "tool_call_counts": {"exec": 2},
-                "total_tool_calls": 2,
-            },
+            "output": raw_output,
+            "parsed_response": json.loads(raw_output),
         }
     )
 
@@ -1563,7 +3066,11 @@ def test_async_task_done_persists_researcher_output_file(tmp_path):
     assert len(files) == 1
     payload = json.loads(files[0].read_text(encoding="utf-8"))
     assert payload["researcher_tool"] == "cli_research"
+    assert payload["full_research_review"] == "cli review"
     assert payload["tool_call_counts"] == {"exec": 2}
+    raw_files = list((tmp_path / "researcher_outputs").glob("async_*.raw.txt"))
+    assert len(raw_files) == 1
+    assert raw_files[0].read_text(encoding="utf-8") == raw_output
 
 
 def test_normalize_researcher_name_accepts_aliases_and_tool_names():
@@ -1742,7 +3249,14 @@ def test_administrator_finalizer_appends_researcher_outputs_and_usage():
     researcher_response = {
         "research_worked": True,
         "failure_reason": "",
-        "final_research_review": "web review",
+        "overall_summary": "Compact web research conclusion.",
+        "findings": [{
+            "claim": "The web evidence supports the investigated claim",
+            "summary": "The researcher found direct web evidence relevant to the investigated claim and retained every citation, contradiction, and caveat in the complete review.",
+        }],
+        "gaps": [],
+        "open_topics": [],
+        "full_research_review": "web review",
         "researcher_tool": "websearcher_research",
         "tool_call_counts": {
             "search_google_web": 2,
@@ -1763,7 +3277,8 @@ def test_administrator_finalizer_appends_researcher_outputs_and_usage():
 
     assert payload["administrator_conclusions"] == "summary"
     assert payload["evidence_data_path"] == "/tmp/evidence"
-    assert payload["researcher_responses"] == [researcher_response]
+    assert payload["researcher_responses"][0]["researcher_tool"] == "websearcher_research"
+    assert "full_research_review" not in payload["researcher_responses"][0]
     assert payload["researcher_tool_call_counts"] == {
         "fetch_url_text": 1,
         "search_google_web": 2,
@@ -1893,18 +3408,28 @@ def test_administrator_finalizer_requires_success_from_each_required_researcher(
         {
             "research_worked": True,
             "failure_reason": "",
-            "final_research_review": "web evidence",
+            "overall_summary": "The web researcher returned a substantive evidence-backed review covering the investigated claim and its material caveats.",
+            "findings": [{
+                "claim": "The investigated web claim is supported by directly inspectable primary evidence",
+                "summary": "The researcher compared directly inspectable sources, recorded the relevant dates and provenance, and retained material contradictions and uncertainty in the complete review for downstream synthesis.",
+            }],
+            "full_research_review": "The web review records the directly inspectable sources, dates, provenance, contradictions, and limitations relevant to the investigated claim.",
             "researcher_tool": "websearcher_research",
         },
         {
             "research_worked": True,
             "failure_reason": "",
-            "final_research_review": "pro evidence",
+            "overall_summary": "The Pro researcher returned a substantive evidence-backed review covering the investigated claim and its material caveats.",
+            "findings": [{
+                "claim": "The investigated claim has corroborating evidence in the independent Pro review",
+                "summary": "The researcher compared independent source material, recorded the relevant dates and provenance, and retained material contradictions and uncertainty in the complete review for downstream synthesis.",
+            }],
+            "full_research_review": "The Pro review records the independent source material, dates, provenance, contradictions, and limitations relevant to the investigated claim.",
             "researcher_tool": "prochatgpt_researcher",
         },
     ]
     final = finalize_researcher_administrator_output(
-        '{"research_worked":true,"failure_reason":"","administrator_conclusions":"summary"}',
+        '{"research_worked":true,"failure_reason":"","administrator_conclusions":"The administrator compared both independent reviews, separated corroborated observations from inference, and recorded the remaining uncertainty and evidence limitations before reaching this synthesis."}',
         evidence_dir="/tmp/evidence",
         save_artifacts=False,
         researcher_responses=responses,
@@ -1954,19 +3479,27 @@ def test_administrator_finalizer_writes_admin_and_researcher_output_files(tmp_pa
     researcher_response = {
         "research_worked": True,
         "failure_reason": "",
-        "final_research_review": "web review",
+        "overall_summary": "Compact web research conclusion.",
+        "findings": [{
+            "claim": "The web evidence supports the investigated claim",
+            "summary": "The researcher found direct web evidence relevant to the investigated claim and retained every citation, contradiction, and caveat in the complete review.",
+        }],
+        "gaps": [],
+        "open_topics": [],
+        "full_research_review": "web review",
         "researcher_tool": "websearcher_research",
         "tool_call_counts": {"fetch_url_text": 1},
         "total_tool_calls": 1,
     }
 
+    raw_output = json.dumps(researcher_response, separators=(",", ":"))
     final = finalize_researcher_administrator_output(
         '{"research_worked":true,"failure_reason":"","administrator_conclusions":"summary"}',
         evidence_dir=str(tmp_path),
         save_artifacts=True,
         researcher_responses=[researcher_response],
         tool_counts=Counter({"websearcher_research": 1}),
-        steps=[],
+        steps=[{"tool": "websearcher_research", "output": raw_output}],
     )
     payload = json.loads(final)
 
@@ -1974,6 +3507,19 @@ def test_administrator_finalizer_writes_admin_and_researcher_output_files(tmp_pa
     assert payload["output_files"]["researcher_outputs"] == ["researcher_outputs/001_websearcher_research.json"]
     assert json.loads((tmp_path / "admin_output.json").read_text(encoding="utf-8"))["administrator_conclusions"] == "summary"
     assert json.loads((tmp_path / "researcher_outputs" / "001_websearcher_research.json").read_text(encoding="utf-8")) == researcher_response
+    raw_paths = payload["output_files"]["raw_researcher_outputs"]
+    assert raw_paths == ["researcher_outputs/raw_step_001_websearcher_research.raw.txt"]
+    assert (tmp_path / raw_paths[0]).read_text(encoding="utf-8") == raw_output
+    manifest = payload["output_files"]["researcher_output_manifest"]
+    assert manifest == [{
+        "researcher_tool": "websearcher_research",
+        "structured_path": "researcher_outputs/001_websearcher_research.json",
+        "format": "full_researcher_response_v1",
+        "full_research_review_available": True,
+        "raw_path": raw_paths[0],
+    }]
+    saved_admin = json.loads((tmp_path / "admin_output.json").read_text(encoding="utf-8"))
+    assert saved_admin["output_files"] == payload["output_files"]
 
 
 def test_administrator_finalizer_parses_prefixed_structured_tool_output():
