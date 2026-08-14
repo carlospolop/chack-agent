@@ -72,8 +72,8 @@ def _codex_tool_instructions(
 ) -> str:
     """Return system instructions consistent with the effective tool surface.
 
-    FactChecker verifiers intentionally pass no local/picklable tools because their
-    board and research tools live behind the shared MCP URL. That URL must therefore
+    Shared-MCP consumers may intentionally pass no local/picklable tools because their
+    application and research tools live behind the shared MCP URL. That URL must therefore
     count as a real tool surface; otherwise the old no-tools instruction tells Codex
     not to call the very MCP tools it just discovered.
     """
@@ -164,7 +164,7 @@ def _resolve_codex_exec_timeout(
 
 
 # Optional host-process callback invoked whenever a codex process times out, so the
-# application (e.g. the factchecker) can alert Discord. Called with a dict describing the
+# host application can alert its operator. Called with a dict describing the
 # timed-out agent. Runs in the same process/thread that monitors the codex subprocess.
 _CODEX_TIMEOUT_HOOK = None
 
@@ -2348,7 +2348,7 @@ class CodexExecutor:
             # host-process server that holds a shared queue / board), instead of each
             # agent spawning its own stdio server. The shared server is itself the tool
             # source, so it must be configured even when the local allowed-tools list is
-            # intentionally empty (for example, FactChecker's non-picklable board tools).
+            # intentionally empty (for example, a consumer's non-picklable remote tools).
             shared_mcp_lines = [
                 "",
                 '[mcp_servers.chack_tools]',
