@@ -2114,7 +2114,7 @@ You are a research administrator tasked with a specific research and must obtain
 4. Stop when the evidence supports a defensible answer or further work has low value. Preserve enough runtime to synthesize; state remaining gaps instead of timing out while chasing completeness.
 
 ### LONG-RUNNING RESEARCHERS
-Prefer `start_researchers_async` and completion-aware `poll_researchers_async` waits for long work. Poll once immediately after launch. `poll_researchers_async` is status-only by default (`include_outputs=false`): this preserves every full result outside your conversation while returning only lifecycle, health, heartbeat, tool counts, artifact counts, and failures. Do not set `include_outputs=true` during routine polling; that compatibility option injects each finished child's bounded digest again on every poll. A valid result contains only `research_worked`, `failure_reason`, `overall_summary`, `findings[{claim,summary}]`, `gaps`, and `open_topics`; unparseable results fall back to raw text. Treat open topics as optional leads, not mandatory tasks: launch a follow-up only when it can materially improve the requested conclusion within the remaining budget. Ordinary jobs normally use 30-120 second waits; ChatGPT browser jobs use 300-600 seconds and may take tens of minutes or up to 180 minutes. Queued/starting for a few minutes is not failure.
+Every researcher is async-only in this administrator. Always launch ordinary and browser researchers with `start_researchers_async`, then use completion-aware `poll_researchers_async` waits. Never attempt a synchronous batch: provider/MCP tool bridges can time out while healthy children continue, which loses the job handle and risks duplicate physical launches. Poll once immediately after launch. `poll_researchers_async` is status-only by default (`include_outputs=false`): this preserves every full result outside your conversation while returning only lifecycle, health, heartbeat, tool counts, artifact counts, and failures. Do not set `include_outputs=true` during routine polling; that compatibility option injects each finished child's bounded digest again on every poll. A valid result contains only `research_worked`, `failure_reason`, `overall_summary`, `findings[{claim,summary}]`, `gaps`, and `open_topics`; unparseable results fall back to raw text. Treat open topics as optional leads, not mandatory tasks: launch a follow-up only when it can materially improve the requested conclusion within the remaining budget. Ordinary jobs normally use 30-120 second waits; ChatGPT browser jobs use 300-600 seconds and may take tens of minutes or up to 180 minutes. Queued/starting for a few minutes is not failure.
 Use `list_researcher_jobs` if you lose a job id. Use `get_researcher_task` for one child's current diagnostics. When a child is done, call `get_researcher_result` with `view=summary` first. Read the lossless `parsed` or exact `raw` view page by page using `next_offset` whenever detailed evidence, citations, contradictions, provenance, or omitted context matters. Full reviews and evidence artifacts remain available even though summaries and status polls omit them.
 Use `cancel_researcher_task` to stop only a duplicated/stale ordinary child while preserving siblings, and `cancel_researchers_async` only when the whole ordinary job is no longer useful. Use `retry_researcher_task` at most once and only for a concrete transient failure or material missing source family; it privately reuses the original prompt. A `no_recent_progress` health label is a warning to inspect, not proof of death.
 Never use `wait(..., terminate=true)`, cancellation, or process termination on a running ChatGPT browser researcher merely because it is slow or finalizing. Cancel it only on explicit user request, a proven terminal error, or the configured hard timeout. Ordinary async work may be cancelled when clearly stalled, duplicated, or no longer useful.
@@ -3553,7 +3553,7 @@ class ResearcherAdministratorAgentTool:
                 capability = ", ".join(names) if names else "no internal tools available"
             except Exception as exc:
                 capability = f"capability map unavailable ({type(exc).__name__}: {exc})"
-            lines.append(f"- {short} via `run_researchers_batch` (request `{exposed_tool}`): {capability}")
+            lines.append(f"- {short} via `start_researchers_async` (request `{exposed_tool}`): {capability}")
         return lines
 
     @staticmethod
@@ -5329,29 +5329,20 @@ class ResearcherAdministratorAgentTool:
             all_tools.append(tool)
 
         tools_by_name = {self._name_of_tool(tool): tool for tool in all_tools}
-        long_browser_researchers = {
-            "deepchatgpt",
-            "prochatgpt",
-            "chatgptxhigh",
-        }.intersection(enabled_researchers)
-        synchronous_researchers = [short for short in enabled_researchers if short not in long_browser_researchers]
-        synchronous_tool_names = {RESEARCHER_REGISTRY[short][1] for short in synchronous_researchers}
-
-        # Every ordinary researcher must enter through the supervised batch
-        # boundary. Exposing its raw tool here lets the model bypass the
-        # process-group deadline and is unsafe for long calls such as travel.
-        # Browser researchers are already async-only for the same reason.
+        # Every researcher must enter through the supervised async boundary.
+        # Exposing a raw researcher tool bypasses lifecycle management. Exposing
+        # the synchronous batch is also unsafe: provider/MCP bridges commonly
+        # impose a roughly five-minute tool-call timeout, while healthy research
+        # children can need much longer. If that bridge abandons the synchronous
+        # call, its children continue without a parent-visible job handle and the
+        # administrator may launch physical duplicates. The async control plane
+        # returns a durable job id immediately and keeps polling/cancellation,
+        # accounting, harvest, and process cleanup observable.
         tools = [
             tool
             for tool in all_tools
             if self._name_of_tool(tool) == "task_steps_manager"
         ]
-        if synchronous_researchers:
-            synchronous_tools = {
-                name: tool for name, tool in tools_by_name.items()
-                if name in synchronous_tool_names
-            }
-            tools.append(self._build_batch_tool(synchronous_tools, synchronous_researchers))
         async_tools = self._build_async_tools(
             tools_by_name,
             enabled_researchers,

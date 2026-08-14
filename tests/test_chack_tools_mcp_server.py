@@ -33,7 +33,6 @@ def test_name_based_administrator_tool_reconstruction(monkeypatch) -> None:
     monkeypatch.setenv(
         "CHACK_TOOLS_OVERRIDE_NAMES_JSON",
         json.dumps([
-            "run_researchers_batch",
             "start_researchers_async",
             "list_researcher_jobs",
             "get_researcher_task",
@@ -50,7 +49,6 @@ def test_name_based_administrator_tool_reconstruction(monkeypatch) -> None:
         ]),
     )
     monkeypatch.setenv("CHACK_ALLOWED_TOOLS_JSON", json.dumps([
-        "run_researchers_batch",
         "start_researchers_async",
         "list_researcher_jobs",
         "get_researcher_task",
@@ -69,7 +67,6 @@ def test_name_based_administrator_tool_reconstruction(monkeypatch) -> None:
     tools = _load_toolset()
     names = [str(getattr(tool, "name", "") or "") for tool in tools]
     assert names == [
-        "run_researchers_batch",
         "start_researchers_async",
         "list_researcher_jobs",
         "get_researcher_task",
