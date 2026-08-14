@@ -286,7 +286,11 @@ def test_chatgpt_researchers_are_structurally_async_only():
     assert "prochatgpt_researcher" not in inner
     assert "chatgptxhigh" not in inner
     assert "run_researchers_batch" not in inner
-    assert "cancel_researchers_async" not in inner
+    # Whole-job cancellation remains exposed even when the selected researchers
+    # are browser-backed. The administrator must retain an explicit control-plane
+    # path; browser jobs only reject impatient/model-driven cancellation in their
+    # worker policy, not the management capability itself.
+    assert "cancel_researchers_async" in inner
 
 
 def test_administrator_allowlist_force_enables_researchers():
@@ -301,8 +305,6 @@ def test_administrator_allowlist_force_enables_researchers():
 
     inner = _tool_names(helper._build_subagent_tools(helper._enabled_researchers()))
     assert inner == {
-        "scientific_research",
-        "business_research",
         "run_researchers_batch",
         "start_researchers_async",
         "poll_researchers_async",
@@ -471,6 +473,50 @@ def test_sync_researcher_batch_deadline_returns_without_executor_shutdown_wait()
     assert task["artifact_count"] == 0
     assert task["failure_reason"]
     assert task["execution_active"] is True
+
+
+def test_sync_batch_uses_exported_deadline_when_mcp_contextvar_is_missing(monkeypatch):
+    """The MCP reconstruction must retain the administrator's reserved window."""
+    class SlowResearcher:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            await asyncio.sleep(4)
+            return "late output"
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            researcher_administrator_enabled=True,
+            scientific_enabled=True,
+            researcher_administrator_child_timeout_seconds=30,
+        ),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    monkeypatch.setenv(
+        "CHACK_RESEARCHER_ADMIN_RESEARCHER_DEADLINE_EPOCH",
+        str(time.time() + 1.2),
+    )
+    batch = helper._build_batch_tool(
+        {"scientific_research": SlowResearcher()},
+        ["scientific"],
+    )
+    prompt = "Investigate the scientific claim with primary sources, exact dates, contradictions, and evidence gaps. " * 12
+    payload = json.loads(
+        helper._invoke_tool_sync(
+            batch,
+            {
+                "requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}]),
+                "save_artifacts": False,
+                "max_parallel": 1,
+            },
+        )
+    )
+
+    assert payload["child_timeout_seconds"] == 1
+    assert payload["batch_worked"] is False
+    assert payload["errors"][0]["status"] == "deadline_exceeded"
 
 
 def test_daemon_executor_does_not_join_blocked_worker_at_process_exit():
@@ -735,10 +781,10 @@ def test_administrator_capability_map_lists_internal_researcher_tools():
     lines = helper._researcher_capability_lines(helper._enabled_researchers())
     text = "\n".join(lines)
 
-    assert "- websearcher via `websearcher_research`:" in text
+    assert "- websearcher via `run_researchers_batch` (request `websearcher_research`):" in text
     assert "fetch_url_text" in text
     assert "web_archive_search" in text
-    assert "- scientific via `scientific_research`:" in text
+    assert "- scientific via `run_researchers_batch` (request `scientific_research`):" in text
     assert "search_arxiv" in text
     assert "download_pmc_full_text" in text
 
@@ -1007,6 +1053,24 @@ def test_administrator_prompt_exposes_research_and_synthesis_time_windows(monkey
     assert "administrator hard cap is 60 minutes" in captured["text"]
     assert "researcher phase has a hard stop after 55 minutes" in captured["text"]
     assert "leaving 5 minutes reserved for your own synthesis" in captured["text"]
+
+
+def test_useful_evidence_rejects_placeholder_full_review_even_with_artifacts(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    evidence = tmp_path / "evidence.txt"
+    evidence.write_text("real source evidence", encoding="utf-8")
+    response = {
+        "research_worked": True,
+        "failure_reason": "",
+        "overall_summary": "A substantive bounded summary.",
+        "findings": [{"claim": "A concrete claim with enough detail", "summary": "A substantive finding summary with caveats and provenance."}],
+        "full_research_review": "placeholder",
+        "evidence_data_path": str(tmp_path),
+        "key_artifacts": [{"filename": evidence.name}],
+    }
+
+    assert admin_mod._response_has_useful_evidence(response) is False
 
 
 def test_administrator_timeout_returns_preserved_artifact_paths(monkeypatch, tmp_path):
@@ -2114,6 +2178,68 @@ def test_administrator_async_cancel_terminates_registered_running_process(tmp_pa
     assert payload["tasks"][0]["termination"]["process_alive_after"] is False
 
 
+def test_mcp_shutdown_reconciles_active_async_task_before_exit(tmp_path):
+    """MCP shutdown must not leave a terminal task physically active in its ledger."""
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    root = tmp_path / "mcp-shutdown"
+    root.mkdir()
+    started = root / "started"
+
+    class BlockingResearchTool:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            started.touch()
+            cancel_event = current_cancellation_event()
+            while not (cancel_event is not None and cancel_event.is_set()):
+                await asyncio.sleep(0.02)
+            return "ERROR: shutdown cancellation"
+
+    tools = helper._build_async_tools(
+        {"scientific_research": BlockingResearchTool()},
+        ["scientific"],
+        artifact_root=str(root),
+    )
+    by_name = {tool.name: tool for tool in tools}
+    prompt = "Investigate this scientific question with primary sources, exact dates, contradictions, and evidence gaps. " * 10
+    launched = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {"requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}])},
+        )
+    )
+    job_id = launched["job_id"]
+    try:
+        assert _wait_for_file(started, 10)
+        admin_mod._shutdown_async_research_jobs(timeout_seconds=10)
+        payload = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": job_id},
+            )
+        )
+        task = payload["tasks"][0]
+        assert payload["complete"] is True
+        assert task["status"] == "cancelled"
+        assert task["execution_active"] is False
+        assert task["termination"]["term_sent"] is True
+        assert task["termination"]["process_alive_after"] is False
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            job = admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+        for task in ((job or {}).get("tasks") or {}).values():
+            timer = task.get("deadline_timer")
+            if timer is not None:
+                timer.cancel()
+
+
 def test_administrator_can_cancel_one_ordinary_task_without_cancelling_siblings(tmp_path):
     root = tmp_path / "sibling-cancel"
     root.mkdir()
@@ -2773,7 +2899,8 @@ def test_administrator_finalizer_appends_researcher_outputs_and_usage():
 
     assert payload["administrator_conclusions"] == "summary"
     assert payload["evidence_data_path"] == "/tmp/evidence"
-    assert payload["researcher_responses"] == [researcher_response]
+    assert payload["researcher_responses"][0]["researcher_tool"] == "websearcher_research"
+    assert "full_research_review" not in payload["researcher_responses"][0]
     assert payload["researcher_tool_call_counts"] == {
         "fetch_url_text": 1,
         "search_google_web": 2,

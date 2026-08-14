@@ -441,6 +441,11 @@ class AgentsToolset:
 
     def _build_tools(self):
         tools = []
+        # The administrator helper is also used by the CLI/MCP transport when
+        # its live management closures cannot be serialized. Keep the helper
+        # private and reconstruct its tools inside the MCP child instead of
+        # moving ContextVars/locks across process boundaries.
+        self._researcher_administrator_helper = None
         if self.config.exec_enabled:
             exec_helper = ExecTool(self.config)
             tools.append(get_exec_tool(exec_helper))
@@ -904,6 +909,7 @@ class AgentsToolset:
                 self_critique_enabled=self.self_critique_enabled,
                 self_critique_rounds=self.self_critique_rounds,
             )
+            self._researcher_administrator_helper = administrator_helper
             tools.append(get_researcher_administrator_tool(administrator_helper))
 
         if getattr(self.config, "researcher_queue_enabled", False):

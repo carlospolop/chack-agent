@@ -941,7 +941,7 @@ def inherit_subagent_limits(
     parent_remaining_runtime_minutes: float,
     parent_remaining_cost_usd: float,
     runtime_ratio: float = 1.0 / 3.0,
-    runtime_cap_minutes: int = 4,
+    runtime_cap_minutes: int = 20,
     cost_ratio: float = 1.0 / 3.0,
 ) -> tuple[int, int, float]:
     # Child turns cap: 1/2 of parent max turns.

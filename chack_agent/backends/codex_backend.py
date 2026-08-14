@@ -43,6 +43,8 @@ from .tool_payloads import (
     CHACK_TOOLS_CONFIG_JSON_PATH_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_PATH_ENV,
+    CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV,
+    CHACK_TOOLS_APPEND_NAMES_JSON_ENV,
     CHACK_INLINE_ENV_VALUE_MAX_CHARS,
     augment_subprocess_pythonpath,
     serialize_tools_payload,
@@ -570,6 +572,8 @@ class CodexExecutor:
     _travel_model: str = ""
     _travel_max_turns: int = 50
     _runtime_env_json: str = "{}"
+    _serialized_tools_override_names_json: str = ""
+    _serialized_tools_append_names_json: str = ""
     _cacheable_developer_prompt: str = ""
     _prompt_cache_prefix_key: str = ""
 
@@ -1974,6 +1978,14 @@ class CodexExecutor:
             path_env_key=CHACK_TOOLS_APPEND_B64_PATH_ENV,
             prefix="chack_tools_append_",
         )
+        if self._serialized_tools_override_names_json:
+            env[CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV] = self._serialized_tools_override_names_json
+        else:
+            env.pop(CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV, None)
+        if self._serialized_tools_append_names_json:
+            env[CHACK_TOOLS_APPEND_NAMES_JSON_ENV] = self._serialized_tools_append_names_json
+        else:
+            env.pop(CHACK_TOOLS_APPEND_NAMES_JSON_ENV, None)
         # Shared-MCP routing: when every agent points at one HTTP MCP server
         # (CHACK_CODEX_MCP_URL), give THIS subprocess a per-run bearer token (its
         # session id) under the configured env var so the shared server can route this
@@ -2026,6 +2038,7 @@ class CodexExecutor:
         )
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
+        env["CHACK_MCP_PARENT_PID"] = str(os.getpid())
         env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
         return env
 
@@ -2090,6 +2103,8 @@ class CodexExecutor:
             "CHACK_TOOLS_OVERRIDE_B64_PATH",
             "CHACK_TOOLS_APPEND_B64",
             "CHACK_TOOLS_APPEND_B64_PATH",
+            "CHACK_TOOLS_OVERRIDE_NAMES_JSON",
+            "CHACK_TOOLS_APPEND_NAMES_JSON",
             "CHACK_CHATGPT_ASYNC_API_URL",
             "CHACK_CHATGPT_ASYNC_API_SECRET",
             "PYTHONPATH",
@@ -2137,6 +2152,7 @@ class CodexExecutor:
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
+            "CHACK_MCP_PARENT_PID",
             "CHACK_DISABLE_STDOUT_EVENTS",
             "CHACK_RESEARCH_MASTER_DIR",
             "CHACK_RESEARCH_DATA_DIR",
@@ -2723,8 +2739,36 @@ def build_executor(
             names.append(name)
         return names
 
-    serialized_tools_override_b64 = serialize_tools_payload(tools_override)
-    serialized_tools_append_b64 = serialize_tools_payload(tools_append)
+    serialized_tools_override_b64 = ""
+    serialized_tools_append_b64 = ""
+    serialized_tools_override_names_json = ""
+    serialized_tools_append_names_json = ""
+    try:
+        serialized_tools_override_b64 = serialize_tools_payload(tools_override)
+    except Exception as exc:
+        override_names = _extract_tool_names(tools_override)
+        management_names = {
+            "run_researchers_batch",
+            "start_researchers_async",
+            "list_researcher_jobs",
+            "get_researcher_task",
+            "poll_researchers_async",
+            "get_researcher_result",
+            "cancel_researcher_task",
+            "retry_researcher_task",
+            "cancel_researchers_async",
+        }
+        if not (set(override_names) & management_names):
+            raise
+        serialized_tools_override_names_json = json.dumps(override_names, ensure_ascii=False)
+        _LOGGER.info(
+            "Using MCP name-based reconstruction for researcher administrator tools after closure serialization failed: %s",
+            type(exc).__name__,
+        )
+    try:
+        serialized_tools_append_b64 = serialize_tools_payload(tools_append)
+    except Exception:
+        raise
     model_provider = str(config.model.provider or "").strip()
     if not model_provider:
         raise ValueError("model.provider must be defined in config")
@@ -2937,4 +2981,6 @@ def build_executor(
             },
             ensure_ascii=False,
         ),
+        _serialized_tools_override_names_json=serialized_tools_override_names_json,
+        _serialized_tools_append_names_json=serialized_tools_append_names_json,
     )

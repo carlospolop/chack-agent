@@ -16,22 +16,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from chack_tools.config import ToolsConfig
-from chack_tools.researcher_administrator_agent import ResearcherAdministratorAgentTool
+from chack_tools.researcher_administrator_agent import (
+    RESEARCHER_REGISTRY,
+    ResearcherAdministratorAgentTool,
+)
 from chack_tools.telemetry.context import reset_log_context, set_log_context
 
 
+_BROWSER_RESEARCHERS = {"deepchatgpt", "prochatgpt", "chatgptxhigh"}
+# The normal CLI/provider matrix is derived from the runtime registry. Browser
+# researchers are a separate authenticated-UI acceptance surface.
 RESEARCHERS = [
-    "websearcher",
-    "scientific",
-    "business",
-    "product",
-    "legal",
-    "data_statistics",
-    "news_media",
-    "knowledge_graph",
-    "social_network",
-    "religious",
-    "cli",
+    short for short in RESEARCHER_REGISTRY
+    if short not in _BROWSER_RESEARCHERS
 ]
 
 
@@ -102,6 +99,13 @@ TOPICS = {
         "product/security, business/entity, and knowledge graph researchers as needed for context, advisories, maintainers, ownership, and public "
         "reporting. Preserve evidence and clearly distinguish command-verified facts from search-result leads and commentary."
     ),
+    "travel_sustainable_europe": (
+        "Research a bounded travel-planning question for a two-week rail-first trip through Spain, France, and Italy in the current "
+        "season. Compare realistic route options, border and rail-operator constraints, reservation requirements, disruption or strike "
+        "risks, seasonal weather, accessibility, and major sustainable alternatives to short-haul flights. Use official rail/operator "
+        "and government sources first, then current travel reporting and traveler evidence only as supporting context. Preserve exact "
+        "dates, fares or availability caveats, source provenance, contradictions, and unresolved details; do not invent live schedules."
+    ),
 }
 
 SPLIT_PRIORITY_SUFFIX = (
@@ -129,17 +133,16 @@ BACKEND_PROFILES = {
 
 
 def load_env(path: Path) -> None:
-    if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+    if path.exists():
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
     # Prefer the already-authenticated local Codex CLI session when present.
     # Some .env access tokens are short-lived and make Codex reject otherwise valid local auth.
     os.environ.pop("CODEX_ACCESS_TOKEN", None)
@@ -184,6 +187,123 @@ def artifact_stats(path: str) -> dict[str, Any]:
         "file_count": len(files),
         "bytes": sum(p.stat().st_size for p in files),
         "dirs": dirs,
+    }
+
+
+def validate_case(
+    summary: dict[str, Any],
+    parsed: dict[str, Any],
+    raw: str,
+) -> dict[str, Any]:
+    """Apply independent case-level gates; reject schema-shaped/null rows."""
+    failures: list[str] = []
+    expected_researchers = [str(value) for value in summary.get("enabled_researchers") or []]
+    expected_tools = [
+        RESEARCHER_REGISTRY[name][1]
+        for name in expected_researchers
+        if name in RESEARCHER_REGISTRY
+    ]
+    parse_ok = isinstance(parsed, dict) and isinstance(parsed.get("research_worked"), bool)
+    if not parse_ok:
+        failures.append("administrator output is missing an explicit boolean research_worked")
+    if not str(raw or "").strip():
+        failures.append("administrator returned empty output")
+
+    responses = parsed.get("researcher_responses") if isinstance(parsed.get("researcher_responses"), list) else []
+    researcher_calls = parsed.get("researcher_call_counts") if isinstance(parsed.get("researcher_call_counts"), dict) else {}
+    tool_counts = parsed.get("researcher_tool_call_counts") if isinstance(parsed.get("researcher_tool_call_counts"), dict) else {}
+    if not responses:
+        failures.append("no terminal researcher response was returned")
+    if not tool_counts:
+        failures.append("no researcher tool calls were observed")
+    for tool_name in expected_tools:
+        if int(researcher_calls.get(tool_name) or 0) < 1:
+            failures.append(f"researcher call was not observed for {tool_name}")
+
+    conclusions = str(parsed.get("administrator_conclusions") or "").strip()
+    if len(conclusions) < 40:
+        failures.append("administrator synthesis is not substantive")
+    for response in responses:
+        if not isinstance(response, dict):
+            failures.append("researcher response is not an object")
+            continue
+        tool_name = str(response.get("researcher_tool") or "unknown")
+        if response.get("research_worked") is not True:
+            failures.append(f"{tool_name} did not report research_worked=true")
+        findings = response.get("findings")
+        if not isinstance(findings, list) or not findings:
+            failures.append(f"{tool_name} has no findings in its digest")
+
+    evidence_path = str(summary.get("evidence_data_path") or "")
+    artifact_info = summary.get("artifact_stats") if isinstance(summary.get("artifact_stats"), dict) else {}
+    artifact_files = int(artifact_info.get("file_count") or 0)
+    full_records: dict[str, dict[str, Any]] = {}
+    raw_files: list[Path] = []
+    source_files: list[Path] = []
+    if summary.get("save_artifacts"):
+        if not evidence_path or not Path(evidence_path).expanduser().is_dir():
+            failures.append("preserved evidence_data_path is missing or not a directory")
+        else:
+            root = Path(evidence_path).expanduser()
+            if artifact_files <= 0:
+                failures.append("preserved evidence workspace is empty")
+            output_dir = root / "researcher_outputs"
+            for path in sorted(output_dir.glob("*.json")):
+                try:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    failures.append(f"full parsed researcher output is unreadable: {path.name}")
+                    continue
+                if isinstance(record, dict) and str(record.get("researcher_tool") or "").strip():
+                    full_records[str(record["researcher_tool"])] = record
+            raw_files = sorted(output_dir.glob("*.raw.txt"))
+            ignored_parts = {"researcher_outputs", "researcher_jobs", "admin_output.json"}
+            source_files = [
+                path for path in root.rglob("*")
+                if path.is_file()
+                and path.name != "_artifact_manifest.jsonl"
+                and not any(part in ignored_parts for part in path.relative_to(root).parts)
+            ]
+            if not full_records:
+                failures.append("full parsed researcher output was not persisted")
+            if not raw_files:
+                failures.append("exact raw researcher output was not persisted")
+            if not source_files:
+                failures.append("no source/detail artifact was persisted")
+            for tool_name in expected_tools:
+                record = full_records.get(tool_name)
+                if record is None:
+                    failures.append(f"full response is missing for {tool_name}")
+                    continue
+                if record.get("research_worked") is not True:
+                    failures.append(f"persisted response for {tool_name} is not successful")
+                if len(str(record.get("full_research_review") or "").strip()) < 20:
+                    failures.append(f"persisted response for {tool_name} has no substantive full review")
+                if not isinstance(record.get("findings"), list) or not record.get("findings"):
+                    failures.append(f"persisted response for {tool_name} has no findings")
+
+            for ledger_path in sorted((root / "researcher_jobs").glob("*.json")):
+                try:
+                    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+                except Exception:
+                    failures.append(f"researcher ledger is unreadable: {ledger_path.name}")
+                    continue
+                for task in ledger.get("tasks") or []:
+                    status = str(task.get("status") or "")
+                    if status not in {"done", "error", "cancelled", "deadline_exceeded"}:
+                        failures.append(f"researcher task remained non-terminal: {task.get('task_id')}")
+                    if task.get("execution_active"):
+                        failures.append(f"researcher task remained physically active: {task.get('task_id')}")
+
+    harness_failure = not parse_ok and "bootstrapping phase" in str(raw or "")
+    acceptance_pass = not failures and parsed.get("research_worked") is True
+    return {
+        "parse_ok": parse_ok,
+        "terminal": parse_ok,
+        "functional_pass": acceptance_pass,
+        "acceptance_pass": acceptance_pass,
+        "harness_failure": harness_failure,
+        "validation_failures": failures,
     }
 
 
@@ -375,6 +495,7 @@ def make_helper(
         model_provider=profile["provider"],
         max_turns=admin_turns,
         researchers=active_researchers,
+        required_researchers=active_researchers,
         researcher_model_overrides=researcher_models,
         researcher_max_turns_overrides=researcher_max_turns,
         social_network_model=researcher_model,
@@ -506,6 +627,7 @@ def run_case(
         "evidence_data_path": evidence_path,
         "score": score_result(parsed, raw, artifacts, elapsed),
     }
+    summary.update(validate_case(summary, parsed, raw))
     (case_dir / "raw_output.json").write_text(raw, encoding="utf-8")
     (case_dir / "parsed_output.json").write_text(compact_json(parsed), encoding="utf-8")
     (case_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -537,6 +659,7 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     all_summaries: list[dict[str, Any]] = []
+    invalid_cases = 0
     for backend in args.backends:
         topics = list(args.topics)
         if args.limit > 0:
@@ -562,6 +685,8 @@ def main() -> int:
             )
             all_summaries.append(summary)
             print(compact_json(summary), flush=True)
+            if not summary.get("acceptance_pass"):
+                invalid_cases += 1
 
     summary_path = out_dir / "summary.json"
     existing_summaries: list[dict[str, Any]] = []
@@ -577,6 +702,9 @@ def main() -> int:
         encoding="utf-8",
     )
     print(f"WROTE {summary_path}", flush=True)
+    if invalid_cases:
+        print(f"ACCEPTANCE FAILED: {invalid_cases} case(s) did not satisfy the independent gates.", flush=True)
+        return 1
     return 0
 
 

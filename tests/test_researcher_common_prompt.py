@@ -142,5 +142,5 @@ def test_inherit_subagent_limits_keeps_parent_time_for_synthesis():
     )
 
     assert turns == 12
-    assert runtime_minutes == 4
+    assert runtime_minutes == 10
     assert cost_usd == 3

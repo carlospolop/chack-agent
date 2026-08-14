@@ -41,6 +41,8 @@ from .tool_payloads import (
     CHACK_TOOLS_CONFIG_JSON_PATH_ENV,
     CHACK_TOOLS_OVERRIDE_B64_PATH_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
+    CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV,
+    CHACK_TOOLS_APPEND_NAMES_JSON_ENV,
     augment_subprocess_pythonpath,
     serialize_tools_payload,
     write_payload_to_file,
@@ -296,6 +298,8 @@ class ClaudeCodeExecutor:
     _travel_max_turns: int = 50
     _cacheable_system_prompt: str = ""
     _prompt_cache_prefix_key: str = ""
+    _serialized_tools_override_names_json: str = ""
+    _serialized_tools_append_names_json: str = ""
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
         self._prompt_only_next_invocation = True
@@ -900,9 +904,36 @@ class ClaudeCodeExecutor:
                         str(event.get("subtype") or "").strip().lower() == "error"
                         or bool(event.get("is_error"))
                     ):
+                        diagnostic: dict[str, Any] = {}
+                        for key in (
+                            "subtype",
+                            "is_error",
+                            "stop_reason",
+                            "stop_sequence",
+                            "num_turns",
+                            "duration_ms",
+                            "duration_api_ms",
+                            "session_id",
+                            "error",
+                            "errors",
+                            "permission_denials",
+                        ):
+                            value = event.get(key)
+                            if value not in (None, "", [], {}):
+                                diagnostic[key] = value
+                        diagnostic_text = ""
+                        if diagnostic:
+                            try:
+                                diagnostic_text = (
+                                    " Event diagnostics: "
+                                    + json.dumps(diagnostic, ensure_ascii=False, default=str)[:2000]
+                                )
+                            except Exception:
+                                diagnostic_text = ""
                         return (
                             "ERROR: Claude returned an error in final result event. "
-                            + (result_text or "No error text was returned."),
+                            + (result_text or "No error text was returned.")
+                            + diagnostic_text,
                             steps,
                             _RawResult(raw_responses=raw_responses),
                         )
@@ -1465,6 +1496,14 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             path_env_key=CHACK_TOOLS_APPEND_B64_PATH_ENV,
             prefix="chack_tools_append_",
         )
+        if self._serialized_tools_override_names_json:
+            env[CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV] = self._serialized_tools_override_names_json
+        else:
+            env.pop(CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV, None)
+        if self._serialized_tools_append_names_json:
+            env[CHACK_TOOLS_APPEND_NAMES_JSON_ENV] = self._serialized_tools_append_names_json
+        else:
+            env.pop(CHACK_TOOLS_APPEND_NAMES_JSON_ENV, None)
         env["CHACK_MODEL_PROVIDER"] = self._model_provider
         env["CHACK_DEFAULT_MODEL"] = self._default_model
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
@@ -1674,6 +1713,8 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "CHACK_TOOLS_OVERRIDE_B64_PATH",
             "CHACK_TOOLS_APPEND_B64",
             "CHACK_TOOLS_APPEND_B64_PATH",
+            "CHACK_TOOLS_OVERRIDE_NAMES_JSON",
+            "CHACK_TOOLS_APPEND_NAMES_JSON",
             "CHACK_CHATGPT_ASYNC_API_URL",
             "CHACK_CHATGPT_ASYNC_API_SECRET",
             "PATH",
@@ -1786,6 +1827,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
                 continue
             env_payload[key] = str(value)
 
+        env_payload["CHACK_MCP_PARENT_PID"] = str(os.getpid())
         return env_payload
 
     @staticmethod
@@ -1996,7 +2038,23 @@ def build_executor(
 
     configured_claude_path = os.environ.get("CLAUDE_CLI_PATH", "").strip() or "claude"
     claude_cli_path = shutil.which(configured_claude_path) or configured_claude_path
-    serialized_tools_override_b64 = serialize_tools_payload(tools_override)
+    serialized_tools_override_b64 = ""
+    serialized_tools_append_b64 = ""
+    serialized_tools_override_names_json = ""
+    serialized_tools_append_names_json = ""
+    try:
+        serialized_tools_override_b64 = serialize_tools_payload(tools_override)
+    except Exception as exc:
+        override_names = _extract_tool_names(tools_override)
+        management_names = {
+            "run_researchers_batch", "start_researchers_async", "list_researcher_jobs",
+            "get_researcher_task", "poll_researchers_async", "get_researcher_result",
+            "cancel_researcher_task", "retry_researcher_task", "cancel_researchers_async",
+        }
+        if not (set(override_names) & management_names):
+            raise
+        serialized_tools_override_names_json = json.dumps(override_names, ensure_ascii=False)
+        _LOGGER.info("Using MCP name-based reconstruction for researcher administrator tools: %s", type(exc).__name__)
     serialized_tools_append_b64 = serialize_tools_payload(tools_append)
 
     route = get_openrouter_route(config)
@@ -2013,6 +2071,8 @@ def build_executor(
         _allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False),
         _serialized_tools_override_b64=serialized_tools_override_b64,
         _serialized_tools_append_b64=serialized_tools_append_b64,
+        _serialized_tools_override_names_json=serialized_tools_override_names_json,
+        _serialized_tools_append_names_json=serialized_tools_append_names_json,
         _model_provider=model_provider,
         _default_model=str(config.model.primary or ""),
         _social_network_model=str(config.model.social_network or ""),

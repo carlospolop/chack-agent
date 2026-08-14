@@ -30,6 +30,8 @@ from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_c
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
+    CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV,
+    CHACK_TOOLS_APPEND_NAMES_JSON_ENV,
     augment_subprocess_pythonpath,
     serialize_tools_payload,
 )
@@ -124,6 +126,8 @@ class GeminiCliExecutor:
         thinking_effort: str = "high",
         travel_model: str = "",
         travel_max_turns: int = 50,
+        serialized_tools_override_names_json: str = "",
+        serialized_tools_append_names_json: str = "",
     ) -> None:
         self._conversation = conversation
         self._memory_limit = memory_max_messages
@@ -164,6 +168,12 @@ class GeminiCliExecutor:
         self._output_schema_name = output_schema_name or "output_schema"
         self._output_schema_strict = bool(output_schema_strict)
         self._thinking_effort = normalize_thinking_effort(thinking_effort)
+        self._serialized_tools_override_names_json = str(
+            serialized_tools_override_names_json or ""
+        )
+        self._serialized_tools_append_names_json = str(
+            serialized_tools_append_names_json or ""
+        )
 
         self._gemini_home: str | None = None
         self._gemini_session_id: str | None = None
@@ -484,6 +494,10 @@ class GeminiCliExecutor:
             env[CHACK_TOOLS_OVERRIDE_B64_ENV] = self._serialized_tools_override_b64
         if self._serialized_tools_append_b64:
             env[CHACK_TOOLS_APPEND_B64_ENV] = self._serialized_tools_append_b64
+        if getattr(self, "_serialized_tools_override_names_json", ""):
+            env[CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV] = self._serialized_tools_override_names_json
+        if getattr(self, "_serialized_tools_append_names_json", ""):
+            env[CHACK_TOOLS_APPEND_NAMES_JSON_ENV] = self._serialized_tools_append_names_json
         env["CHACK_MODEL_PROVIDER"] = self._model_provider
         env["CHACK_DEFAULT_MODEL"] = self._default_model
         env["CHACK_SOCIAL_NETWORK_MODEL"] = self._social_network_model
@@ -590,6 +604,8 @@ class GeminiCliExecutor:
             "CHACK_ALLOWED_TOOLS_JSON",
             "CHACK_TOOLS_OVERRIDE_B64",
             "CHACK_TOOLS_APPEND_B64",
+            "CHACK_TOOLS_OVERRIDE_NAMES_JSON",
+            "CHACK_TOOLS_APPEND_NAMES_JSON",
             "CHACK_CHATGPT_ASYNC_API_URL",
             "CHACK_CHATGPT_ASYNC_API_SECRET",
             "PATH",
@@ -679,6 +695,7 @@ class GeminiCliExecutor:
         if self._gemini_api_key:
             env_payload.setdefault("GEMINI_API_KEY", self._gemini_api_key)
 
+        env_payload["CHACK_MCP_PARENT_PID"] = str(os.getpid())
         return env_payload
 
     @staticmethod
@@ -895,7 +912,23 @@ def build_executor(
 
     configured_gemini_path = os.environ.get("GEMINI_CLI_PATH", "").strip() or "gemini"
     gemini_cli_path = shutil.which(configured_gemini_path) or configured_gemini_path
-    serialized_tools_override_b64 = serialize_tools_payload(tools_override)
+    serialized_tools_override_b64 = ""
+    serialized_tools_append_b64 = ""
+    serialized_tools_override_names_json = ""
+    serialized_tools_append_names_json = ""
+    try:
+        serialized_tools_override_b64 = serialize_tools_payload(tools_override)
+    except Exception as exc:
+        override_names = _extract_tool_names(tools_override)
+        management_names = {
+            "run_researchers_batch", "start_researchers_async", "list_researcher_jobs",
+            "get_researcher_task", "poll_researchers_async", "get_researcher_result",
+            "cancel_researcher_task", "retry_researcher_task", "cancel_researchers_async",
+        }
+        if not (set(override_names) & management_names):
+            raise
+        serialized_tools_override_names_json = json.dumps(override_names, ensure_ascii=False)
+        _LOGGER.info("Using MCP name-based reconstruction for researcher administrator tools: %s", type(exc).__name__)
     serialized_tools_append_b64 = serialize_tools_payload(tools_append)
 
     return GeminiCliExecutor(
@@ -911,6 +944,8 @@ def build_executor(
         allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False),
         serialized_tools_override_b64=serialized_tools_override_b64,
         serialized_tools_append_b64=serialized_tools_append_b64,
+        serialized_tools_override_names_json=serialized_tools_override_names_json,
+        serialized_tools_append_names_json=serialized_tools_append_names_json,
         model_provider=model_provider,
         default_model=str(config.model.primary or ""),
         social_network_model=str(config.model.social_network or ""),

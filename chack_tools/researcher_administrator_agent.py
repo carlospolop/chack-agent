@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -139,6 +140,8 @@ _ASYNC_RESEARCH_EXECUTOR = _DaemonThreadPoolExecutor(
 )
 _ASYNC_RESEARCH_LOCK = threading.Lock()
 _ASYNC_RESEARCH_JOBS: dict[str, dict[str, Any]] = {}
+_SYNC_RESEARCH_LOCK = threading.Lock()
+_SYNC_RESEARCH_BATCHES: dict[str, dict[str, Any]] = {}
 _RESEARCHER_TERMINAL_STATUSES = {"done", "error", "cancelled", "deadline_exceeded"}
 _BROWSER_RESEARCHER_TOOLS = {"deepchatgpt_researcher", "prochatgpt_researcher", "chatgptxhigh"}
 _RESEARCH_WRITER_LOCK = threading.Lock()
@@ -148,6 +151,7 @@ _DEFAULT_SYNTHESIS_RESERVE_MINUTES = 5
 _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS = 5.0
 _PROCESS_CONTEXT_WARM_LOCK = threading.Lock()
 _PROCESS_CONTEXT_WARMED: set[str] = set()
+_RESEARCHER_DEADLINE_EPOCH_ENV = "CHACK_RESEARCHER_ADMIN_RESEARCHER_DEADLINE_EPOCH"
 _CURRENT_RESEARCH_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "chack_current_research_deadline",
     default=None,
@@ -232,6 +236,24 @@ def _warm_researcher_process_context() -> Any:
             raise RuntimeError(f"Researcher process-server warmup failed (exitcode={process.exitcode}).")
         _PROCESS_CONTEXT_WARMED.add(method)
     return context
+
+
+def _researcher_deadline_from_environment() -> float | None:
+    """Translate the administrator deadline exported to an MCP subprocess.
+
+    Tool payload reconstruction happens in a different process, so the
+    ContextVar used by in-process backends is unavailable there. The wall-clock
+    value is deliberately converted to a local monotonic deadline immediately;
+    callers then retain the same deadline semantics as the in-process path.
+    """
+    raw = str(os.environ.get(_RESEARCHER_DEADLINE_EPOCH_ENV, "") or "").strip()
+    if not raw:
+        return None
+    try:
+        remaining = float(raw) - time.time()
+    except (TypeError, ValueError):
+        return None
+    return time.monotonic() + max(0.0, remaining)
 
 
 def _serialize_researcher_tool(tool: Any) -> bytes:
@@ -837,6 +859,13 @@ def _persist_async_job_ledger(job_id: str) -> None:
                         "failure_reason",
                         "latest_action",
                         "execution_active",
+                        "process_pid",
+                        "process_group_id",
+                        "process_exitcode",
+                        "process_alive_after",
+                        "descendant_pids_after_term",
+                        "descendant_pids_after",
+                        "termination",
                     )
                 }
             )
@@ -1127,6 +1156,89 @@ def _persist_async_researcher_output(
         output_dir = root / "researcher_outputs"
         output_dir.mkdir(parents=True, exist_ok=True)
         stem = f"async_{_async_output_name(task_id)}_{_async_output_name(tool_name)}"
+        (output_dir / f"{stem}.json").write_text(_compact_json(response), encoding="utf-8")
+        if result.get("output") is not None:
+            raw_value = result.get("output")
+            raw_text = raw_value if isinstance(raw_value, str) else _compact_json(raw_value)
+            (output_dir / f"{stem}.raw.txt").write_text(raw_text, encoding="utf-8")
+    except Exception:
+        return
+
+
+def _batch_result_projection(result: dict[str, Any]) -> dict[str, Any]:
+    """Project one synchronous child result onto the administrator control plane."""
+    projected: dict[str, Any] = {
+        key: result.get(key)
+        for key in ("researcher", "researcher_tool", "status", "task_id")
+        if result.get(key) not in (None, "")
+    }
+    parsed = result.get("parsed_response")
+    if isinstance(parsed, dict):
+        projected["digest"] = compact_researcher_digest(parsed)
+        counts = parsed.get("tool_call_counts") or result.get("tool_call_counts") or {}
+        total = parsed.get("total_tool_calls")
+        if total is None:
+            total = result.get("total_tool_calls")
+    else:
+        counts = result.get("tool_call_counts") or {}
+        total = result.get("total_tool_calls")
+    if isinstance(counts, dict) and counts:
+        projected["tool_call_counts"] = {
+            str(name): int(value)
+            for name, value in sorted(counts.items())
+            if str(name).strip() and int(value or 0) > 0
+        }
+    if total is not None:
+        projected["total_tool_calls"] = int(total or 0)
+    if result.get("finished_at") is not None:
+        projected["finished_at"] = result.get("finished_at")
+    return projected
+
+
+def _batch_result_is_useful(result: dict[str, Any]) -> bool:
+    parsed = result.get("parsed_response")
+    return isinstance(parsed, dict) and _response_has_useful_evidence(parsed)
+
+
+def _persist_batch_researcher_output(
+    evidence_dir: str,
+    batch_id: str,
+    result: dict[str, Any],
+) -> None:
+    """Persist a synchronous-batch result before projecting it for the parent.
+
+    ``run_researchers_batch`` is a parent-facing control-plane tool.  Its return
+    value must never contain both the exact provider output and the full parsed
+    response, but finalization still needs the lossless response for validation
+    and the filesystem must retain both representations for audit/recovery.
+    """
+    if not evidence_dir or not isinstance(result, dict):
+        return
+    tool_name = str(result.get("researcher_tool") or "").strip()
+    if not tool_name:
+        return
+    parsed = result.get("parsed_response") if isinstance(result.get("parsed_response"), dict) else None
+    if parsed is not None:
+        response = normalize_researcher_response_payload(parsed)
+        response.setdefault("researcher_tool", tool_name)
+    else:
+        response = researcher_response_from_output(tool_name, result.get("output"))
+    if response is None:
+        response = {
+            "research_worked": False,
+            "failure_reason": str(result.get("error") or "Researcher did not return parseable JSON.")[:500],
+            "overall_summary": "The researcher returned unparseable output; the exact response is preserved in the paired raw file.",
+            "findings": [],
+            "gaps": ["The researcher response could not be parsed into the configured structured output."],
+            "open_topics": [],
+            "full_research_review": "",
+            "researcher_tool": tool_name,
+        }
+    root = Path(str(evidence_dir)).expanduser()
+    try:
+        output_dir = root / "researcher_outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"batch_{_async_output_name(batch_id)}_{_async_output_name(str(result.get('task_id') or result.get('researcher') or 'researcher'))}_{_async_output_name(tool_name)}"
         (output_dir / f"{stem}.json").write_text(_compact_json(response), encoding="utf-8")
         if result.get("output") is not None:
             raw_value = result.get("output")
@@ -1494,6 +1606,209 @@ def _async_cancel_job(job_id: str) -> dict[str, Any]:
         "already_finished": already_finished,
         "note": "Cancellation is terminal immediately; registered subprocess trees and remote browser jobs are terminated while in-process cleanup unwinds.",
     }
+
+
+def _shutdown_async_research_jobs(*, timeout_seconds: float = 15.0) -> None:
+    """Physically unwind MCP-owned async researchers before process exit.
+
+    Async management intentionally uses daemon supervisor threads so a blocked
+    provider cannot hold the MCP process open forever.  That safety property has
+    a sharp edge: normal MCP shutdown can otherwise terminate those threads
+    before their done callbacks persist ``execution_active=false``.  The parent
+    process cannot repair the in-memory job state because the queue lives in the
+    MCP process, so shutdown must request process-group termination, wait for the
+    supervisors to reap, and publish the final ledger from here.
+
+    This is bounded cleanup, not a provider timeout extension.  A task is only
+    reconciled as inactive after its future completed; an unresolved future is
+    deliberately left marked ``execution_active`` rather than being reported as
+    successful or safely unwound without evidence.
+    """
+    try:
+        limit = max(0.1, float(timeout_seconds or 0.0))
+    except (TypeError, ValueError):
+        limit = 15.0
+    jobs: list[tuple[str, list[tuple[str, Any, Any, Any, Any]]]] = []
+    with _ASYNC_RESEARCH_LOCK:
+        for job_id, job in _ASYNC_RESEARCH_JOBS.items():
+            rows: list[tuple[str, Any, Any, Any, Any]] = []
+            for task_id, task in (job.get("tasks") or {}).items():
+                if not bool(task.get("execution_active")):
+                    continue
+                rows.append(
+                    (
+                        str(task_id),
+                        task.get("future"),
+                        task.get("cancel_event"),
+                        task.get("deadline_timer"),
+                        str(task.get("status") or "unknown"),
+                    )
+                )
+                now = time.time()
+                if str(task.get("status") or "") not in _RESEARCHER_TERMINAL_STATUSES:
+                    task["status"] = "cancelled"
+                    task["finished_at"] = now
+                    task["failure_reason"] = "MCP process shutdown requested researcher cancellation."
+                task["cancel_requested"] = True
+                task["last_activity_at"] = now
+                task["last_progress_at"] = max(float(task.get("last_progress_at") or 0.0), now)
+                task["latest_action"] = "MCP shutdown; physical termination requested"
+            if rows:
+                jobs.append((str(job_id), rows))
+
+    for job_id, rows in jobs:
+        for _task_id, future, cancel_event, timer, _status in rows:
+            if isinstance(timer, threading.Timer):
+                timer.cancel()
+            if future is not None:
+                try:
+                    future.cancel()
+                except Exception:
+                    pass
+            if isinstance(cancel_event, threading.Event):
+                try:
+                    request_cancel(cancel_event)
+                except Exception:
+                    pass
+        _persist_async_job_ledger(job_id)
+
+    deadline = time.monotonic() + limit
+    while jobs and time.monotonic() < deadline:
+        with _ASYNC_RESEARCH_LOCK:
+            pending = [
+                (job_id, task_id)
+                for job_id, _rows in jobs
+                for task_id, task in ((_ASYNC_RESEARCH_JOBS.get(job_id) or {}).get("tasks") or {}).items()
+                if bool(task.get("execution_active"))
+            ]
+        if not pending:
+            break
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    # Callbacks normally persist this transition.  Persist once more from the
+    # shutdown owner so the final file is durable even when the last callback
+    # raced the interpreter's exit sequence.
+    for job_id, _rows in jobs:
+        _persist_async_job_ledger(job_id)
+
+
+def _shutdown_sync_research_batches(*, timeout_seconds: float = 15.0) -> None:
+    """Cancel MCP-owned synchronous batches during parent/process shutdown."""
+    try:
+        limit = max(0.1, float(timeout_seconds or 0.0))
+    except (TypeError, ValueError):
+        limit = 15.0
+    with _SYNC_RESEARCH_LOCK:
+        jobs = list(_SYNC_RESEARCH_BATCHES.items())
+    shutdown_deadline = time.monotonic() + limit
+    for batch_id, runtime in jobs:
+        state_lock = runtime.get("state_lock")
+        states = runtime.get("states") or {}
+        cancel_events: list[threading.Event] = []
+        now = time.time()
+        try:
+            with state_lock:
+                for state in states.values():
+                    if not isinstance(state, dict):
+                        continue
+                    if str(state.get("status") or "") in _RESEARCHER_TERMINAL_STATUSES and not state.get(
+                        "execution_active"
+                    ):
+                        continue
+                    if str(state.get("status") or "") not in _RESEARCHER_TERMINAL_STATUSES:
+                        state["status"] = "cancelled"
+                        state["finished_at"] = now
+                        state["failure_reason"] = "MCP parent shutdown requested batch cancellation."
+                    state["latest_action"] = "MCP parent shutdown; physical termination requested"
+                    state["last_progress_at"] = max(float(state.get("last_progress_at") or 0.0), now)
+                    cancel_event = state.get("cancel_event")
+                    if isinstance(cancel_event, threading.Event):
+                        cancel_events.append(cancel_event)
+        except Exception:
+            continue
+        for cancel_event in cancel_events:
+            try:
+                request_cancel(cancel_event)
+            except Exception:
+                pass
+        # request_cancel() performs the owned TERM -> grace -> KILL sequence;
+        # wait for each supervisor callback to publish its physical settlement
+        # instead of declaring execution_active=false merely because the MCP
+        # process is about to exit.
+        while time.monotonic() < shutdown_deadline:
+            try:
+                with state_lock:
+                    active = any(bool(state.get("execution_active")) for state in states.values())
+            except Exception:
+                active = False
+            if not active:
+                break
+            time.sleep(min(0.05, max(0.0, shutdown_deadline - time.monotonic())))
+        try:
+            with state_lock:
+                for state in states.values():
+                    if not isinstance(state, dict) or not state.get("execution_active"):
+                        continue
+                    try:
+                        pid = int(state.get("process_pid") or 0)
+                    except (TypeError, ValueError):
+                        pid = 0
+                    try:
+                        pgid = int(state.get("process_group_id") or 0)
+                    except (TypeError, ValueError):
+                        pgid = 0
+                    group_members = _live_process_group_members(pgid) if pgid > 1 else []
+                    pid_live = False
+                    if pid > 1:
+                        try:
+                            stat = (Path("/proc") / str(pid) / "stat").read_text(
+                                encoding="utf-8", errors="replace"
+                            )
+                            close = stat.rfind(")")
+                            fields = stat[close + 2 :].split() if close >= 0 else []
+                            pid_live = bool(fields and fields[0] != "Z")
+                        except (OSError, ValueError):
+                            pid_live = False
+                    if not group_members and not pid_live:
+                        state["execution_active"] = False
+                        state["current_tool"] = ""
+                        termination = dict(state.get("termination") or {})
+                        termination.update(
+                            {
+                                "shutdown_requested": True,
+                                "verified_no_process_group_members": True,
+                                "process_alive_after": False,
+                                "descendant_pids_after": [],
+                            }
+                        )
+                        state["termination"] = termination
+                    else:
+                        state["latest_action"] = "MCP shutdown could not yet prove physical settlement"
+        except Exception:
+            pass
+        persist = runtime.get("persist")
+        if callable(persist):
+            try:
+                persist()
+            except Exception:
+                pass
+        try:
+            with state_lock:
+                settled = not any(bool(state.get("execution_active")) for state in states.values())
+        except Exception:
+            settled = False
+        if settled:
+            with _SYNC_RESEARCH_LOCK:
+                _SYNC_RESEARCH_BATCHES.pop(str(batch_id), None)
+
+
+def _shutdown_all_research_jobs(*, timeout_seconds: float = 15.0) -> None:
+    """Bounded shutdown for both async and synchronous MCP researcher jobs."""
+    _shutdown_sync_research_batches(timeout_seconds=timeout_seconds)
+    _shutdown_async_research_jobs(timeout_seconds=timeout_seconds)
+
+
+atexit.register(_shutdown_all_research_jobs)
 
 # Canonical registry of the researchers the administrator can orchestrate.
 # short-name -> (ToolsConfig enable attribute, exposed research tool name)
@@ -1988,6 +2303,26 @@ def _researcher_responses_from_async_output_files(evidence_dir: str) -> list[dic
     return responses
 
 
+def _researcher_responses_from_batch_output_files(evidence_dir: str) -> list[dict[str, Any]]:
+    """Recover full synchronous-batch responses from the owned data plane."""
+    root = Path(str(evidence_dir or "")).expanduser()
+    output_dir = root / "researcher_outputs"
+    if not output_dir.is_dir():
+        return []
+    responses: list[dict[str, Any]] = []
+    for path in sorted(output_dir.glob("batch_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        tool_name = str(payload.get("researcher_tool") or "").strip()
+        if tool_name:
+            responses.append(payload)
+    return responses
+
+
 def _researcher_responses_from_batch_output(output: Any) -> list[dict[str, Any]]:
     payload = _json_from_output(str(output or ""))
     if payload is None:
@@ -2005,8 +2340,18 @@ def _researcher_responses_from_batch_output(output: Any) -> list[dict[str, Any]]
             tool_name = RESEARCHER_REGISTRY.get(researcher, ("", ""))[1]
         if not tool_name:
             continue
-        if isinstance(row.get("parsed_response"), dict):
-            response = deepcopy(row["parsed_response"])
+        parsed_row = row.get("parsed_response")
+        parsed_is_digest_only = (
+            isinstance(parsed_row, dict)
+            and "full_research_review" not in parsed_row
+            and "final_research_review" not in parsed_row
+        )
+        # The synchronous batch transport is digest-only. Recover the canonical
+        # full response from batch_*.json in the owned workspace instead.
+        if parsed_is_digest_only:
+            continue
+        if isinstance(parsed_row, dict):
+            response = deepcopy(parsed_row)
             response.setdefault("researcher_tool", tool_name)
         else:
             response = researcher_response_from_output(tool_name, row.get("output"))
@@ -2044,15 +2389,30 @@ def _dedupe_researcher_responses(responses: list[dict[str, Any]]) -> list[dict[s
     return unique
 
 
-def _response_has_useful_evidence(response: dict[str, Any]) -> bool:
+def _response_has_useful_evidence(
+    response: dict[str, Any],
+    *,
+    evidence_dir: str = "",
+) -> bool:
     """Return whether a terminal researcher response contains usable evidence."""
     if not isinstance(response, dict) or response.get("research_worked") is not True:
         return False
+    if str(response.get("failure_reason") or "").strip():
+        return False
     full_review = str(response.get("full_research_review") or "").strip()
     overall_summary = str(response.get("overall_summary") or "").strip()
-    findings = response.get("findings")
-    if not full_review and not overall_summary:
+    placeholder = {
+        "placeholder",
+        "summary",
+        "conclusion",
+        "conclusions",
+        "n/a",
+        "none",
+        "ok",
+    }
+    if overall_summary.casefold() in placeholder or full_review.casefold() in placeholder:
         return False
+    findings = response.get("findings")
     if not isinstance(findings, list) or not any(
         isinstance(item, dict)
         and str(item.get("claim") or "").strip()
@@ -2060,7 +2420,32 @@ def _response_has_useful_evidence(response: dict[str, Any]) -> bool:
         for item in findings
     ):
         return False
-    return True
+
+    # A digest-shaped object is not evidence. Success requires a non-trivial
+    # complete review, or a verifiable preserved artifact record when a provider
+    # intentionally puts the complete evidence only on disk.
+    has_full_review = len(full_review) >= 20
+    has_verified_artifact = False
+    artifact_path = str(response.get("evidence_data_path") or evidence_dir or "").strip()
+    artifact_rows = response.get("key_artifacts")
+    if artifact_path and isinstance(artifact_rows, list):
+        root = Path(artifact_path).expanduser()
+        if root.is_dir():
+            for row in artifact_rows:
+                if not isinstance(row, dict):
+                    continue
+                filename = str(row.get("filename") or "").strip()
+                if not filename:
+                    continue
+                candidate = (root / filename).resolve()
+                try:
+                    candidate.relative_to(root.resolve())
+                except ValueError:
+                    continue
+                if candidate.is_file() and candidate.stat().st_size > 0:
+                    has_verified_artifact = True
+                    break
+    return bool(has_full_review or has_verified_artifact)
 
 
 def _researcher_response_is_terminal_and_parseable(response: dict[str, Any]) -> bool:
@@ -2247,6 +2632,7 @@ def finalize_researcher_administrator_output(
             "administrator_conclusions": "",
         }
     raw_responses = list(researcher_responses or []) + _researcher_responses_from_steps(steps)
+    raw_responses.extend(_researcher_responses_from_batch_output_files(evidence_dir))
     responses = _dedupe_researcher_responses(
         [
             normalize_researcher_response_payload(response)
@@ -2254,7 +2640,11 @@ def finalize_researcher_administrator_output(
             if isinstance(response, dict)
         ]
     )
-    payload["researcher_responses"] = responses
+    # Full responses are used internally for deterministic validation and are
+    # written to the owned filesystem. The administrator/model boundary receives
+    # only bounded digests; raw output and full parsed reviews never cross it.
+    response_digests = [compact_researcher_digest(response) for response in responses]
+    payload["researcher_responses"] = response_digests
     failures = list(researcher_failures or []) + _researcher_failures_from_steps(steps)
     failures.extend(_partial_artifact_failures(evidence_dir, responses, failures))
     failures = _enrich_failures_with_artifact_counts(evidence_dir, failures)
@@ -2868,17 +3258,17 @@ class ResearcherAdministratorAgentTool:
             exposed_tool = RESEARCHER_REGISTRY[short][1]
             if short == "deepchatgpt":
                 lines.append(
-                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Deep Research browser; full response and artifacts"
+                    f"- {short} via `start_researchers_async` (request `{exposed_tool}`): authenticated ChatGPT Deep Research browser; full response and artifacts"
                 )
                 continue
             if short == "prochatgpt":
                 lines.append(
-                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Pro browser; full response and artifacts"
+                    f"- {short} via `start_researchers_async` (request `{exposed_tool}`): authenticated ChatGPT Pro browser; full response and artifacts"
                 )
                 continue
             if short == "chatgptxhigh":
                 lines.append(
-                    f"- {short} via `{exposed_tool}`: authenticated ChatGPT Extra High browser; full response and artifacts"
+                    f"- {short} via `start_researchers_async` (request `{exposed_tool}`): authenticated ChatGPT Extra High browser; full response and artifacts"
                 )
                 continue
             try:
@@ -2893,7 +3283,7 @@ class ResearcherAdministratorAgentTool:
                 capability = ", ".join(names) if names else "no internal tools available"
             except Exception as exc:
                 capability = f"capability map unavailable ({type(exc).__name__}: {exc})"
-            lines.append(f"- {short} via `{exposed_tool}`: {capability}")
+            lines.append(f"- {short} via `run_researchers_batch` (request `{exposed_tool}`): {capability}")
         return lines
 
     @staticmethod
@@ -2953,10 +3343,6 @@ class ResearcherAdministratorAgentTool:
                 max_parallel: Maximum concurrent child researchers, capped at four. Use a
                     higher value only when the independent requests are safe to overlap.
 
-            Output: Compact JSON with batch_worked, results, and errors. Each successful result
-            includes researcher, researcher_tool, parsed_response when available, and raw output.
-            The administrator runtime later appends these parsed researcher responses to the final
-            administrator JSON.
             """
             try:
                 requests = json.loads(str(requests_json or "[]"))
@@ -3068,6 +3454,8 @@ class ResearcherAdministratorAgentTool:
             )
             batch_started = time.monotonic()
             parent_deadline = _CURRENT_RESEARCH_DEADLINE.get()
+            if parent_deadline is None:
+                parent_deadline = _researcher_deadline_from_environment()
 
             evidence_dir = research_artifacts_master_root() or research_artifacts_root()
             batch_id = f"research-batch-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
@@ -3126,6 +3514,13 @@ class ResearcherAdministratorAgentTool:
                                 "failure_reason",
                                 "latest_action",
                                 "execution_active",
+                                "process_pid",
+                                "process_group_id",
+                                "process_exitcode",
+                                "process_alive_after",
+                                "descendant_pids_after_term",
+                                "descendant_pids_after",
+                                "termination",
                             )
                         }
                         for _index, state in sorted(states.items())
@@ -3154,6 +3549,21 @@ class ResearcherAdministratorAgentTool:
                     os.replace(temporary, path)
                 except Exception:
                     return
+
+            with _SYNC_RESEARCH_LOCK:
+                _SYNC_RESEARCH_BATCHES[batch_id] = {
+                    "state_lock": state_lock,
+                    "states": states,
+                    "persist": _persist_batch_ledger,
+                    "evidence_dir": evidence_dir,
+                }
+
+            def _maybe_unregister_sync_batch() -> None:
+                with state_lock:
+                    active = any(bool(state.get("execution_active")) for state in states.values())
+                if not active:
+                    with _SYNC_RESEARCH_LOCK:
+                        _SYNC_RESEARCH_BATCHES.pop(batch_id, None)
 
             def _request_child_timeout(index: int, reason: str) -> None:
                 cancel_event = None
@@ -3256,6 +3666,17 @@ class ResearcherAdministratorAgentTool:
                             ),
                         )
                         with state_lock:
+                            for key in (
+                                "process_pid",
+                                "process_group_id",
+                                "process_exitcode",
+                                "process_alive_after",
+                                "descendant_pids_after_term",
+                                "descendant_pids_after",
+                                "termination",
+                            ):
+                                if key in output_result:
+                                    state[key] = output_result.get(key)
                             deadline_at = float(state.get("deadline_at") or 0.0)
                             timed_out = (
                                 state["status"] == "deadline_exceeded"
@@ -3351,6 +3772,7 @@ class ResearcherAdministratorAgentTool:
                             )
                         _persist_batch_ledger()
                         _research_writer_finished(evidence_dir)
+                        _maybe_unregister_sync_batch()
 
                 return context.run(_inner)
 
@@ -3413,8 +3835,16 @@ class ResearcherAdministratorAgentTool:
                                 "error": f"{type(exc).__name__}: {exc}",
                             }
                         if result.get("status") == "done":
+                            # Keep the exact provider response in the owned data
+                            # plane. The value returned by this control-plane tool
+                            # is projected below and must not carry raw + parsed
+                            # copies into the administrator context.
+                            result.setdefault("task_id", states[index].get("task_id"))
+                            _persist_batch_researcher_output(evidence_dir, batch_id, result)
                             results.append(result)
                         else:
+                            result.setdefault("task_id", states[index].get("task_id"))
+                            _persist_batch_researcher_output(evidence_dir, batch_id, result)
                             errors.append(
                                 {
                                     key: value
@@ -3457,6 +3887,14 @@ class ResearcherAdministratorAgentTool:
                 executor.shutdown(wait=False, cancel_futures=True)
             results.sort(key=lambda item: str(item.get("researcher_tool") or ""))
             errors.sort(key=lambda item: (str(item.get("researcher_tool") or ""), str(item.get("status") or "error")))
+
+            # Persist the lossless provider output before projecting anything across
+            # the administrator/model boundary. The batch return is control-plane
+            # traffic: it may contain one bounded digest per successful child, but
+            # never the exact raw output and full parsed response together.
+            for result in results:
+                _persist_batch_researcher_output(evidence_dir, batch_id, result)
+
             _persist_batch_ledger()
             with state_lock:
                 task_states = [
@@ -3477,18 +3915,30 @@ class ResearcherAdministratorAgentTool:
                             "artifact_count",
                             "failure_reason",
                             "execution_active",
+                            "process_pid",
+                            "process_group_id",
+                            "process_exitcode",
+                            "process_alive_after",
+                            "descendant_pids_after_term",
+                            "descendant_pids_after",
+                            "termination",
                         )
                     }
                     for _index, state in sorted(states.items())
                 ]
+            projected_results = [_batch_result_projection(result) for result in results]
+            batch_worked = any(_batch_result_is_useful(result) for result in results)
+            batch_complete = bool(results) and not errors and all(
+                _batch_result_is_useful(result) for result in results
+            )
             return _compact_json(
                 {
                     "batch_id": batch_id,
-                    "batch_worked": bool(results),
-                    "batch_complete": bool(results) and not errors,
+                    "batch_worked": batch_worked,
+                    "batch_complete": batch_complete,
                     "child_timeout_seconds": effective_child_timeout,
                     "tasks": task_states,
-                    "results": results,
+                    "results": projected_results,
                     "errors": errors,
                 }
             )
@@ -3500,8 +3950,9 @@ class ResearcherAdministratorAgentTool:
             "each prompt must be >=500 characters and relevant to that specific researcher. "
             "Set save_artifacts true when source/detail artifacts should be preserved. "
             f"max_parallel is capped at {MAX_RESEARCHER_PARALLELISM}; child ContextVars and per-researcher artifact folders keep concurrent requests isolated.\n"
-            "Output: Compact JSON containing every researcher result plus errors; final administrator output "
-            "will include parsed researcher responses and tool counts."
+            "Output: Compact JSON containing lifecycle tasks, bounded digests, and errors. "
+            "Exact raw output and complete parsed responses are persisted under the owned "
+            "researcher_outputs directory and retrieved explicitly through result tools."
         )
         return tool
 
@@ -3912,6 +4363,8 @@ class ResearcherAdministratorAgentTool:
 
             effective_child_timeout = child_timeout_seconds
             parent_deadline = _CURRENT_RESEARCH_DEADLINE.get()
+            if parent_deadline is None:
+                parent_deadline = _researcher_deadline_from_environment()
             if parent_deadline is not None:
                 effective_child_timeout = max(
                     1,
@@ -4570,21 +5023,14 @@ class ResearcherAdministratorAgentTool:
         synchronous_researchers = [short for short in enabled_researchers if short not in long_browser_researchers]
         synchronous_tool_names = {RESEARCHER_REGISTRY[short][1] for short in synchronous_researchers}
 
-        # ChatGPT Pro/Extra High/Deep can run for tens of minutes or up to 180 minutes. Never expose those direct
-        # blocking tools (or a synchronous batch containing them) to the Codex
-        # administrator, because Codex execution cells can be manually terminated
-        # before the researcher reaches terminal output. Keep the direct tools
-        # private inside the async wrapper and expose only start + poll. Also omit
-        # cancellation for a job containing browser researchers; the outer user or
-        # configured hard timeout remains the authoritative cancellation boundary.
+        # Every ordinary researcher must enter through the supervised batch
+        # boundary. Exposing its raw tool here lets the model bypass the
+        # process-group deadline and is unsafe for long calls such as travel.
+        # Browser researchers are already async-only for the same reason.
         tools = [
             tool
             for tool in all_tools
             if self._name_of_tool(tool) == "task_steps_manager"
-            or (
-                not self.required_researchers
-                and self._name_of_tool(tool) in synchronous_tool_names
-            )
         ]
         if synchronous_researchers:
             synchronous_tools = {
@@ -4597,8 +5043,6 @@ class ResearcherAdministratorAgentTool:
             enabled_researchers,
             artifact_root=artifact_root,
         )
-        if long_browser_researchers:
-            async_tools = [tool for tool in async_tools if self._name_of_tool(tool) != "cancel_researchers_async"]
         tools.extend(async_tools)
         add_research_artifact_tools(tools, self.config, root=artifact_root)
         return tools
@@ -4833,6 +5277,18 @@ class ResearcherAdministratorAgentTool:
                 "CHACK_RESEARCH_MASTER_DIR": master_dir,
                 "CHACK_RESEARCH_DATA_DIR": master_dir,
                 "CHACK_RESEARCH_SAVE_ARTIFACTS": "1" if save_artifacts else "0",
+                # The administrator's researcher queue may execute in a separate
+                # MCP process where _CURRENT_RESEARCH_DEADLINE is absent. Export
+                # the same deadline through the child environment so sync and
+                # async orchestration keep one hard wall-clock budget.
+                _RESEARCHER_DEADLINE_EPOCH_ENV: (
+                    str(
+                        time.time()
+                        + max(0.0, researcher_deadline - time.monotonic())
+                    )
+                    if researcher_deadline != float("inf")
+                    else ""
+                ),
             },
         }
         overrides["agent"]["max_runtime_minutes"] = effective_runtime_minutes
@@ -4849,6 +5305,106 @@ class ResearcherAdministratorAgentTool:
             system_prompt=_ADMINISTRATOR_SYSTEM_PROMPT,
             overrides=overrides,
         )
+
+        def _recover_synthesis_only(
+            failed_output: str,
+            completed_responses: list[dict[str, Any]],
+        ) -> str:
+            """Retry only the administrator synthesis after a provider final error.
+
+            The researcher calls have already completed (or been recorded as
+            failures).  Keep this recovery bounded and digest-only: it must not
+            relaunch a researcher, receive raw/full researcher output, or extend
+            the administrator's hard deadline.
+            """
+            if admin_deadline != float("inf") and time.monotonic() >= admin_deadline - 10:
+                return ""
+            digests = [
+                compact_researcher_digest(response)
+                for response in completed_responses
+                if isinstance(response, dict)
+            ]
+            if not digests:
+                return ""
+            recovery_prompt = (
+                "The previous administrator provider call ended with a final-result error. "
+                "The researcher work is already complete and is listed below as bounded digests. "
+                "Do not call tools, do not launch or retry researchers, and do not ask for raw/full "
+                "researcher output. Produce exactly one JSON object matching the administrator output "
+                "schema. Write a substantive evidence-weighted administrator_conclusions synthesis "
+                "with concrete claims, contradictions, confidence, and gaps. Set research_worked true "
+                "only if every required researcher digest is successful; otherwise set it false and "
+                "explain the missing researcher.\n\n"
+                f"Previous provider diagnostic (not evidence): {str(failed_output or '')[:1200]}\n\n"
+                "BOUNDed researcher digests:\n"
+                + json.dumps(digests, ensure_ascii=False, separators=(",", ":"))
+            )
+            recovery_overrides = {
+                "agent": {
+                    "output_schema_json": researcher_administrator_output_schema(
+                        preserve_artifacts=save_artifacts
+                    ),
+                    "output_schema_name": "researcher_administrator_recovery_result",
+                    "output_schema_strict": True,
+                    "max_runtime_minutes": max(
+                        1,
+                        min(
+                            int(effective_runtime_minutes or 1),
+                            max(1, int((admin_deadline - time.monotonic()) / 60))
+                            if admin_deadline != float("inf")
+                            else int(effective_runtime_minutes or 1),
+                        ),
+                    ),
+                    "max_cost_usd": effective_cost_usd,
+                    "sub_action": "researcher_administrator_recovery",
+                },
+                "session": {
+                    "max_turns": max(2, min(8, int(effective_max_turns or 8))),
+                    "memory_max_messages": parent_memory_max_messages,
+                    "memory_reset_to_messages": parent_memory_reset_to_messages,
+                    "long_term_memory_enabled": False,
+                },
+                "tools": {"max_tools_used": 0},
+                "env": {
+                    "CHACK_RESEARCH_MASTER_DIR": master_dir,
+                    "CHACK_RESEARCH_DATA_DIR": master_dir,
+                    "CHACK_RESEARCH_SAVE_ARTIFACTS": "1" if save_artifacts else "0",
+                },
+            }
+            recovery_config = build_subagent_config(
+                self.config,
+                model_name=model_name,
+                model_provider=self.model_provider,
+                max_turns=max(2, min(8, int(effective_max_turns or 8))),
+                system_prompt=_ADMINISTRATOR_SYSTEM_PROMPT,
+                overrides=recovery_overrides,
+            )
+            try:
+                recovery_result = Chack(recovery_config).run(
+                    session_id=create_subagent_session_id(
+                        "researcher_administrator_recovery", parent_root_session_id
+                    ),
+                    text=recovery_prompt,
+                    min_tools_used_override=0,
+                    max_tools_used_override=0,
+                    enable_self_critique=False,
+                    require_task_steps_manager_init_first=False,
+                    tools_override=[],
+                    system_prompt_override=recovery_config.system_prompt,
+                    usage_session_id=parent_task_session_id,
+                )
+                recovered = str(recovery_result.output or "").strip()
+                parsed_recovered = _json_from_output(recovered)
+                if (
+                    isinstance(parsed_recovered, dict)
+                    and parsed_recovered.get("research_worked") is True
+                    and _administrator_synthesis_is_valid(parsed_recovered)
+                ):
+                    return recovered
+            except Exception:
+                return ""
+            return ""
+
         parent_task_session_id = current_session_id()
         subagent_session_id = create_subagent_session_id("researcher_administrator", parent_root_session_id)
 
@@ -4909,6 +5465,18 @@ class ResearcherAdministratorAgentTool:
                 combined_failures.extend(async_deadline_failures)
                 combined_tool_counts = _researcher_call_counts_from_async_jobs(_owned_async_job_ids())
                 combined_tool_counts.update(self._launched_researcher_tool_counts())
+                recovered_output = _recover_synthesis_only(output, combined_responses)
+                if recovered_output:
+                    return finalize_researcher_administrator_output(
+                        recovered_output,
+                        evidence_dir=master_dir,
+                        save_artifacts=save_artifacts,
+                        researcher_responses=combined_responses,
+                        researcher_failures=combined_failures,
+                        tool_counts=combined_tool_counts,
+                        steps=result.all_steps,
+                        required_researchers=self.required_researchers,
+                    )
                 failure_payload = {
                     "research_worked": False,
                     "failure_reason": output,
