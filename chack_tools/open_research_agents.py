@@ -66,7 +66,13 @@ from .subagent_config import (
 )
 from .task_steps_manager_state import current_session_id
 from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
-from .research_artifacts import add_research_artifact_tools, cleanup_research_artifacts, reset_research_artifact_context, set_research_artifact_context
+from .research_artifacts import (
+    add_research_artifact_tools,
+    cleanup_research_artifacts,
+    research_artifacts_master_root,
+    reset_research_artifact_context,
+    set_research_artifact_context,
+)
 from .telemetry import current_log_context, run_with_tool_logging
 
 try:
@@ -246,7 +252,7 @@ class OpenSpecialistResearchAgentTool:
         chack = Chack(config)
         artifact_context_tokens = set_research_artifact_context(
             evidence_dir,
-            os.environ.get("CHACK_RESEARCH_MASTER_DIR", "").strip(),
+            research_artifacts_master_root(),
         )
         try:
             result = chack.run(

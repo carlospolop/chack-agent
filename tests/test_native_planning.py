@@ -62,6 +62,28 @@ def test_forced_planning_prompt_uses_backend_native_tool_names() -> None:
     assert "task_steps_manager action=init" not in claude
 
 
+def test_an_agent_that_does_not_require_the_tasklist_is_not_told_to_keep_one() -> None:
+    # Otherwise every such agent spends tool rounds maintaining a list nobody asked
+    # for. The strong wording belongs only to runs that actually require it.
+    forced = _build_initial_system_prompt(
+        task_steps_manager_enabled=True,
+        require_task_steps_manager_init_first=True,
+    )
+    optional = _build_initial_system_prompt(
+        task_steps_manager_enabled=True,
+        require_task_steps_manager_init_first=False,
+    )
+    disabled = _build_initial_system_prompt(
+        task_steps_manager_enabled=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert "keep updating this task list" in forced
+    for prompt in (optional, disabled):
+        assert "keep updating this task list" not in prompt
+        assert "think through the steps the task will require" in prompt
+
+
 def test_codex_native_snapshot_notifies_common_plan_listener() -> None:
     session_id = "native-codex-snapshot"
     STORE.create_session(session_id, title="Agent Plan")

@@ -5,6 +5,7 @@
     "claude-sonnet-4.5",
     "claude-haiku-4.5",
     "claude-fable-5",
+    "claude-opus-5",
     "claude-opus-4.8",
     "claude-opus-4.8-fast",
     "claude-opus-4.7",
@@ -19,6 +20,7 @@
     "gpt-5.4-mini",
     "gpt-5-mini",
     "gemini-3.1-pro-preview",
+    "gemini-3.6-flash",
     "gemini-3.5-flash",
     "kimi-k2.7-code"
   ]

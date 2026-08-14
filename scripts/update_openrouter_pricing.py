@@ -12,7 +12,13 @@ from urllib.request import Request, urlopen
 
 DEFAULT_MODELS_URL = "https://openrouter.ai/api/v1/models"
 DEFAULT_OUTPUT_PATH = Path("chack_agent/config/pricing.yaml")
+DEFAULT_EFFORT_OUTPUT_PATH = Path("chack_agent/config/thinking_effort.yaml")
 MICRO_TOKENS = Decimal("1000000")
+
+# Mirrors chack_agent.thinking_effort: the shared vocabulary, and the key shape
+# that makes every spelling of one model (OpenRouter's ``anthropic/claude-opus-
+# 4.6``, the API's ``claude-opus-4-6``, Copilot's ``claude-sonnet-4.6``) agree.
+THINKING_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def _decimal_million(value: Any) -> Decimal:
@@ -86,19 +92,83 @@ def _build_yaml(models: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def update_pricing(output_path: Path, models_url: str, api_key: str | None) -> None:
+def _effort_key(model_id: str) -> str:
+    key = str(model_id or "").strip().lower().split(":", 1)[0]
+    if "/" in key:
+        key = key.rsplit("/", 1)[-1]
+    return key.replace(".", "-")
+
+
+def _build_effort_yaml(models: list[dict[str, Any]]) -> str:
+    """Record the reasoning levels OpenRouter publishes for each model.
+
+    Models with no ``supported_efforts`` are skipped rather than written as
+    "no levels": OpenRouter only reports the ones it exposes an ``effort``
+    parameter for, and Gemini 2.5 (a token budget instead of an effort enum)
+    would otherwise look like it had no thinking control at all.
+    """
+    collected: dict[str, set[str]] = {}
+    for item in models:
+        key = _effort_key(str(item.get("id", "")))
+        if not key:
+            continue
+        reasoning = item.get("reasoning")
+        if not isinstance(reasoning, dict):
+            continue
+        efforts = reasoning.get("supported_efforts")
+        if not isinstance(efforts, list):
+            continue
+        known = {
+            str(effort).strip().lower()
+            for effort in efforts
+            if str(effort).strip().lower() in THINKING_EFFORT_ORDER
+        }
+        if known:
+            collected.setdefault(key, set()).update(known)
+
+    lines = [
+        "# Reasoning effort levels each model accepts.",
+        "# Generated from OpenRouter's reasoning.supported_efforts by",
+        "# scripts/update_openrouter_pricing.py -- do not edit by hand.",
+        "models:",
+    ]
+    for key in sorted(collected):
+        ordered = [level for level in THINKING_EFFORT_ORDER if level in collected[key]]
+        lines.append(f"  {key}: [{', '.join(ordered)}]")
+    return "\n".join(lines) + "\n"
+
+
+def update_pricing(
+    output_path: Path,
+    models_url: str,
+    api_key: str | None,
+    effort_output_path: Path | None = None,
+) -> None:
     models = _load_models(models_url=models_url, api_key=api_key)
     output_path.write_text(_build_yaml(models), encoding="utf-8")
+    if effort_output_path is not None:
+        effort_output_path.write_text(_build_effort_yaml(models), encoding="utf-8")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Fetch OpenRouter model pricing and write chack pricing YAML."
+        description=(
+            "Fetch the OpenRouter model list and write the chack pricing and "
+            "thinking effort YAML files."
+        )
     )
     parser.add_argument(
         "--output",
         default=str(DEFAULT_OUTPUT_PATH),
         help=f"Output YAML path. Defaults to {DEFAULT_OUTPUT_PATH}.",
+    )
+    parser.add_argument(
+        "--effort-output",
+        default=str(DEFAULT_EFFORT_OUTPUT_PATH),
+        help=(
+            "Supported thinking effort YAML path. Defaults to "
+            f"{DEFAULT_EFFORT_OUTPUT_PATH}."
+        ),
     )
     parser.add_argument(
         "--models-url",
@@ -110,12 +180,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    output_path = Path(args.output)
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip() or None
     update_pricing(
-        output_path=output_path,
+        output_path=Path(args.output),
         models_url=args.models_url,
         api_key=api_key,
+        effort_output_path=Path(args.effort_output),
     )
     return 0
 

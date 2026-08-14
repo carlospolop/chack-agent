@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import base64
 import uuid
@@ -30,7 +32,7 @@ from chack_tools.cancellation import cancellation_requested, register_process, u
 from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
-from ..live_cost_state import report_live_usage
+from ..live_cost_state import LiveCostLimitExceeded, report_live_usage
 from ..openrouter_routing import get_openrouter_route
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
@@ -60,6 +62,49 @@ _DIRECT_CACHE_INSTRUCTIONS = (
     "You are an automated Chack agent. Follow the developer and user messages "
     "exactly and return only the requested result."
 )
+
+
+def _codex_tool_instructions(
+    *,
+    sub_action: str,
+    shared_mcp_url: str,
+    has_configured_tools: bool,
+) -> str:
+    """Return system instructions consistent with the effective tool surface.
+
+    FactChecker verifiers intentionally pass no local/picklable tools because their
+    board and research tools live behind the shared MCP URL. That URL must therefore
+    count as a real tool surface; otherwise the old no-tools instruction tells Codex
+    not to call the very MCP tools it just discovered.
+    """
+    has_shared_mcp_tools = bool(
+        str(sub_action or "").strip() == "verifier" and str(shared_mcp_url or "").strip()
+    )
+    if has_shared_mcp_tools:
+        return (
+            "CRITICAL: You have explicit tools exposed through the shared MCP server. "
+            "Use those MCP tools to perform the task and obey the tool workflow in the "
+            "user/system prompt. Do not answer from the prompt alone when a tool is "
+            "required; make the actual MCP tool call. Do not call MCP resource browser "
+            "helpers such as `list_mcp_resources`, `list_mcp_resource_templates`, or "
+            "`read_mcp_resource` unless the task explicitly requires them."
+        )
+    if has_configured_tools:
+        return (
+            "CRITICAL: You do NOT have a tool called `report_intent`. "
+            "It does not exist. Never attempt to call it. "
+            "To report or save a vulnerability finding you MUST call the MCP tool "
+            "`chack_tools-save_discovered_vulnerability`. "
+            "Any call to `report_intent` will silently discard your finding. "
+            "Do not call MCP resource browser helpers such as `list_mcp_resources`, "
+            "`list_mcp_resource_templates`, or `read_mcp_resource`; use only the "
+            "explicit task tools listed in the prompt."
+        )
+    return (
+        "This is a no-tools task. Do not call or request tools; complete it "
+        "solely from the context embedded in the prompt."
+    )
+
 
 
 def _cleanup_isolated_codex_home(codex_home: str, home_base: str) -> bool:
@@ -193,9 +238,19 @@ def _log_timestamp() -> str:
 
 def _preview_text(value: Any, *, max_chars: int = 2000) -> str:
     text = str(value or "").strip()
-    if len(text) <= max_chars:
+    limit = max(1, int(max_chars))
+    if len(text) <= limit:
         return text
-    return text[:max_chars] + "...[truncated]"
+    # Codex emits a JSON event stream. Startup/context events are at the
+    # beginning, while the provider's actionable terminal error is normally
+    # at the end. Preserve both so failure telemetry remains classifiable.
+    marker = "...[truncated middle]..."
+    if limit <= len(marker) + 2:
+        return text[-limit:]
+    available = limit - len(marker)
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return text[:head_chars] + marker + text[-tail_chars:]
 
 
 def _readline_when_ready(stream: Any, wait_seconds: float) -> Optional[str]:
@@ -224,6 +279,210 @@ def _resolve_codex_exec_cwd(runtime_env: Optional[dict[str, str]] = None) -> str
     if candidate:
         return candidate
     return os.getcwd()
+
+
+_ROLLOUT_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+)
+
+
+class _RolloutUsageTailer:
+    """Report token usage while a Codex turn is still running.
+
+    `codex exec --json` carries usage only on `turn.completed`, and one exec
+    invocation is one turn however many model rounds it takes. So a 45-minute
+    turn looks free for 45 minutes: the cost half of the budget advisory can
+    never fire, `check_budget_status` answers $0.00, and the live spend ceiling
+    is unenforceable until the turn it was meant to bound has already ended.
+
+    Codex does append a `token_count` event carrying cumulative usage to its
+    rollout file after every model round, so that is what this follows. Only
+    the growth since the last report is handed to `report_live_usage`, and the
+    caller settles the difference against the authoritative `turn.completed`
+    totals, so the accounting is exact even if the tail missed rounds.
+
+    Everything here fails soft: if the rollout cannot be found, read, or parsed,
+    the run behaves exactly as it did before and usage lands once, at the end.
+    """
+
+    _ATTACH_TIMEOUT_SECONDS = 120.0
+    # `poll` runs once per line of Codex output, and locating the rollout means
+    # a recursive glob of the sessions tree. Codex normally has the file open by
+    # the time the thread is announced, so this only bounds the case where it
+    # never appears: a retry per output line for two minutes would spend real
+    # CPU searching for a file that is not there.
+    _LOCATE_RETRY_SECONDS = 0.5
+
+    def __init__(self, codex_home: str, model_name: str) -> None:
+        home = str(codex_home or "").strip()
+        self._sessions_dir = os.path.join(home, "sessions") if home else ""
+        self._model_name = str(model_name or "")
+        self._thread_id = ""
+        self._path: Optional[str] = None
+        self._offset = 0
+        self._partial = ""
+        self._baseline: dict[str, int] = {}
+        self._reported = {field: 0 for field in _ROLLOUT_USAGE_FIELDS}
+        self._give_up_after = 0.0
+        self._next_locate_at = 0.0
+        self._disabled = not self._sessions_dir
+
+    def attach(self, thread_id: str) -> None:
+        """Start following the rollout of `thread_id` from its current end."""
+        identifier = str(thread_id or "").strip()
+        if self._disabled or not identifier or identifier == self._thread_id:
+            return
+        self._thread_id = identifier
+        self._path = None
+        self._offset = 0
+        self._partial = ""
+        self._baseline = {}
+        self._give_up_after = time.monotonic() + self._ATTACH_TIMEOUT_SECONDS
+        self._next_locate_at = 0.0
+        # Snapshot the baseline now rather than on the first poll: a round that
+        # completed in between would otherwise be read as pre-existing usage and
+        # never reported. Codex usually has the rollout open by `thread.started`;
+        # when it does not, the retry in `poll` picks it up.
+        try:
+            self._locate()
+        except Exception:
+            self._disabled = True
+
+    def poll(self) -> None:
+        """Report whatever rounds have completed since the last call.
+
+        Raises only `LiveCostLimitExceeded`, which is the live spend ceiling
+        firing and must reach the caller so it can stop the Codex process.
+        """
+        if self._disabled or not self._thread_id:
+            return
+        try:
+            if self._path is None:
+                now = time.monotonic()
+                if now < self._next_locate_at:
+                    return
+                self._next_locate_at = now + self._LOCATE_RETRY_SECONDS
+                if not self._locate():
+                    return
+            totals = self._read_new_totals()
+        except LiveCostLimitExceeded:
+            raise
+        except Exception:
+            # A rollout we cannot follow is not worth failing a run over.
+            self._disabled = True
+            return
+        if not totals:
+            return
+        deltas = {
+            field: max(
+                0,
+                int(totals.get(field, 0) or 0)
+                - self._baseline.get(field, 0)
+                - self._reported[field],
+            )
+            for field in _ROLLOUT_USAGE_FIELDS
+        }
+        if not any(deltas.values()):
+            return
+        for field, value in deltas.items():
+            self._reported[field] += value
+        report_live_usage(
+            self._model_name,
+            prompt_tokens=deltas["input_tokens"],
+            completion_tokens=deltas["output_tokens"],
+            cached_prompt_tokens=deltas["cached_input_tokens"],
+            cache_write_tokens=deltas["cache_write_input_tokens"],
+        )
+
+    def settle(self, turn_usage: dict[str, Any]) -> dict[str, int]:
+        """Return the part of the turn's real totals not yet reported.
+
+        Recording the settlement matters: the rollout keeps its own copy of
+        these tokens, so a later poll would otherwise count them a second time.
+        The tail is done once the turn has reported its own totals.
+        """
+        details = turn_usage.get("input_tokens_details")
+        details = details if isinstance(details, dict) else {}
+        actual = {
+            "input_tokens": int(turn_usage.get("input_tokens", 0) or 0),
+            "cached_input_tokens": int(details.get("cached_tokens", 0) or 0),
+            "cache_write_input_tokens": int(details.get("cache_write_tokens", 0) or 0),
+            "output_tokens": int(turn_usage.get("output_tokens", 0) or 0),
+        }
+        remaining = {
+            field: max(0, actual[field] - self._reported[field])
+            for field in _ROLLOUT_USAGE_FIELDS
+        }
+        for field, value in remaining.items():
+            self._reported[field] += value
+        self._disabled = True
+        return remaining
+
+    def _locate(self) -> bool:
+        if time.monotonic() > self._give_up_after:
+            self._disabled = True
+            return False
+        matches = glob.glob(
+            os.path.join(self._sessions_dir, "**", f"*{self._thread_id}.jsonl"),
+            recursive=True,
+        )
+        if not matches:
+            # Codex creates the rollout moments after it announces the thread.
+            return False
+        path = max(matches, key=os.path.getmtime)
+        # A resumed thread appends to the rollout the previous invocations
+        # already wrote, and their tokens are counted in `estimated_cost_spent`
+        # by now. Anything already on disk is the baseline, not new spend.
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            existing = handle.read()
+            self._offset = handle.tell()
+        totals = self._last_totals(existing.splitlines())
+        self._baseline = totals or {field: 0 for field in _ROLLOUT_USAGE_FIELDS}
+        self._path = path
+        return True
+
+    def _read_new_totals(self) -> dict[str, int]:
+        assert self._path is not None
+        if os.path.getsize(self._path) <= self._offset:
+            return {}
+        with open(self._path, "r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(self._offset)
+            chunk = handle.read()
+            self._offset = handle.tell()
+        text = self._partial + chunk
+        lines = text.split("\n")
+        # The tail of a file being appended to is usually half a line.
+        self._partial = lines.pop() if lines else ""
+        return self._last_totals(lines)
+
+    @staticmethod
+    def _last_totals(lines: list[str]) -> dict[str, int]:
+        latest: dict[str, int] = {}
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or "token_count" not in stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+            except (TypeError, ValueError):
+                continue
+            payload = event.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
+            if str(payload.get("type", "") or "") != "token_count":
+                continue
+            info = payload.get("info")
+            info = info if isinstance(info, dict) else {}
+            usage = info.get("total_token_usage")
+            if not isinstance(usage, dict):
+                continue
+            latest = {
+                field: max(0, int(usage.get(field, 0) or 0))
+                for field in _ROLLOUT_USAGE_FIELDS
+            }
+        return latest
 
 
 @dataclass
@@ -412,6 +671,7 @@ class CodexExecutor:
         self._ensure_codex_home_and_config()
         command = [self._codex_path, "app-server", "--stdio"]
         env = self._build_env()
+        self._write_codex_explicit_mcp_env(env)
         exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
         timeout_seconds = max(
             30,
@@ -674,6 +934,13 @@ class CodexExecutor:
             policy_block = "\n\n### TOOL USAGE POLICY\n" + "\n".join(policy_lines)
 
         cache_parts = split_prompt_cache_breakpoint(user_input)
+        if cache_parts.has_breakpoint and not cache_parts.dynamic_suffix.strip():
+            # Everything the caller wrote sits above the boundary. Honouring it
+            # would send an empty prompt on stdin, and `codex exec -` rejects that
+            # outright ("No prompt provided via stdin"), so this run goes uncached
+            # rather than not running at all.
+            user_input = cache_parts.stable_prefix
+            cache_parts = split_prompt_cache_breakpoint(user_input)
         if cache_parts.has_breakpoint:
             developer_parts = [
                 part
@@ -1173,6 +1440,7 @@ class CodexExecutor:
     ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         command = self._build_command()
         env = self._build_env()
+        self._write_codex_explicit_mcp_env(env)
         timeout_seconds = _resolve_codex_exec_timeout(self._sub_action, self._runtime_env())
         exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
         _LOGGER.info(
@@ -1238,6 +1506,11 @@ class CodexExecutor:
         error_messages: list[str] = []
         started_at = time.monotonic()
         time_to_first_token_seconds: float | None = None
+        usage_tailer = _RolloutUsageTailer(self._codex_home or "", self._model_name)
+        # A resumed thread is already known, so its rollout can be followed from
+        # the first line of output rather than waiting for `thread.started`.
+        if self._thread_id:
+            usage_tailer.attach(self._thread_id)
 
         if process.stdin is not None:
             try:
@@ -1247,6 +1520,14 @@ class CodexExecutor:
                 pass
 
         while True:
+            try:
+                usage_tailer.poll()
+            except LiveCostLimitExceeded:
+                # The spend ceiling fired mid-turn. Stop Codex before unwinding,
+                # or the process keeps burning budget with nobody reading it.
+                _terminate_process_tree(process)
+                unregister_process(cancel_registration)
+                raise
             if cancellation_requested():
                 _terminate_process_tree(process)
                 unregister_process(cancel_registration)
@@ -1324,6 +1605,7 @@ class CodexExecutor:
                 thread_id = str(event.get("thread_id", "") or "").strip()
                 if thread_id:
                     self._thread_id = thread_id
+                    usage_tailer.attach(thread_id)
                 continue
 
             if event_type == "error":
@@ -1420,12 +1702,16 @@ class CodexExecutor:
                         "cache_write_tokens": 0,
                     },
                 }
+                # These are the authoritative totals for the turn; whatever the
+                # rollout tail already reported is subtracted so the live figure
+                # ends up exact rather than doubled.
+                remaining = usage_tailer.settle(usage_payload)
                 report_live_usage(
                     self._model_name,
-                    prompt_tokens=usage_payload["input_tokens"],
-                    completion_tokens=usage_payload["output_tokens"],
-                    cached_prompt_tokens=usage_payload["input_tokens_details"]["cached_tokens"],
-                    cache_write_tokens=0,
+                    prompt_tokens=remaining["input_tokens"],
+                    completion_tokens=remaining["output_tokens"],
+                    cached_prompt_tokens=remaining["cached_input_tokens"],
+                    cache_write_tokens=remaining["cache_write_input_tokens"],
                 )
 
         output = "\n".join(part for part in output_parts if part).strip()
@@ -1433,6 +1719,20 @@ class CodexExecutor:
         unregister_process(cancel_registration)
         if return_code != 0:
             details = "\n".join(combined_output_lines).strip() or "No error output captured."
+            startup_status_path = str(
+                env.get("CHACK_MCP_STARTUP_STATUS_PATH", "") or ""
+            ).strip()
+            if startup_status_path:
+                try:
+                    with open(startup_status_path, "r", encoding="utf-8") as handle:
+                        startup_status = json.load(handle)
+                    details += "\nMCP startup status: " + json.dumps(
+                        startup_status,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    )
+                except (FileNotFoundError, OSError, ValueError, TypeError):
+                    pass
             self._log_codex_failure(
                 "codex_exec_failed",
                 command=command,
@@ -1468,12 +1768,15 @@ class CodexExecutor:
                 "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
             }
             raw_responses.append({"usage": estimated})
+            # Estimated or not, this is the turn's final word on its own usage,
+            # so it settles against whatever the rollout tail already reported.
+            remaining = usage_tailer.settle(estimated)
             report_live_usage(
                 self._model_name,
-                prompt_tokens=est_input,
-                completion_tokens=est_output,
-                cached_prompt_tokens=0,
-                cache_write_tokens=0,
+                prompt_tokens=remaining["input_tokens"],
+                completion_tokens=remaining["output_tokens"],
+                cached_prompt_tokens=remaining["cached_input_tokens"],
+                cache_write_tokens=remaining["cache_write_input_tokens"],
             )
         if not output and usage_payload is None and not steps:
             details = "\n".join(error_messages or combined_output_lines).strip() or (
@@ -1550,15 +1853,20 @@ class CodexExecutor:
         return_code: int | None = None,
     ) -> None:
         preview = _preview_text(details)
+        command_executable = os.path.basename(str(command[0])) if command else ""
+        command_argument_count = max(0, len(command) - 1)
         _LOGGER.error(
-            "Codex CLI failure: type=%s provider=%s model=%s return_code=%s thread_id=%s cwd=%s command=%s details=%s ts=%s",
+            "Codex CLI failure: type=%s provider=%s model=%s return_code=%s "
+            "thread_id=%s cwd=%s command_executable=%s command_argument_count=%d "
+            "details=%s ts=%s",
             failure_type,
             self._model_provider,
             self._model_name,
             return_code,
             self._thread_id or "",
             cwd,
-            command,
+            command_executable,
+            command_argument_count,
             preview,
             _log_timestamp(),
         )
@@ -1572,7 +1880,8 @@ class CodexExecutor:
                     "return_code": return_code,
                     "thread_id": str(self._thread_id or ""),
                     "cwd": str(cwd or ""),
-                    "command": [str(part) for part in command],
+                    "command_executable": command_executable,
+                    "command_argument_count": command_argument_count,
                     "details_preview": preview,
                 },
                 task_session_id=current_session_id() or "",
@@ -1770,6 +2079,16 @@ class CodexExecutor:
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        if self._codex_home and self._has_configured_tools():
+            startup_status_path = os.path.join(
+                self._codex_home,
+                "mcp_startup_status.json",
+            )
+            try:
+                os.unlink(startup_status_path)
+            except FileNotFoundError:
+                pass
+            env["CHACK_MCP_STARTUP_STATUS_PATH"] = startup_status_path
         return env
 
     def _set_env_or_file(
@@ -1802,6 +2121,7 @@ class CodexExecutor:
         ).strip() or os.path.expanduser("~/.codex/chack")
         base = os.path.join(home_base, safe_session)
         os.makedirs(base, exist_ok=True)
+        os.chmod(base, 0o700)
         self._codex_home = base
         self._write_codex_config(base)
         self._write_codex_auth(base)
@@ -1833,6 +2153,7 @@ class CodexExecutor:
             "CHACK_TOOLS_OVERRIDE_B64_PATH",
             "CHACK_TOOLS_APPEND_B64",
             "CHACK_TOOLS_APPEND_B64_PATH",
+            "CHACK_MCP_STARTUP_STATUS_PATH",
             "CHACK_CHATGPT_ASYNC_API_URL",
             "CHACK_CHATGPT_ASYNC_API_SECRET",
             "PYTHONPATH",
@@ -1945,6 +2266,12 @@ class CodexExecutor:
             "OPENROUTER_HTTP_REFERER",
             "OPENROUTER_APP_NAME",
         ]
+        # Retain the exact allowlist so the finalized per-run values can also
+        # be written explicitly below. Some containerized Codex builds do not
+        # reliably propagate dynamically-added parent variables via
+        # ``env_vars`` alone, which otherwise makes the required stdio MCP
+        # child exit before its initialize response.
+        self._codex_mcp_env_var_names = tuple(env_vars)
 
         def _toml_string(value: str) -> str:
             return json.dumps(str(value))
@@ -1970,25 +2297,13 @@ class CodexExecutor:
                 f"model_auto_compact_token_limit = {compact_at}"
             )
 
-        # System-level instructions to prevent the model from calling
-        # non-existent built-in tools like `report_intent` instead of the
-        # real MCP tools.
-        if self._has_configured_tools():
-            instructions_text = (
-                "CRITICAL: You do NOT have a tool called `report_intent`. "
-                "It does not exist. Never attempt to call it. "
-                "To report or save a vulnerability finding you MUST call the MCP tool "
-                "`chack_tools-save_discovered_vulnerability`. "
-                "Any call to `report_intent` will silently discard your finding. "
-                "Do not call MCP resource browser helpers such as `list_mcp_resources`, "
-                "`list_mcp_resource_templates`, or `read_mcp_resource`; use only the "
-                "explicit task tools listed in the prompt."
-            )
-        else:
-            instructions_text = (
-                "This is a no-tools task. Do not call or request tools; complete it "
-                "solely from the context embedded in the prompt."
-            )
+        # Shared-MCP verifiers have no local/picklable tools, but the shared URL is
+        # the effective tool surface and must not trigger the no-tools instruction.
+        instructions_text = _codex_tool_instructions(
+            sub_action=self._sub_action,
+            shared_mcp_url=self._runtime_env_value("CHACK_CODEX_MCP_URL"),
+            has_configured_tools=self._has_configured_tools(),
+        )
         config_lines.append(f"instructions = {_toml_string(instructions_text)}")
         chack_mcp_startup_timeout = int(
             self._runtime_env_value("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "120")
@@ -2027,10 +2342,12 @@ class CodexExecutor:
             self._runtime_env_value("CHACK_MCP_TOOL_TIMEOUT_SECONDS", "3600") or "3600"
         )
         chack_shared_mcp_url = self._runtime_env_value("CHACK_CODEX_MCP_URL").strip()
-        if self._has_configured_tools() and chack_shared_mcp_url:
+        if chack_shared_mcp_url:
             # Point every codex agent at ONE shared streamable-HTTP MCP server (e.g. a
             # host-process server that holds a shared queue / board), instead of each
-            # agent spawning its own stdio server. Custom tools then live on that server.
+            # agent spawning its own stdio server. The shared server is itself the tool
+            # source, so it must be configured even when the local allowed-tools list is
+            # intentionally empty (for example, FactChecker's non-picklable board tools).
             shared_mcp_lines = [
                 "",
                 '[mcp_servers.chack_tools]',
@@ -2084,6 +2401,41 @@ class CodexExecutor:
         config_body = "\n".join(config_lines)
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(config_body + "\n")
+        os.chmod(config_path, 0o600)
+
+    def _write_codex_explicit_mcp_env(self, env: dict[str, str]) -> None:
+        """Persist the isolated stdio MCP child's finalized environment.
+
+        ``env_vars`` remains in the generated config for compatibility, while
+        this explicit table makes file-backed dynamic tool payloads and their
+        model/session metadata deterministic across Codex CLI versions.
+        """
+        if (
+            not self._codex_home
+            or not self._has_configured_tools()
+            or self._runtime_env_value("CHACK_CODEX_MCP_URL").strip()
+        ):
+            return
+        config_path = os.path.join(self._codex_home, "config.toml")
+        try:
+            with open(config_path, "r", encoding="utf-8") as handle:
+                body = handle.read()
+        except FileNotFoundError:
+            return
+        marker = "# chack: explicit per-run MCP environment"
+        body = body.split(marker, 1)[0].rstrip()
+        names = tuple(getattr(self, "_codex_mcp_env_var_names", ()) or ())
+        lines = [body, "", marker, "[mcp_servers.chack_tools.env]"]
+        for name in names:
+            value = env.get(name)
+            if value is None:
+                continue
+            lines.append(f"{name} = {json.dumps(str(value), ensure_ascii=False)}")
+        temporary_path = f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, config_path)
 
     def _write_codex_auth(self, codex_home: str) -> None:
         if self._use_existing_codex_auth_file:
@@ -2559,6 +2911,11 @@ def build_executor(
 
     route = get_openrouter_route(config)
     uses_openrouter_route = route is not None
+    explicit_api_key_type = str(
+        getattr(config.model, "api_key_type", "") or ""
+    ).strip().lower()
+    explicitly_use_openai_api = explicit_api_key_type in {"openai", "openai_api"}
+    explicitly_use_codex_token = explicit_api_key_type in {"codex", "codex_token"}
     fallback_openai_api_key = (
         str(config.credentials.openai_api_key or "").strip()
         or os.environ.get("OPENAI_API_KEY", "").strip()
@@ -2567,7 +2924,15 @@ def build_executor(
         str(getattr(config.credentials, "codex_access_token", "") or "").strip()
         or os.environ.get("CODEX_ACCESS_TOKEN", "").strip()
     )
+    if explicitly_use_openai_api:
+        codex_access_token = ""
+    elif explicitly_use_codex_token:
+        # A selected account token is authoritative. Do not silently bill a
+        # different OpenAI API credential if that token fails.
+        fallback_openai_api_key = ""
     existing_codex_auth_file = "" if uses_openrouter_route else _existing_codex_auth_file()
+    if explicitly_use_openai_api:
+        existing_codex_auth_file = ""
     codex_api_key = route.api_key if route is not None else (codex_access_token or fallback_openai_api_key)
     if not codex_api_key and not existing_codex_auth_file:
         raise ValueError(

@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
+from chack_agent.backends.codex_backend import _codex_tool_instructions
+
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "backends" / "codex_backend.py"
 CLAUDE_MODULE_PATH = Path(__file__).resolve().parents[1] / "chack_agent" / "backends" / "claude_code_backend.py"
@@ -88,6 +90,35 @@ extract_text_candidate = _load_codex_helper("_extract_text_candidate")
 class _CodexHelperShim:
     _extract_message_text = classmethod(extract_message_text)
     _extract_text_candidate = classmethod(extract_text_candidate)
+
+
+def test_shared_mcp_verifier_is_not_told_it_has_no_tools():
+    instructions = _codex_tool_instructions(
+        sub_action="verifier",
+        shared_mcp_url="http://127.0.0.1:12345/mcp",
+        has_configured_tools=False,
+    )
+    assert "explicit tools exposed through the shared MCP server" in instructions
+    assert "no-tools task" not in instructions
+
+
+def test_no_tools_instruction_is_preserved_without_shared_mcp():
+    instructions = _codex_tool_instructions(
+        sub_action="classifier",
+        shared_mcp_url="",
+        has_configured_tools=False,
+    )
+    assert instructions.startswith("This is a no-tools task.")
+
+
+def test_local_tool_instruction_is_preserved_without_shared_mcp():
+    instructions = _codex_tool_instructions(
+        sub_action="verifier",
+        shared_mcp_url="",
+        has_configured_tools=True,
+    )
+    assert "report_intent" in instructions
+    assert "no-tools task" not in instructions
 
 
 def test_extract_message_text_supports_content_parts():
@@ -253,6 +284,15 @@ def test_codex_backend_logs_codex_cli_failure_event():
             break
 
     assert found is True
+
+
+def test_codex_backend_failure_event_does_not_log_prompt_bearing_command():
+    source = MODULE_PATH.read_text()
+
+    assert '"command": [str(part) for part in command]' not in source
+    assert "command_executable=%s command_argument_count=%d" in source
+    assert '"command_executable": command_executable' in source
+    assert '"command_argument_count": command_argument_count' in source
 
 
 def test_codex_backend_does_not_pass_cd_to_exec_resume():

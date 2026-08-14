@@ -10,7 +10,7 @@ inputs:
     required: false
     default: "BEST_QUALITY"
   thinking_effort:
-    description: "Thinking/reasoning effort: none, minimal, low, medium, high, xhigh (extra high), or max"
+    description: "Thinking/reasoning effort: none, minimal, low, medium, high, xhigh (extra high), or max. Validated against the levels the selected model supports"
     required: false
     default: "high"
   model_social_network:

@@ -1050,12 +1050,14 @@ def build_subagent_config(
     )
     if not isinstance(role_settings, Mapping):
         role_settings = {}
-    from chack_agent.thinking_effort import normalize_thinking_effort
+    from chack_agent.thinking_effort import validate_thinking_effort
 
-    thinking_effort = normalize_thinking_effort(
+    thinking_effort = validate_thinking_effort(
         agent_overrides.get("thinking_effort")
         or role_settings.get("thinking_effort")
-        or "high"
+        or "high",
+        model=model_primary,
+        setting="thinking_effort",
     )
     agent = AgentConfig(
         thinking_effort=thinking_effort,

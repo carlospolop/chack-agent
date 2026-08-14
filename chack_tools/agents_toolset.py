@@ -200,6 +200,94 @@ from .chatgpt_research_agents import (
     get_prochatgpt_researcher_tool,
     resolve_chatgpt_timeout_seconds,
 )
+
+
+QUEUE_DEFAULT_MODEL = "gpt-5.6-luna"
+QUEUE_DEFAULT_THINKING_EFFORT = "max"
+
+# These are the role-specific config dictionaries consumed by
+# build_subagent_config when the queue's administrator launches a researcher.
+_QUEUE_RESEARCHER_ROLE_FIELDS = {
+    "scientific": "scientific_agent",
+    "business": "business_agent",
+    "product": "product_agent",
+    "travel": "travel_agent",
+    "websearcher": "websearcher_agent",
+    "social_network": "social_network_agent",
+    "legal": "legal_agent",
+    "data_statistics": "data_statistics_agent",
+    "news_media": "news_media_agent",
+    "knowledge_graph": "knowledge_graph_agent",
+    "religious": "religious_agent",
+    "cli": "cli_agent",
+}
+
+
+def _queue_default_model(model_provider: str) -> str:
+    """Return the queue's model default in the provider's model namespace."""
+    provider = str(model_provider or "").strip().lower()
+    if provider in {"openrouter", "openrouter.ai"}:
+        return f"openrouter/openai/{QUEUE_DEFAULT_MODEL}"
+    return QUEUE_DEFAULT_MODEL
+
+
+def _prepare_queue_runtime_config(
+    config: ToolsConfig,
+    *,
+    model_provider: str,
+) -> tuple[ToolsConfig, dict, list[str], list[str], str]:
+    """Apply queue-only model/effort defaults without mutating the parent config.
+
+    The ordinary agent defaults may intentionally use a cheaper model. A queue
+    is different: its administrator, merge agent, and every selected researcher
+    must share one known model/effort pair so a nested role cannot inherit an
+    incompatible ``max`` setting from another model.
+    """
+    queue_agent_cfg = dict(getattr(config, "researcher_queue_agent", {}) or {})
+    queue_researchers = list(getattr(config, "researcher_queue_researchers", []) or [])
+    queue_required_researchers = list(
+        getattr(config, "researcher_queue_required_researchers", []) or []
+    )
+    default_model = _queue_default_model(model_provider)
+
+    # Queue research is intentionally independent from ordinary agent defaults:
+    # the administrator, merge pass, and every researcher must use Luna/max.
+    # Ignore legacy queue aliases such as OPENAI_CHEAP_BUT_QUALITY here; they
+    # otherwise reintroduce the exact model split this queue contract forbids.
+    queue_agent_cfg["model"] = default_model
+    queue_agent_cfg["thinking_effort"] = QUEUE_DEFAULT_THINKING_EFFORT
+    queue_agent_cfg["merge_model"] = default_model
+    queue_agent_cfg["researcher_models"] = {
+        short: default_model for short in RESEARCHER_REGISTRY
+    }
+    queue_agent_cfg["researcher_thinking_efforts"] = {
+        short: QUEUE_DEFAULT_THINKING_EFFORT for short in RESEARCHER_REGISTRY
+    }
+    researcher_efforts = queue_agent_cfg["researcher_thinking_efforts"]
+
+    # The queue's private administrator receives a copy of the parent tool
+    # config. Set the role-specific effort on that copy so every nested helper
+    # sees max together with the gpt-5.6-luna model override.
+    role_overrides = {}
+    for short, field_name in _QUEUE_RESEARCHER_ROLE_FIELDS.items():
+        role_config = dict(getattr(config, field_name, {}) or {})
+        role_config["thinking_effort"] = researcher_efforts.get(
+            short, QUEUE_DEFAULT_THINKING_EFFORT
+        )
+        role_overrides[field_name] = role_config
+
+    queue_config = replace(
+        config,
+        researcher_queue_agent=queue_agent_cfg,
+        **role_overrides,
+    )
+    return (
+        queue_config,
+        queue_agent_cfg,
+        queue_researchers,
+        queue_required_researchers,
+        default_model,
+    )
 from .subchack_research_agent import SubChackResearchAgentTool, get_subchack_research_tool
 from .serpapi_keys import has_serpapi_keys
 
@@ -826,14 +914,22 @@ class AgentsToolset:
                 get_researcher_queue_status_tool,
             )
 
-            queue_agent_cfg = dict(getattr(self.config, "researcher_queue_agent", {}) or {})
-            queue_researchers = list(getattr(self.config, "researcher_queue_researchers", []) or [])
-            queue_required_researchers = list(
-                getattr(self.config, "researcher_queue_required_researchers", []) or []
+            (
+                queue_config,
+                queue_agent_cfg,
+                queue_researchers,
+                queue_required_researchers,
+                queue_default_model,
+            ) = _prepare_queue_runtime_config(
+                self.config,
+                model_provider=self.model_provider,
             )
             queue_admin_model = (
-                self._resolve_alias(str(queue_agent_cfg.get("model") or ""), fallback="")
-                or self.researcher_administrator_model
+                self._resolve_alias(
+                    str(queue_agent_cfg.get("model") or ""),
+                    fallback=queue_default_model,
+                )
+                or queue_default_model
             )
             queue_admin_max_turns = (
                 int(queue_agent_cfg.get("max_turns") or 0) or self.researcher_administrator_max_turns
@@ -864,7 +960,7 @@ class AgentsToolset:
             # The queue owns a private administrator (force-enabled) that researches
             # each merged request. Force it off recursion just like the standalone one.
             queue_admin_config = replace(
-                self.config,
+                queue_config,
                 researcher_administrator_enabled=True,
                 researcher_administrator_researchers=queue_researchers,
                 researcher_administrator_required_researchers=queue_required_researchers,
@@ -875,7 +971,7 @@ class AgentsToolset:
                 chatgpt_research_timeout_seconds=0,
                 researcher_administrator_agent={
                     **dict(
-                        getattr(self.config, "researcher_administrator_agent", {}) or {}
+                        getattr(queue_config, "researcher_administrator_agent", {}) or {}
                     ),
                     **queue_agent_cfg,
                 },
@@ -886,6 +982,13 @@ class AgentsToolset:
                 fallback_model=self.default_model,
                 model_provider=self.model_provider,
                 max_turns=queue_admin_max_turns,
+                runtime_cap_minutes=max(
+                    0,
+                    int(
+                        getattr(queue_config, "researcher_queue_max_runtime_minutes", 0)
+                        or 0
+                    ),
+                ),
                 researchers=queue_researchers,
                 required_researchers=queue_required_researchers,
                 researcher_model_overrides=queue_agent_cfg.get("researcher_models"),
@@ -921,16 +1024,16 @@ class AgentsToolset:
                 self._resolve_alias(
                     str(
                         queue_agent_cfg.get("merge_model")
-                        or getattr(self.config, "researcher_queue_merge_model", "")
+                        or getattr(queue_config, "researcher_queue_merge_model", "")
                         or ""
                     ),
-                    fallback="",
+                    fallback=queue_default_model,
                 )
-                or self.default_model
+                or queue_default_model
             )
             queue_helper = ResearcherQueueAgentTool(
                 queue_admin,
-                config=self.config,
+                config=queue_config,
                 model_provider=self.model_provider,
                 merge_model=queue_merge_model,
                 fallback_model=self.default_model,

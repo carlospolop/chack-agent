@@ -17,6 +17,40 @@ from chack_agent.model_aliases import (
 
 
 class ModelAliasResolutionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Keep the historical unit tests deterministic. The central Lambda is
+        # exercised explicitly below; ordinary tests use the local fallback.
+        self._remote_url_patcher = patch("chack_agent.model_aliases._REMOTE_URL", "")
+        self._remote_model_patcher = patch(
+            "chack_agent.model_aliases._REMOTE_MODEL_CACHE", {}
+        )
+        self._remote_backend_patcher = patch(
+            "chack_agent.model_aliases._REMOTE_BACKEND_CACHE", {}
+        )
+        self._credential_env_patcher = patch.dict(
+            os.environ,
+            {
+                "CODEX_ACCESS_TOKEN": "",
+                "OPENAI_API_KEY": "",
+                "CLAUDE_CODE_OAUTH_TOKEN": "",
+                "CLAUDE_ACCESS_TOKEN": "",
+                "ANTHROPIC_API_KEY": "",
+                "CLAUDE_API_KEY": "",
+                "OPENROUTER_API_KEY": "",
+            },
+            clear=False,
+        )
+        self._remote_url_patcher.start()
+        self._remote_model_patcher.start()
+        self._remote_backend_patcher.start()
+        self._credential_env_patcher.start()
+
+    def tearDown(self) -> None:
+        self._remote_backend_patcher.stop()
+        self._remote_model_patcher.stop()
+        self._remote_url_patcher.stop()
+        self._credential_env_patcher.stop()
+
     def test_load_config_supports_codex_access_token_for_explicit_codex_provider(self) -> None:
         config_yaml = textwrap.dedent(
             """
@@ -95,7 +129,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
     def test_resolve_model_alias_uses_api_key_priority_when_provider_is_unspecified(self) -> None:
         self.assertEqual(
             resolve_model_alias("BEST_QUALITY", openai_api_key="oa-test"),
-            "gpt-5.4",
+            "gpt-5.6-sol",
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", anthropic_api_key="anth-test"),
@@ -111,8 +145,18 @@ class ModelAliasResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             resolve_model_alias("BEST_QUALITY", openai_api_key="oa-test", anthropic_api_key="anth-test", openrouter_api_key="or-test"),
-            "gpt-5.4",
+            "gpt-5.6-sol",
         )
+
+    def test_central_lambda_alias_overrides_local_fallback(self) -> None:
+        with patch("chack_agent.model_aliases._refresh_remote_alias_caches"), patch(
+            "chack_agent.model_aliases._REMOTE_MODEL_CACHE",
+            {"OPENAI_BEST_QUALITY": "gpt-central-assignment"},
+        ):
+            self.assertEqual(
+                resolve_model_alias("BEST_QUALITY", provider="openai"),
+                "gpt-central-assignment",
+            )
 
     def test_resolve_model_alias_does_not_treat_codex_access_token_as_generic_model_priority(self) -> None:
         with patch.dict("os.environ", {"CODEX_ACCESS_TOKEN": "codex-access-token"}, clear=False):
@@ -239,6 +283,30 @@ class ModelAliasResolutionTests(unittest.TestCase):
 
         self.assertEqual(resolve_api_key_type(config), "codex_token")
 
+    def test_resolve_api_key_type_honors_explicit_openai_selection(self) -> None:
+        config_yaml = textwrap.dedent(
+            """
+            system_prompt: test system prompt
+            agent:
+              primary: gpt-5.4-mini
+              provider: codex
+              api_key_type: openai
+              main_action: test
+              sub_action: run
+            credentials:
+              codex_access_token: codex-access-token
+              openai_api_key: oa-test
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(config_yaml)
+            path = handle.name
+
+        config = load_config(path)
+
+        self.assertEqual(config.model.api_key_type, "openai")
+        self.assertEqual(resolve_api_key_type(config), "openai")
+
     def test_chack_logs_instantiation_details(self) -> None:
         config_yaml = textwrap.dedent(
             """
@@ -265,7 +333,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
 
         logger_mock.return_value.info.assert_any_call(
             "Agent instantiated: model=%s backend=%s api_key_type=%s",
-            "openrouter/openai/gpt-5.4",
+            "openrouter/openai/gpt-5.6-sol",
             "openrouter",
             "openrouter",
         )

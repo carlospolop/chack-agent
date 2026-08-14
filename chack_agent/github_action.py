@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -79,6 +80,18 @@ def _write_github_output(message: str) -> None:
         if not message.endswith("\n"):
             handle.write("\n")
         handle.write("EOF\n")
+
+
+def _publish_result(result) -> None:
+    """Expose successful output, but fail the action on backend/session errors."""
+    output = str(getattr(result, "output", "") or "")
+    print(output)
+    _write_github_output(output)
+
+    error = str(getattr(result, "error", "") or "").strip()
+    if error:
+        print(f"Chack Agent failed: {error}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 def _safe_token(value: str) -> str:
@@ -296,10 +309,7 @@ def main() -> None:
         text=prompt,
         require_task_steps_manager_init_first=bool(agent_cfg.require_task_steps_manager_init_first),
     )
-    output = result.output or ""
-
-    print(output)
-    _write_github_output(output)
+    _publish_result(result)
 
 
 if __name__ == "__main__":

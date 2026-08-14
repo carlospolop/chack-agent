@@ -155,9 +155,22 @@ def _build_initial_system_prompt(
         if task_steps_manager_enabled
         else ""
     )
+    if task_steps_manager_enabled and require_task_steps_manager_init_first:
+        planning_note = (
+            "Your first step on any task should be think and organize all the steps "
+            "the requested task will require and keep updating this task list."
+        )
+    else:
+        # An agent that is not required to keep a tracked task list should not be told
+        # its first step is to build and maintain one: every update is a tool round it
+        # was never asked to spend. Thinking the steps through costs nothing.
+        planning_note = (
+            "Before acting, think through the steps the task will require, and revisit "
+            "that plan as you learn more."
+        )
     return f"""### CHACK RUNTIME
 You are Chack, a very helpful and organized autonomous assistant. You must work as hard as possible, always completing the extra miles, to perform the task assigned as perfectly as possible.
-Your first step on any task should be think and organize all the steps the requested task will require and keep updating this task list.
+{planning_note}
 Usually the most important part of a task is to truly obtain all the information needed to understand all the components perfectly to be able to find the actual best solution. Therefore, you must always obtain all the context needed (using as many times as needed the tools). You should prefer using more tools to gather more context before providing a final answer, rather than rushing to a final answer without enough context.
 
 ### OPERATING RULES
@@ -205,6 +218,7 @@ class RunResult:
     resume_compaction_method: str = ""
     resume_compaction_duration_seconds: float = 0.0
     resume_compaction_error: str = ""
+    error: str = ""
 
 
 TaskStepsSnapshotCallback = Callable[[Dict[str, Any]], None]
@@ -1300,6 +1314,7 @@ class Chack:
         tools_append: Optional[list[Any]] = None,
         exec_cwd: Optional[str] = None,
         output_schema_json_override: Optional[Dict[str, Any]] = None,
+        reuse_session_executor: bool = False,
     ):
         config = self.config
         exec_cwd_value = str(exec_cwd or "").strip()
@@ -1320,7 +1335,9 @@ class Chack:
         memory_max_messages = int(self.config.session.memory_max_messages)
         memory_reset_to_messages = int(self.config.session.memory_reset_to_messages)
         memory_summary_max_chars = int(self.config.session.memory_summary_max_chars)
-        if tools_override is not None or tools_append is not None:
+        if (
+            tools_override is not None or tools_append is not None
+        ) and not reuse_session_executor:
             return build_executor(
                 config,
                 system_prompt=system_prompt_override or self.config.system_prompt,
@@ -1344,6 +1361,11 @@ class Chack:
                 _log_timestamp(),
             )
             system_prompt = self._system_prompt_for_session(session_id, system_prompt_override)
+            executor_tool_kwargs: dict[str, Any] = {}
+            if tools_override is not None:
+                executor_tool_kwargs["tools_override"] = tools_override
+            if tools_append is not None:
+                executor_tool_kwargs["tools_append"] = tools_append
             executor = build_executor(
                 config,
                 system_prompt=system_prompt,
@@ -1351,6 +1373,7 @@ class Chack:
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
                 memory_summary_max_chars=memory_summary_max_chars,
+                **executor_tool_kwargs,
             )
             self._executors[cache_key] = executor
         else:
@@ -1512,6 +1535,7 @@ class Chack:
         stop_requested: Optional[Callable[[], bool]] = None,
         compact_before_resume: bool = False,
         resume_compaction_instructions: Optional[str] = None,
+        reuse_session_executor: bool = False,
     ) -> RunResult:
         return await asyncio.to_thread(
             self.run,
@@ -1535,6 +1559,7 @@ class Chack:
             stop_requested=stop_requested,
             compact_before_resume=compact_before_resume,
             resume_compaction_instructions=resume_compaction_instructions,
+            reuse_session_executor=reuse_session_executor,
         )
 
     def run(
@@ -1562,7 +1587,15 @@ class Chack:
         output_schema_json_override: Optional[Dict[str, Any]] = None,
         compact_before_resume: bool = False,
         resume_compaction_instructions: Optional[str] = None,
+        reuse_session_executor: bool = False,
     ) -> RunResult:
+        """Run one turn in a logical session.
+
+        Set ``reuse_session_executor`` when per-run tool overrides must remain
+        attached to the same executor across continuation turns. The first
+        executor configuration for a session/cache key remains authoritative
+        until that session is reset.
+        """
         log_token = set_log_context(
             main_action=str(self.config.agent.main_action or ""),
             sub_action=str(self.config.agent.sub_action or ""),
@@ -1609,14 +1642,16 @@ class Chack:
             )
 
             self._prepare_session_for_run(session_id)
-            executor = self._get_executor(
-                session_id,
-                system_prompt_override=system_prompt_override,
-                tools_override=tools_override,
-                tools_append=tools_append,
-                exec_cwd=exec_cwd,
-                output_schema_json_override=output_schema_json_override,
-            )
+            executor_kwargs: dict[str, Any] = {
+                "system_prompt_override": system_prompt_override,
+                "tools_override": tools_override,
+                "tools_append": tools_append,
+                "exec_cwd": exec_cwd,
+                "output_schema_json_override": output_schema_json_override,
+            }
+            if reuse_session_executor:
+                executor_kwargs["reuse_session_executor"] = True
+            executor = self._get_executor(session_id, **executor_kwargs)
             self._last_activity_at[session_id] = time.time()
             run_started_at = self._last_activity_at[session_id]
             max_runtime_minutes = max(0, int(self.config.agent.max_runtime_minutes or 0))
@@ -2947,6 +2982,7 @@ class Chack:
                     "tool_counts": dict(tool_counts),
                     "nested_tool_counts": dict(nested_counts_total),
                     "nested_usage_by_model": nested_usage_by_model,
+                    "error": str(result.get("error") or ""),
                 },
             )
 
@@ -2991,6 +3027,7 @@ class Chack:
                 resume_compaction_method=resume_compaction.method,
                 resume_compaction_duration_seconds=resume_compaction.duration_seconds,
                 resume_compaction_error=resume_compaction.error,
+                error=str(result.get("error") or ""),
             )
         except Exception as exc:
             limit_text = str(exc or "").lower()

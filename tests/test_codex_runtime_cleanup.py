@@ -5,7 +5,19 @@ from pathlib import Path
 from chack_agent.backends.codex_backend import (
     CodexExecutor,
     _cleanup_isolated_codex_home,
+    _preview_text,
 )
+
+
+def test_failure_preview_preserves_start_and_terminal_error():
+    text = "startup:" + ("x" * 100) + ":terminal provider error"
+
+    preview = _preview_text(text, max_chars=80)
+
+    assert len(preview) == 80
+    assert preview.startswith("startup:")
+    assert preview.endswith(":terminal provider error")
+    assert "truncated middle" in preview
 
 
 def test_cleanup_isolated_codex_home_removes_only_child(tmp_path: Path):

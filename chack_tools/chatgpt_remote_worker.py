@@ -42,6 +42,9 @@ _PUBLIC_METADATA_FIELDS = {
     "forced_answer",
     "execution_backend",
     "prior_browser_submission_detected",
+    "selected_effort",
+    "selected_power",
+    "selector_ui",
 }
 
 

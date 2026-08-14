@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 
 from agents import function_tool
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 
 from chack_agent.backends.chack_tools_mcp_server import (
@@ -11,6 +15,32 @@ from chack_agent.backends.chack_tools_mcp_server import (
     _register_tools,
 )
 from chack_tools.subagent_config import enforce_prompt_str_or_list_schema
+
+
+def test_stdio_server_completes_mcp_handshake() -> None:
+    async def _list_tool_names() -> set[str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "CHACK_MODEL_PROVIDER": "codex",
+                "CHACK_DEFAULT_MODEL": "gpt-5.6-sol",
+                "CHACK_TOOLS_CONFIG_JSON": '{"exec_enabled": true}',
+                "CHACK_ALLOWED_TOOLS_JSON": '["exec"]',
+                "CHACK_DISABLE_STDOUT_EVENTS": "1",
+            }
+        )
+        server = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "chack_agent.backends.chack_tools_mcp_server"],
+            env=env,
+        )
+        async with stdio_client(server) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                return {tool.name for tool in tools.tools}
+
+    assert "exec" in asyncio.run(_list_tool_names())
 
 
 def test_schema_type_preserves_string_or_array_union() -> None:
