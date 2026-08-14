@@ -764,7 +764,8 @@ def test_codex_prompt_cache_boundary_never_sends_an_empty_prompt():
     assert composed.strip()
     assert "Repository Path: /tmp/repo" in composed
     assert PROMPT_CACHE_BREAKPOINT not in composed
-    assert executor._cacheable_developer_prompt == ""
+    assert executor._cacheable_developer_prompt == "You are a helpful assistant."
+    assert executor._prompt_cache_prefix_key.startswith("chack-")
 
     # A boundary with real content after it still caches everything above it.
     cached = executor._compose_prompt(
