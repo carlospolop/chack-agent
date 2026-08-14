@@ -855,17 +855,31 @@ class ChatGPTWebResearchAgentTool:
 
         expression = r"""(()=>{
 const root=document.querySelector('#root'),doc=root?.contentDocument;
-if(!doc)return{text:'',textLen:0,buttons:[],links:[],hasStop:false,completed:false,planning:false,clickedStart:false};
+if(!doc)return{text:'',textLen:0,buttons:[],links:[],hasStop:false,completed:false,planning:false,clickedStart:false,widgetStatus:''};
 const buttons=[...doc.querySelectorAll('button')];
 let clickedStart=false;
-if(CLICK_START){const start=buttons.find(b=>/^\s*(Start|Iniciar)\s*$/i.test((b.innerText||b.getAttribute('aria-label')||'')));if(start){start.click();clickedStart=true;}}
+if(CLICK_START){const start=buttons.find(b=>/^\s*(Start|Iniciar)(?:\s|$)/i.test((b.innerText||b.getAttribute('aria-label')||'')));if(start){start.click();clickedStart=true;}}
 const text=doc.body?.innerText||root?.innerText||'';
 const labels=buttons.map(b=>(b.innerText||b.getAttribute('aria-label')||'').trim()).filter(Boolean);
-const links=[...doc.querySelectorAll('a[href]')].map(a=>({label:(a.innerText||a.getAttribute('aria-label')||'Source').trim(),url:a.href||''}));
+const domLinks=[...doc.querySelectorAll('a[href]')].map(a=>({label:(a.innerText||a.getAttribute('aria-label')||'Source').trim(),url:a.href||''}));
+const widgetState=root?.contentWindow?.openai?.widgetState||{};
+const reportMessage=widgetState?.report_message||{};
+const contentReferences=reportMessage?.metadata?.content_references||[];
+const citationLinks=[];
+for(const reference of Array.isArray(contentReferences)?contentReferences:[]){
+  for(const item of Array.isArray(reference?.items)?reference.items:[]){
+    if(item?.url)citationLinks.push({label:(item.title||item.attribution||'Source').trim(),url:item.url});
+    for(const supporting of Array.isArray(item?.supporting_websites)?item.supporting_websites:[]){
+      if(supporting?.url)citationLinks.push({label:(supporting.title||supporting.attribution||'Supporting source').trim(),url:supporting.url});
+    }
+  }
+}
+const links=[...domLinks,...citationLinks];
+const widgetStatus=String(widgetState?.status||'');
 const hasStop=labels.some(x=>/Stop research|Detener.*investigaci/i.test(x));
-const completed=/Research completed|Investigaci[oó]n completada/i.test(text)||(/\bSources\b|\bFuentes\b/i.test(text)&&text.length>1200&&!hasStop);
-const planning=labels.some(x=>/^\s*(Start|Iniciar)\s*$/i.test(x));
-return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,clickedStart};
+const completed=/completed|finished/i.test(widgetStatus)||/Research completed|Investigaci[oó]n completada/i.test(text)||(/\bSources\b|\bFuentes\b/i.test(text)&&text.length>1200&&!hasStop);
+const planning=labels.some(x=>/^\s*(Start|Iniciar)(?:\s|$)/i.test(x));
+return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,clickedStart,widgetStatus};
 })()""".replace("CLICK_START", "true" if click_start else "false")
         with connect(websocket_url, origin=None, open_timeout=10, close_timeout=5) as websocket:
             websocket.send(
@@ -1155,6 +1169,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                         run_state_path=run_state_path,
                     )
                     conversation_url = page.url
+                source_url_count = len(set(re.findall(r"https?://[^\s)>]+", answer)))
                 metadata = {
                     "mode": self.mode,
                     **selected_mode_metadata,
@@ -1162,10 +1177,16 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     "started_at": started_at,
                     "finished_at": time.time(),
                     "answer_chars": len(answer),
+                    "source_url_count": source_url_count,
                     "terminal_state": "extracted",
                 }
                 self._write_json(run_state_path, metadata)
-                self._emit_progress("answer_extracted", answer_chars=len(answer), running=False)
+                self._emit_progress(
+                    "answer_extracted",
+                    answer_chars=len(answer),
+                    source_url_count=source_url_count,
+                    running=False,
+                )
                 return answer, conversation_url, metadata
             except Exception as exc:
                 state = "timeout" if "did not reach an extractable terminal state" in str(exc) else "error"
