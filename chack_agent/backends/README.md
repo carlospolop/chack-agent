@@ -11,11 +11,18 @@ This folder contains 7 runtime backends:
 
 ## Prompt-cache boundary
 
-Agent prompts that run repeatedly with a large immutable prefix may place one
-visible `<!-- CHACK_PROMPT_CACHE_BREAKPOINT -->` marker between that prefix and
-their changing suffix. Keep the real stable text and variables in the YAML;
-do not hide them behind a generated prefix placeholder. Chack removes the
-marker before inference and uses the same split for both CLI providers:
+Every Codex and Claude invocation automatically keeps Chack's immutable
+runtime/system instructions, tool policy, and output contract in the
+provider's developer/system prefix; the changing task is sent as the user
+message. This gives every agent a cacheable baseline without requiring a
+marker.
+
+Agent prompts that run repeatedly with additional large immutable task context
+may extend that baseline by placing one visible
+`<!-- CHACK_PROMPT_CACHE_BREAKPOINT -->` marker between that context and their
+changing suffix. Keep the real stable text and variables in the YAML; do not
+hide them behind a generated prefix placeholder. Chack removes the marker
+before inference and uses the same split for both CLI providers:
 
 - Claude Code receives the stable side through its cached system layer and the
   changing side through stdin. No-tool agents replace the generic coding
@@ -42,7 +49,12 @@ reported `cached_prompt_tokens`/`cache_write_prompt_tokens`, not inferred from
 the prompt layout.
 
 Backends log a deterministic prefix key so cache-read/cache-write telemetry can
-be grouped without logging the prompt. When an agent resolves to zero tools,
+be grouped without logging the prompt. Structured-output schemas are included
+in the direct Codex routing identity because they are part of the rendered
+prefix. Claude's disjoint ordinary-input, cache-read, and cache-write counters
+are normalized into total prompt tokens plus read/write subsets before cost
+calculation; Claude Code's one-hour cache writes use the provider's 2x input
+write price rather than the five-minute 1.25x price. When an agent resolves to zero tools,
 the Codex and Claude CLI backends also skip the Chack MCP server/tool registry;
 this removes startup and schema-token overhead without changing agent
 capabilities.

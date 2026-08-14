@@ -308,8 +308,8 @@ class TestComposePromptEndToEnd:
         # This is what the executor sees
         composed = executor._compose_prompt(prompt_to_send)
 
-        # Verify system prompt present
-        assert "You are a helpful assistant" in composed
+        # Verify the stable system prompt is separated for provider caching.
+        assert "You are a helpful assistant" in executor._cacheable_system_prompt
         # Verify user input present
         assert "Find vulnerabilities" in composed
         # Verify budget warning present (the model will see this!)
@@ -615,6 +615,21 @@ def test_codex_cache_breakpoint_uses_developer_instructions() -> None:
     assert "changing checks" not in developer_arg
 
 
+def test_codex_unmarked_prompt_still_caches_shared_system_layer() -> None:
+    executor = _make_stub_codex_executor()
+
+    prompt = executor._compose_prompt("changing task")
+    command = executor._build_command()
+
+    assert prompt == "changing task"
+    assert "You are a helpful assistant." in executor._cacheable_developer_prompt
+    assert executor._prompt_cache_prefix_key.startswith("chack-")
+    assert any(
+        arg.startswith("developer_instructions=")
+        for arg in command
+    )
+
+
 def test_codex_mcp_startup_timeout_is_configurable(monkeypatch, tmp_path):
     executor = _make_stub_codex_executor()
     executor._allowed_tools_json = '["read_context"]'
@@ -690,7 +705,8 @@ def test_codex_followup_prompt_only_suppresses_system_once():
 
     assert prompt == "original request\n\ntry harder"
     assert "You are a helpful assistant." not in prompt
-    assert "You are a helpful assistant." in executor._compose_prompt("normal")
+    assert executor._compose_prompt("normal") == "normal"
+    assert "You are a helpful assistant." in executor._cacheable_developer_prompt
 
 
 def _make_stub_copilot_executor():
@@ -748,7 +764,8 @@ def test_codex_prompt_cache_boundary_never_sends_an_empty_prompt():
     assert composed.strip()
     assert "Repository Path: /tmp/repo" in composed
     assert PROMPT_CACHE_BREAKPOINT not in composed
-    assert executor._cacheable_developer_prompt == ""
+    assert executor._cacheable_developer_prompt == "You are a helpful assistant."
+    assert executor._prompt_cache_prefix_key.startswith("chack-")
 
     # A boundary with real content after it still caches everything above it.
     cached = executor._compose_prompt(

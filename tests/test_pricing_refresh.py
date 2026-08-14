@@ -141,6 +141,52 @@ class PricingRefreshTests(unittest.TestCase):
 
         self.assertEqual(cost, 6.0)
 
+    def test_estimate_cost_treats_cache_reads_and_writes_as_disjoint_input(self) -> None:
+        table = pricing.PricingTable(
+            models={
+                "gpt-5.6": pricing.ModelPricing(
+                    input=5.0,
+                    cached_input=0.5,
+                    cache_write=6.25,
+                    output=30.0,
+                )
+            }
+        )
+
+        cost = pricing.estimate_cost(
+            table,
+            "gpt-5.6",
+            prompt_tokens=1_000_000,
+            completion_tokens=0,
+            cached_prompt_tokens=600_000,
+            cache_write_tokens=300_000,
+        )
+
+        self.assertEqual(cost, 2.675)
+
+    def test_estimate_cost_supports_one_hour_cache_write_rate(self) -> None:
+        table = pricing.PricingTable(
+            models={
+                "claude": pricing.ModelPricing(
+                    input=1.0,
+                    cached_input=0.1,
+                    cache_write=1.25,
+                    output=5.0,
+                )
+            }
+        )
+
+        cost = pricing.estimate_cost(
+            table,
+            "claude",
+            prompt_tokens=1_000_000,
+            completion_tokens=0,
+            cache_write_tokens=1_000_000,
+            cache_write_rate_multiplier=1.6,
+        )
+
+        self.assertEqual(cost, 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

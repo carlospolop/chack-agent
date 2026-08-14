@@ -937,8 +937,9 @@ class CodexExecutor:
         if cache_parts.has_breakpoint and not cache_parts.dynamic_suffix.strip():
             # Everything the caller wrote sits above the boundary. Honouring it
             # would send an empty prompt on stdin, and `codex exec -` rejects that
-            # outright ("No prompt provided via stdin"), so this run goes uncached
-            # rather than not running at all.
+            # outright ("No prompt provided via stdin"), so keep the complete task
+            # in the user message. The shared system/developer baseline may still
+            # use its independent cache boundary.
             user_input = cache_parts.stable_prefix
             cache_parts = split_prompt_cache_breakpoint(user_input)
         if cache_parts.has_breakpoint:
@@ -958,13 +959,30 @@ class CodexExecutor:
             )
             return cache_parts.dynamic_suffix
 
-        self._cacheable_developer_prompt = ""
-        self._prompt_cache_prefix_key = ""
-        if not base:
-            return f"{user_input}{policy_block}" if policy_block else user_input
-        if not user_input:
-            return f"{base}{policy_block}" if policy_block else base
-        return f"{base}{policy_block}\n\n### USER REQUEST\n{user_input}"
+        # Even prompts without an application-specific breakpoint have a
+        # provider-stable layer: Chack's runtime/system instructions and tool
+        # policy. Keep that layer in the developer message and send only the
+        # changing request as user input. This makes every eligible fresh
+        # Codex invocation cacheable while preserving the explicit marker for
+        # callers that can additionally reuse large task-specific context.
+        developer_parts = [
+            part
+            for part in (base, policy_block)
+            if part.strip()
+        ]
+        self._cacheable_developer_prompt = "\n".join(developer_parts)
+        self._prompt_cache_prefix_key = (
+            prompt_cache_key(self._cacheable_developer_prompt)
+            if self._cacheable_developer_prompt
+            else ""
+        )
+        if self._cacheable_developer_prompt:
+            _LOGGER.info(
+                "Using cache-stable Codex system prefix: chars=%d key=%s",
+                len(self._cacheable_developer_prompt),
+                self._prompt_cache_prefix_key,
+            )
+        return str(user_input or "")
 
     def _run_codex(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_codex_home_and_config()
@@ -1145,10 +1163,29 @@ class CodexExecutor:
         prompt: str,
     ) -> tuple[str, dict[str, str], dict[str, Any]]:
         auth_mode, bearer_token, account_id = self._direct_cache_credentials()
+        output_schema = self._direct_cache_output_schema()
+        # Structured-output schemas are rendered before the developer message
+        # by the Responses API and therefore participate in the exact cached
+        # prefix. Include every prefix-shaping value in the routing identity so
+        # agents with the same instructions but different schemas do not
+        # contend for one cache route.
+        routing_key = prompt_cache_key(
+            json.dumps(
+                {
+                    "model": self._model_name,
+                    "instructions": _DIRECT_CACHE_INSTRUCTIONS,
+                    "developer": self._cacheable_developer_prompt,
+                    "output_schema": output_schema,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
         session_id = str(
             uuid.uuid5(
                 _DIRECT_CACHE_SESSION_NAMESPACE,
-                self._prompt_cache_prefix_key,
+                routing_key,
             )
         )
         headers = {
@@ -1194,9 +1231,8 @@ class CodexExecutor:
             "store": False,
             "stream": True,
             "include": ["reasoning.encrypted_content"],
-            "prompt_cache_key": self._prompt_cache_prefix_key,
+            "prompt_cache_key": routing_key,
         }
-        output_schema = self._direct_cache_output_schema()
         if output_schema is not None:
             request_body["text"] = {
                 "format": {
