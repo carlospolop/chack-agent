@@ -55,7 +55,9 @@ def _wait_for_file(path: Path, timeout: float = 10.0) -> bool:
 
 def test_chatgpt_researchers_are_never_cancelled_for_elapsed_time():
     prompt = _ADMINISTRATOR_SYSTEM_PROMPT
-    assert "Prefer `start_researchers_async`" in prompt
+    assert "Every researcher is async-only" in prompt
+    assert "Always launch ordinary and browser researchers with `start_researchers_async`" in prompt
+    assert "provider/MCP tool bridges can time out while healthy children continue" in prompt
     assert "Never use `wait(..., terminate=true)`" in prompt
     assert "configured hard timeout" in prompt
     assert "up to 180 minutes" in prompt
@@ -305,7 +307,6 @@ def test_administrator_allowlist_force_enables_researchers():
 
     inner = _tool_names(helper._build_subagent_tools(helper._enabled_researchers()))
     assert inner == {
-        "run_researchers_batch",
         "start_researchers_async",
         "poll_researchers_async",
         "cancel_researchers_async",
@@ -967,10 +968,10 @@ def test_administrator_capability_map_lists_internal_researcher_tools():
     lines = helper._researcher_capability_lines(helper._enabled_researchers())
     text = "\n".join(lines)
 
-    assert "- websearcher via `run_researchers_batch` (request `websearcher_research`):" in text
+    assert "- websearcher via `start_researchers_async` (request `websearcher_research`):" in text
     assert "fetch_url_text" in text
     assert "web_archive_search" in text
-    assert "- scientific via `run_researchers_batch` (request `scientific_research`):" in text
+    assert "- scientific via `start_researchers_async` (request `scientific_research`):" in text
     assert "search_arxiv" in text
     assert "download_pmc_full_text" in text
 
@@ -1729,7 +1730,7 @@ def test_required_researcher_batch_request_rejects_missing_researchers():
     assert any("business" in str(error.get("error")) for error in payload["errors"])
 
 
-def test_required_researcher_mode_hides_direct_sync_tools():
+def test_required_researcher_mode_is_structurally_async_only():
     helper = ResearcherAdministratorAgentTool(
         ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True, business_enabled=True),
         model_provider="openai",
@@ -1740,7 +1741,9 @@ def test_required_researcher_mode_hides_direct_sync_tools():
 
     names = _tool_names(helper._build_subagent_tools(helper._enabled_researchers()))
 
-    assert "run_researchers_batch" in names
+    assert "run_researchers_batch" not in names
+    assert "start_researchers_async" in names
+    assert "poll_researchers_async" in names
     assert "scientific_research" not in names
     assert "business_research" not in names
 
