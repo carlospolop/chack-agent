@@ -66,6 +66,7 @@ _REMOTE_METADATA_FIELDS = {
     "selected_effort",
     "selected_power",
     "selector_ui",
+    "provider_retry_count",
 }
 # Rolling-deployment compatibility for brokers that predate the native xhigh
 # enum. The authenticated worker strips this transport marker before sending the
@@ -760,12 +761,43 @@ class ChatGPTWebResearchAgentTool:
         return False
 
     @staticmethod
+    def _click_provider_retry_if_present(page) -> bool:
+        """Retry one provider-side failed generation without resubmitting manually."""
+        candidates = []
+        try:
+            candidates.append(page.locator('[data-testid="regenerate-thread-error-button"]'))
+        except Exception:
+            pass
+        for pattern in (
+            re.compile(r"^\s*Retry\s*$", re.I),
+            re.compile(r"^\s*Try again\s*$", re.I),
+            re.compile(r"^\s*Reintentar\s*$", re.I),
+            re.compile(r"^\s*Volver a intentar\s*$", re.I),
+        ):
+            try:
+                candidates.append(page.get_by_role("button", name=pattern))
+            except Exception:
+                continue
+        for buttons in candidates:
+            for index in range(buttons.count()):
+                try:
+                    button = buttons.nth(index)
+                    if button.is_visible() and button.is_enabled():
+                        button.click(timeout=5000)
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    @staticmethod
     def _is_running(page) -> bool:
         running_patterns = (
             re.compile(r"stop (generating|research|thinking|answering)", re.I),
             re.compile(r"detener (la )?(generaci[oó]n|investigaci[oó]n|respuesta)", re.I),
             re.compile(r"^\s*Answer now\s*$", re.I),
             re.compile(r"^\s*Responder ahora\s*$", re.I),
+            re.compile(r"^\s*Searching the web\s*$", re.I),
+            re.compile(r"^\s*Buscando en la web\s*$", re.I),
         )
         for pattern in running_patterns:
             if page.get_by_role("button", name=pattern).count():
@@ -921,8 +953,34 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         last_progress_at = 0.0
         forced_answer = False
         force_baseline = ""
+        provider_retry_count = 0
         while True:
             now = time.monotonic()
+            if provider_retry_count < 1 and self._click_provider_retry_if_present(page):
+                provider_retry_count += 1
+                previous = ""
+                stable_polls = 0
+                self._emit_progress(
+                    "provider_retry_requested",
+                    answer_chars=0,
+                    running=True,
+                    forced_answer=forced_answer,
+                )
+                self._write_json(
+                    run_state_path,
+                    {
+                        "mode": self.mode,
+                        "terminal_state": "retrying_provider_failure",
+                        "updated_at": time.time(),
+                        "provider_retry_count": provider_retry_count,
+                        "forced_answer": forced_answer,
+                        "output_timeout_seconds": timeout_seconds,
+                    },
+                )
+                remaining = max(0.0, hard_deadline - now)
+                if remaining > 0:
+                    page.wait_for_timeout(min(float(self._poll_seconds()), remaining) * 1000)
+                continue
             # Pro's Answer-now recovery window is inside the total output
             # deadline. It must never extend a broken browser request beyond the
             # configured total output deadline.
@@ -981,6 +1039,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     "answer_chars": len(answer),
                     "running": running,
                     "forced_answer": forced_answer,
+                    "provider_retry_count": provider_retry_count,
                     "output_timeout_seconds": timeout_seconds,
                 },
             )

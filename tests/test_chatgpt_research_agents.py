@@ -705,6 +705,52 @@ def test_running_state_accepts_answer_now_label():
     assert ChatGPTWebResearchAgentTool._is_running(Page()) is True
 
 
+def test_running_state_accepts_searching_the_web_label():
+    class Locator:
+        def count(self):
+            return 1
+
+    class Page:
+        def get_by_role(self, _role, name):
+            return Locator() if name.search("Searching the web") else type("Empty", (), {"count": lambda self: 0})()
+
+    assert ChatGPTWebResearchAgentTool._is_running(Page()) is True
+
+
+def test_pro_retries_one_provider_generation_error_within_original_deadline(monkeypatch, tmp_path):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_pro_timeout_seconds=120, chatgpt_research_poll_seconds=2),
+        mode="pro",
+    )
+    clock = {"now": 0.0}
+    retries = []
+
+    class Page:
+        url = "https://chatgpt.com/c/provider-retry"
+
+        def wait_for_timeout(self, milliseconds):
+            clock["now"] += milliseconds / 1000.0
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        helper,
+        "_click_provider_retry_if_present",
+        lambda _page: retries.append(clock["now"]) is None if not retries else False,
+    )
+    monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: "R" * 500 if retries else "")
+    monkeypatch.setattr(helper, "_is_running", lambda _page: False)
+    run_state = tmp_path / "chatgpt-run.json"
+
+    answer = helper._wait_and_extract(Page(), run_state_path=run_state)
+
+    assert answer == "R" * 500
+    assert retries == [0.0]
+    assert clock["now"] == 6.0
+    state = json.loads(run_state.read_text())
+    assert state["provider_retry_count"] == 1
+
+
 def test_pro_timeout_forces_answer_early_and_extracts_within_total_deadline(monkeypatch, tmp_path):
     helper = ChatGPTWebResearchAgentTool(
         ToolsConfig(
