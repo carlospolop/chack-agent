@@ -22,6 +22,7 @@ from chack_tools.run_lifecycle import (
     ToolBudgetClaim,
     claim_non_task_tool_slot,
     mark_task_manager_initialized,
+    record_mcp_tool_usage,
     task_manager_initialized,
     tool_budget_warning,
 )
@@ -486,6 +487,7 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                             f"Tool budget reached ({state.max_non_task_tools}). Finish using gathered context."
                         )
 
+                record_mcp_tool_usage(_name, state.session_id)
                 result = await _invoke_function_tool(_tool, payload)
                 if is_task_steps_manager_init and str(result).startswith("SUCCESS:"):
                     state.has_task_steps_manager_init = True
@@ -559,11 +561,14 @@ def main() -> None:
             name="check_budget_status",
             description=(
                 "Returns the current runtime and cost budget status. "
-                "Call this periodically (every 5-10 tool calls) to check "
-                "if you are approaching budget limits and need to wrap up."
+                "Use it only in a long run after at least five other tool calls, "
+                "then at most once every 5-10 additional calls, or after an explicit "
+                "budget warning. Do not call it before finishing a short task; hard "
+                "runtime and cost limits are enforced automatically."
             ),
         )
         async def _check_budget_status() -> str:
+            record_mcp_tool_usage("check_budget_status", state.session_id)
             return budget_status_from_env()
 
         if transport in {"http", "streamable-http"}:

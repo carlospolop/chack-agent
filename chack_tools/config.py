@@ -157,15 +157,18 @@ class ToolsConfig:
     cli_google_web_enabled: bool = False
     cli_agent: dict = field(default_factory=dict)
 
-    # Authenticated ChatGPT Web researchers. Both attach to the same user-managed
+    # Authenticated ChatGPT Web tools. All attach to the same user-managed
     # Chrome CDP profile; each request runs in its own clean tab.
     deepchatgpt_enabled: bool = False
     prochatgpt_enabled: bool = False
+    chatgptxhigh_enabled: bool = False
     chatgpt_cdp_url: str = ""
     # Total browser-output deadlines. Mode-specific values take precedence over
     # the deprecated shared timeout below. Zero/None means use the built-in
-    # defaults: 90 minutes for Pro and 75 minutes for Deep Research.
+    # defaults: 90 minutes for Pro, 30 minutes for Extra High, and 75 minutes
+    # for Deep Research.
     chatgpt_pro_timeout_seconds: Optional[int] = None
+    chatgpt_xhigh_timeout_seconds: Optional[int] = None
     chatgpt_deep_timeout_seconds: Optional[int] = None
     chatgpt_research_timeout_seconds: int = 0  # deprecated shared fallback
     chatgpt_research_poll_seconds: int = 15
@@ -177,7 +180,9 @@ class ToolsConfig:
     chatgpt_async_api_url: str = ""
     chatgpt_async_api_secret: str = ""
     chatgpt_async_poll_seconds: int = 10
-    chatgpt_async_max_wait_seconds: int = 10800
+    # XHigh's 1800-second output deadline plus the 300-second terminal/grace
+    # window. Mode-specific code still caps stale overrides at timeout+grace.
+    chatgpt_async_max_wait_seconds: int = 2100
     chatgpt_async_request_timeout_seconds: int = 30
     # Pro requests click "Answer now" this many seconds before their total
     # output deadline; this is part of, not added after, the Pro timeout.

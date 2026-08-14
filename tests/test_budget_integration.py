@@ -368,6 +368,8 @@ class TestMCPServerRegistration:
         assert "check_budget_status" in source
         assert "budget_status_from_env" in source
         assert "mcp.tool" in source or "@mcp.tool" in source
+        assert "after at least five other tool calls" in source
+        assert "Do not call it before finishing a short task" in source
 
 
 # ---------------------------------------------------------------------------
@@ -594,8 +596,28 @@ def test_codex_build_command_resumes_captured_thread_for_followup_prompt():
     assert command[-1] == "-"
 
 
+def test_codex_cache_breakpoint_uses_developer_instructions() -> None:
+    from chack_agent.backends.prompt_cache import PROMPT_CACHE_BREAKPOINT
+
+    executor = _make_stub_codex_executor()
+    prompt = executor._compose_prompt(
+        f"stable repository context\n{PROMPT_CACHE_BREAKPOINT}\nchanging checks"
+    )
+    command = executor._build_command()
+
+    assert prompt == "\nchanging checks"
+    assert PROMPT_CACHE_BREAKPOINT not in prompt
+    assert "stable repository context" in executor._cacheable_developer_prompt
+    developer_arg = next(
+        arg for arg in command if arg.startswith("developer_instructions=")
+    )
+    assert "stable repository context" in developer_arg
+    assert "changing checks" not in developer_arg
+
+
 def test_codex_mcp_startup_timeout_is_configurable(monkeypatch, tmp_path):
     executor = _make_stub_codex_executor()
+    executor._allowed_tools_json = '["read_context"]'
 
     monkeypatch.setenv("CHACK_CODEX_HOME_BASE", str(tmp_path))
     monkeypatch.setenv("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "180")
@@ -603,7 +625,61 @@ def test_codex_mcp_startup_timeout_is_configurable(monkeypatch, tmp_path):
 
     config_path = os.path.join(executor._codex_home, "config.toml")
     body = open(config_path, "r", encoding="utf-8").read()
+    assert os.stat(executor._codex_home).st_mode & 0o777 == 0o700
+    assert os.stat(config_path).st_mode & 0o777 == 0o600
     assert "startup_timeout_sec = 180" in body
+
+
+def test_codex_writes_finalized_dynamic_tool_environment_explicitly(monkeypatch, tmp_path):
+    executor = _make_stub_codex_executor()
+    executor._allowed_tools_json = '["read_context"]'
+    executor._serialized_tools_override_b64 = "x" * 25000
+
+    monkeypatch.setenv("CHACK_CODEX_HOME_BASE", str(tmp_path))
+    executor._ensure_codex_home_and_config()
+    env = executor._build_env()
+    executor._write_codex_explicit_mcp_env(env)
+
+    config_path = os.path.join(executor._codex_home, "config.toml")
+    body = open(config_path, "r", encoding="utf-8").read()
+    assert body.count("[mcp_servers.chack_tools.env]") == 1
+    assert 'CHACK_MODEL_PROVIDER = "codex"' in body
+    assert "CHACK_MCP_STARTUP_STATUS_PATH = " in body
+    assert "CHACK_TOOLS_OVERRIDE_B64_PATH = " in body
+    assert "CHACK_TOOLS_OVERRIDE_B64 = " not in body
+
+    # Retrying the same executor replaces the generated table instead of
+    # appending a duplicate TOML section.
+    executor._write_codex_explicit_mcp_env(env)
+    body = open(config_path, "r", encoding="utf-8").read()
+    assert body.count("[mcp_servers.chack_tools.env]") == 1
+
+
+def test_codex_skips_mcp_server_when_agent_has_no_tools(monkeypatch, tmp_path):
+    executor = _make_stub_codex_executor()
+
+    monkeypatch.setenv("CHACK_CODEX_HOME_BASE", str(tmp_path))
+    executor._ensure_codex_home_and_config()
+
+    config_path = os.path.join(executor._codex_home, "config.toml")
+    body = open(config_path, "r", encoding="utf-8").read()
+    assert "[mcp_servers.chack_tools]" not in body
+
+
+def test_codex_configures_shared_mcp_even_when_agent_has_no_local_tools(monkeypatch, tmp_path):
+    executor = _make_stub_codex_executor()
+
+    monkeypatch.setenv("CHACK_CODEX_HOME_BASE", str(tmp_path))
+    monkeypatch.setenv("CHACK_CODEX_MCP_URL", "http://127.0.0.1:8765/mcp")
+    executor._ensure_codex_home_and_config()
+
+    assert executor._codex_home is not None
+    config_path = os.path.join(executor._codex_home, "config.toml")
+    body = open(config_path, "r", encoding="utf-8").read()
+    assert "[mcp_servers.chack_tools]" in body
+    assert 'url = "http://127.0.0.1:8765/mcp"' in body
+    assert 'bearer_token_env_var = "CHACK_CODEX_MCP_BEARER_TOKEN"' in body
+    assert "required = true" in body
 
 
 def test_codex_followup_prompt_only_suppresses_system_once():
@@ -653,3 +729,31 @@ def _make_stub_copilot_executor():
         require_task_steps_manager_init_first=False,
         output_schema_json="",
     )
+
+
+def test_codex_prompt_cache_boundary_never_sends_an_empty_prompt():
+    """A prompt whose cache boundary is last would put nothing on codex's stdin.
+
+    `codex exec -` refuses that with "No prompt provided via stdin", so the run
+    dies before it starts. Better to lose the cache for one call than the call.
+    """
+    from chack_agent.backends.prompt_cache import PROMPT_CACHE_BREAKPOINT
+
+    executor = _make_stub_codex_executor()
+
+    composed = executor._compose_prompt(
+        f"### TASK\n\nRepository Path: /tmp/repo\n\n{PROMPT_CACHE_BREAKPOINT}\n\n"
+    )
+
+    assert composed.strip()
+    assert "Repository Path: /tmp/repo" in composed
+    assert PROMPT_CACHE_BREAKPOINT not in composed
+    assert executor._cacheable_developer_prompt == ""
+
+    # A boundary with real content after it still caches everything above it.
+    cached = executor._compose_prompt(
+        f"### TASK\n\nRepository Path: /tmp/repo\n\n{PROMPT_CACHE_BREAKPOINT}\n\nDo the analysis."
+    )
+
+    assert cached.strip() == "Do the analysis."
+    assert "Repository Path: /tmp/repo" in executor._cacheable_developer_prompt

@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Update pricing file
+      - name: Update pricing and thinking effort files
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: python scripts/update_openrouter_pricing.py
@@ -31,10 +31,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add chack_agent/config/pricing.yaml
+          git add chack_agent/config/pricing.yaml chack_agent/config/thinking_effort.yaml
           if git diff --cached --quiet; then
-            echo "No pricing changes detected"
+            echo "No pricing or thinking effort changes detected"
             exit 0
           fi
-          git commit -m "chore: update OpenRouter pricing"
+          git commit -m "chore: update OpenRouter pricing and thinking effort levels"
           git push origin HEAD:master

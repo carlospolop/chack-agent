@@ -3,12 +3,16 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from chack_tools.agents_toolset import AgentsToolset
+from chack_tools.agents_toolset import (
+    AgentsToolset,
+    _prepare_queue_runtime_config,
+)
 from chack_tools.config import ToolsConfig
 from chack_tools.researcher_queue_agent import (
     ResearcherQueue,
     ResearcherQueueAgentTool,
     _QueueWaiter,
+    _researcher_usage_for,
     get_researcher_queue_tool,
 )
 
@@ -51,6 +55,69 @@ def test_queue_default_wait_is_90_minutes():
     assert ToolsConfig().researcher_queue_max_wait_seconds == 5400
     assert ToolsConfig().researcher_queue_max_cost_usd == 5.0
     assert ToolsConfig().researcher_queue_required_researchers == []
+
+
+def test_queue_passes_its_runtime_cap_to_the_nested_administrator(monkeypatch):
+    import chack_tools.agents_toolset as agents_toolset_module
+
+    seen = {}
+
+    class FakeAdministrator:
+        def __init__(self, *args, **kwargs):
+            seen.update(kwargs)
+            self.max_turns = kwargs.get("max_turns", 30)
+
+    monkeypatch.setattr(
+        agents_toolset_module,
+        "ResearcherAdministratorAgentTool",
+        FakeAdministrator,
+    )
+    AgentsToolset(
+        ToolsConfig(
+            researcher_queue_enabled=True,
+            researcher_queue_researchers=["scientific"],
+            researcher_queue_max_runtime_minutes=180,
+        ),
+        model_provider="openai",
+        default_model="m",
+    )
+
+    assert seen["runtime_cap_minutes"] == 180
+
+
+
+def test_queue_runtime_forces_luna_max_over_legacy_aliases():
+    config = ToolsConfig(
+        researcher_queue_researchers=["scientific", "websearcher"],
+        researcher_queue_merge_model="OPENAI_CHEAP_BUT_QUALITY",
+        researcher_queue_agent={
+            "model": "OPENAI_CHEAP_BUT_QUALITY",
+            "merge_model": "OPENAI_BEST_QUALITY",
+            "thinking_effort": "low",
+            "researcher_models": {"scientific": "OPENAI_BEST_QUALITY"},
+            "researcher_thinking_efforts": {"scientific": "low"},
+        },
+        scientific_agent={"thinking_effort": "low"},
+        websearcher_agent={"thinking_effort": "low"},
+    )
+
+    queue_config, queue_agent_cfg, researchers, required, default_model = _prepare_queue_runtime_config(
+        config,
+        model_provider="openai",
+    )
+
+    assert default_model == "gpt-5.6-luna"
+    assert researchers == ["scientific", "websearcher"]
+    assert required == []
+    assert queue_agent_cfg["model"] == "gpt-5.6-luna"
+    assert queue_agent_cfg["merge_model"] == "gpt-5.6-luna"
+    assert queue_agent_cfg["thinking_effort"] == "max"
+    assert set(queue_agent_cfg["researcher_models"].values()) == {"gpt-5.6-luna"}
+    assert set(queue_agent_cfg["researcher_thinking_efforts"].values()) == {"max"}
+    assert queue_config.scientific_agent["thinking_effort"] == "max"
+    assert queue_config.websearcher_agent["thinking_effort"] == "max"
+    # The parent config is not mutated; non-queue agents may retain their own policy.
+    assert config.scientific_agent["thinking_effort"] == "low"
 
 
 def test_queue_create_returns_reusable_queue_folder():
@@ -523,6 +590,39 @@ def test_process_batch_aggregates_exact_private_researcher_usage(monkeypatch):
     }
 
 
+def test_researcher_usage_preserves_known_counts_when_one_admin_is_partial():
+    usage = _researcher_usage_for(
+        [
+            {
+                "researcher_call_counts": {"websearcher_research": 2, "news_media_research": 1},
+                "researcher_responses": [
+                    {"researcher_tool": "websearcher_research", "research_worked": True},
+                    {"researcher_tool": "news_media_research", "research_worked": True},
+                ],
+                "researcher_usage_complete": True,
+            },
+            {
+                "researcher_call_counts": {"chatgptxhigh": 1},
+                "researcher_failures": [
+                    {"researcher_tool": "chatgptxhigh", "failure_reason": "BROWSER_OUTPUT_TIMEOUT"}
+                ],
+                "researcher_usage_complete": False,
+            },
+        ]
+    )
+
+    assert usage["researcher_call_counts"] == {
+        "chatgptxhigh": 1,
+        "news_media_research": 1,
+        "websearcher_research": 2,
+    }
+    assert usage["total_researcher_calls"] == 4
+    assert usage["successful_researcher_tools"] == ["news_media_research", "websearcher_research"]
+    assert usage["failed_researcher_tools"] == ["chatgptxhigh"]
+    assert usage["researcher_failure_details"] == {"chatgptxhigh": "BROWSER_OUTPUT_TIMEOUT"}
+    assert usage["complete"] is False
+
+
 def test_process_batch_includes_evidence_paths_when_artifacts_are_preserved(monkeypatch):
     helper = _make_helper()
     monkeypatch.setattr(helper, "_merge_prompts", lambda prompts: [("merged with artifacts", [0])])
@@ -793,7 +893,8 @@ def test_run_admin_marks_required_researcher_failure_as_incomplete():
     assert out["research_worked"] is False
     assert out["required_researchers_satisfied"] is False
     assert out["researcher_usage_complete"] is False
-    assert out["conclusions"].startswith("Research failed:")
+    assert out["conclusions"] == "partial web-only conclusions"
+    assert "prochatgpt_researcher" in out["failure_reason"]
 
 
 def test_queue_research_context_uses_fixed_queue_limits_not_requester_context():

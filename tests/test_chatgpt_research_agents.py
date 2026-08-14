@@ -11,11 +11,14 @@ from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.chatgpt_research_agents import (
     CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS,
     CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS,
+    CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS,
+    _XHIGH_COMPAT_PROMPT_PREFIX,
     ChatGPTWebResearchAgentTool,
     ChatGPTWebResearchError,
     resolve_chatgpt_timeout_seconds,
 )
-from chack_tools.chatgpt_async_client import ChatGPTAsyncApiClient
+from chack_tools.chatgpt_async_client import ChatGPTAsyncApiClient, ChatGPTAsyncApiError
+from chack_tools.cancellation import reset_cancellation_event, set_cancellation_event
 from chack_tools.config import ToolsConfig
 from chack_tools.researcher_administrator_agent import (
     ResearcherAdministratorAgentTool,
@@ -31,21 +34,165 @@ def test_chatgpt_research_tools_register_only_when_enabled():
     off = AgentsToolset(ToolsConfig(), model_provider="openai", default_model="gpt-5-mini")
     assert "deepchatgpt_researcher" not in _tool_names(off.tools)
     assert "prochatgpt_researcher" not in _tool_names(off.tools)
+    assert "chatgptxhigh" not in _tool_names(off.tools)
 
     on = AgentsToolset(
-        ToolsConfig(deepchatgpt_enabled=True, prochatgpt_enabled=True),
+        ToolsConfig(
+            deepchatgpt_enabled=True,
+            prochatgpt_enabled=True,
+            chatgptxhigh_enabled=True,
+        ),
         model_provider="openai",
         default_model="gpt-5-mini",
     )
-    assert {"deepchatgpt_researcher", "prochatgpt_researcher"} <= _tool_names(on.tools)
+    assert {
+        "deepchatgpt_researcher",
+        "prochatgpt_researcher",
+        "chatgptxhigh",
+    } <= _tool_names(on.tools)
 
 
 def test_chatgpt_modes_have_distinct_total_output_deadlines():
     config = ToolsConfig()
     assert resolve_chatgpt_timeout_seconds(config, "pro") == 90 * 60
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 30 * 60
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 75 * 60
     assert CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS == 5400
+    assert CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS == 1800
     assert CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS == 4500
+
+
+class _ModeLocator:
+    def __init__(self, page, role, pattern, label=""):
+        self.page = page
+        self.role = role
+        self.pattern = pattern
+        self.label = label
+
+    def count(self):
+        if self.role == "button":
+            return 1 if self.pattern.search(self.page.selected) else 0
+        return 0
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self):
+        return True
+
+    def inner_text(self, timeout=0):
+        return self.page.selected
+
+    def get_attribute(self, name):
+        if name == "aria-label":
+            return self.page.selected
+        return None
+
+    def click(self, timeout=0):
+        assert timeout == 5000
+        self.page.menu_open = True
+        self.page.clicks.append(f"open:{self.page.selected}")
+
+
+class _TextLocator:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1 if self.page.menu_open else 0
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self):
+        return True
+
+    def inner_text(self, timeout=0):
+        return f"{self.page.selected}, {self.page.power + 1} of 5. Use Left and Right arrow keys to adjust power."
+
+
+class _SliderLocator:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1 if self.page.menu_open else 0
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self):
+        return True
+
+    def get_attribute(self, name):
+        return {
+            "aria-valuemin": "0",
+            "aria-valuemax": "4",
+            "aria-valuenow": str(self.page.power),
+        }.get(name)
+
+    def press(self, key, timeout=0):
+        assert timeout == 5000
+        if key == "ArrowRight":
+            self.page.power = min(4, self.page.power + 1)
+        elif key == "ArrowLeft":
+            self.page.power = max(0, self.page.power - 1)
+        self.page.selected = self.page.options[self.page.power]
+        self.page.clicks.append(f"power:{key}")
+
+
+class _EmptyLocator:
+    def count(self):
+        return 0
+
+
+class _ModePage:
+    options = ("Instant", "Medium", "High", "Extra High", "Pro")
+
+    def __init__(self, selected):
+        self.power = self.options.index(selected)
+        self.selected = selected
+        self.menu_open = False
+        self.clicks = []
+
+    def get_by_role(self, role, name=None):
+        if role == "button":
+            return _ModeLocator(self, role, name)
+        if role == "menu":
+            return _TextLocator(self)
+        return _EmptyLocator()
+
+    def get_by_text(self, _name):
+        return _EmptyLocator()
+
+    def locator(self, selector):
+        if "role='slider'" in selector:
+            return _SliderLocator(self)
+        if "composer-model-picker-slider-simple-view" in selector or "[role='menu']" in selector:
+            return _TextLocator(self)
+        return _EmptyLocator()
+
+    def wait_for_timeout(self, milliseconds):
+        assert milliseconds in {250, 500}
+
+
+@pytest.mark.parametrize(
+    ("mode", "starting", "expected", "expected_power"),
+    [
+        ("pro", "Extra High", "Pro", "5/5"),
+        ("pro", "Pro", "Pro", "5/5"),
+        ("xhigh", "Pro", "Extra High", "4/5"),
+        ("xhigh", "High", "Extra High", "4/5"),
+    ],
+)
+def test_current_power_picker_selects_distinct_pro_and_xhigh_levels(mode, starting, expected, expected_power):
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode=mode)
+    page = _ModePage(starting)
+    selected = helper._select_reasoning_mode(page)
+    assert page.selected == expected
+    assert selected["selected_effort"] == expected
+    assert selected["selected_power"] == expected_power
+    assert page.clicks[0] == f"open:{starting}"
 
 
 def test_chatgpt_research_tool_accepts_and_runs_five_prompts_in_parallel(monkeypatch):
@@ -76,30 +223,63 @@ def test_chatgpt_research_tool_accepts_and_runs_five_prompts_in_parallel(monkeyp
 def test_mode_specific_timeout_overrides_legacy_shared_timeout():
     config = ToolsConfig(
         chatgpt_pro_timeout_seconds=321,
+        chatgpt_xhigh_timeout_seconds=987,
         chatgpt_deep_timeout_seconds=654,
         chatgpt_research_timeout_seconds=999,
     )
     assert resolve_chatgpt_timeout_seconds(config, "pro") == 321
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 987
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 654
+
+
+def test_default_xhigh_timeout_and_async_wait_are_bounded():
+    config = ToolsConfig()
+    helper = ChatGPTWebResearchAgentTool(config, mode="xhigh")
+    assert config.chatgpt_xhigh_timeout_seconds is None
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 1800
+    assert helper._async_max_wait_seconds() == 2100
+
+
+def test_xhigh_async_wait_caps_stale_legacy_values_at_timeout_plus_grace():
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(
+            chatgpt_xhigh_timeout_seconds=1800,
+            chatgpt_async_max_wait_seconds=10800,
+            chatgpt_force_answer_grace_seconds=300,
+        ),
+        mode="xhigh",
+    )
+    assert helper._async_max_wait_seconds() == 2100
 
 
 def test_legacy_shared_timeout_remains_a_compatibility_fallback():
     config = ToolsConfig(chatgpt_research_timeout_seconds=777)
     assert resolve_chatgpt_timeout_seconds(config, "pro") == 777
+    assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 777
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 777
 
 
 def test_chatgpt_aliases_are_accepted_by_administrator():
     assert normalize_researcher_name("chatgpt-deep") == "deepchatgpt"
     assert normalize_researcher_name("prochatgpt_researcher") == "prochatgpt"
+    assert normalize_researcher_name("chatgpt_xhigh") == "chatgptxhigh"
+    assert normalize_researcher_name("chatgptxhigh") == "chatgptxhigh"
 
     helper = ResearcherAdministratorAgentTool(
-        ToolsConfig(deepchatgpt_enabled=True, prochatgpt_enabled=True),
+        ToolsConfig(
+            deepchatgpt_enabled=True,
+            prochatgpt_enabled=True,
+            chatgptxhigh_enabled=True,
+        ),
         model_provider="openai",
         fallback_model="gpt-5-mini",
-        researchers=["chatgpt_deep", "chatgpt_pro"],
+        researchers=["chatgpt_deep", "chatgpt_pro", "chatgpt_xhigh"],
     )
-    assert helper._enabled_researchers() == ["deepchatgpt", "prochatgpt"]
+    assert helper._enabled_researchers() == [
+        "deepchatgpt",
+        "prochatgpt",
+        "chatgptxhigh",
+    ]
 
 
 def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
@@ -230,6 +410,123 @@ def test_remote_backend_submits_polls_and_preserves_result(monkeypatch, tmp_path
     assert json.loads(run_state.read_text())["remote_job_id"].startswith("job_")
 
 
+def test_xhigh_remote_backend_submits_exact_mode_and_preserves_result(monkeypatch, tmp_path):
+    class FakeClient:
+        def submit(self, **kwargs):
+            assert kwargs["mode"] == "xhigh"
+            assert kwargs["output_timeout_seconds"] == 1800
+            return {
+                "job_id": "job_00000000-0000-0000-0000-000000000002",
+                "status": "QUEUED",
+            }
+
+        def status(self, _job_id):
+            return {"status": "SUCCEEDED", "stage": "extracted", "answer_chars": 300}
+
+        def result(self, _job_id):
+            return {
+                "status": "SUCCEEDED",
+                "result": "XHIGH_OK " + ("R" * 300),
+                "partial_result": "",
+                "metadata": {"mode": "xhigh", "terminal_state": "extracted"},
+            }
+
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_execution_backend="remote"),
+        mode="xhigh",
+    )
+    monkeypatch.setattr(helper, "_async_client", lambda: FakeClient())
+    answer, url, metadata = helper._remote_research(
+        "P" * 500,
+        run_state_path=tmp_path / "run.json",
+        partial_path=tmp_path / "partial.md",
+    )
+    assert answer.startswith("XHIGH_OK")
+    assert url == ""
+    assert metadata["mode"] == "xhigh"
+    assert helper.tool_name == "chatgptxhigh"
+
+
+def test_remote_backend_honors_async_cancellation(monkeypatch, tmp_path):
+    class FakeClient:
+        def __init__(self):
+            self.cancelled = []
+
+        def submit(self, **_kwargs):
+            return {"job_id": "job_cancelled"}
+
+        def cancel(self, job_id):
+            self.cancelled.append(job_id)
+            return {"status": "CANCELLED"}
+
+    client = FakeClient()
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(
+            chatgpt_execution_backend="remote",
+            chatgpt_async_api_url="https://broker.example",
+            chatgpt_async_api_secret="test-secret",
+        ),
+        mode="xhigh",
+    )
+    monkeypatch.setattr(helper, "_async_client", lambda: client)
+    event = threading.Event()
+    event.set()
+    token = set_cancellation_event(event)
+    try:
+        with pytest.raises(ChatGPTWebResearchError, match="cancelled"):
+            helper._remote_research(
+                "P" * 500,
+                run_state_path=tmp_path / "run.json",
+                partial_path=tmp_path / "partial.md",
+            )
+    finally:
+        reset_cancellation_event(token)
+    assert client.cancelled == ["job_cancelled"]
+
+
+def test_xhigh_remote_backend_rolls_through_a_stale_broker_without_losing_real_mode(monkeypatch, tmp_path):
+    class FakeClient:
+        def __init__(self):
+            self.submissions = []
+
+        def submit(self, **kwargs):
+            self.submissions.append(kwargs)
+            if len(self.submissions) == 1:
+                raise ChatGPTAsyncApiError(
+                    "old broker",
+                    status_code=400,
+                    error_code="invalid_mode",
+                )
+            return {"job_id": "job_00000000-0000-0000-0000-000000000003"}
+
+        def status(self, _job_id):
+            return {"status": "SUCCEEDED", "stage": "extracted", "answer_chars": 300}
+
+        def result(self, _job_id):
+            return {
+                "status": "SUCCEEDED",
+                "result": "XHIGH_COMPAT_OK " + ("R" * 300),
+                "metadata": {"mode": "xhigh", "terminal_state": "extracted"},
+            }
+
+    client = FakeClient()
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_execution_backend="remote"),
+        mode="xhigh",
+    )
+    monkeypatch.setattr(helper, "_async_client", lambda: client)
+    answer, _, metadata = helper._remote_research(
+        "P" * 500,
+        run_state_path=tmp_path / "run.json",
+        partial_path=tmp_path / "partial.md",
+    )
+    assert answer.startswith("XHIGH_COMPAT_OK")
+    assert metadata["mode"] == "xhigh"
+    assert [call["mode"] for call in client.submissions] == ["xhigh", "pro"]
+    assert client.submissions[1]["prompt"] == _XHIGH_COMPAT_PROMPT_PREFIX + ("P" * 500)
+    assert client.submissions[0]["idempotency_key"] == client.submissions[1]["idempotency_key"]
+
+
 def test_async_client_sends_bearer_secret_only_in_header():
     class Response:
         status_code = 202
@@ -269,6 +566,33 @@ def test_async_client_rejects_non_origin_or_credential_bearing_urls():
     ):
         with pytest.raises(ValueError, match="clean HTTPS origin"):
             ChatGPTAsyncApiClient(url, "known-secret")
+
+
+def test_deep_connector_discovery_accepts_current_hyphenated_target_url(monkeypatch):
+    target = {
+        "type": "iframe",
+        "id": "connector-target",
+        "parentId": "parent-target",
+        "url": "https://connector-openai-deep-research.web-sandbox.oaiusercontent.com/",
+        "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/connector-target",
+    }
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps([target]).encode()
+
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="deep")
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.urllib.request.urlopen",
+        lambda *_args, **_kwargs: Response(),
+    )
+    assert helper._deep_connector_target("parent-target", timeout_seconds=1) == target
 
 
 def test_deep_research_counter_noise_is_removed_without_touching_normal_numbered_answers():

@@ -21,12 +21,14 @@ from chack_tools.task_steps_manager_state import (
     current_run_label,
     current_session_id,
 )
+from chack_tools.native_planning import native_planning_prompt, sync_claude_native_task
 from chack_tools.telemetry import log_event
 from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
 from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
+from ..resume_compaction import ResumeCompactionResult
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
@@ -43,10 +45,52 @@ from .tool_payloads import (
     serialize_tools_payload,
     write_payload_to_file,
 )
+from .prompt_cache import prompt_cache_key, split_prompt_cache_breakpoint
 
 
 _LOGGER = logging.getLogger("chack.claude_code_backend")
 _MCP_STARTUP_STATUS_PATH_ENV = "CHACK_MCP_STARTUP_STATUS_PATH"
+
+
+def _claude_cli_json_schema(schema_json: str) -> str:
+    """Remove dialect declarations that Claude CLI cannot resolve.
+
+    Claude Code validates ``--json-schema`` with its bundled validator. Some
+    releases do not register the draft 2020-12 metaschema and reject an
+    otherwise supported schema solely because it contains ``$schema``. The
+    declaration does not define an output constraint, so remove it while
+    preserving every validation keyword. Keep invalid/non-object input intact
+    so the CLI still reports the original configuration error.
+    """
+
+    raw_schema = str(schema_json or "")
+    try:
+        schema = json.loads(raw_schema)
+    except (TypeError, json.JSONDecodeError):
+        return raw_schema
+    if not isinstance(schema, dict):
+        return raw_schema
+
+    changed = False
+
+    def strip_dialect(value: Any) -> Any:
+        nonlocal changed
+        if isinstance(value, dict):
+            normalized = {}
+            for key, item in value.items():
+                if key == "$schema":
+                    changed = True
+                    continue
+                normalized[key] = strip_dialect(item)
+            return normalized
+        if isinstance(value, list):
+            return [strip_dialect(item) for item in value]
+        return value
+
+    normalized = strip_dialect(schema)
+    if not changed:
+        return raw_schema
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
 
 
 def _seconds_until_claude_quota_reset(
@@ -183,6 +227,8 @@ class ToolAction:
 @dataclass
 class _RawResult:
     raw_responses: list[Any]
+    time_to_first_token_seconds: float | None = None
+    time_to_first_token_source: str = "unavailable"
 
 
 @dataclass
@@ -230,6 +276,8 @@ class ClaudeCodeExecutor:
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
+    _native_task_planning_backend: str = ""
+    _require_native_plan_first: bool = False
     _output_schema_name: str = "output_schema"
     _output_schema_strict: bool = True
     _max_context_tokens: int = 0
@@ -246,9 +294,18 @@ class ClaudeCodeExecutor:
     _thinking_effort: str = "high"
     _travel_model: str = ""
     _travel_max_turns: int = 50
+    _cacheable_system_prompt: str = ""
+    _prompt_cache_prefix_key: str = ""
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
         self._prompt_only_next_invocation = True
+
+    def _has_configured_tools(self) -> bool:
+        try:
+            names = json.loads(self._allowed_tools_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return True
+        return bool(names) if isinstance(names, list) else True
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
@@ -385,6 +442,36 @@ class ClaudeCodeExecutor:
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
 
+    def compact_for_resume(
+        self, focus_instructions: str = ""
+    ) -> ResumeCompactionResult:
+        result = ResumeCompactionResult(
+            backend="claude",
+            method="/compact",
+        )
+        if not self._claude_session_id:
+            return result
+        result.attempted = True
+        started_at = time.monotonic()
+        command = "/compact"
+        if str(focus_instructions or "").strip():
+            command += f" {focus_instructions.strip()}"
+        try:
+            output, _steps, raw_result = self._run_claude_once(
+                command,
+                resume_compaction=True,
+            )
+            result.raw_responses = list(raw_result.raw_responses or [])
+            normalized = str(output or "").strip().lower()
+            if normalized.startswith("error:") or "unknown slash command" in normalized:
+                result.error = str(output or "Claude /compact failed.")
+            else:
+                result.succeeded = True
+        except Exception as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        result.duration_seconds = max(0.0, time.monotonic() - started_at)
+        return result
+
     def _has_save_vulnerability_tool(self) -> bool:
         """Check if save_discovered_vulnerability is in the allowed tools."""
         try:
@@ -423,10 +510,18 @@ class ClaudeCodeExecutor:
     def _compose_prompt(self, user_input: str) -> str:
         if self._prompt_only_next_invocation:
             self._prompt_only_next_invocation = False
+            self._cacheable_system_prompt = ""
+            self._prompt_cache_prefix_key = ""
             return str(user_input or "")
         base = str(self._base_system_prompt or "").strip()
 
         policy_lines: list[str] = []
+        native_plan_line = native_planning_prompt(
+            self._native_task_planning_backend,
+            required_first=self._require_native_plan_first,
+        )
+        if native_plan_line:
+            policy_lines.append(native_plan_line)
         try:
             parsed_allowed_tools = json.loads(self._allowed_tools_json or "[]")
         except (TypeError, json.JSONDecodeError):
@@ -504,6 +599,31 @@ class ClaudeCodeExecutor:
         if schema_lines:
             schema_block = "\n" + "\n".join(schema_lines)
 
+        cache_parts = split_prompt_cache_breakpoint(user_input)
+        if cache_parts.has_breakpoint:
+            system_parts = [
+                part
+                for part in (
+                    base,
+                    policy_block,
+                    schema_block,
+                    cache_parts.stable_prefix,
+                )
+                if part.strip()
+            ]
+            self._cacheable_system_prompt = "\n".join(system_parts)
+            self._prompt_cache_prefix_key = prompt_cache_key(
+                self._cacheable_system_prompt
+            )
+            _LOGGER.info(
+                "Using cache-stable Claude system prefix: chars=%d key=%s",
+                len(self._cacheable_system_prompt),
+                self._prompt_cache_prefix_key,
+            )
+            return cache_parts.dynamic_suffix
+
+        self._cacheable_system_prompt = ""
+        self._prompt_cache_prefix_key = ""
         prompt_parts = [p for p in (base, user_input, policy_block, schema_block) if p.strip()]
         return "\n".join(prompt_parts)
 
@@ -563,7 +683,12 @@ class ClaudeCodeExecutor:
             )
         )
 
-    def _run_claude_once(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+    def _run_claude_once(
+        self,
+        prompt: str,
+        *,
+        resume_compaction: bool = False,
+    ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_claude_home_and_settings()
 
         startup_status_path = self._mcp_startup_status_path()
@@ -572,7 +697,10 @@ class ClaudeCodeExecutor:
         except FileNotFoundError:
             pass
 
-        command = self._build_command(prompt)
+        command = self._build_command(
+            prompt,
+            resume_compaction=resume_compaction,
+        )
         env = self._build_env()
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
         bash_vulns_dir = self._bash_vuln_fallback_dir(exec_cwd)
@@ -629,6 +757,7 @@ class ClaudeCodeExecutor:
         tool_calls: dict[str, tuple[str, Any]] = {}
         failed_mcp_servers: dict[str, str] = {}
         started_at = time.monotonic()
+        time_to_first_token_seconds: float | None = None
         return_seen = False
 
         try:
@@ -683,6 +812,14 @@ class ClaudeCodeExecutor:
 
                 event_type = str(event.get("type") or event.get("event") or "").strip().lower()
                 subtype = str(event.get("subtype") or "").strip().lower()
+                if (
+                    time_to_first_token_seconds is None
+                    and event_type != "system"
+                ):
+                    time_to_first_token_seconds = max(
+                        0.0,
+                        time.monotonic() - started_at,
+                    )
 
                 if event_type == "system" and subtype == "init":
                     session_id = str(event.get("session_id") or "").strip()
@@ -838,7 +975,11 @@ class ClaudeCodeExecutor:
         if bash_vuln_steps:
             steps.extend(bash_vuln_steps)
 
-        return response, steps, _RawResult(raw_responses=raw_responses)
+        return response, steps, _RawResult(
+            raw_responses=raw_responses,
+            time_to_first_token_seconds=time_to_first_token_seconds,
+            time_to_first_token_source="claude_first_response_event",
+        )
 
     def _mcp_startup_status_path(self) -> str:
         return os.path.join(str(self._claude_home or ""), "mcp_startup_status.json")
@@ -998,6 +1139,13 @@ class ClaudeCodeExecutor:
         steps.append((step, None))
         self._log_tool_called(step.tool, step.tool_input)
 
+        if self._native_task_planning_backend:
+            sync_claude_native_task(
+                step.tool,
+                tool_input,
+                status=status,
+                result=result_payload,
+            )
         if str(step.tool).strip() == "task_steps_manager":
             self._sync_task_steps_manager(tool_input, status)
 
@@ -1182,7 +1330,12 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             _LOGGER.info("Collected %d JSON-fallback vulnerabilities from %s", len(steps), vulns_dir)
         return steps
 
-    def _build_command(self, prompt: str) -> list[str]:
+    def _build_command(
+        self,
+        prompt: str,
+        *,
+        resume_compaction: bool = False,
+    ) -> list[str]:
         try:
             tools_cfg = json.loads(self._tools_config_json or "{}")
             _exec_enabled = bool(tools_cfg.get("exec_enabled", False))
@@ -1197,19 +1350,32 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "stream-json",
             "--allow-dangerously-skip-permissions",
             "--dangerously-skip-permissions",
-            "--mcp-config",
-            os.path.join(self._claude_home or os.getcwd(), "settings.json"),
-            "--strict-mcp-config",
         ]
+        has_cli_tools = self._has_configured_tools() or self._playwright_mcp_enabled()
+        if resume_compaction or not has_cli_tools:
+            args.extend(["--tools", ""])
+        else:
+            args.extend(
+                [
+                    "--mcp-config",
+                    os.path.join(
+                        self._claude_home or os.getcwd(),
+                        "settings.json",
+                    ),
+                    "--strict-mcp-config",
+                ]
+            )
         # ``--tools Bash`` is a built-in-tool allowlist in Claude Code. Passing
         # it hides every configured MCP tool, which made models attempt MCP
         # names as shell commands. Leave the normal tool registry intact when
         # execution is enabled; when it is disabled, deny only native Bash so
         # MCP tools remain discoverable and callable.
-        if not _exec_enabled:
+        if not resume_compaction and has_cli_tools and not _exec_enabled:
             args.extend(["--disallowedTools", "Bash"])
 
-        if self._max_turns > 0:
+        if resume_compaction:
+            args.extend(["--max-turns", "1"])
+        elif self._max_turns > 0:
             args.extend(["--max-turns", str(self._max_turns)])
         args.extend(
             [
@@ -1234,10 +1400,27 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             args.extend(["--betas", _CLAUDE_1M_CONTEXT_BETA])
         if self._model_name:
             args.extend(["--model", self._model_name])
+        if self._cacheable_system_prompt and not resume_compaction:
+            # Claude Code owns the provider cache_control blocks. Appended
+            # system content is part of its stable system cache layer, while
+            # the changing suffix continues to arrive as the user message.
+            system_prompt_flag = (
+                "--append-system-prompt"
+                if has_cli_tools
+                else "--system-prompt"
+            )
+            args.extend(
+                [system_prompt_flag, self._cacheable_system_prompt]
+            )
         if self._claude_session_id:
             args.extend(["--resume", self._claude_session_id])
-        if self._output_schema_json:
-            args.extend(["--json-schema", self._output_schema_json])
+        if self._output_schema_json and not resume_compaction:
+            args.extend(
+                [
+                    "--json-schema",
+                    _claude_cli_json_schema(self._output_schema_json),
+                ]
+            )
 
         return args
 
@@ -1798,10 +1981,18 @@ def build_executor(
         base_toolset = AgentsToolset(config.tools, **_build_toolset_kwargs())
         allowed_tool_names = _extract_tool_names(list(base_toolset.tools))
 
-    require_task_steps_manager_init_first = bool(
-        getattr(config.agent, "require_task_steps_manager_init_first", True)
-        and ("task_steps_manager" in allowed_tool_names)
+    native_task_planning_backend = (
+        "claude"
+        if bool(getattr(config.tools, "task_steps_manager_enabled", True))
+        else ""
     )
+    # Claude Code's TodoWrite/Task* tools produce better native plans. Explicit
+    # Chack tool overrides are translated into native-plan prompt guidance too.
+    allowed_tool_names = [
+        name for name in allowed_tool_names if name != "task_steps_manager"
+    ]
+
+    require_task_steps_manager_init_first = False
 
     configured_claude_path = os.environ.get("CLAUDE_CLI_PATH", "").strip() or "claude"
     claude_cli_path = shutil.which(configured_claude_path) or configured_claude_path
@@ -1859,6 +2050,11 @@ def build_executor(
             json.dumps(config.agent.output_schema_json, ensure_ascii=False)
             if getattr(config.agent, "output_schema_json", None)
             else ""
+        ),
+        _native_task_planning_backend=native_task_planning_backend,
+        _require_native_plan_first=bool(
+            native_task_planning_backend
+            and getattr(config.agent, "require_task_steps_manager_init_first", True)
         ),
         _output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
         _output_schema_strict=bool(getattr(config.agent, "output_schema_strict", True)),

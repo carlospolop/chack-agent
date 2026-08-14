@@ -83,6 +83,29 @@ def test_claude_command_forces_configured_output_schema() -> None:
     assert "Your response must strictly match the JSON schema." in prompt
 
 
+def test_claude_command_removes_unsupported_json_schema_dialect_declarations() -> None:
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "result": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "string",
+            }
+        },
+        "required": ["result"],
+    }
+    executor = _build_executor(json.dumps(schema))
+
+    command = executor._build_command(executor._compose_prompt("classify repository"))
+    cli_schema = json.loads(command[command.index("--json-schema") + 1])
+
+    assert "$schema" not in cli_schema
+    assert "$schema" not in cli_schema["properties"]["result"]
+    assert cli_schema["properties"]["result"]["type"] == "string"
+    assert cli_schema["required"] == ["result"]
+
+
 def test_claude_sends_large_prompt_via_stdin(monkeypatch, tmp_path) -> None:
     prompt = "large prompt\n" + ("x" * 500_000)
     captured: dict[str, object] = {}
@@ -132,6 +155,7 @@ def test_claude_command_omits_json_schema_when_unconfigured() -> None:
 def test_claude_exec_enabled_does_not_hide_mcp_tools() -> None:
     executor = _build_executor("")
     executor._tools_config_json = '{"exec_enabled": true}'
+    executor._allowed_tools_json = '["read_context"]'
 
     command = executor._build_command("use tools")
 
@@ -142,11 +166,22 @@ def test_claude_exec_enabled_does_not_hide_mcp_tools() -> None:
 def test_claude_exec_disabled_denies_bash_without_hiding_mcp_tools() -> None:
     executor = _build_executor("")
     executor._tools_config_json = '{"exec_enabled": false}'
+    executor._allowed_tools_json = '["read_context"]'
 
     command = executor._build_command("use tools")
 
     assert "--tools" not in command
     assert command[command.index("--disallowedTools") + 1] == "Bash"
+
+
+def test_claude_skips_all_tool_definitions_when_agent_has_no_tools() -> None:
+    executor = _build_executor("")
+    executor._allowed_tools_json = "[]"
+
+    command = executor._build_command("analyze embedded context")
+
+    assert command[command.index("--tools") + 1] == ""
+    assert "--mcp-config" not in command
 
 
 def test_claude_haiku_loads_mcp_tools_up_front(monkeypatch) -> None:
@@ -370,6 +405,25 @@ def test_claude_command_resumes_captured_session_for_followup_prompt() -> None:
     assert "--resume" in command
     assert command[command.index("--resume") + 1] == "11111111-2222-3333-4444-555555555555"
     assert prompt not in command
+
+
+def test_claude_cache_breakpoint_uses_system_prompt_without_tools() -> None:
+    from chack_agent.backends.prompt_cache import PROMPT_CACHE_BREAKPOINT
+
+    executor = _build_executor("")
+    executor._base_system_prompt = "Threat-model only the supplied functionality."
+    prompt = executor._compose_prompt(
+        f"stable repository context\n{PROMPT_CACHE_BREAKPOINT}\nchanging checks"
+    )
+    command = executor._build_command(prompt)
+
+    assert prompt == "\nchanging checks"
+    assert PROMPT_CACHE_BREAKPOINT not in prompt
+    assert "--system-prompt" in command
+    cached_prefix = command[command.index("--system-prompt") + 1]
+    assert "Threat-model only the supplied functionality." in cached_prefix
+    assert "stable repository context" in cached_prefix
+    assert "changing checks" not in cached_prefix
 
 
 def test_claude_followup_prompt_only_suppresses_system_once() -> None:

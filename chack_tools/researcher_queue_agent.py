@@ -122,14 +122,38 @@ def _researcher_usage_for(researches: Any) -> dict[str, Any]:
     """
     rows = [row for row in (researches or []) if isinstance(row, dict)]
     researcher_counts: dict[str, int] = {}
+    successful_tools: set[str] = set()
+    failed_tools: set[str] = set()
+    failure_details: dict[str, str] = {}
     complete = True
     for row in rows:
         raw_counts = row.get("researcher_call_counts")
-        if not isinstance(raw_counts, dict) or row.get("researcher_usage_complete") is False:
+        if not isinstance(raw_counts, dict):
             complete = False
             continue
+        # Preserve counts from a partially failed administrator. They are useful
+        # coverage telemetry to the host (for example websearcher/news_media may
+        # have produced evidence while XHigh timed out), while `complete=false`
+        # continues to prevent consumers from treating the ledger as full success.
+        if row.get("researcher_usage_complete") is False:
+            complete = False
         for name, count in _clean_researcher_call_counts(raw_counts).items():
             researcher_counts[name] = researcher_counts.get(name, 0) + count
+        for response in row.get("researcher_responses") or []:
+            if not isinstance(response, dict):
+                continue
+            tool_name = str(response.get("researcher_tool") or "").strip()
+            if tool_name and response.get("research_worked") is True:
+                successful_tools.add(tool_name)
+        for failure in row.get("researcher_failures") or []:
+            if not isinstance(failure, dict):
+                continue
+            tool_name = str(failure.get("researcher_tool") or "").strip()
+            if tool_name:
+                failed_tools.add(tool_name)
+                reason = " ".join(str(failure.get("failure_reason") or "").split())
+                if reason:
+                    failure_details[tool_name] = reason[:320]
     researcher_counts = dict(sorted(researcher_counts.items()))
     usage = {
         "administrator_calls": len(rows),
@@ -144,6 +168,12 @@ def _researcher_usage_for(researches: Any) -> dict[str, Any]:
     ]
     if administrator_call_ids:
         usage["administrator_call_ids"] = administrator_call_ids
+    if successful_tools:
+        usage["successful_researcher_tools"] = sorted(successful_tools)
+    if failed_tools:
+        usage["failed_researcher_tools"] = sorted(failed_tools)
+    if failure_details:
+        usage["researcher_failure_details"] = dict(sorted(failure_details.items()))
     return usage
 
 
@@ -962,8 +992,42 @@ class ResearcherQueueAgentTool:
             entry["researcher_usage_complete"] = (
                 isinstance(raw_counts, dict) and required_satisfied is not False
             )
+            for key in (
+                "researcher_responses",
+                "researcher_failures",
+                "required_researchers",
+                "required_researchers_satisfied",
+                "failure_reason",
+            ):
+                value = payload.get(key)
+                if value in (None, ""):
+                    continue
+                if key == "researcher_responses" and isinstance(value, list):
+                    value = [
+                        {
+                            "researcher_tool": str(row.get("researcher_tool") or "").strip(),
+                            "research_worked": row.get("research_worked") is True,
+                        }
+                        for row in value
+                        if isinstance(row, dict) and str(row.get("researcher_tool") or "").strip()
+                    ]
+                elif key == "researcher_failures" and isinstance(value, list):
+                    value = [
+                        {
+                            "researcher_tool": str(row.get("researcher_tool") or "").strip(),
+                            "status": str(row.get("status") or "").strip()[:80],
+                            "failure_reason": " ".join(str(row.get("failure_reason") or "").split())[:320],
+                        }
+                        for row in value
+                        if isinstance(row, dict) and str(row.get("researcher_tool") or "").strip()
+                    ]
+                entry[key] = value
             conclusions = str(payload.get("administrator_conclusions") or "").strip()
-            if conclusions and entry["research_worked"]:
+            # Keep a useful administrator synthesis even when one selected
+            # specialist failed. The host marks the queue as degraded from the
+            # preserved failure/response metadata instead of discarding all
+            # evidence before the verifier can inspect it.
+            if conclusions:
                 entry["conclusions"] = conclusions
                 evidence_path = str(payload.get("evidence_data_path") or "").strip()
                 if save_artifacts and evidence_path:

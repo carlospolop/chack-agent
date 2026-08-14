@@ -12,6 +12,8 @@ from chack_agent.config import (
     SessionConfig,
     ToolsConfig,
 )
+from chack_tools.run_lifecycle import record_mcp_tool_usage
+from chack_tools.task_steps_manager_state import current_session_id
 
 
 class _Executor:
@@ -27,6 +29,27 @@ class _Executor:
         if self.responses:
             return self.responses.pop(0)
         return {"output": "done", "intermediate_steps": [], "raw_result": None}
+
+
+class _McpBoundaryOnlyExecutor:
+    """Simulate provider output losing tool events after MCP executed them."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, payload, context=None):
+        del payload, context
+        self.calls += 1
+        task_session_id = current_session_id()
+        assert task_session_id
+        record_mcp_tool_usage("update_vulnerability", task_session_id)
+        record_mcp_tool_usage("update_vulnerability", task_session_id)
+        record_mcp_tool_usage("read_file", task_session_id)
+        return {
+            "output": "saved despite compacted provider transcript",
+            "intermediate_steps": [],
+            "raw_result": None,
+        }
 
 
 class _TestChack(Chack):
@@ -87,6 +110,30 @@ def test_required_tool_call_retries_until_tool_is_seen():
     assert result.tool_counts["chack_tools-update_vulnerability"] == 1
 
 
+def test_mcp_boundary_counts_survive_missing_provider_steps():
+    executor = _McpBoundaryOnlyExecutor()
+    agent = _TestChack(executor, _config())
+
+    result = agent.run(
+        "mcp-boundary-tool-telemetry",
+        "finish only after updating",
+        required_tool_names=["update_vulnerability"],
+        required_tool_call_attempts=1,
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert executor.calls == 1
+    assert result.output == "saved despite compacted provider transcript"
+    assert result.run1_steps == 0
+    assert result.run1_tools_used == 3
+    assert result.tools_used == 3
+    assert result.tool_counts == {
+        "update_vulnerability": 2,
+        "read_file": 1,
+    }
+
+
 def test_required_tool_call_returns_error_after_retry_budget():
     executor = _Executor([
         {"output": "I am done", "intermediate_steps": [], "raw_result": None},
@@ -106,6 +153,36 @@ def test_required_tool_call_returns_error_after_retry_budget():
     assert executor.calls == 2
     assert result.output == "ERROR: Agent finished without calling required tool(s): update_vulnerability"
     assert result.run1_output == result.output
+
+
+def test_backend_failure_does_not_resume_to_satisfy_tool_requirements():
+    failure = (
+        "ERROR: Codex exec failed (exit=1).\n"
+        "You've hit your usage limit. Try again next week."
+    )
+    executor = _Executor([
+        {"output": failure, "intermediate_steps": [], "raw_result": None},
+        {"output": "must not run", "intermediate_steps": [], "raw_result": None},
+    ])
+    agent = _TestChack(
+        executor,
+        _config(min_tools_used=2, missing_tools_reminders_max=3),
+    )
+
+    result = agent.run(
+        "terminal-backend-failure",
+        "inspect the repository",
+        required_tool_names=["update_vulnerability"],
+        required_tool_call_attempts=3,
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert executor.calls == 1
+    assert result.output == failure
+    assert result.error == "backend_failure"
+    assert result.prompt_tokens == 0
+    assert result.completion_tokens == 0
 
 
 def test_self_critique_reuses_same_executor_session_without_repeating_previous_answer():
@@ -132,7 +209,8 @@ def test_self_critique_reuses_same_executor_session_without_repeating_previous_a
     assert "original request" in executor.inputs[1]
     assert "Previous answer:" not in executor.inputs[1]
     assert "first answer" not in executor.inputs[1]
-    assert "Is this the best you can do?" in executor.inputs[1]
+    assert "Reuse the conversation context" in executor.inputs[1]
+    assert "targeted tool calls" in executor.inputs[1]
 
 
 def test_self_critique_is_disabled_by_default():

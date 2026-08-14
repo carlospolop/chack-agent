@@ -23,6 +23,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
+from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import copilot_thinking_effort, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -49,6 +50,8 @@ class ToolAction:
 @dataclass
 class _RawResult:
     raw_responses: list[Any]
+    time_to_first_token_seconds: float | None = None
+    time_to_first_token_source: str = "unavailable"
 
 
 class CopilotCliExecutor:
@@ -159,6 +162,33 @@ class CopilotCliExecutor:
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
 
+    def compact_for_resume(
+        self, focus_instructions: str = ""
+    ) -> ResumeCompactionResult:
+        result = ResumeCompactionResult(
+            backend="copilot",
+            method="/compact",
+        )
+        if not self._copilot_session_id:
+            return result
+        result.attempted = True
+        started_at = time.monotonic()
+        command = "/compact"
+        if str(focus_instructions or "").strip():
+            command += f" {focus_instructions.strip()}"
+        try:
+            output, _steps, raw_result = self._run_copilot(command)
+            result.raw_responses = list(raw_result.raw_responses or [])
+            normalized = str(output or "").strip().lower()
+            if normalized.startswith("error:") or "unknown command" in normalized:
+                result.error = str(output or "Copilot /compact failed.")
+            else:
+                result.succeeded = True
+        except Exception as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        result.duration_seconds = max(0.0, time.monotonic() - started_at)
+        return result
+
     def _compose_prompt(self, user_input: str) -> str:
         base = str(self._base_system_prompt or "").strip()
 
@@ -247,6 +277,7 @@ class CopilotCliExecutor:
         raw_responses: list[Any] = []
         tool_calls: dict[str, tuple[str, Any]] = {}
         started_at = time.monotonic()
+        time_to_first_token_seconds: float | None = None
 
         try:
             # Close stdin immediately — prompt is passed via -p flag
@@ -287,6 +318,19 @@ class CopilotCliExecutor:
                 data = event.get("data")
                 if not isinstance(data, dict):
                     data = {}
+                if (
+                    time_to_first_token_seconds is None
+                    and (
+                        event_type.startswith("assistant.reasoning")
+                        or event_type.startswith("assistant.message")
+                        or event_type == "tool.execution_start"
+                        or event_type == "result"
+                    )
+                ):
+                    time_to_first_token_seconds = max(
+                        0.0,
+                        time.monotonic() - started_at,
+                    )
 
                 # -- Session / setup events --------------------------------
 
@@ -434,7 +478,11 @@ class CopilotCliExecutor:
             if response:
                 response = response[-4000:]
 
-        return response, steps, _RawResult(raw_responses=raw_responses)
+        return response, steps, _RawResult(
+            raw_responses=raw_responses,
+            time_to_first_token_seconds=time_to_first_token_seconds,
+            time_to_first_token_source="copilot_first_response_event",
+        )
 
     # ------------------------------------------------------------------
     #  Command / environment building

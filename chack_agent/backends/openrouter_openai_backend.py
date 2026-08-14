@@ -30,6 +30,7 @@ from ..config import ChackConfig
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
+from ..resume_compaction import ResumeCompactionResult
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import openai_thinking_effort
 from chack_tools.agents_toolset import AgentsToolset
@@ -765,6 +766,7 @@ class AgentsExecutor:
         messages_after_keep: int = 0,
         triggered_by_messages: bool = False,
         triggered_by_tokens: bool = False,
+        focus_instructions: str = "",
     ) -> str:
         if not items:
             return previous_summary
@@ -775,6 +777,11 @@ class AgentsExecutor:
         source_chars = len(chunk)
         did_truncate = False
 
+        focus_block = (
+            f"\n\nCompaction focus:\n{focus_instructions.strip()}"
+            if str(focus_instructions or "").strip()
+            else ""
+        )
         if previous_summary:
             prompt = (
                 "You maintain compact conversation memory.\n"
@@ -783,11 +790,12 @@ class AgentsExecutor:
                 "New messages:\n"
                 f"{chunk}\n\n"
                 "Return an updated concise summary preserving key facts, decisions, and constraints."
+                f"{focus_block}"
             )
         else:
             prompt = (
                 "Summarize the following conversation history concisely, preserving key facts, decisions, and constraints:\n"
-                f"{chunk}"
+                f"{chunk}{focus_block}"
             )
 
         result = Runner.run_sync(
@@ -941,6 +949,39 @@ class AgentsExecutor:
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
+
+    def compact_for_resume(
+        self, focus_instructions: str = ""
+    ) -> ResumeCompactionResult:
+        result = ResumeCompactionResult(
+            backend="openrouter_openai",
+            method="summary_chain_rotation",
+        )
+        if not self._conversation:
+            return result
+        result.attempted = True
+        started_at = time.monotonic()
+        try:
+            messages_before = len(self._conversation)
+            self._summary = self._summarize_items(
+                self._summary,
+                list(self._conversation),
+                messages_before=messages_before,
+                messages_after_keep=0,
+                focus_instructions=focus_instructions,
+            )
+            if not self._summary:
+                raise RuntimeError("summary model returned an empty summary")
+            # A server-side chain would still carry the full uncompressed
+            # history. Rotate it so the next request starts from the summary.
+            self._previous_response_id = None
+            self._conversation_id = None
+            self._conversation = []
+            result.succeeded = True
+        except Exception as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        result.duration_seconds = max(0.0, time.monotonic() - started_at)
+        return result
 
 
 def _extract_tool_steps(items: list[Any]) -> list[tuple[ToolAction, Any]]:

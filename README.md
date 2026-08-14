@@ -8,6 +8,15 @@ A configurable OpenAI Agents SDK runtime with rich tools and sub‑agent researc
 pip install chack-agent
 ```
 
+> **Naxus consumers track `master`, not a pinned commit.** AISecurityAuditor,
+> Dynamic-AIgent, and the backend all install
+> `chack-agent @ git+https://github.com/carlospolop/chack-agent.git@master`, and
+> AISecurityAuditor and Dynamic-AIgent additionally reinstall from `master` at
+> the start of every run. A commit merged to `master` therefore reaches every
+> Naxus agent on its next build or scan, with no pin to advance and no window in
+> which to catch a regression downstream. Land breaking changes behind a config
+> flag and keep `master` green.
+
 ## Quick Start
 
 ```python
@@ -75,6 +84,18 @@ result = agent.run(
 )
 
 print(result.output)
+
+# Opt in only when this continuation should compact its existing native
+# conversation before receiving the new instruction.
+continued = agent.run(
+    session_id="investigation-001",
+    text="Find additional checks",
+    compact_before_resume=True,
+    resume_compaction_instructions=(
+        "Preserve the supplied context, existing checks, prior conclusions, "
+        "and unexplored hypotheses."
+    ),
+)
 ```
 
 You can also replace the default toolset entirely:
@@ -88,6 +109,28 @@ result = agent.run(
 ```
 
 `tools_append` and `tools_override` work with both in-process backends and CLI backends such as `codex`, `claude`, and `gemini`.
+
+By default, a tool override creates a fresh executor for that call. For
+continuation turns that must retain both conversation memory and the overridden
+tools, opt into a session-persistent executor:
+
+```python
+first = agent.run(
+    session_id="demo",
+    text="Inspect the repository.",
+    tools_override=[my_tool],
+    reuse_session_executor=True,
+)
+correction = agent.run(
+    session_id="demo",
+    text="Return the same conclusion in the required JSON shape.",
+    tools_override=[my_tool],
+    reuse_session_executor=True,
+)
+```
+
+The first executor configuration for that session is reused until
+`reset_session()` is called.
 
 You can also require specific tools to be called before a run is accepted as
 complete. This is useful when a workflow must persist a verdict or update a
@@ -189,6 +232,55 @@ LangGraph/OpenRouter request parameters. Where a backend has fewer levels,
 the nearest native level is used. Claude Code capabilities are detected from
 the installed CLI, and Gemini 2.5/3 receive their respective `thinkingBudget`
 or `thinkingLevel` control (never both).
+
+### Validation against the selected model
+
+Providers do not share one effort vocabulary, and levels differ between models
+of the same provider. Every configured value is therefore checked against the
+model it will actually run on — `agent.thinking_effort` against `agent.primary`,
+and each `<role>_thinking_effort` (or `tools.<role>_agent.thinking_effort`)
+against that role's own model. A mismatch fails when the config is loaded:
+
+```
+agent.thinking_effort='xhigh' is not supported by model 'claude-sonnet-4-6'.
+Supported values for this model: low, medium, high, max
+```
+
+The levels come from `chack_agent/config/thinking_effort.yaml`, which the
+Update OpenRouter Pricing workflow regenerates every night from OpenRouter's
+published `reasoning.supported_efforts` — the same run that refreshes
+`pricing.yaml`. Nothing has to be hand-maintained as models ship, and the list
+covers every vendor OpenRouter carries, not just the first-party ones:
+
+```yaml
+models:
+  claude-opus-4-6: [low, medium, high, max]
+  claude-opus-4-7: [low, medium, high, xhigh, max]
+  gpt-5-4: [none, low, medium, high, xhigh]
+  gpt-5-4-pro: [medium, high, xhigh]
+  gemini-3-flash-preview: [minimal, low, medium, high]
+```
+
+Keys are normalized, so the OpenRouter (`openrouter/anthropic/claude-opus-4.6`),
+API (`claude-opus-4-6`), Copilot (`claude-sonnet-4.6`) and Bedrock
+(`us.anthropic.claude-opus-4-6-v1:0`) spellings of one model all resolve to the
+same entry, as do dated releases like `claude-opus-4-5-20251101`.
+
+A small set of built-in family rules covers what OpenRouter does not publish:
+
+| Model | Supported levels |
+| --- | --- |
+| Gemini 2.5 Flash / Flash-Lite | every level (token-budget based, so no effort enum is published) |
+| Gemini 2.5 Pro | every level except `none` (thinking cannot be disabled) |
+| Gemini 3 Pro | `low`, `high` |
+| Claude Opus 4.5, Mythos Preview | `low`, `medium`, `high` / `+ max` |
+| o1 / o3 / o4 series | `low`, `medium`, `high` |
+| No effort control (Claude Haiku, Claude 3.x, GPT-4.x) | `high` only |
+
+`high` is the one level those last models still accept, because every provider
+defines it as "behave as if the parameter was never sent". A model neither
+source knows is not validated at all, so a brand new model works before either
+list catches up.
 
 MCP-launched researchers receive the same per-role settings through the
 serialized tools configuration. A standalone/shared MCP server can set
@@ -339,7 +431,25 @@ Researchers listed in `researcher_administrator_researchers` are force‑enabled
 
 ### 3. Memory Architecture
 * **Short‑Term Memory**: Compaction is driven by `max_context_tokens` and `compaction_threshold_ratio`.
+  - `compaction_threshold_ratio` is only the trigger point. For example,
+    `max_context_tokens: 250000` with `compaction_threshold_ratio: 0.75`
+    starts compaction at 187,500 active input tokens. It does **not** retain
+    75% of the old conversation.
+  - After the trigger, native backends replace old history with their compact
+    summary. Summary-based backends retain the generated summary (bounded by
+    `memory_summary_max_chars`) plus only the newest
+    `memory_reset_to_messages`, so the resulting context is much smaller than
+    the trigger context.
   - `memory_summary_max_chars` controls how long the running memory summary can be.
+  - `run(..., compact_before_resume=True)` explicitly invokes the selected
+    backend's compactor before that individual continuation. It is off by
+    default and is not a session-wide setting: an ordinary resume never
+    implicitly requests it.
+  - `resume_compaction_instructions="..."` optionally tells compaction which
+    prior conclusions, state, or unresolved work must survive.
+  - `RunResult` reports whether compaction was attempted/succeeded, its backend
+    method and duration, and any error. Backend-reported compaction tokens and
+    cost are included in the run totals.
 * **Long‑Term Memory**: File-based persistence. The agent reads/writes summaries to a `long_term_memory_dir`.
 
 ## Configuration & Environment Variables
@@ -366,7 +476,7 @@ Most tools require API keys. Provide them via env vars (recommended) or your own
 | `FORUMSCOUT_BASE_URL` | ForumScout API base URL | Optional override |
 | `CHACK_AWS_PROFILES` | Base64 of an AWS credentials file | AWS profile injection |
 
-### Remote ChatGPT Pro / Deep worker
+### Remote ChatGPT Pro / Extra High / Deep worker
 
 Cloud applications do not need Chrome and must not try to reach a workstation directly. Configure them with the
 authenticated asynchronous broker's HTTPS origin and its client-only secret:
@@ -376,7 +486,7 @@ export CHACK_CHATGPT_ASYNC_API_URL="https://broker.example.com"
 export CHACK_CHATGPT_ASYNC_API_SECRET="<client bearer secret>"
 ```
 
-When either broker variable is present, the Pro and Deep researcher tools use only the broker. Incomplete broker
+When either broker variable is present, the Pro, Extra High, and Deep researcher tools use only the broker. Incomplete broker
 configuration is a hard failure; it never falls back to a local browser.
 
 Run the separate outbound worker on the PC that has the authenticated ChatGPT Chrome profile. Give this process the

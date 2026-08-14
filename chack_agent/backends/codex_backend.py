@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
 import re
+import selectors
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import base64
+import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Optional
+
+import requests
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import (
@@ -20,13 +26,15 @@ from chack_tools.task_steps_manager_state import (
     current_run_label,
     current_session_id,
 )
+from chack_tools.native_planning import native_planning_prompt, sync_native_plan_snapshot
 from chack_tools.telemetry import log_event
 from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
 from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
-from ..live_cost_state import report_live_usage
+from ..live_cost_state import LiveCostLimitExceeded, report_live_usage
 from ..openrouter_routing import get_openrouter_route
+from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -41,9 +49,82 @@ from .tool_payloads import (
     serialize_tools_payload,
     write_payload_to_file,
 )
+from .prompt_cache import (
+    openai_model_requires_explicit_prompt_cache,
+    prompt_cache_key,
+    split_prompt_cache_breakpoint,
+)
 
 
 _LOGGER = logging.getLogger("chack.codex_backend")
+_DIRECT_CACHE_SESSION_NAMESPACE = uuid.UUID("d74fb76e-9f4c-4ffc-97bb-74ef0e4cc4b8")
+_DIRECT_CACHE_INSTRUCTIONS = (
+    "You are an automated Chack agent. Follow the developer and user messages "
+    "exactly and return only the requested result."
+)
+
+
+def _codex_tool_instructions(
+    *,
+    sub_action: str,
+    shared_mcp_url: str,
+    has_configured_tools: bool,
+) -> str:
+    """Return system instructions consistent with the effective tool surface.
+
+    FactChecker verifiers intentionally pass no local/picklable tools because their
+    board and research tools live behind the shared MCP URL. That URL must therefore
+    count as a real tool surface; otherwise the old no-tools instruction tells Codex
+    not to call the very MCP tools it just discovered.
+    """
+    has_shared_mcp_tools = bool(
+        str(sub_action or "").strip() == "verifier" and str(shared_mcp_url or "").strip()
+    )
+    if has_shared_mcp_tools:
+        return (
+            "CRITICAL: You have explicit tools exposed through the shared MCP server. "
+            "Use those MCP tools to perform the task and obey the tool workflow in the "
+            "user/system prompt. Do not answer from the prompt alone when a tool is "
+            "required; make the actual MCP tool call. Do not call MCP resource browser "
+            "helpers such as `list_mcp_resources`, `list_mcp_resource_templates`, or "
+            "`read_mcp_resource` unless the task explicitly requires them."
+        )
+    if has_configured_tools:
+        return (
+            "CRITICAL: You do NOT have a tool called `report_intent`. "
+            "It does not exist. Never attempt to call it. "
+            "To report or save a vulnerability finding you MUST call the MCP tool "
+            "`chack_tools-save_discovered_vulnerability`. "
+            "Any call to `report_intent` will silently discard your finding. "
+            "Do not call MCP resource browser helpers such as `list_mcp_resources`, "
+            "`list_mcp_resource_templates`, or `read_mcp_resource`; use only the "
+            "explicit task tools listed in the prompt."
+        )
+    return (
+        "This is a no-tools task. Do not call or request tools; complete it "
+        "solely from the context embedded in the prompt."
+    )
+
+
+
+def _cleanup_isolated_codex_home(codex_home: str, home_base: str) -> bool:
+    """Remove one isolated Codex home without ever deleting its parent or an outside path."""
+    raw_target = str(codex_home or "").strip()
+    raw_base = str(home_base or "").strip()
+    if not raw_target or not raw_base:
+        return False
+    target = os.path.realpath(os.path.abspath(os.path.expanduser(raw_target)))
+    base = os.path.realpath(os.path.abspath(os.path.expanduser(raw_base)))
+    try:
+        if target == base or os.path.commonpath([target, base]) != base:
+            return False
+    except ValueError:
+        return False
+    if not os.path.lexists(target):
+        return True
+    shutil.rmtree(target)
+    return True
+
 
 # Per-run codex process timeout, selected by the agent's sub_action so different roles
 # (verifiers vs research administrators vs sub-researchers) get different wall-clock caps.
@@ -157,9 +238,37 @@ def _log_timestamp() -> str:
 
 def _preview_text(value: Any, *, max_chars: int = 2000) -> str:
     text = str(value or "").strip()
-    if len(text) <= max_chars:
+    limit = max(1, int(max_chars))
+    if len(text) <= limit:
         return text
-    return text[:max_chars] + "...[truncated]"
+    # Codex emits a JSON event stream. Startup/context events are at the
+    # beginning, while the provider's actionable terminal error is normally
+    # at the end. Preserve both so failure telemetry remains classifiable.
+    marker = "...[truncated middle]..."
+    if limit <= len(marker) + 2:
+        return text[-limit:]
+    available = limit - len(marker)
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return text[:head_chars] + marker + text[-tail_chars:]
+
+
+def _readline_when_ready(stream: Any, wait_seconds: float) -> Optional[str]:
+    """Read one subprocess line only when its pipe is ready.
+
+    ``TextIO.readline()`` blocks indefinitely when a child stays alive without
+    producing output. Waiting on the pipe first lets the caller continue
+    enforcing execution deadlines and cancellation while the provider is
+    silent.
+    """
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(stream, selectors.EVENT_READ)
+        if not selector.select(timeout=max(0.0, float(wait_seconds))):
+            return None
+        return stream.readline()
+    finally:
+        selector.close()
 
 
 def _resolve_codex_exec_cwd(runtime_env: Optional[dict[str, str]] = None) -> str:
@@ -172,6 +281,210 @@ def _resolve_codex_exec_cwd(runtime_env: Optional[dict[str, str]] = None) -> str
     return os.getcwd()
 
 
+_ROLLOUT_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+)
+
+
+class _RolloutUsageTailer:
+    """Report token usage while a Codex turn is still running.
+
+    `codex exec --json` carries usage only on `turn.completed`, and one exec
+    invocation is one turn however many model rounds it takes. So a 45-minute
+    turn looks free for 45 minutes: the cost half of the budget advisory can
+    never fire, `check_budget_status` answers $0.00, and the live spend ceiling
+    is unenforceable until the turn it was meant to bound has already ended.
+
+    Codex does append a `token_count` event carrying cumulative usage to its
+    rollout file after every model round, so that is what this follows. Only
+    the growth since the last report is handed to `report_live_usage`, and the
+    caller settles the difference against the authoritative `turn.completed`
+    totals, so the accounting is exact even if the tail missed rounds.
+
+    Everything here fails soft: if the rollout cannot be found, read, or parsed,
+    the run behaves exactly as it did before and usage lands once, at the end.
+    """
+
+    _ATTACH_TIMEOUT_SECONDS = 120.0
+    # `poll` runs once per line of Codex output, and locating the rollout means
+    # a recursive glob of the sessions tree. Codex normally has the file open by
+    # the time the thread is announced, so this only bounds the case where it
+    # never appears: a retry per output line for two minutes would spend real
+    # CPU searching for a file that is not there.
+    _LOCATE_RETRY_SECONDS = 0.5
+
+    def __init__(self, codex_home: str, model_name: str) -> None:
+        home = str(codex_home or "").strip()
+        self._sessions_dir = os.path.join(home, "sessions") if home else ""
+        self._model_name = str(model_name or "")
+        self._thread_id = ""
+        self._path: Optional[str] = None
+        self._offset = 0
+        self._partial = ""
+        self._baseline: dict[str, int] = {}
+        self._reported = {field: 0 for field in _ROLLOUT_USAGE_FIELDS}
+        self._give_up_after = 0.0
+        self._next_locate_at = 0.0
+        self._disabled = not self._sessions_dir
+
+    def attach(self, thread_id: str) -> None:
+        """Start following the rollout of `thread_id` from its current end."""
+        identifier = str(thread_id or "").strip()
+        if self._disabled or not identifier or identifier == self._thread_id:
+            return
+        self._thread_id = identifier
+        self._path = None
+        self._offset = 0
+        self._partial = ""
+        self._baseline = {}
+        self._give_up_after = time.monotonic() + self._ATTACH_TIMEOUT_SECONDS
+        self._next_locate_at = 0.0
+        # Snapshot the baseline now rather than on the first poll: a round that
+        # completed in between would otherwise be read as pre-existing usage and
+        # never reported. Codex usually has the rollout open by `thread.started`;
+        # when it does not, the retry in `poll` picks it up.
+        try:
+            self._locate()
+        except Exception:
+            self._disabled = True
+
+    def poll(self) -> None:
+        """Report whatever rounds have completed since the last call.
+
+        Raises only `LiveCostLimitExceeded`, which is the live spend ceiling
+        firing and must reach the caller so it can stop the Codex process.
+        """
+        if self._disabled or not self._thread_id:
+            return
+        try:
+            if self._path is None:
+                now = time.monotonic()
+                if now < self._next_locate_at:
+                    return
+                self._next_locate_at = now + self._LOCATE_RETRY_SECONDS
+                if not self._locate():
+                    return
+            totals = self._read_new_totals()
+        except LiveCostLimitExceeded:
+            raise
+        except Exception:
+            # A rollout we cannot follow is not worth failing a run over.
+            self._disabled = True
+            return
+        if not totals:
+            return
+        deltas = {
+            field: max(
+                0,
+                int(totals.get(field, 0) or 0)
+                - self._baseline.get(field, 0)
+                - self._reported[field],
+            )
+            for field in _ROLLOUT_USAGE_FIELDS
+        }
+        if not any(deltas.values()):
+            return
+        for field, value in deltas.items():
+            self._reported[field] += value
+        report_live_usage(
+            self._model_name,
+            prompt_tokens=deltas["input_tokens"],
+            completion_tokens=deltas["output_tokens"],
+            cached_prompt_tokens=deltas["cached_input_tokens"],
+            cache_write_tokens=deltas["cache_write_input_tokens"],
+        )
+
+    def settle(self, turn_usage: dict[str, Any]) -> dict[str, int]:
+        """Return the part of the turn's real totals not yet reported.
+
+        Recording the settlement matters: the rollout keeps its own copy of
+        these tokens, so a later poll would otherwise count them a second time.
+        The tail is done once the turn has reported its own totals.
+        """
+        details = turn_usage.get("input_tokens_details")
+        details = details if isinstance(details, dict) else {}
+        actual = {
+            "input_tokens": int(turn_usage.get("input_tokens", 0) or 0),
+            "cached_input_tokens": int(details.get("cached_tokens", 0) or 0),
+            "cache_write_input_tokens": int(details.get("cache_write_tokens", 0) or 0),
+            "output_tokens": int(turn_usage.get("output_tokens", 0) or 0),
+        }
+        remaining = {
+            field: max(0, actual[field] - self._reported[field])
+            for field in _ROLLOUT_USAGE_FIELDS
+        }
+        for field, value in remaining.items():
+            self._reported[field] += value
+        self._disabled = True
+        return remaining
+
+    def _locate(self) -> bool:
+        if time.monotonic() > self._give_up_after:
+            self._disabled = True
+            return False
+        matches = glob.glob(
+            os.path.join(self._sessions_dir, "**", f"*{self._thread_id}.jsonl"),
+            recursive=True,
+        )
+        if not matches:
+            # Codex creates the rollout moments after it announces the thread.
+            return False
+        path = max(matches, key=os.path.getmtime)
+        # A resumed thread appends to the rollout the previous invocations
+        # already wrote, and their tokens are counted in `estimated_cost_spent`
+        # by now. Anything already on disk is the baseline, not new spend.
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            existing = handle.read()
+            self._offset = handle.tell()
+        totals = self._last_totals(existing.splitlines())
+        self._baseline = totals or {field: 0 for field in _ROLLOUT_USAGE_FIELDS}
+        self._path = path
+        return True
+
+    def _read_new_totals(self) -> dict[str, int]:
+        assert self._path is not None
+        if os.path.getsize(self._path) <= self._offset:
+            return {}
+        with open(self._path, "r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(self._offset)
+            chunk = handle.read()
+            self._offset = handle.tell()
+        text = self._partial + chunk
+        lines = text.split("\n")
+        # The tail of a file being appended to is usually half a line.
+        self._partial = lines.pop() if lines else ""
+        return self._last_totals(lines)
+
+    @staticmethod
+    def _last_totals(lines: list[str]) -> dict[str, int]:
+        latest: dict[str, int] = {}
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or "token_count" not in stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+            except (TypeError, ValueError):
+                continue
+            payload = event.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
+            if str(payload.get("type", "") or "") != "token_count":
+                continue
+            info = payload.get("info")
+            info = info if isinstance(info, dict) else {}
+            usage = info.get("total_token_usage")
+            if not isinstance(usage, dict):
+                continue
+            latest = {
+                field: max(0, int(usage.get(field, 0) or 0))
+                for field in _ROLLOUT_USAGE_FIELDS
+            }
+        return latest
+
+
 @dataclass
 class ToolAction:
     tool: str
@@ -181,6 +494,8 @@ class ToolAction:
 @dataclass
 class _RawResult:
     raw_responses: list[Any]
+    time_to_first_token_seconds: float | None = None
+    time_to_first_token_source: str = "unavailable"
 
 
 @dataclass
@@ -234,6 +549,9 @@ class CodexExecutor:
     _max_tools_used: int
     _require_task_steps_manager_init_first: bool
     _output_schema_json: str
+    _native_task_planning_backend: str = ""
+    _require_native_plan_first: bool = False
+    _output_schema_strict: bool = True
     _max_context_tokens: int = 0
     _compaction_threshold_ratio: float = 0.50
     _uses_openrouter_route: bool = False
@@ -253,6 +571,8 @@ class CodexExecutor:
     _travel_model: str = ""
     _travel_max_turns: int = 50
     _runtime_env_json: str = "{}"
+    _cacheable_developer_prompt: str = ""
+    _prompt_cache_prefix_key: str = ""
 
     def _runtime_env(self) -> dict[str, str]:
         try:
@@ -266,6 +586,13 @@ class CodexExecutor:
     def _runtime_env_value(self, name: str, default: str = "") -> str:
         runtime_env = self._runtime_env()
         return str(runtime_env.get(name, os.environ.get(name, default)) or default)
+
+    def _has_configured_tools(self) -> bool:
+        try:
+            names = json.loads(self._allowed_tools_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return True
+        return bool(names) if isinstance(names, list) else True
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
         self._prompt_only_next_invocation = True
@@ -317,12 +644,279 @@ class CodexExecutor:
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
 
+    def compact_for_resume(
+        self, focus_instructions: str = ""
+    ) -> ResumeCompactionResult:
+        result = ResumeCompactionResult(
+            backend="codex",
+            method="thread/compact/start",
+        )
+        if not self._thread_id:
+            return result
+        result.attempted = True
+        started_at = time.monotonic()
+        try:
+            result.raw_responses = self._compact_codex_thread(
+                focus_instructions
+            )
+            result.succeeded = True
+        except Exception as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+        result.duration_seconds = max(0.0, time.monotonic() - started_at)
+        return result
+
+    def _compact_codex_thread(
+        self, focus_instructions: str
+    ) -> list[Any]:
+        self._ensure_codex_home_and_config()
+        command = [self._codex_path, "app-server", "--stdio"]
+        env = self._build_env()
+        self._write_codex_explicit_mcp_env(env)
+        exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
+        timeout_seconds = max(
+            30,
+            int(
+                self._runtime_env_value(
+                    "CHACK_CODEX_COMPACTION_TIMEOUT_SECONDS",
+                    "300",
+                )
+                or "300"
+            ),
+        )
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=env,
+            cwd=exec_cwd or None,
+            start_new_session=True,
+        )
+        cancel_registration = register_process(process, _terminate_process_tree)
+        deadline = time.monotonic() + timeout_seconds
+        selector = selectors.DefaultSelector()
+        compaction_usage: dict[str, Any] = {}
+        if process.stdout is None or process.stdin is None:
+            _terminate_process_tree(process)
+            unregister_process(cancel_registration)
+            raise RuntimeError("Codex app-server did not expose stdio pipes")
+        selector.register(process.stdout, selectors.EVENT_READ)
+
+        def _send(message: dict[str, Any]) -> None:
+            if process.stdin is None:
+                raise RuntimeError("Codex app-server stdin closed unexpectedly")
+            process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            process.stdin.flush()
+
+        def _wait_for(
+            predicate,
+            *,
+            description: str,
+        ) -> dict[str, Any]:
+            while time.monotonic() < deadline:
+                if cancellation_requested():
+                    raise RuntimeError("Codex compaction cancelled")
+                if process.poll() is not None:
+                    stderr = (
+                        process.stderr.read()
+                        if process.stderr is not None
+                        else ""
+                    )
+                    raise RuntimeError(
+                        f"Codex app-server exited while waiting for {description}: "
+                        f"{str(stderr or '').strip()[-1000:]}"
+                    )
+                remaining = max(0.0, deadline - time.monotonic())
+                events = selector.select(timeout=min(1.0, remaining))
+                if not events:
+                    continue
+                line = process.stdout.readline()
+                if not line:
+                    continue
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if (
+                    str(message.get("method") or "")
+                    == "thread/tokenUsage/updated"
+                ):
+                    params = (
+                        message.get("params")
+                        if isinstance(message.get("params"), dict)
+                        else {}
+                    )
+                    token_usage = (
+                        params.get("tokenUsage")
+                        if isinstance(params.get("tokenUsage"), dict)
+                        else {}
+                    )
+                    last = (
+                        token_usage.get("last")
+                        if isinstance(token_usage.get("last"), dict)
+                        else {}
+                    )
+                    if last:
+                        compaction_usage.clear()
+                        compaction_usage.update(
+                            {
+                                "input_tokens": int(
+                                    last.get("inputTokens", 0) or 0
+                                ),
+                                "output_tokens": int(
+                                    last.get("outputTokens", 0) or 0
+                                ),
+                                "input_tokens_details": {
+                                    "cached_tokens": int(
+                                        last.get(
+                                            "cachedInputTokens",
+                                            0,
+                                        )
+                                        or 0
+                                    ),
+                                    "cache_write_tokens": 0,
+                                },
+                            }
+                        )
+                if "error" in message and "id" in message:
+                    error = message.get("error")
+                    if isinstance(error, dict):
+                        error = error.get("message") or error
+                    raise RuntimeError(
+                        f"Codex app-server request failed: {error}"
+                    )
+                if predicate(message):
+                    return message
+            raise TimeoutError(
+                f"Codex app-server timed out waiting for {description}"
+            )
+
+        try:
+            _send(
+                {
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {
+                            "name": "chack-agent",
+                            "title": "Chack pre-resume compactor",
+                            "version": "1",
+                        },
+                        "capabilities": {"experimentalApi": True},
+                    },
+                }
+            )
+            _wait_for(
+                lambda message: message.get("id") == 1
+                and "result" in message,
+                description="initialize response",
+            )
+            _send({"method": "initialized"})
+            compact_prompt = (
+                "Create a detailed continuation summary of this conversation. "
+                "The summary will replace the prior turns and must let the next "
+                "agent continue without rereading them."
+            )
+            if str(focus_instructions or "").strip():
+                compact_prompt += "\n\n" + focus_instructions.strip()
+            _send(
+                {
+                    "id": 2,
+                    "method": "thread/resume",
+                    "params": {
+                        "threadId": self._thread_id,
+                        "model": self._model_name,
+                        "config": {"compact_prompt": compact_prompt},
+                    },
+                }
+            )
+            _wait_for(
+                lambda message: message.get("id") == 2
+                and "result" in message,
+                description="thread resume response",
+            )
+            _send(
+                {
+                    "id": 3,
+                    "method": "thread/compact/start",
+                    "params": {"threadId": self._thread_id},
+                }
+            )
+            _wait_for(
+                lambda message: message.get("id") == 3
+                and "result" in message,
+                description="compaction start response",
+            )
+
+            def _is_compaction_complete(message: dict[str, Any]) -> bool:
+                method = str(message.get("method") or "")
+                params = (
+                    message.get("params")
+                    if isinstance(message.get("params"), dict)
+                    else {}
+                )
+                item = (
+                    params.get("item")
+                    if isinstance(params.get("item"), dict)
+                    else {}
+                )
+                item_type = str(item.get("type") or "")
+                return (
+                    method == "item/completed"
+                    and item_type == "contextCompaction"
+                ) or method == "thread/compacted"
+
+            _wait_for(
+                _is_compaction_complete,
+                description="compaction completion",
+            )
+            if compaction_usage:
+                report_live_usage(
+                    self._model_name,
+                    prompt_tokens=int(
+                        compaction_usage.get("input_tokens", 0) or 0
+                    ),
+                    completion_tokens=int(
+                        compaction_usage.get("output_tokens", 0) or 0
+                    ),
+                    cached_prompt_tokens=int(
+                        compaction_usage.get(
+                            "input_tokens_details",
+                            {},
+                        ).get("cached_tokens", 0)
+                        or 0
+                    ),
+                    cache_write_tokens=0,
+                )
+                return [{"usage": dict(compaction_usage)}]
+            return []
+        finally:
+            selector.close()
+            try:
+                process.stdin.close()
+            except Exception:
+                pass
+            _terminate_process_tree(process)
+            unregister_process(cancel_registration)
+
     def _compose_prompt(self, user_input: str) -> str:
         if self._prompt_only_next_invocation:
             self._prompt_only_next_invocation = False
+            self._cacheable_developer_prompt = ""
+            self._prompt_cache_prefix_key = ""
             return str(user_input or "")
         base = str(self._base_system_prompt or "").strip()
         policy_lines: list[str] = []
+        native_plan_line = native_planning_prompt(
+            self._native_task_planning_backend,
+            required_first=self._require_native_plan_first,
+        )
+        if native_plan_line:
+            policy_lines.append(native_plan_line)
         if self._require_task_steps_manager_init_first:
             policy_lines.append(
                 "- First, call task_steps_manager with action=init before any other tool call."
@@ -339,6 +933,33 @@ class CodexExecutor:
         if policy_lines:
             policy_block = "\n\n### TOOL USAGE POLICY\n" + "\n".join(policy_lines)
 
+        cache_parts = split_prompt_cache_breakpoint(user_input)
+        if cache_parts.has_breakpoint and not cache_parts.dynamic_suffix.strip():
+            # Everything the caller wrote sits above the boundary. Honouring it
+            # would send an empty prompt on stdin, and `codex exec -` rejects that
+            # outright ("No prompt provided via stdin"), so this run goes uncached
+            # rather than not running at all.
+            user_input = cache_parts.stable_prefix
+            cache_parts = split_prompt_cache_breakpoint(user_input)
+        if cache_parts.has_breakpoint:
+            developer_parts = [
+                part
+                for part in (base, policy_block, cache_parts.stable_prefix)
+                if part.strip()
+            ]
+            self._cacheable_developer_prompt = "\n".join(developer_parts)
+            self._prompt_cache_prefix_key = prompt_cache_key(
+                self._cacheable_developer_prompt
+            )
+            _LOGGER.info(
+                "Using cache-stable Codex developer prefix: chars=%d key=%s",
+                len(self._cacheable_developer_prompt),
+                self._prompt_cache_prefix_key,
+            )
+            return cache_parts.dynamic_suffix
+
+        self._cacheable_developer_prompt = ""
+        self._prompt_cache_prefix_key = ""
         if not base:
             return f"{user_input}{policy_block}" if policy_block else user_input
         if not user_input:
@@ -347,7 +968,434 @@ class CodexExecutor:
 
     def _run_codex(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_codex_home_and_config()
+        if self._should_use_direct_prompt_cache():
+            try:
+                max_attempts = max(
+                    1,
+                    min(
+                        6,
+                        int(
+                            self._runtime_env_value(
+                                "CHACK_CODEX_DIRECT_CACHE_MAX_ATTEMPTS",
+                                "4",
+                            )
+                            or 4
+                        ),
+                    ),
+                )
+            except (TypeError, ValueError):
+                max_attempts = 4
+            direct_result: tuple[
+                str,
+                list[tuple[ToolAction, Any]],
+                _RawResult,
+            ] = ("", [], _RawResult(raw_responses=[]))
+            for attempt in range(1, max_attempts + 1):
+                direct_result = self._run_direct_cached_response(prompt)
+                direct_error = str(direct_result[0] or "")
+                if not direct_error.startswith(
+                    "ERROR: Codex direct cached request"
+                ):
+                    return direct_result
+                if (
+                    attempt >= max_attempts
+                    or not self._direct_cache_error_is_retryable(direct_error)
+                ):
+                    break
+                retry_delay = self._direct_cache_retry_delay(attempt)
+                _LOGGER.warning(
+                    "Retrying transient direct cached Codex failure "
+                    "(attempt=%d/%d delay=%.1fs): %s",
+                    attempt,
+                    max_attempts,
+                    retry_delay,
+                    _preview_text(direct_error, max_chars=500),
+                )
+                deadline = time.monotonic() + retry_delay
+                while time.monotonic() < deadline:
+                    if cancellation_requested():
+                        break
+                    time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                if cancellation_requested():
+                    break
+            _LOGGER.warning(
+                "Direct cached Codex transport failed; falling back to Codex CLI: %s",
+                _preview_text(direct_result[0], max_chars=500),
+            )
         return self._run_codex_once(prompt, allow_api_key_fallback=True)
+
+    @staticmethod
+    def _direct_cache_error_is_retryable(error_text: str) -> bool:
+        normalized = str(error_text or "").lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "currently overloaded",
+                "overloaded",
+                "temporarily unavailable",
+                "try again later",
+                "rate limit",
+                "status=429",
+                "status=500",
+                "status=502",
+                "status=503",
+                "status=504",
+                "timeout",
+                "timed out",
+                "connection error",
+                "connection reset",
+                "chunkedencodingerror",
+                "response ended prematurely",
+                "remote disconnected",
+                "broken pipe",
+            )
+        )
+
+    def _direct_cache_retry_delay(self, attempt: int) -> float:
+        base_delays = (2.0, 5.0, 10.0, 20.0, 30.0)
+        base = base_delays[min(max(1, attempt), len(base_delays)) - 1]
+        key = str(self._prompt_cache_prefix_key or "0")
+        try:
+            offset = (max(1, attempt) - 1) * 2
+            jitter = int((key[offset : offset + 2] or key[:2] or "0"), 16) % 5
+        except ValueError:
+            jitter = 0
+        return base + float(jitter)
+
+    def _should_use_direct_prompt_cache(self) -> bool:
+        mode = self._runtime_env_value(
+            "CHACK_CODEX_DIRECT_CACHE_TRANSPORT",
+            "auto",
+        ).strip().lower()
+        if mode in {"0", "false", "no", "off", "disabled"}:
+            return False
+        if self._uses_openrouter_route:
+            return False
+        if not openai_model_requires_explicit_prompt_cache(self._model_name):
+            return False
+        if not self._cacheable_developer_prompt or not self._prompt_cache_prefix_key:
+            return False
+        if self._has_configured_tools() or self._thread_id or self._conversation:
+            return False
+        try:
+            self._direct_cache_credentials()
+        except Exception:
+            return False
+        return True
+
+    def _direct_cache_credentials(self) -> tuple[str, str, str]:
+        """Return ``(auth_mode, bearer_token, account_id)`` without logging secrets."""
+        if self._use_codex_access_token and self._codex_access_token:
+            claims = self._decode_jwt_claims(self._codex_access_token)
+            auth_claims = claims.get("https://api.openai.com/auth")
+            if not isinstance(auth_claims, dict):
+                auth_claims = {}
+            account_id = str(
+                auth_claims.get("chatgpt_account_id", "")
+                or self._runtime_env_value("CODEX_ACCOUNT_ID")
+                or ""
+            ).strip()
+            if not account_id:
+                raise ValueError("Codex ChatGPT account id is unavailable")
+            return "chatgpt", self._codex_access_token, account_id
+
+        if self._use_existing_codex_auth_file and self._existing_codex_auth_file:
+            with open(self._existing_codex_auth_file, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                raise ValueError("Codex auth.json is not a JSON object")
+            auth_mode = str(payload.get("auth_mode", "") or "").strip().lower()
+            if auth_mode == "chatgpt":
+                tokens = payload.get("tokens")
+                if not isinstance(tokens, dict):
+                    tokens = {}
+                bearer = str(tokens.get("access_token", "") or "").strip()
+                account_id = str(tokens.get("account_id", "") or "").strip()
+                if not bearer or not account_id:
+                    raise ValueError("Codex ChatGPT auth tokens are incomplete")
+                return "chatgpt", bearer, account_id
+            api_key = str(payload.get("OPENAI_API_KEY", "") or "").strip()
+            if api_key:
+                return "api_key", api_key, ""
+
+        api_key = str(self._openai_api_key or "").strip()
+        if api_key:
+            return "api_key", api_key, ""
+        raise ValueError("No credential is available for direct cached Codex transport")
+
+    def _direct_cache_output_schema(self) -> dict[str, Any] | None:
+        if not self._output_schema_strict:
+            return None
+        raw = str(self._output_schema_json or "").strip()
+        if not raw:
+            return None
+        try:
+            schema = json.loads(raw)
+        except Exception:
+            return None
+        if not isinstance(schema, dict):
+            return None
+        return self._normalize_codex_output_schema(
+            schema,
+            force_all_required=True,
+        )
+
+    def _direct_cache_request(
+        self,
+        prompt: str,
+    ) -> tuple[str, dict[str, str], dict[str, Any]]:
+        auth_mode, bearer_token, account_id = self._direct_cache_credentials()
+        session_id = str(
+            uuid.uuid5(
+                _DIRECT_CACHE_SESSION_NAMESPACE,
+                self._prompt_cache_prefix_key,
+            )
+        )
+        headers = {
+            "Authorization": f"Bearer {bearer_token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            # Match the first-party Codex transport classification. Unknown
+            # originators are routed differently by the subscription backend
+            # and can return overload failures while the CLI route is healthy.
+            "originator": "codex_cli_rs",
+            # ChatGPT's Codex endpoint uses this header together with
+            # prompt_cache_key for sticky cache routing. It must be stable
+            # across fresh processes that share the exact prefix.
+            "session_id": session_id,
+        }
+
+        stable_content: dict[str, Any] = {
+            "type": "input_text",
+            "text": self._cacheable_developer_prompt,
+        }
+        request_body: dict[str, Any] = {
+            "model": self._model_name,
+            "instructions": _DIRECT_CACHE_INSTRUCTIONS,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [stable_content],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                },
+            ],
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "reasoning": {
+                "effort": codex_thinking_effort(self._thinking_effort),
+                "summary": "auto",
+            },
+            "store": False,
+            "stream": True,
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": self._prompt_cache_prefix_key,
+        }
+        output_schema = self._direct_cache_output_schema()
+        if output_schema is not None:
+            request_body["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "strict": True,
+                    "schema": output_schema,
+                    "name": "chack_output_schema",
+                }
+            }
+
+        if auth_mode == "chatgpt":
+            headers["ChatGPT-Account-ID"] = account_id
+            # The subscription endpoint currently rejects the public API's
+            # prompt_cache_options and prompt_cache_breakpoint fields for
+            # gpt-5.6-sol. Stable prompt_cache_key + session_id is its
+            # compatible sticky-routing mechanism.
+            url = "https://chatgpt.com/backend-api/codex/responses"
+        else:
+            # The public GPT-5.6 API supports and recommends an explicit
+            # breakpoint after the stable content plus explicit-only policy.
+            stable_content["prompt_cache_breakpoint"] = {"mode": "explicit"}
+            request_body["prompt_cache_options"] = {
+                "mode": "explicit",
+                "ttl": "30m",
+            }
+            base_url = str(
+                self._runtime_env_value(
+                    "OPENAI_BASE_URL",
+                    "https://api.openai.com/v1",
+                )
+                or "https://api.openai.com/v1"
+            ).rstrip("/")
+            url = f"{base_url}/responses"
+        return url, headers, request_body
+
+    def _run_direct_cached_response(
+        self,
+        prompt: str,
+    ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        try:
+            url, headers, request_body = self._direct_cache_request(prompt)
+        except Exception as exc:
+            return (
+                f"ERROR: Codex direct cached request setup failed: {type(exc).__name__}: {exc}",
+                [],
+                _RawResult(raw_responses=[]),
+            )
+
+        timeout_seconds = _resolve_codex_exec_timeout(
+            self._sub_action,
+            self._runtime_env(),
+        )
+        started_at = time.monotonic()
+        time_to_first_token_seconds: float | None = None
+        output_parts: list[str] = []
+        completed_response: dict[str, Any] = {}
+        error_message = ""
+        response: requests.Response | None = None
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=request_body,
+                stream=True,
+                timeout=(30, timeout_seconds),
+            )
+            if int(response.status_code) != 200:
+                return (
+                    "ERROR: Codex direct cached request failed "
+                    f"(status={response.status_code}): "
+                    f"{_preview_text(response.text, max_chars=1000)}",
+                    [],
+                    _RawResult(raw_responses=[]),
+                )
+            for raw_line in response.iter_lines():
+                if cancellation_requested():
+                    response.close()
+                    return (
+                        "ERROR: Codex direct cached request cancelled.",
+                        [],
+                        _RawResult(raw_responses=[]),
+                    )
+                if isinstance(raw_line, bytes):
+                    line = raw_line.decode("utf-8", errors="replace")
+                else:
+                    line = str(raw_line or "")
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(data)
+                except Exception:
+                    continue
+                event_type = str(event.get("type", "") or "")
+                if event_type == "response.output_text.delta":
+                    delta = str(event.get("delta", "") or "")
+                    if delta:
+                        if time_to_first_token_seconds is None:
+                            time_to_first_token_seconds = max(
+                                0.0,
+                                time.monotonic() - started_at,
+                            )
+                        output_parts.append(delta)
+                elif event_type == "response.completed":
+                    raw_completed = event.get("response")
+                    if isinstance(raw_completed, dict):
+                        completed_response = raw_completed
+                elif event_type in {"error", "response.failed"}:
+                    raw_error = event.get("error")
+                    if not isinstance(raw_error, dict):
+                        failed_response = event.get("response")
+                        if isinstance(failed_response, dict):
+                            raw_error = failed_response.get("error")
+                    if isinstance(raw_error, dict):
+                        error_message = str(
+                            raw_error.get("message", "")
+                            or raw_error.get("code", "")
+                            or raw_error
+                        )
+                    else:
+                        error_message = str(
+                            event.get("message", "")
+                            or raw_error
+                            or event_type
+                        )
+        except requests.RequestException as exc:
+            return (
+                f"ERROR: Codex direct cached request failed: {type(exc).__name__}: {exc}",
+                [],
+                _RawResult(raw_responses=[]),
+            )
+        finally:
+            if response is not None:
+                response.close()
+
+        if error_message:
+            return (
+                f"ERROR: Codex direct cached request failed: {error_message}",
+                [],
+                _RawResult(raw_responses=[]),
+            )
+        output = "".join(output_parts).strip()
+        usage = (
+            completed_response.get("usage")
+            if isinstance(completed_response.get("usage"), dict)
+            else {}
+        )
+        input_details = (
+            usage.get("input_tokens_details")
+            if isinstance(usage.get("input_tokens_details"), dict)
+            else {}
+        )
+        usage_payload = {
+            "input_tokens": int(usage.get("input_tokens", 0) or 0),
+            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+            "input_tokens_details": {
+                "cached_tokens": int(input_details.get("cached_tokens", 0) or 0),
+                "cache_write_tokens": int(
+                    input_details.get("cache_write_tokens", 0) or 0
+                ),
+            },
+        }
+        if not output or not usage_payload["input_tokens"]:
+            return (
+                "ERROR: Codex direct cached request produced no usable response.",
+                [],
+                _RawResult(raw_responses=[]),
+            )
+        report_live_usage(
+            self._model_name,
+            prompt_tokens=usage_payload["input_tokens"],
+            completion_tokens=usage_payload["output_tokens"],
+            cached_prompt_tokens=usage_payload["input_tokens_details"][
+                "cached_tokens"
+            ],
+            cache_write_tokens=usage_payload["input_tokens_details"][
+                "cache_write_tokens"
+            ],
+        )
+        _LOGGER.info(
+            "Completed direct cached Codex request: model=%s key=%s "
+            "input_tokens=%d cached_tokens=%d cache_write_tokens=%d",
+            self._model_name,
+            self._prompt_cache_prefix_key,
+            usage_payload["input_tokens"],
+            usage_payload["input_tokens_details"]["cached_tokens"],
+            usage_payload["input_tokens_details"]["cache_write_tokens"],
+        )
+        return (
+            output,
+            [],
+            _RawResult(
+                raw_responses=[{"usage": usage_payload}],
+                time_to_first_token_seconds=time_to_first_token_seconds,
+                time_to_first_token_source="responses_output_text_delta",
+            ),
+        )
 
     def _run_codex_once(
         self,
@@ -357,6 +1405,7 @@ class CodexExecutor:
     ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         command = self._build_command()
         env = self._build_env()
+        self._write_codex_explicit_mcp_env(env)
         timeout_seconds = _resolve_codex_exec_timeout(self._sub_action, self._runtime_env())
         exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
         _LOGGER.info(
@@ -421,6 +1470,12 @@ class CodexExecutor:
         combined_output_lines: list[str] = []
         error_messages: list[str] = []
         started_at = time.monotonic()
+        time_to_first_token_seconds: float | None = None
+        usage_tailer = _RolloutUsageTailer(self._codex_home or "", self._model_name)
+        # A resumed thread is already known, so its rollout can be followed from
+        # the first line of output rather than waiting for `thread.started`.
+        if self._thread_id:
+            usage_tailer.attach(self._thread_id)
 
         if process.stdin is not None:
             try:
@@ -430,6 +1485,14 @@ class CodexExecutor:
                 pass
 
         while True:
+            try:
+                usage_tailer.poll()
+            except LiveCostLimitExceeded:
+                # The spend ceiling fired mid-turn. Stop Codex before unwinding,
+                # or the process keeps burning budget with nobody reading it.
+                _terminate_process_tree(process)
+                unregister_process(cancel_registration)
+                raise
             if cancellation_requested():
                 _terminate_process_tree(process)
                 unregister_process(cancel_registration)
@@ -471,7 +1534,16 @@ class CodexExecutor:
                 )
             if process.stdout is None:
                 break
-            line = process.stdout.readline()
+            remaining_seconds = max(
+                0.0,
+                timeout_seconds - (time.monotonic() - started_at),
+            )
+            line = _readline_when_ready(
+                process.stdout,
+                min(1.0, remaining_seconds),
+            )
+            if line is None:
+                continue
             if line == "" and process.poll() is not None:
                 break
             if not line:
@@ -486,10 +1558,19 @@ class CodexExecutor:
                 continue
 
             event_type = str(event.get("type", "") or "")
+            if (
+                time_to_first_token_seconds is None
+                and event_type not in {"thread.started", "turn.started", "turn.completed", "error"}
+            ):
+                time_to_first_token_seconds = max(
+                    0.0,
+                    time.monotonic() - started_at,
+                )
             if event_type == "thread.started":
                 thread_id = str(event.get("thread_id", "") or "").strip()
                 if thread_id:
                     self._thread_id = thread_id
+                    usage_tailer.attach(thread_id)
                 continue
 
             if event_type == "error":
@@ -498,9 +1579,29 @@ class CodexExecutor:
                     error_messages.append(message)
                 continue
 
-            if event_type == "item.completed":
-                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+            if event_type in {"item.started", "item.updated", "item.completed"}:
+                raw_item = event.get("item")
+                item: dict[str, Any] = raw_item if isinstance(raw_item, dict) else {}
                 item_type = str(item.get("type", "") or "")
+
+                if item_type == "todo_list":
+                    if self._native_task_planning_backend:
+                        sync_native_plan_snapshot(
+                            item.get("items") or [],
+                            source="codex:update_plan",
+                            infer_current=True,
+                        )
+                    # Keep the plan visible in the execution trace without counting
+                    # it as a non-task tool. Only record the terminal event once.
+                    if event_type == "item.completed":
+                        step = self._item_to_step(item)
+                        if step is not None:
+                            steps.append((step, None))
+                            self._log_tool_called(step.tool, step.tool_input)
+                    continue
+
+                if event_type != "item.completed":
+                    continue
 
                 if item_type == "error":
                     message = str(item.get("message", "") or "").strip()
@@ -566,12 +1667,16 @@ class CodexExecutor:
                         "cache_write_tokens": 0,
                     },
                 }
+                # These are the authoritative totals for the turn; whatever the
+                # rollout tail already reported is subtracted so the live figure
+                # ends up exact rather than doubled.
+                remaining = usage_tailer.settle(usage_payload)
                 report_live_usage(
                     self._model_name,
-                    prompt_tokens=usage_payload["input_tokens"],
-                    completion_tokens=usage_payload["output_tokens"],
-                    cached_prompt_tokens=usage_payload["input_tokens_details"]["cached_tokens"],
-                    cache_write_tokens=0,
+                    prompt_tokens=remaining["input_tokens"],
+                    completion_tokens=remaining["output_tokens"],
+                    cached_prompt_tokens=remaining["cached_input_tokens"],
+                    cache_write_tokens=remaining["cache_write_input_tokens"],
                 )
 
         output = "\n".join(part for part in output_parts if part).strip()
@@ -579,6 +1684,20 @@ class CodexExecutor:
         unregister_process(cancel_registration)
         if return_code != 0:
             details = "\n".join(combined_output_lines).strip() or "No error output captured."
+            startup_status_path = str(
+                env.get("CHACK_MCP_STARTUP_STATUS_PATH", "") or ""
+            ).strip()
+            if startup_status_path:
+                try:
+                    with open(startup_status_path, "r", encoding="utf-8") as handle:
+                        startup_status = json.load(handle)
+                    details += "\nMCP startup status: " + json.dumps(
+                        startup_status,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    )
+                except (FileNotFoundError, OSError, ValueError, TypeError):
+                    pass
             self._log_codex_failure(
                 "codex_exec_failed",
                 command=command,
@@ -614,12 +1733,15 @@ class CodexExecutor:
                 "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
             }
             raw_responses.append({"usage": estimated})
+            # Estimated or not, this is the turn's final word on its own usage,
+            # so it settles against whatever the rollout tail already reported.
+            remaining = usage_tailer.settle(estimated)
             report_live_usage(
                 self._model_name,
-                prompt_tokens=est_input,
-                completion_tokens=est_output,
-                cached_prompt_tokens=0,
-                cache_write_tokens=0,
+                prompt_tokens=remaining["input_tokens"],
+                completion_tokens=remaining["output_tokens"],
+                cached_prompt_tokens=remaining["cached_input_tokens"],
+                cache_write_tokens=remaining["cache_write_input_tokens"],
             )
         if not output and usage_payload is None and not steps:
             details = "\n".join(error_messages or combined_output_lines).strip() or (
@@ -643,7 +1765,15 @@ class CodexExecutor:
                 allow_api_key_fallback,
                 codex_exec_failed=True,
             )
-        result = (output, steps, _RawResult(raw_responses=raw_responses))
+        result = (
+            output,
+            steps,
+            _RawResult(
+                raw_responses=raw_responses,
+                time_to_first_token_seconds=time_to_first_token_seconds,
+                time_to_first_token_source="codex_first_response_event",
+            ),
+        )
         return self._maybe_retry_with_api_key(
             prompt,
             result,
@@ -688,15 +1818,20 @@ class CodexExecutor:
         return_code: int | None = None,
     ) -> None:
         preview = _preview_text(details)
+        command_executable = os.path.basename(str(command[0])) if command else ""
+        command_argument_count = max(0, len(command) - 1)
         _LOGGER.error(
-            "Codex CLI failure: type=%s provider=%s model=%s return_code=%s thread_id=%s cwd=%s command=%s details=%s ts=%s",
+            "Codex CLI failure: type=%s provider=%s model=%s return_code=%s "
+            "thread_id=%s cwd=%s command_executable=%s command_argument_count=%d "
+            "details=%s ts=%s",
             failure_type,
             self._model_provider,
             self._model_name,
             return_code,
             self._thread_id or "",
             cwd,
-            command,
+            command_executable,
+            command_argument_count,
             preview,
             _log_timestamp(),
         )
@@ -710,7 +1845,8 @@ class CodexExecutor:
                     "return_code": return_code,
                     "thread_id": str(self._thread_id or ""),
                     "cwd": str(cwd or ""),
-                    "command": [str(part) for part in command],
+                    "command_executable": command_executable,
+                    "command_argument_count": command_argument_count,
                     "details_preview": preview,
                 },
                 task_session_id=current_session_id() or "",
@@ -743,6 +1879,16 @@ class CodexExecutor:
             "--config",
             f'model_reasoning_effort="{codex_thinking_effort(self._thinking_effort)}"',
         ]
+        stable_prompt_args: list[str] = []
+        if self._cacheable_developer_prompt:
+            # Codex accepts developer_instructions as a real developer message.
+            # json.dumps emits a TOML-compatible quoted string while safely
+            # preserving newlines and quotes in large context blocks.
+            stable_prompt_args = [
+                "--config",
+                "developer_instructions="
+                + json.dumps(self._cacheable_developer_prompt, ensure_ascii=False),
+            ]
         if self._thread_id:
             output_schema_args: list[str] = []
             if self._output_schema_path:
@@ -757,6 +1903,7 @@ class CodexExecutor:
             ]
             args.extend(self._disabled_native_tool_args())
             args.extend(effort_args)
+            args.extend(stable_prompt_args)
             if output_schema_args:
                 args.extend(output_schema_args)
             args.extend(
@@ -782,6 +1929,7 @@ class CodexExecutor:
         ]
         args.extend(self._disabled_native_tool_args())
         args.extend(effort_args)
+        args.extend(stable_prompt_args)
         args.extend(
             [
                 "--model",
@@ -896,6 +2044,16 @@ class CodexExecutor:
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        if self._codex_home and self._has_configured_tools():
+            startup_status_path = os.path.join(
+                self._codex_home,
+                "mcp_startup_status.json",
+            )
+            try:
+                os.unlink(startup_status_path)
+            except FileNotFoundError:
+                pass
+            env["CHACK_MCP_STARTUP_STATUS_PATH"] = startup_status_path
         return env
 
     def _set_env_or_file(
@@ -928,10 +2086,24 @@ class CodexExecutor:
         ).strip() or os.path.expanduser("~/.codex/chack")
         base = os.path.join(home_base, safe_session)
         os.makedirs(base, exist_ok=True)
+        os.chmod(base, 0o700)
         self._codex_home = base
         self._write_codex_config(base)
         self._write_codex_auth(base)
         self._write_output_schema_file(base)
+
+    def cleanup_runtime_artifacts(self) -> bool:
+        """Remove the isolated Codex home created for this executor."""
+        if not self._codex_home:
+            return False
+        home_base = self._runtime_env_value(
+            "CHACK_CODEX_HOME_BASE", os.path.expanduser("~/.codex/chack")
+        ).strip() or os.path.expanduser("~/.codex/chack")
+        cleaned = _cleanup_isolated_codex_home(self._codex_home, home_base)
+        if cleaned:
+            self._codex_home = None
+            self._output_schema_path = None
+        return cleaned
 
     def _write_codex_config(self, codex_home: str) -> None:
         os.makedirs(codex_home, exist_ok=True)
@@ -946,6 +2118,7 @@ class CodexExecutor:
             "CHACK_TOOLS_OVERRIDE_B64_PATH",
             "CHACK_TOOLS_APPEND_B64",
             "CHACK_TOOLS_APPEND_B64_PATH",
+            "CHACK_MCP_STARTUP_STATUS_PATH",
             "CHACK_CHATGPT_ASYNC_API_URL",
             "CHACK_CHATGPT_ASYNC_API_SECRET",
             "PYTHONPATH",
@@ -1058,6 +2231,12 @@ class CodexExecutor:
             "OPENROUTER_HTTP_REFERER",
             "OPENROUTER_APP_NAME",
         ]
+        # Retain the exact allowlist so the finalized per-run values can also
+        # be written explicitly below. Some containerized Codex builds do not
+        # reliably propagate dynamically-added parent variables via
+        # ``env_vars`` alone, which otherwise makes the required stdio MCP
+        # child exit before its initialize response.
+        self._codex_mcp_env_var_names = tuple(env_vars)
 
         def _toml_string(value: str) -> str:
             return json.dumps(str(value))
@@ -1083,18 +2262,12 @@ class CodexExecutor:
                 f"model_auto_compact_token_limit = {compact_at}"
             )
 
-        # System-level instructions to prevent the model from calling
-        # non-existent built-in tools like `report_intent` instead of the
-        # real MCP tools.
-        instructions_text = (
-            "CRITICAL: You do NOT have a tool called `report_intent`. "
-            "It does not exist. Never attempt to call it. "
-            "To report or save a vulnerability finding you MUST call the MCP tool "
-            "`chack_tools-save_discovered_vulnerability`. "
-            "Any call to `report_intent` will silently discard your finding. "
-            "Do not call MCP resource browser helpers such as `list_mcp_resources`, "
-            "`list_mcp_resource_templates`, or `read_mcp_resource`; use only the "
-            "explicit task tools listed in the prompt."
+        # Shared-MCP verifiers have no local/picklable tools, but the shared URL is
+        # the effective tool surface and must not trigger the no-tools instruction.
+        instructions_text = _codex_tool_instructions(
+            sub_action=self._sub_action,
+            shared_mcp_url=self._runtime_env_value("CHACK_CODEX_MCP_URL"),
+            has_configured_tools=self._has_configured_tools(),
         )
         config_lines.append(f"instructions = {_toml_string(instructions_text)}")
         chack_mcp_startup_timeout = int(
@@ -1137,7 +2310,9 @@ class CodexExecutor:
         if chack_shared_mcp_url:
             # Point every codex agent at ONE shared streamable-HTTP MCP server (e.g. a
             # host-process server that holds a shared queue / board), instead of each
-            # agent spawning its own stdio server. Custom tools then live on that server.
+            # agent spawning its own stdio server. The shared server is itself the tool
+            # source, so it must be configured even when the local allowed-tools list is
+            # intentionally empty (for example, FactChecker's non-picklable board tools).
             shared_mcp_lines = [
                 "",
                 '[mcp_servers.chack_tools]',
@@ -1156,7 +2331,7 @@ class CodexExecutor:
                 ]
             )
             config_lines.extend(shared_mcp_lines)
-        else:
+        elif self._has_configured_tools():
             config_lines.extend(
                 [
                     "",
@@ -1168,6 +2343,10 @@ class CodexExecutor:
                     f"startup_timeout_sec = {chack_mcp_startup_timeout}",
                     f"tool_timeout_sec = {chack_mcp_tool_timeout}",
                 ]
+            )
+        else:
+            _LOGGER.info(
+                "Skipping Codex chack_tools MCP server because this agent has no tools."
             )
         if self._playwright_mcp_enabled():
             playwright_server = playwright_mcp_server_config()
@@ -1187,6 +2366,41 @@ class CodexExecutor:
         config_body = "\n".join(config_lines)
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(config_body + "\n")
+        os.chmod(config_path, 0o600)
+
+    def _write_codex_explicit_mcp_env(self, env: dict[str, str]) -> None:
+        """Persist the isolated stdio MCP child's finalized environment.
+
+        ``env_vars`` remains in the generated config for compatibility, while
+        this explicit table makes file-backed dynamic tool payloads and their
+        model/session metadata deterministic across Codex CLI versions.
+        """
+        if (
+            not self._codex_home
+            or not self._has_configured_tools()
+            or self._runtime_env_value("CHACK_CODEX_MCP_URL").strip()
+        ):
+            return
+        config_path = os.path.join(self._codex_home, "config.toml")
+        try:
+            with open(config_path, "r", encoding="utf-8") as handle:
+                body = handle.read()
+        except FileNotFoundError:
+            return
+        marker = "# chack: explicit per-run MCP environment"
+        body = body.split(marker, 1)[0].rstrip()
+        names = tuple(getattr(self, "_codex_mcp_env_var_names", ()) or ())
+        lines = [body, "", marker, "[mcp_servers.chack_tools.env]"]
+        for name in names:
+            value = env.get(name)
+            if value is None:
+                continue
+            lines.append(f"{name} = {json.dumps(str(value), ensure_ascii=False)}")
+        temporary_path = f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, config_path)
 
     def _write_codex_auth(self, codex_home: str) -> None:
         if self._use_existing_codex_auth_file:
@@ -1268,6 +2482,14 @@ class CodexExecutor:
 
     def _write_output_schema_file(self, codex_home: str) -> None:
         self._output_schema_path = None
+        # Codex CLI structured output accepts only strict schemas: every
+        # property must be required. A non-strict Chack schema intentionally
+        # models patch objects whose omitted fields remain unchanged, so
+        # passing it through --output-schema causes an API-level 400 before the
+        # model can run. Let Chack's normal JSON extraction/schema validation
+        # handle these responses instead.
+        if not self._output_schema_strict:
+            return
         raw = str(self._output_schema_json or "").strip()
         if not raw:
             return
@@ -1277,7 +2499,10 @@ class CodexExecutor:
             return
         if not isinstance(schema_obj, dict):
             return
-        schema_obj = self._normalize_codex_output_schema(schema_obj)
+        schema_obj = self._normalize_codex_output_schema(
+            schema_obj,
+            force_all_required=self._output_schema_strict,
+        )
         path = os.path.join(codex_home, "output_schema.json")
         try:
             with open(path, "w", encoding="utf-8") as handle:
@@ -1288,34 +2513,69 @@ class CodexExecutor:
             self._output_schema_path = None
 
     @classmethod
-    def _normalize_codex_output_schema(cls, schema: Any) -> Any:
+    def _normalize_codex_output_schema(
+        cls,
+        schema: Any,
+        *,
+        force_all_required: bool = True,
+    ) -> Any:
         if isinstance(schema, list):
-            return [cls._normalize_codex_output_schema(item) for item in schema]
+            return [
+                cls._normalize_codex_output_schema(
+                    item,
+                    force_all_required=force_all_required,
+                )
+                for item in schema
+            ]
         if not isinstance(schema, dict):
             return schema
 
         normalized = {
-            key: cls._normalize_codex_output_schema(value)
+            key: cls._normalize_codex_output_schema(
+                value,
+                force_all_required=force_all_required,
+            )
             for key, value in schema.items()
         }
         properties = normalized.get("properties")
         if isinstance(properties, dict):
             normalized["properties"] = {
-                str(key): cls._normalize_codex_output_schema(value)
+                str(key): cls._normalize_codex_output_schema(
+                    value,
+                    force_all_required=force_all_required,
+                )
                 for key, value in properties.items()
             }
-            normalized["required"] = list(normalized["properties"].keys())
+            if force_all_required:
+                normalized["required"] = list(normalized["properties"].keys())
+            elif "required" in normalized:
+                declared = normalized.get("required")
+                normalized["required"] = (
+                    [
+                        str(key)
+                        for key in declared
+                        if str(key) in normalized["properties"]
+                    ]
+                    if isinstance(declared, list)
+                    else []
+                )
             normalized.setdefault("additionalProperties", False)
         elif "required" in normalized:
             normalized.pop("required", None)
         for union_key in ("anyOf", "allOf", "oneOf"):
             if isinstance(normalized.get(union_key), list):
                 normalized[union_key] = [
-                    cls._normalize_codex_output_schema(item)
+                    cls._normalize_codex_output_schema(
+                        item,
+                        force_all_required=force_all_required,
+                    )
                     for item in normalized[union_key]
                 ]
         if isinstance(normalized.get("items"), dict):
-            normalized["items"] = cls._normalize_codex_output_schema(normalized["items"])
+            normalized["items"] = cls._normalize_codex_output_schema(
+                normalized["items"],
+                force_all_required=force_all_required,
+            )
         return normalized
 
     @staticmethod
@@ -1589,11 +2849,18 @@ def build_executor(
     else:
         allowed_tool_names = _extract_tool_names(_configured_base_tools())
 
-    has_task_steps_manager_tool = (
-        "task_steps_manager" in allowed_tool_names
-        if allowed_tool_names is not None
-        else bool(getattr(config.tools, "task_steps_manager_enabled", True))
+    native_task_planning_backend = (
+        "codex"
+        if bool(getattr(config.tools, "task_steps_manager_enabled", True))
+        else ""
     )
+    # Never transport the Chack task manager into Codex. Even explicit tool
+    # overrides map to Codex's native update_plan prompt/callback path instead.
+    allowed_tool_names = [
+        name for name in (allowed_tool_names or []) if name != "task_steps_manager"
+    ]
+
+    has_task_steps_manager_tool = False
     require_task_steps_manager_init_first = bool(
         getattr(config.agent, "require_task_steps_manager_init_first", True)
         and has_task_steps_manager_tool
@@ -1609,6 +2876,11 @@ def build_executor(
 
     route = get_openrouter_route(config)
     uses_openrouter_route = route is not None
+    explicit_api_key_type = str(
+        getattr(config.model, "api_key_type", "") or ""
+    ).strip().lower()
+    explicitly_use_openai_api = explicit_api_key_type in {"openai", "openai_api"}
+    explicitly_use_codex_token = explicit_api_key_type in {"codex", "codex_token"}
     fallback_openai_api_key = (
         str(config.credentials.openai_api_key or "").strip()
         or os.environ.get("OPENAI_API_KEY", "").strip()
@@ -1617,7 +2889,15 @@ def build_executor(
         str(getattr(config.credentials, "codex_access_token", "") or "").strip()
         or os.environ.get("CODEX_ACCESS_TOKEN", "").strip()
     )
+    if explicitly_use_openai_api:
+        codex_access_token = ""
+    elif explicitly_use_codex_token:
+        # A selected account token is authoritative. Do not silently bill a
+        # different OpenAI API credential if that token fails.
+        fallback_openai_api_key = ""
     existing_codex_auth_file = "" if uses_openrouter_route else _existing_codex_auth_file()
+    if explicitly_use_openai_api:
+        existing_codex_auth_file = ""
     codex_api_key = route.api_key if route is not None else (codex_access_token or fallback_openai_api_key)
     if not codex_api_key and not existing_codex_auth_file:
         raise ValueError(
@@ -1691,6 +2971,14 @@ def build_executor(
             json.dumps(getattr(config.agent, "output_schema_json", None), ensure_ascii=False, indent=2)
             if getattr(config.agent, "output_schema_json", None)
             else ""
+        ),
+        _native_task_planning_backend=native_task_planning_backend,
+        _require_native_plan_first=bool(
+            native_task_planning_backend
+            and getattr(config.agent, "require_task_steps_manager_init_first", True)
+        ),
+        _output_schema_strict=bool(
+            getattr(config.agent, "output_schema_strict", True)
         ),
         _max_context_tokens=int(getattr(config.model, "max_context_tokens", 0) or 0),
         _compaction_threshold_ratio=float(

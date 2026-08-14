@@ -5,6 +5,7 @@ import time
 from typing import Any, cast
 
 from chack_tools.chatgpt_remote_worker import ChatGPTRemoteWorker
+from chack_tools.chatgpt_research_agents import _XHIGH_COMPAT_PROMPT_PREFIX
 
 
 class FakeWorkerClient:
@@ -73,6 +74,73 @@ def test_worker_forces_local_backend_and_posts_success(monkeypatch, tmp_path):
     assert completion["result"] == "A" * 2000
     assert completion["metadata"]["execution_backend"] == "local_worker"
     assert "conversation_url" not in completion["metadata"]
+
+
+def test_worker_accepts_xhigh_and_uses_its_mode_specific_timeout(monkeypatch, tmp_path):
+    worker, client = _worker(tmp_path)
+
+    def browser(_self, prompt, *, run_state_path, partial_path):
+        assert prompt == "X" * 200
+        assert _self.mode == "xhigh"
+        assert _self.tool_name == "chatgptxhigh"
+        assert _self._timeout_seconds() == 1234
+        return "XHIGH_OK " + ("A" * 300), "", {
+            "mode": "xhigh",
+            "terminal_state": "extracted",
+        }
+
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_remote_worker.ChatGPTWebResearchAgentTool._browser_research",
+        browser,
+    )
+    worker.process(
+        {
+            "job_id": "job_00000000-0000-0000-0000-000000000099",
+            "lease_id": "lease-xhigh",
+            "mode": "xhigh",
+            "prompt": "X" * 200,
+            "output_timeout_seconds": 1234,
+        }
+    )
+
+    cfg = worker._config("xhigh", 1234)
+    assert cfg.chatgpt_execution_backend == "local"
+    assert cfg.chatgpt_xhigh_timeout_seconds == 1234
+    _, completion = client.completions[0]
+    assert completion["status"] == "SUCCEEDED"
+    assert completion["result"].startswith("XHIGH_OK")
+    assert completion["metadata"]["mode"] == "xhigh"
+
+
+def test_worker_restores_xhigh_from_stale_broker_compatibility_envelope(monkeypatch, tmp_path):
+    worker, client = _worker(tmp_path)
+    original_prompt = "Compatibility prompt " + ("X" * 200)
+
+    def browser(_self, prompt, *, run_state_path, partial_path):
+        assert _self.mode == "xhigh"
+        assert prompt == original_prompt
+        assert _XHIGH_COMPAT_PROMPT_PREFIX not in prompt
+        return "XHIGH_COMPAT_WORKER_OK " + ("A" * 300), "", {
+            "mode": "xhigh",
+            "terminal_state": "extracted",
+        }
+
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_remote_worker.ChatGPTWebResearchAgentTool._browser_research",
+        browser,
+    )
+    worker.process(
+        {
+            "job_id": "job_00000000-0000-0000-0000-000000000098",
+            "lease_id": "lease-xhigh-compat",
+            "mode": "pro",
+            "prompt": _XHIGH_COMPAT_PROMPT_PREFIX + original_prompt,
+            "output_timeout_seconds": 5400,
+        }
+    )
+    _, completion = client.completions[0]
+    assert completion["status"] == "SUCCEEDED"
+    assert completion["metadata"]["mode"] == "xhigh"
 
 
 def test_worker_posts_timeout_with_partial_output(monkeypatch, tmp_path):

@@ -22,7 +22,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from .chatgpt_async_client import ChatGPTAsyncApiClient, ChatGPTAsyncApiError
-from .chatgpt_research_agents import ChatGPTWebResearchAgentTool, Mode
+from .chatgpt_research_agents import (
+    _XHIGH_COMPAT_PROMPT_PREFIX,
+    ChatGPTWebResearchAgentTool,
+    Mode,
+)
 from .config import ToolsConfig
 
 LOG = logging.getLogger("chack-chatgpt-worker")
@@ -38,6 +42,9 @@ _PUBLIC_METADATA_FIELDS = {
     "forced_answer",
     "execution_backend",
     "prior_browser_submission_detected",
+    "selected_effort",
+    "selected_power",
+    "selector_ui",
 }
 
 
@@ -111,10 +118,15 @@ class ChatGPTRemoteWorker:
             "chatgpt_cdp_url": self.cdp_url,
             "chatgpt_research_poll_seconds": int(os.environ.get("CHACK_CHATGPT_BROWSER_POLL_SECONDS", "15")),
         }
-        if mode == "pro":
-            kwargs["chatgpt_pro_timeout_seconds"] = output_timeout_seconds
-        else:
-            kwargs["chatgpt_deep_timeout_seconds"] = output_timeout_seconds
+        timeout_fields = {
+            "pro": "chatgpt_pro_timeout_seconds",
+            "xhigh": "chatgpt_xhigh_timeout_seconds",
+            "deep": "chatgpt_deep_timeout_seconds",
+        }
+        field_name = timeout_fields.get(mode)
+        if not field_name:
+            raise ValueError(f"Unsupported ChatGPT worker mode: {mode}")
+        kwargs[field_name] = output_timeout_seconds
         return ToolsConfig(**kwargs)
 
     def _pending_path(self, job_id: str) -> Path:
@@ -223,8 +235,12 @@ class ChatGPTRemoteWorker:
         lease_id = str(lease.get("lease_id") or "")
         mode = str(lease.get("mode") or "")
         prompt = str(lease.get("prompt") or "")
-        output_timeout = int(lease.get("output_timeout_seconds") or (5400 if mode == "pro" else 4500))
-        if not job_id or not lease_id or mode not in {"pro", "deep"} or not prompt:
+        if mode == "pro" and prompt.startswith(_XHIGH_COMPAT_PROMPT_PREFIX):
+            mode = "xhigh"
+            prompt = prompt[len(_XHIGH_COMPAT_PROMPT_PREFIX):]
+        default_timeout = 4500 if mode == "deep" else 5400
+        output_timeout = int(lease.get("output_timeout_seconds") or default_timeout)
+        if not job_id or not lease_id or mode not in {"pro", "xhigh", "deep"} or not prompt:
             LOG.error("broker returned an invalid lease payload")
             return
 

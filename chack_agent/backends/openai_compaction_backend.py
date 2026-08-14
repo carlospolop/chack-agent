@@ -28,6 +28,7 @@ from ..config import ChackConfig
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
+from ..resume_compaction import ResumeCompactionResult
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import openai_thinking_effort
@@ -451,6 +452,31 @@ class AgentsExecutor:
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
+
+    def compact_for_resume(
+        self, focus_instructions: str = ""
+    ) -> ResumeCompactionResult:
+        del focus_instructions  # The Responses compaction endpoint owns its prompt.
+        result = ResumeCompactionResult(
+            backend="openai_compaction",
+            method="responses.compact",
+        )
+        if not self._previous_response_id:
+            return result
+        result.attempted = True
+        started_at = time.monotonic()
+        previous_response_id = self._previous_response_id
+        new_response_id = self._run_compaction(previous_response_id)
+        result.duration_seconds = max(0.0, time.monotonic() - started_at)
+        if not new_response_id:
+            result.error = "OpenAI Responses compaction returned no response id."
+            return result
+        self._previous_response_id = new_response_id
+        reset_to = self._normalized_memory_reset_to()
+        if self._conversation:
+            self._conversation = self._conversation[-reset_to:]
+        result.succeeded = True
+        return result
 
     def _normalized_memory_reset_to(self) -> int:
         if self._memory_limit <= 0:

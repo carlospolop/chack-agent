@@ -19,7 +19,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal
 
-from .chatgpt_async_client import ChatGPTAsyncApiClient
+from .cancellation import cancellation_requested
+from .chatgpt_async_client import ChatGPTAsyncApiClient, ChatGPTAsyncApiError
 from .config import ToolsConfig
 from .research_artifacts import cleanup_research_artifacts
 from .subagent_config import (
@@ -38,10 +39,19 @@ except ImportError:  # pragma: no cover - mirrors the other researcher modules
     function_tool = None
 
 
-Mode = Literal["deep", "pro"]
+Mode = Literal["deep", "pro", "xhigh"]
 
 CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 90 * 60
+# Extra High research can legitimately spend well over ten minutes in the
+# browser before exposing an extractable answer. Keep a finite deadline, but
+# give it the same 30-minute window configured for the factchecker contract.
+CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS = 30 * 60
 CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS = 75 * 60
+_MODE_TOOL_NAMES: dict[Mode, str] = {
+    "deep": "deepchatgpt_researcher",
+    "pro": "prochatgpt_researcher",
+    "xhigh": "chatgptxhigh",
+}
 _REMOTE_METADATA_FIELDS = {
     "mode",
     "started_at",
@@ -52,7 +62,15 @@ _REMOTE_METADATA_FIELDS = {
     "forced_answer",
     "output_timeout_seconds",
     "execution_backend",
+    "selected_effort",
+    "selected_power",
+    "selector_ui",
 }
+# Rolling-deployment compatibility for brokers that predate the native xhigh
+# enum. The authenticated worker strips this transport marker before sending the
+# prompt and still selects the real Extra High UI mode. Native xhigh submission
+# remains the first and preferred path.
+_XHIGH_COMPAT_PROMPT_PREFIX = "__CHACK_CHATGPT_XHIGH_V1__\n"
 
 
 def resolve_chatgpt_timeout_seconds(config: ToolsConfig, mode: Mode) -> int:
@@ -61,15 +79,22 @@ def resolve_chatgpt_timeout_seconds(config: ToolsConfig, mode: Mode) -> int:
     Mode-specific configuration is authoritative. The old shared setting is
     retained as a compatibility fallback for callers that have not migrated.
     """
-    field_name = "chatgpt_deep_timeout_seconds" if mode == "deep" else "chatgpt_pro_timeout_seconds"
+    field_name = {
+        "deep": "chatgpt_deep_timeout_seconds",
+        "pro": "chatgpt_pro_timeout_seconds",
+        "xhigh": "chatgpt_xhigh_timeout_seconds",
+    }[mode]
     configured = getattr(config, field_name, None)
     if configured is not None and int(configured or 0) > 0:
         return max(60, int(configured))
     legacy = int(getattr(config, "chatgpt_research_timeout_seconds", 0) or 0)
     if legacy > 0:
         return max(60, legacy)
-    default = CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS if mode == "deep" else CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS
-    return default
+    return {
+        "deep": CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS,
+        "pro": CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS,
+        "xhigh": CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS,
+    }[mode]
 
 
 class ChatGPTWebResearchError(RuntimeError):
@@ -81,17 +106,17 @@ def _compact(payload: Any) -> str:
 
 
 class ChatGPTWebResearchAgentTool:
-    """Launch a Deep Research or Pro request in an existing Chrome session."""
+    """Launch a Deep Research, Pro, or Extra High request in Chrome."""
 
     def __init__(self, config: ToolsConfig, *, mode: Mode):
-        if mode not in {"deep", "pro"}:
+        if mode not in {"deep", "pro", "xhigh"}:
             raise ValueError(f"Unsupported ChatGPT research mode: {mode}")
         self.config = config
         self.mode: Mode = mode
 
     @property
     def tool_name(self) -> str:
-        return f"{self.mode}chatgpt_researcher"
+        return _MODE_TOOL_NAMES[self.mode]
 
     def _cdp_url(self) -> str:
         configured = str(getattr(self.config, "chatgpt_cdp_url", "") or "").strip()
@@ -135,7 +160,17 @@ class ChatGPTWebResearchAgentTool:
     def _async_max_wait_seconds(self) -> int:
         configured = int(getattr(self.config, "chatgpt_async_max_wait_seconds", 0) or 0)
         environment = int(os.environ.get("CHACK_CHATGPT_ASYNC_MAX_WAIT_SECONDS", "0") or 0)
-        return max(self._timeout_seconds(), configured or environment or 10800)
+        wait_seconds = max(self._timeout_seconds(), configured or environment or 900)
+        if self.mode == "xhigh":
+            # Extra High has a strict 1800s browser deadline plus a 300s grace
+            # period. Do not let a stale environment/config value keep the
+            # owning async task alive indefinitely after the remote worker has
+            # timed out.
+            wait_seconds = min(
+                wait_seconds,
+                self._timeout_seconds() + self._force_answer_grace_seconds(),
+            )
+        return wait_seconds
 
     def _async_client(self) -> ChatGPTAsyncApiClient:
         url = self._async_api_url()
@@ -157,12 +192,29 @@ class ChatGPTWebResearchAgentTool:
         """Submit through the cloud broker and poll without touching local CDP."""
         client = self._async_client()
         output_timeout_seconds = self._timeout_seconds()
-        submitted = client.submit(
-            mode=self.mode,
-            prompt=prompt,
-            idempotency_key=str(uuid.uuid4()),
-            output_timeout_seconds=output_timeout_seconds,
-        )
+        idempotency_key = str(uuid.uuid4())
+        try:
+            submitted = client.submit(
+                mode=self.mode,
+                prompt=prompt,
+                idempotency_key=idempotency_key,
+                output_timeout_seconds=output_timeout_seconds,
+            )
+        except ChatGPTAsyncApiError as exc:
+            if not (
+                self.mode == "xhigh"
+                and exc.status_code == 400
+                and exc.error_code == "invalid_mode"
+            ):
+                raise
+            # A stale broker can transport the request as Pro during a rolling
+            # deployment; the updated worker restores xhigh before browser use.
+            submitted = client.submit(
+                mode="pro",
+                prompt=_XHIGH_COMPAT_PROMPT_PREFIX + prompt,
+                idempotency_key=idempotency_key,
+                output_timeout_seconds=output_timeout_seconds,
+            )
         job_id = str(submitted.get("job_id") or "")
         if not job_id:
             raise ChatGPTWebResearchError("ChatGPT async API did not return a job id.")
@@ -181,6 +233,16 @@ class ChatGPTWebResearchAgentTool:
         last_stage = "queued"
         last_chars = 0
         while True:
+            if cancellation_requested():
+                try:
+                    client.cancel(job_id)
+                except Exception:
+                    pass
+                metadata.update({"terminal_state": "cancelled", "finished_at": time.time()})
+                self._write_json(run_state_path, metadata)
+                raise ChatGPTWebResearchError(
+                    f"Remote ChatGPT {self.mode} job was cancelled by its owning async task."
+                )
             if time.monotonic() >= deadline:
                 try:
                     client.cancel(job_id)
@@ -335,24 +397,48 @@ class ChatGPTWebResearchAgentTool:
                 except Exception:
                     continue
 
-    def _select_pro(self, page) -> None:
-        # Current ChatGPT UI exposes the selected reasoning level as a compact
-        # menu button (commonly "Medium"). Prefer that exact visible control so
-        # the many conversation-option menus in the sidebar are never inspected.
-        mode_button = page.get_by_role(
-            "button",
-            name=re.compile(r"^\s*(auto|instant|medium|high|extra high|thinking|pro|gpt[- ]?\d.*)\s*$", re.I),
+    def _select_reasoning_mode(self, page) -> dict[str, Any]:
+        """Select and verify the requested ChatGPT power level.
+
+        The current ChatGPT composer uses one five-position Power slider.  Its
+        accessible announcement is the contract we care about:
+
+        * ``Extra High, 4 of 5`` is the xhigh researcher.
+        * ``Pro, 5 of 5`` is the Pro researcher.
+
+        Do not treat ``Pro`` as an xhigh fallback.  The two modes share the same
+        picker but are distinct paid reasoning levels.  The legacy menuitemradio
+        path remains below for older workers during rolling deployments.
+        """
+        if self.mode not in {"pro", "xhigh"}:
+            raise ChatGPTWebResearchError(
+                f"ChatGPT selector is not valid for mode {self.mode}."
+            )
+
+        target_label = "Pro" if self.mode == "pro" else "Extra High"
+        target_power = 5 if self.mode == "pro" else 4
+        target_slider_value = target_power - 1
+        target_pattern = re.compile(rf"^\s*{re.escape(target_label)}\s*$", re.I)
+        mode_pattern = re.compile(
+            r"^\s*(?:auto|instant|medium|high|extra high|thinking|pro|gpt[- ]?\d[\w .-]*)"
+            r"(?:\s*,\s*\d+\s+of\s+5.*)?\s*$",
+            re.I,
         )
+
+        # Current ChatGPT exposes the selected power as a compact button.  Keep
+        # the selector narrow so conversation-option buttons in the sidebar are
+        # never mistaken for the composer picker.
+        mode_button = page.get_by_role("button", name=mode_pattern)
+        opened = False
         for index in reversed(range(mode_button.count())):
             try:
-                if mode_button.nth(index).is_visible():
-                    mode_button.nth(index).click(timeout=5000)
+                button = mode_button.nth(index)
+                if button.is_visible():
+                    button.click(timeout=5000)
                     opened = True
                     break
             except Exception:
                 continue
-        else:
-            opened = False
 
         candidates = (
             "button[data-testid='model-switcher-dropdown-button']",
@@ -364,8 +450,13 @@ class ChatGPTWebResearchAgentTool:
                 for index in range(buttons.count()):
                     button = buttons.nth(index)
                     try:
-                        label = " ".join(((button.inner_text() or "") + " " + (button.get_attribute("aria-label") or "")).split())
-                        if button.is_visible() and ("model" in label.lower() or re.search(r"\b(auto|instant|medium|thinking|pro|gpt)\b", label, re.I)):
+                        label = " ".join(
+                            ((button.inner_text() or "") + " " + (button.get_attribute("aria-label") or "")).split()
+                        )
+                        if button.is_visible() and (
+                            "model" in label.lower()
+                            or re.search(r"\b(auto|instant|medium|high|thinking|pro|gpt)\b", label, re.I)
+                        ):
                             button.click(timeout=5000)
                             opened = True
                             break
@@ -374,18 +465,120 @@ class ChatGPTWebResearchAgentTool:
                 if opened:
                     break
         if not opened:
-            raise ChatGPTWebResearchError("Could not open the ChatGPT model/mode selector required for Pro mode.")
+            raise ChatGPTWebResearchError(
+                f"Could not open the ChatGPT model/mode selector required for {target_label} ({target_power}/5)."
+            )
 
-        pro = page.get_by_text(re.compile(r"^\s*Pro\s*$", re.I))
-        for index in reversed(range(pro.count())):
+        def visible_text(selector: str) -> str:
+            parts: list[str] = []
             try:
-                if pro.nth(index).is_visible():
-                    pro.nth(index).click(timeout=5000)
-                    page.wait_for_timeout(500)
-                    return
+                locator = page.locator(selector)
+                for item_index in range(locator.count()):
+                    item = locator.nth(item_index)
+                    if not item.is_visible():
+                        continue
+                    parts.append(" ".join((item.inner_text(timeout=1000) or "").split()))
+            except Exception:
+                pass
+            return " ".join(part for part in parts if part)
+
+        # New UI: Power is a five-position slider, represented as 0..4 and
+        # announced to the user as 1..5.  Use the semantic value, not CSS classes
+        # or the visible label, because the label changed between UI revisions.
+        slider = page.locator("[role='slider'][aria-valuemin='0'][aria-valuemax='4']")
+        for index in reversed(range(slider.count())):
+            try:
+                control = slider.nth(index)
+                if not control.is_visible():
+                    continue
+                current_raw = control.get_attribute("aria-valuenow")
+                try:
+                    current = int(str(current_raw))
+                except (TypeError, ValueError):
+                    current = None
+                if current is None:
+                    announcement = visible_text(
+                        "[data-testid='composer-model-picker-slider-simple-view'], [role='menu']"
+                    )
+                    match = re.search(r"\b([1-5])\s+of\s+5\b", announcement)
+                    current = int(match.group(1)) - 1 if match else None
+                if current is None or current < 0 or current > 4:
+                    raise ChatGPTWebResearchError(
+                        f"ChatGPT Power slider did not expose a valid current level for {target_label} ({target_power}/5)."
+                    )
+                for _ in range(abs(target_slider_value - current)):
+                    control.press(
+                        "ArrowRight" if target_slider_value > current else "ArrowLeft",
+                        timeout=5000,
+                    )
+                    page.wait_for_timeout(250)
+                page.wait_for_timeout(500)
+                confirmed_raw = control.get_attribute("aria-valuenow")
+                confirmed = int(str(confirmed_raw)) if confirmed_raw is not None else None
+                announcement = visible_text(
+                    "[data-testid='composer-model-picker-slider-simple-view'], [role='menu']"
+                )
+                if confirmed != target_slider_value or not re.search(
+                    rf"\b{target_power}\s+of\s+5\b", announcement
+                ):
+                    raise ChatGPTWebResearchError(
+                        f"ChatGPT did not confirm {target_label} ({target_power}/5) after moving the Power slider; "
+                        f"observed level={confirmed_raw!r}, announcement={announcement[:180]!r}."
+                    )
+                return {
+                    "selected_effort": target_label,
+                    "selected_power": f"{target_power}/5",
+                    "selector_ui": "power-slider",
+                }
+            except ChatGPTWebResearchError:
+                raise
             except Exception:
                 continue
-        raise ChatGPTWebResearchError("The Pro option was not present in the ChatGPT model selector.")
+
+        # Legacy UI: select the exact label only.  In particular, never select
+        # Pro while servicing xhigh: 4/5 and 5/5 are not interchangeable.
+        options = page.get_by_role("menuitemradio", name=target_pattern)
+        if not options.count():
+            options = page.get_by_text(target_pattern)
+        selected_by_click = False
+        for index in reversed(range(options.count())):
+            try:
+                if options.nth(index).is_visible():
+                    options.nth(index).click(timeout=5000)
+                    page.wait_for_timeout(500)
+                    selected_by_click = True
+                    break
+            except Exception:
+                continue
+        if not selected_by_click:
+            observed = visible_text("[role='menu']")
+            raise ChatGPTWebResearchError(
+                f"The ChatGPT selector did not expose {target_label} ({target_power}/5); "
+                f"observed={observed[:240]!r}."
+            )
+
+        # Do not trust the click alone: the mode must be visibly selected before
+        # a potentially expensive prompt is submitted.
+        selected = page.get_by_role("button", name=target_pattern)
+        for index in reversed(range(selected.count())):
+            try:
+                if selected.nth(index).is_visible():
+                    return {
+                        "selected_effort": target_label,
+                        "selected_power": f"{target_power}/5",
+                        "selector_ui": "legacy-menuitemradio",
+                    }
+            except Exception:
+                continue
+        raise ChatGPTWebResearchError(
+            f"ChatGPT did not confirm {target_label} ({target_power}/5) after selection; refusing to send."
+        )
+
+    def _select_pro(self, page) -> None:
+        """Backward-compatible helper retained for integrations/tests."""
+        if self.mode != "pro":
+            raise ChatGPTWebResearchError("_select_pro is only valid for Pro mode.")
+        self._select_reasoning_mode(page)
 
     @staticmethod
     def _send(page, prompt: str) -> None:
@@ -590,7 +783,11 @@ class ChatGPTWebResearchAgentTool:
                         for target in targets
                         if target.get("type") == "iframe"
                         and target.get("parentId") == parent_target_id
-                        and "connector_openai_deep_research" in str(target.get("url") or "")
+                        and re.search(
+                            r"connector[-_]openai[-_]deep[-_]research",
+                            str(target.get("url") or ""),
+                            re.I,
+                        )
                         and target.get("webSocketDebuggerUrl")
                     ),
                     None,
@@ -729,7 +926,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             # deadline. It must never extend a broken browser request beyond the
             # configured total output deadline.
             if (
-                self.mode == "pro"
+                self.mode in {"pro", "xhigh"}
                 and not forced_answer
                 and now >= force_at
                 and self._click_answer_now_if_present(page)
@@ -819,6 +1016,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
 
         started_at = time.time()
         output_timeout_seconds = self._timeout_seconds()
+        selected_mode_metadata: dict[str, Any] = {}
         self._write_json(
             run_state_path,
             {
@@ -858,7 +1056,8 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     if not re.search(r"deep research|full report|detailed report|investigaci[oó]n profunda|informe detallado", body, re.I):
                         raise ChatGPTWebResearchError("The /deep-research route did not expose Deep Research mode; refusing to send a normal chat.")
                 else:
-                    self._select_pro(page)
+                    selected_mode_metadata = self._select_reasoning_mode(page)
+                    self._write_json(run_state_path, selected_mode_metadata)
                 self._send(page, prompt)
                 page.wait_for_timeout(1000)
                 try:
@@ -898,6 +1097,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     conversation_url = page.url
                 metadata = {
                     "mode": self.mode,
+                    **selected_mode_metadata,
                     "conversation_url": conversation_url,
                     "started_at": started_at,
                     "finished_at": time.time(),
@@ -1057,10 +1257,16 @@ def _make_tool(helper: ChatGPTWebResearchAgentTool):
     if function_tool is None:
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
-    mode_label = "Deep Research" if helper.mode == "deep" else "Pro mode"
+    mode_label = {
+        "deep": "Deep Research",
+        "pro": "Pro mode",
+        "xhigh": "Extra High reasoning mode",
+    }[helper.mode]
     description = f"""Run one authenticated ChatGPT Web {mode_label} research agent in a clean Chrome tab and wait for the complete extracted response.
 
 Use it for an independent ChatGPT {mode_label} research or reasoning pass. Give a self-contained prompt with the topic, scope, source/evidence requirements, uncertainties to test, and expected output. Normal clients submit through the configured authenticated async HTTPS broker; only the outbound workstation worker uses the signed-in local Chrome/CDP executor.
+
+ChatGPT's current composer uses one shared five-position Power picker: xhigh means **Extra High (4/5)** and Pro means **Pro (5/5)**. They are adjacent but distinct levels. The browser worker sets the semantic Power slider and verifies the accessible `N of 5` announcement before sending; it must never substitute Pro for an xhigh request.
 
 Args:
     prompt: One detailed research prompt, or a list of up to 5 prompts to run independently.
@@ -1101,3 +1307,7 @@ def get_deepchatgpt_researcher_tool(config: ToolsConfig):
 
 def get_prochatgpt_researcher_tool(config: ToolsConfig):
     return _make_tool(ChatGPTWebResearchAgentTool(config, mode="pro"))
+
+
+def get_chatgptxhigh_tool(config: ToolsConfig):
+    return _make_tool(ChatGPTWebResearchAgentTool(config, mode="xhigh"))

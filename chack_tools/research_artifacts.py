@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import contextvars
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -29,6 +30,7 @@ _RESEARCH_MASTER_DIR: contextvars.ContextVar[str] = contextvars.ContextVar(
     "chack_research_master_dir",
     default="",
 )
+_ARTIFACT_MANIFEST_LOCK = threading.RLock()
 
 
 def _set_param_descriptions(tool: Any, descriptions: dict[str, str]):
@@ -156,14 +158,15 @@ def record_research_artifact(
     if not row["source_url"]:
         row["source_url"] = _infer_source_url({"provenance": provenance, "label": label})
     manifest = root_path / ARTIFACT_MANIFEST_FILENAME
-    manifest.parent.mkdir(parents=True, exist_ok=True)
-    if manifest.is_file():
-        current = _compact_json(row)
-        for line in manifest.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.strip() == current:
-                return
-    with manifest.open("a", encoding="utf-8") as handle:
-        handle.write(_compact_json(row) + "\n")
+    with _ARTIFACT_MANIFEST_LOCK:
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        if manifest.is_file():
+            current = _compact_json(row)
+            for line in manifest.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.strip() == current:
+                    return
+        with manifest.open("a", encoding="utf-8") as handle:
+            handle.write(_compact_json(row) + "\n")
 
 
 def record_research_json_artifact(
@@ -193,46 +196,48 @@ def remove_research_artifact_manifest_entry(evidence_dir: str | Path, filename: 
     manifest = root / ARTIFACT_MANIFEST_FILENAME
     if not manifest.is_file():
         return
-    kept: list[str] = []
-    changed = False
-    for line in manifest.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
+    with _ARTIFACT_MANIFEST_LOCK:
+        kept: list[str] = []
+        changed = False
+        for line in manifest.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                kept.append(line)
+                continue
+            if isinstance(payload, dict) and str(payload.get("filename") or "").strip() == rel:
+                changed = True
+                continue
             kept.append(line)
-            continue
-        if isinstance(payload, dict) and str(payload.get("filename") or "").strip() == rel:
-            changed = True
-            continue
-        kept.append(line)
-    if changed:
-        manifest.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+        if changed:
+            manifest.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
 
 
 def research_artifact_manifest(evidence_dir: str) -> dict[str, dict[str, str]]:
     root = Path(str(evidence_dir or "")).expanduser()
     manifest = root / ARTIFACT_MANIFEST_FILENAME
-    if not manifest.is_file():
-        return {}
-    rows: dict[str, dict[str, str]] = {}
-    for line in manifest.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        filename = str(payload.get("filename") or "").strip()
-        if not filename:
-            continue
-        rows[filename] = {
-            "source_url": str(payload.get("source_url") or "").strip(),
-            "provenance": str(payload.get("provenance") or "").strip(),
-            "tool": str(payload.get("tool") or "").strip(),
-            "kind": str(payload.get("kind") or "").strip(),
-            "label": str(payload.get("label") or "").strip(),
-        }
-    return rows
+    with _ARTIFACT_MANIFEST_LOCK:
+        if not manifest.is_file():
+            return {}
+        rows: dict[str, dict[str, str]] = {}
+        for line in manifest.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            filename = str(payload.get("filename") or "").strip()
+            if not filename:
+                continue
+            rows[filename] = {
+                "source_url": str(payload.get("source_url") or "").strip(),
+                "provenance": str(payload.get("provenance") or "").strip(),
+                "tool": str(payload.get("tool") or "").strip(),
+                "kind": str(payload.get("kind") or "").strip(),
+                "label": str(payload.get("label") or "").strip(),
+            }
+        return rows
 
 
 def register_untracked_research_artifacts(evidence_dir: str | Path) -> int:
@@ -244,32 +249,33 @@ def register_untracked_research_artifacts(evidence_dir: str | Path) -> int:
         root = root.resolve()
     except OSError:
         return 0
-    known = set(research_artifact_manifest(str(root)).keys())
-    added = 0
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        try:
-            rel = str(path.resolve().relative_to(root))
-        except (OSError, ValueError):
-            continue
-        if rel == ARTIFACT_MANIFEST_FILENAME or rel in known:
-            continue
-        row = {
-            "filename": rel,
-            "source_url": "",
-            "provenance": f"unregistered local evidence file created during researcher execution: {rel}",
-            "tool": "unregistered_file_fallback",
-            "kind": "unregistered-file",
-            "label": rel,
-        }
-        manifest = root / ARTIFACT_MANIFEST_FILENAME
-        manifest.parent.mkdir(parents=True, exist_ok=True)
-        with manifest.open("a", encoding="utf-8") as handle:
-            handle.write(_compact_json(row) + "\n")
-        known.add(rel)
-        added += 1
-    return added
+    with _ARTIFACT_MANIFEST_LOCK:
+        known = set(research_artifact_manifest(str(root)).keys())
+        added = 0
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            try:
+                rel = str(path.resolve().relative_to(root))
+            except (OSError, ValueError):
+                continue
+            if rel == ARTIFACT_MANIFEST_FILENAME or rel in known:
+                continue
+            row = {
+                "filename": rel,
+                "source_url": "",
+                "provenance": f"unregistered local evidence file created during researcher execution: {rel}",
+                "tool": "unregistered_file_fallback",
+                "kind": "unregistered-file",
+                "label": rel,
+            }
+            manifest = root / ARTIFACT_MANIFEST_FILENAME
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            with manifest.open("a", encoding="utf-8") as handle:
+                handle.write(_compact_json(row) + "\n")
+            known.add(rel)
+            added += 1
+        return added
 
 
 def cleanup_research_artifacts(path: str, *, save_artifacts: bool) -> None:
@@ -622,8 +628,15 @@ def get_research_artifact_tools(helper: ResearchArtifactsTool, *, readonly: bool
     return built
 
 
-def add_research_artifact_tools(tools: list[Any], config: ToolsConfig) -> None:
-    tools.extend(get_research_artifact_tools(ResearchArtifactsTool(config)))
+def add_research_artifact_tools(tools: list[Any], config: ToolsConfig, *, root: str = "") -> None:
+    """Add artifact tools, optionally pinned to one explicit evidence root.
+
+    Researchers normally use the ContextVar-backed root because each worker owns
+    its own evidence folder. Orchestrators that inspect a shared master folder
+    must pass ``root`` so a child researcher cannot redirect their file tools by
+    changing the inherited research context.
+    """
+    tools.extend(get_research_artifact_tools(ResearchArtifactsTool(config, root=root)))
 
 
 def get_readonly_file_tools_for_root(config: ToolsConfig, root: str) -> list[Any]:

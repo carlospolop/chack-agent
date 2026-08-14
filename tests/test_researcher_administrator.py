@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import time
 import threading
 from collections import Counter
@@ -10,7 +11,11 @@ import pytest
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
-from chack_tools.research_artifacts import cleanup_research_artifacts
+from chack_tools.research_artifacts import (
+    cleanup_research_artifacts,
+    reset_research_artifact_context,
+    set_research_artifact_context,
+)
 from chack_tools.cancellation import (
     current_cancellation_event,
     register_process,
@@ -41,7 +46,186 @@ def test_chatgpt_researchers_are_never_cancelled_for_elapsed_time():
     assert "Prefer `start_researchers_async`" in prompt
     assert "Never use `wait(..., terminate=true)`" in prompt
     assert "configured hard timeout" in prompt
-    assert "45-90 minutes" in prompt
+    assert "up to 180 minutes" in prompt
+
+
+def test_administrator_runtime_cap_is_explicit_and_configurable():
+    default = ResearcherAdministratorAgentTool(
+        ToolsConfig(),
+        model_provider="openai",
+        fallback_model="m",
+    )
+    queue = ResearcherAdministratorAgentTool(
+        ToolsConfig(),
+        model_provider="openai",
+        fallback_model="m",
+        runtime_cap_minutes=180,
+    )
+
+    assert default.runtime_cap_minutes == 90
+    assert queue.runtime_cap_minutes == 180
+
+
+def test_async_jobs_can_be_harvested_by_unique_evidence_workspace():
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    evidence_dir = "/tmp/chack-ledger-workspace-test"
+    job_id = "research-job-owned-by-workspace"
+    admin_mod._async_job_store(
+        job_id,
+        {
+            "job_id": job_id,
+            "created_at": time.time(),
+            "evidence_dir": evidence_dir,
+            "tasks": {},
+        },
+    )
+
+    assert admin_mod._async_job_ids_for_evidence_dir(evidence_dir) == [job_id]
+    assert admin_mod._async_job_ids_for_evidence_dir(evidence_dir + "-other") == []
+
+
+def test_async_harvest_waits_for_nonterminal_job_before_return():
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    job_id = "research-job-harvest-waits"
+    completion = threading.Event()
+    admin_mod._async_job_store(
+        job_id,
+        {
+            "job_id": job_id,
+            "created_at": time.time(),
+            "completion_event": completion,
+            "expected_task_count": 1,
+            "tasks": {
+                "task-1": {
+                    "task_id": "task-1",
+                    "researcher_tool": "scientific_research",
+                    "status": "running",
+                }
+            },
+        },
+    )
+
+    def finish_job():
+        time.sleep(0.05)
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            admin_mod._ASYNC_RESEARCH_JOBS[job_id]["tasks"]["task-1"]["status"] = "done"
+        completion.set()
+
+    worker = threading.Thread(target=finish_job)
+    worker.start()
+    try:
+        pending = admin_mod._wait_for_async_jobs_terminal([job_id], time.monotonic() + 2)
+    finally:
+        worker.join(timeout=2)
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+
+    assert pending == []
+
+
+def test_administrator_harvests_workspace_owned_job_without_contextvar_ids(monkeypatch, tmp_path):
+    import chack_agent
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    job_id = "research-job-workspace-harvest"
+    tool_name = "scientific_research"
+
+    class FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeChack:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self, **kwargs):
+            admin_mod._async_job_store(
+                job_id,
+                {
+                    "job_id": job_id,
+                    "created_at": time.time(),
+                    "evidence_dir": str(tmp_path),
+                    "tasks": {
+                        "task-0": {
+                            "task_id": "task-0",
+                            "researcher": "scientific",
+                            "researcher_tool": tool_name,
+                            "status": "done",
+                            "result": {
+                                "researcher_tool": tool_name,
+                                "parsed_response": {
+                                    "research_worked": True,
+                                    "failure_reason": "",
+                                    "final_research_review": "workspace-harvested review",
+                                    "tool_call_counts": {"search_europe_pmc": 2},
+                                    "total_tool_calls": 2,
+                                },
+                            },
+                        }
+                    },
+                },
+            )
+            return SimpleNamespace(
+                output=json.dumps(
+                    {
+                        "research_worked": True,
+                        "failure_reason": "",
+                        "administrator_conclusions": "workspace-harvested conclusions",
+                    },
+                    separators=(",", ":"),
+                ),
+                tool_counts=Counter(),
+                all_steps=[],
+            )
+
+    monkeypatch.setattr(chack_agent, "Chack", FakeChack)
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+        required_researchers=["scientific"],
+    )
+    monkeypatch.setattr(
+        helper,
+        "_build_subagent_tools",
+        lambda _enabled, **_kwargs: [FakeTool("task_steps_manager")],
+    )
+
+    output = helper._run_single(
+        "Research a scientific question with primary sources, exact dates, contradictions, and evidence gaps. " * 12,
+        {
+            "max_turns": 20,
+            "max_runtime_minutes": 0,
+            "remaining_runtime_minutes": 0,
+            "max_cost_usd": 0,
+            "remaining_cost_usd": 0,
+            "memory_max_messages": 8,
+            "memory_reset_to_messages": 8,
+            "session_id": "workspace-harvest-test",
+            "research_master_dir": str(tmp_path),
+        },
+        save_artifacts=False,
+    )
+    payload = json.loads(output)
+
+    assert payload["research_worked"] is True
+    assert payload["required_researchers_satisfied"] is True
+    assert payload["researcher_call_counts"] == {tool_name: 1}
+    assert payload["researcher_responses"][0]["researcher_tool"] == tool_name
+
+
+def test_administrator_system_prompt_is_compact_and_has_one_first_wave_policy():
+    prompt = _ADMINISTRATOR_SYSTEM_PROMPT
+
+    assert len(prompt) < 5_000
+    assert "Researchers are blind to one another" in prompt
+    assert "Repeat a researcher only for a specific unresolved source gap or contradiction" in prompt
+    assert "normally run 3-5" not in prompt
+    assert "key_artifacts" not in prompt
+    assert "CHACK_RESEARCH_DATA_DIR" not in prompt
 
 
 def test_administrator_registered_only_when_enabled():
@@ -61,13 +245,14 @@ def test_chatgpt_researchers_are_structurally_async_only():
         researcher_administrator_enabled=True,
         deepchatgpt_enabled=True,
         prochatgpt_enabled=True,
+        chatgptxhigh_enabled=True,
         chatgpt_cdp_url="http://127.0.0.1:9226",
     )
     helper = ResearcherAdministratorAgentTool(
         cfg,
         model_provider="openai",
         fallback_model="m",
-        researchers=["deepchatgpt", "prochatgpt"],
+        researchers=["deepchatgpt", "prochatgpt", "chatgptxhigh"],
     )
 
     inner = _tool_names(helper._build_subagent_tools(helper._enabled_researchers()))
@@ -75,6 +260,7 @@ def test_chatgpt_researchers_are_structurally_async_only():
     assert "poll_researchers_async" in inner
     assert "deepchatgpt_researcher" not in inner
     assert "prochatgpt_researcher" not in inner
+    assert "chatgptxhigh" not in inner
     assert "run_researchers_batch" not in inner
     assert "cancel_researchers_async" not in inner
 
@@ -108,6 +294,102 @@ def test_administrator_allowlist_force_enables_researchers():
     assert "search_arxiv" not in inner
     assert "subchack_researcher" not in inner
     assert "researcher_administrator" not in inner
+
+
+def test_administrator_artifact_tools_stay_pinned_when_child_context_changes(tmp_path):
+    master_dir = tmp_path / "master"
+    child_dir = master_dir / "websearcher"
+    wrong_dir = tmp_path / "wrong-context"
+    master_dir.mkdir()
+    child_dir.mkdir()
+    wrong_dir.mkdir()
+    (master_dir / "master-evidence.txt").write_text("master evidence", encoding="utf-8")
+    (child_dir / "child-evidence.txt").write_text("child evidence", encoding="utf-8")
+    (wrong_dir / "wrong-evidence.txt").write_text("wrong context", encoding="utf-8")
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    list_tool = next(
+        tool for tool in helper._build_subagent_tools(["scientific"], artifact_root=str(master_dir))
+        if getattr(tool, "name", "") == "list_research_artifacts"
+    )
+
+    context_tokens = set_research_artifact_context(str(wrong_dir), str(wrong_dir))
+    try:
+        from agents.tool_context import ToolContext
+        from agents.usage import Usage
+
+        raw_args = json.dumps({"glob": "*", "max_results": 20})
+        tool_context = ToolContext(
+            context=None,
+            usage=Usage(),
+            tool_name="list_research_artifacts",
+            tool_call_id="pinned-root-test",
+            tool_arguments=raw_args,
+        )
+        output = asyncio.run(
+            list_tool.on_invoke_tool(
+                tool_context,
+                raw_args,
+            )
+        )
+    finally:
+        reset_research_artifact_context(context_tokens)
+
+    assert "master-evidence.txt" in output
+    assert "wrong-evidence.txt" not in output
+
+
+def test_async_tools_capture_explicit_administrator_artifact_root(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    class FakeResearcher:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "final_research_review": "root-capture test",
+                    "tool_call_counts": {"search_europe_pmc": 1},
+                    "total_tool_calls": 1,
+                }
+            )
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    root = str(tmp_path / "administrator-root")
+    tools = helper._build_async_tools(
+        {"scientific_research": FakeResearcher()},
+        ["scientific"],
+        artifact_root=root,
+    )
+    start_tool = next(tool for tool in tools if getattr(tool, "name", "") == "start_researchers_async")
+    prompt = "Investigate this scientific question with primary sources, exact dates, contradictions, and evidence gaps. " * 12
+    output = helper._invoke_tool_sync(
+        start_tool,
+        {
+            "requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}]),
+            "save_artifacts": True,
+            "max_parallel": 1,
+        },
+    )
+    payload = json.loads(output)
+    job_id = payload["job_id"]
+    try:
+        assert admin_mod._async_job_get(job_id)["evidence_dir"] == root
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
 
 
 def test_administrator_empty_allowlist_uses_globally_enabled():
@@ -207,7 +489,7 @@ def test_administrator_error_output_keeps_exact_attempted_researcher_count(monke
     monkeypatch.setattr(
         helper,
         "_build_subagent_tools",
-        lambda _enabled: [SimpleNamespace(name="task_steps_manager")],
+        lambda _enabled, **_kwargs: [SimpleNamespace(name="task_steps_manager")],
     )
 
     class FakeChack:
@@ -266,6 +548,35 @@ def test_administrator_capability_map_lists_internal_researcher_tools():
     assert "- scientific via `scientific_research`:" in text
     assert "search_arxiv" in text
     assert "download_pmc_full_text" in text
+
+
+def test_administrator_prioritizes_deep_and_pro_chatgpt_before_xhigh():
+    instruction = ResearcherAdministratorAgentTool._chatgpt_priority_instruction(
+        ["websearcher", "chatgptxhigh", "prochatgpt", "deepchatgpt"]
+    )
+
+    assert "`deepchatgpt_researcher`" in instruction
+    assert "`prochatgpt_researcher`" in instruction
+    assert "start every enabled one immediately" in instruction
+    assert "`start_researchers_async`" in instruction
+    assert "chatgptxhigh" not in instruction
+
+
+def test_administrator_prioritizes_xhigh_when_deep_and_pro_are_unavailable():
+    instruction = ResearcherAdministratorAgentTool._chatgpt_priority_instruction(
+        ["websearcher", "chatgptxhigh"]
+    )
+
+    assert "neither `deepchatgpt_researcher` nor `prochatgpt_researcher` is available" in instruction
+    assert "`chatgptxhigh` is enabled" in instruction
+    assert "start it immediately" in instruction
+    assert "`start_researchers_async`" in instruction
+
+
+def test_administrator_has_no_chatgpt_priority_without_browser_researchers():
+    assert ResearcherAdministratorAgentTool._chatgpt_priority_instruction(
+        ["websearcher", "scientific"]
+    ) == ""
 
 
 def test_administrator_forces_try_harder_for_child_researchers(monkeypatch):
@@ -379,18 +690,20 @@ def test_administrator_prompt_includes_compact_tool_map_and_usage_audit(monkeypa
             researcher_administrator_max_tools_used=3,
             websearcher_enabled=True,
             scientific_enabled=True,
+            prochatgpt_enabled=True,
         ),
         model_provider="openai",
         fallback_model="m",
-        researchers=["websearcher", "scientific"],
+        researchers=["websearcher", "scientific", "prochatgpt"],
         self_critique_rounds=2,
     )
     monkeypatch.setattr(
         helper,
         "_build_subagent_tools",
-        lambda enabled: [
+        lambda enabled, **_kwargs: [
             FakeTool("websearcher_research"),
             FakeTool("scientific_research"),
+            FakeTool("prochatgpt_researcher"),
             FakeTool("task_steps_manager"),
             FakeTool("run_researchers_batch"),
             FakeTool("start_researchers_async"),
@@ -431,21 +744,21 @@ def test_administrator_prompt_includes_compact_tool_map_and_usage_audit(monkeypa
 
     assert payload["research_worked"] is True
     assert captured["max_tools_used_override"] == 20
-    assert "budget for this run: 3 total `*_research` calls" in sent_prompt
-    assert "not on management polls/status checks" in sent_prompt
-    assert "Internal tools available to each researcher in this run:" in sent_prompt
+    assert "Researcher-call budget: 3 launches" in sent_prompt
+    assert "management polls/status do not count" in sent_prompt
+    assert "Researcher capabilities:" in sent_prompt
     assert "- websearcher via `websearcher_research`: fetch_url_text, web_archive_search" in sent_prompt
     assert "- scientific via `scientific_research`: search_arxiv, download_pmc_full_text" in sent_prompt
-    assert "compare its code-added tool_call_counts against the capability map" in sent_prompt
-    assert "skipped or barely used" in sent_prompt
-    assert "relaunch that researcher with explicit missing tool names" in sent_prompt
+    assert "Compare `tool_call_counts` with the capabilities above" in sent_prompt
+    assert "focused follow-up only for a material missing source/tool family" in sent_prompt
     assert "try-harder self-critique for 2 round(s)" in sent_prompt
     assert "start_researchers_async" in sent_prompt
     assert "poll_researchers_async" in sent_prompt
-    assert "ChatGPT Pro/Deep use 300-600 seconds" in sent_prompt
-    assert "recent_events" in sent_prompt
-    assert "idle_seconds" in sent_prompt
-    assert "cancel_researchers_async" in sent_prompt
+    assert "ChatGPT browser 300-600s" in sent_prompt
+    assert "`prochatgpt_researcher` is enabled" in sent_prompt
+    assert "start every enabled one immediately" in sent_prompt
+    assert "### Evidence collection" not in sent_prompt
+    assert len(sent_prompt) - len(prompt) < 4_000
 
 
 def test_administrator_timeout_returns_preserved_artifact_paths(monkeypatch, tmp_path):
@@ -473,7 +786,7 @@ def test_administrator_timeout_returns_preserved_artifact_paths(monkeypatch, tmp
     monkeypatch.setattr(
         helper,
         "_build_subagent_tools",
-        lambda enabled: [
+        lambda enabled, **_kwargs: [
             FakeTool("websearcher_research"),
             FakeTool("task_steps_manager"),
             FakeTool("run_researchers_batch"),
@@ -564,7 +877,7 @@ def test_administrator_timeout_harvests_completed_async_researchers(monkeypatch,
     monkeypatch.setattr(
         helper,
         "_build_subagent_tools",
-        lambda enabled: [
+        lambda enabled, **_kwargs: [
             FakeTool("scientific_research"),
             FakeTool("task_steps_manager"),
             FakeTool("start_researchers_async"),
@@ -638,7 +951,7 @@ def test_administrator_timeout_harvests_persisted_async_researcher_files(monkeyp
     monkeypatch.setattr(
         helper,
         "_build_subagent_tools",
-        lambda enabled: [
+        lambda enabled, **_kwargs: [
             FakeTool("legal_research"),
             FakeTool("task_steps_manager"),
             FakeTool("start_researchers_async"),
@@ -740,7 +1053,7 @@ def test_administrator_async_research_tools_start_and_poll():
     started = json.loads(start)
     assert started["async_started"] is True
     assert started["max_parallel"] == 1
-    assert "one at a time" in started["next_step"]
+    assert "up to 1 concurrent workers" in started["next_step"]
     job_id = started["job_id"]
 
     poll_started = time.monotonic()
@@ -762,6 +1075,165 @@ def test_administrator_async_research_tools_start_and_poll():
     assert task["tool_call_counts"] == {"search_arxiv": 1}
     assert task["total_tool_calls"] == 1
     assert any(event["tool"] == "search_arxiv" for event in task["recent_events"])
+
+
+def test_async_researchers_keep_the_administrator_artifact_context_isolated(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            researcher_administrator_enabled=True,
+            news_media_enabled=True,
+            chatgptxhigh_enabled=True,
+            chatgpt_cdp_url="http://127.0.0.1:9226",
+        ),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["news_media", "chatgptxhigh"],
+    )
+    master_dir = str(tmp_path / "administrator-workspace")
+    seen: list[tuple[str, str, str]] = []
+    seen_lock = threading.Lock()
+
+    class FakeResearchTool:
+        def __init__(self, name):
+            self.name = name
+
+        async def on_invoke_tool(self, ctx, raw_args):
+            from chack_tools.research_artifacts import (
+                research_artifacts_master_root,
+                research_artifacts_root,
+            )
+
+            with seen_lock:
+                seen.append((self.name, research_artifacts_root(), research_artifacts_master_root()))
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "final_research_review": f"{self.name} review",
+                    "tool_call_counts": {},
+                    "total_tool_calls": 0,
+                },
+                separators=(",", ":"),
+            )
+
+    tools = helper._build_async_tools(
+        {
+            "news_media_research": FakeResearchTool("news_media_research"),
+            "chatgptxhigh": FakeResearchTool("chatgptxhigh"),
+        },
+        ["news_media", "chatgptxhigh"],
+    )
+    by_name = {tool.name: tool for tool in tools}
+    prompts = [
+        {"researcher": "news_media", "prompt": "Research current media evidence with primary sources and exact timestamps. " * 12},
+        {"researcher": "chatgptxhigh", "prompt": "Research the same question with independent browser evidence and caveats. " * 12},
+    ]
+    context_tokens = set_research_artifact_context(master_dir, master_dir)
+    try:
+        started = json.loads(
+            helper._invoke_tool_sync(
+                by_name["start_researchers_async"],
+                {
+                    "requests_json": json.dumps(prompts, separators=(",", ":")),
+                    "save_artifacts": False,
+                },
+            )
+        )
+        assert started["async_started"] is True
+        job = admin_mod._async_job_get(started["job_id"])
+        assert job is not None
+        assert job["evidence_dir"] == master_dir
+        payload = json.loads(
+            helper._invoke_tool_sync(
+                by_name["poll_researchers_async"],
+                {"job_id": started["job_id"], "include_outputs": False, "wait_seconds": 900},
+            )
+        )
+    finally:
+        reset_research_artifact_context(context_tokens)
+
+    assert payload["complete"] is True
+    assert started["max_parallel"] == 2
+    assert {row[0] for row in seen} == {"news_media_research", "chatgptxhigh"}
+    assert all(data_dir == master_dir for _, data_dir, _ in seen)
+    assert all(parent_dir == master_dir for _, _, parent_dir in seen)
+
+
+def test_required_researcher_async_request_rejects_missing_researchers():
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True, business_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific", "business"],
+        required_researchers=["scientific", "business"],
+    )
+    prompt = "Research this required source family with primary evidence, exact dates, contradictions, and limitations. " * 12
+
+    normalized, errors = helper._normalize_researcher_requests(
+        json.dumps([{"researcher": "scientific", "prompt": prompt}]),
+        enabled={"scientific", "business"},
+        tools_by_name={"scientific_research": object(), "business_research": object()},
+        required_researchers={"scientific", "business"},
+    )
+
+    assert normalized == []
+    assert any("business" in str(error.get("error")) for error in errors)
+
+
+def test_required_researcher_batch_request_rejects_missing_researchers():
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True, business_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific", "business"],
+        required_researchers=["scientific", "business"],
+    )
+
+    class FakeResearchTool:
+        def __init__(self, name):
+            self.name = name
+
+        async def on_invoke_tool(self, ctx, raw_args):
+            return json.dumps({"research_worked": True, "failure_reason": "", "final_research_review": "ok"})
+
+    tool = helper._build_batch_tool(
+        {
+            "scientific_research": FakeResearchTool("scientific_research"),
+            "business_research": FakeResearchTool("business_research"),
+        },
+        ["scientific", "business"],
+    )
+    prompt = "Research this required source family with primary evidence, exact dates, contradictions, and limitations. " * 12
+    output = helper._invoke_tool_sync(
+        tool,
+        {
+            "requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}]),
+            "save_artifacts": False,
+            "max_parallel": 2,
+        },
+    )
+    payload = json.loads(output)
+
+    assert payload["batch_worked"] is False
+    assert any("business" in str(error.get("error")) for error in payload["errors"])
+
+
+def test_required_researcher_mode_hides_direct_sync_tools():
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True, business_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific", "business"],
+        required_researchers=["scientific", "business"],
+    )
+
+    names = _tool_names(helper._build_subagent_tools(helper._enabled_researchers()))
+
+    assert "run_researchers_batch" in names
+    assert "scientific_research" not in names
+    assert "business_research" not in names
 
 
 def test_async_poll_unknown_job_returns_without_waiting():

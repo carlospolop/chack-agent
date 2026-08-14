@@ -1,4 +1,7 @@
 import json
+import os
+import sys
+import time
 
 from chack_agent.backends.codex_backend import (
     CodexExecutor,
@@ -36,3 +39,36 @@ def test_executor_runtime_env_falls_back_to_process_env(monkeypatch):
 
     assert _resolve_codex_exec_timeout("check_auditor", executor._runtime_env()) == 321
     assert _resolve_codex_exec_cwd(executor._runtime_env()) == "/process-default"
+
+
+def test_silent_codex_process_cannot_bypass_execution_timeout(tmp_path):
+    executor = CodexExecutor.__new__(CodexExecutor)
+    executor._runtime_env_json = json.dumps(
+        {
+            "CHACK_CODEX_EXEC_TIMEOUT_SECONDS": "1",
+            "CHACK_EXEC_CWD": str(tmp_path),
+        }
+    )
+    executor._sub_action = "silent_timeout_test"
+    executor._model_name = "test-model"
+    executor._model_provider = "codex"
+    executor._thread_id = None
+    executor._build_command = lambda: [
+        sys.executable,
+        "-c",
+        "import sys, time; sys.stdin.read(); time.sleep(30)",
+    ]
+    executor._build_env = lambda: dict(os.environ)
+    executor._log_codex_failure = lambda *args, **kwargs: None
+
+    started_at = time.monotonic()
+    output, steps, raw_result = executor._run_codex_once(
+        "test prompt",
+        allow_api_key_fallback=False,
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert output == "ERROR: Codex execution timed out after 1s."
+    assert steps == []
+    assert raw_result.raw_responses == []
+    assert elapsed < 5

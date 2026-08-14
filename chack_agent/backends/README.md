@@ -1,12 +1,72 @@
 # Backends Overview
 
-This folder contains 6 runtime backends:
+This folder contains 7 runtime backends:
 - `openai_compaction_backend.py`
 - `openrouter_openai_backend.py`
 - `codex_backend.py`
 - `langgraph_backend.py`
 - `gemini_cli_backend.py`
 - `claude_code_backend.py`
+- `copilot_cli_backend.py`
+
+## Prompt-cache boundary
+
+Agent prompts that run repeatedly with a large immutable prefix may place one
+visible `<!-- CHACK_PROMPT_CACHE_BREAKPOINT -->` marker between that prefix and
+their changing suffix. Keep the real stable text and variables in the YAML;
+do not hide them behind a generated prefix placeholder. Chack removes the
+marker before inference and uses the same split for both CLI providers:
+
+- Claude Code receives the stable side through its cached system layer and the
+  changing side through stdin. No-tool agents replace the generic coding
+  system prompt; tool-using agents append to it.
+- Codex GPT-5.4 and older receive the stable side as developer instructions and
+  the changing side through stdin for automatic prefix caching.
+- No-tool Codex GPT-5.6+ agents use Chack's direct Responses transport. Public
+  API-key requests use `prompt_cache_key`, an explicit breakpoint after the
+  stable developer content, and explicit cache mode. ChatGPT/Codex subscription
+  requests use the same deterministic `prompt_cache_key` and `session_id`
+  across fresh agents and retain the official CLI's first-party transport
+  classification because that endpoint rejects the public explicit-cache
+  fields and routes unknown originators differently. Transient overload and
+  rate-limit failures receive bounded jittered retries. Tool-using agents and
+  terminal direct-transport failures safely retain the Codex CLI path.
+
+Everything before the marker must be byte-identical for requests intended to
+share a cache. Put check inventories, round notes, focus instructions,
+timestamps, budgets, and retry data after it. A text marker is not itself a
+provider cache directive; Chack converts it to the appropriate provider
+request boundary. Set `CHACK_CODEX_DIRECT_CACHE_TRANSPORT=off` only to disable
+the GPT-5.6+ direct path for diagnosis. Cache behavior must be verified from
+reported `cached_prompt_tokens`/`cache_write_prompt_tokens`, not inferred from
+the prompt layout.
+
+Backends log a deterministic prefix key so cache-read/cache-write telemetry can
+be grouped without logging the prompt. When an agent resolves to zero tools,
+the Codex and Claude CLI backends also skip the Chack MCP server/tool registry;
+this removes startup and schema-token overhead without changing agent
+capabilities.
+
+## Explicit pre-resume compaction
+
+`Chack.run(..., compact_before_resume=True)` asks the live executor to compact
+its existing conversation before the new top-level instruction is sent. This is
+strictly opt-in: ordinary resumes, first turns, and internal retry attempts do
+not trigger it. The choice is per `run`/`arun` call; there is no session-wide
+configuration that silently compacts every continuation. Optional
+`resume_compaction_instructions` focus the summary on state the next turn needs.
+
+- OpenAI: `responses.compact(...)`
+- Codex: app-server `thread/compact/start`
+- Claude Code: `/compact [focus instructions]`
+- Gemini CLI: `/compress`
+- Copilot CLI: `/compact [focus instructions]`
+- OpenRouter and LangGraph: summary plus server/checkpoint thread rotation
+
+Compaction is fail-open: a backend compaction error is returned in `RunResult`
+and the requested continuation still runs. When a backend reports usage, those
+input, cached-input, output-token, and cost values are included in the run
+totals.
 
 ## Current shared config defaults
 
@@ -37,8 +97,12 @@ This folder contains 6 runtime backends:
 
 ### `task_steps_manager init first`
 
-- Enforced in backend tool-input guardrail `require_task_steps_manager_init_first`.
-- Codex, Gemini CLI and LangGraph backends enforce this in their tool execution layers.
+- For backends without native planning, Chack enforces this setting in its
+  `task_steps_manager` tool-input guardrail.
+- Codex and Claude Code do not receive that MCP tool. The same setting becomes
+  prompt guidance to create the first plan with Codex `update_plan` or Claude
+  Code `TodoWrite`/`Task*`; native plan updates are mirrored into Chack's shared
+  plan store and its Telegram/Discord listener.
 
 ## `openai_compaction_backend.py`
 
@@ -120,11 +184,23 @@ This folder contains 6 runtime backends:
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
 - Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Codex JSON output lines and mapped into intermediate steps.
+- Codex `todo_list` events from native `update_plan` are mirrored on every
+  `item.started`, `item.updated`, and `item.completed` event into the shared
+  Chack plan board. Duplicate snapshots do not emit redundant chat edits.
+- Top-level MCP calls are also counted in a tiny file-backed run-state counter
+  at the MCP execution boundary. `agent.py` merges those counts with provider
+  steps by taking the larger per-tool observation, so Codex transcript
+  compaction, timeout, or a truncated event stream cannot erase earlier tool
+  telemetry or cause required-tool enforcement to repeat completed work. The
+  counter is deleted with the rest of the per-run state.
 
 ### Guardrails
 
 - No backend tool-input guardrail hooks (since execution is external CLI-driven).
-- MCP server hard-enforces `task_steps_manager init first` and `max_tools_used` limits.
+- The MCP server never exposes `task_steps_manager` to Codex. When init-first is
+  configured, the prompt asks Codex to call native `update_plan` first and keep
+  it current; this cannot be hard-enforced because it is a provider-native tool.
+- MCP still hard-enforces `max_tools_used` for transported Chack tools.
 - MCP does not expose command-execution tools (e.g. `exec`) to avoid duplication with Codex native command execution.
 
 ## `claude_code_backend.py`
@@ -146,12 +222,19 @@ This folder contains 6 runtime backends:
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
 - Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Claude JSON stream events and mapped into intermediate steps.
+- Successful Claude native `TodoWrite`, `TaskCreate`, and `TaskUpdate` events are
+  normalized into the same shared plan board and listener used by Chack's tool.
+- The shared MCP-boundary counter supplies any calls missing from Claude's
+  returned event stream without double-counting calls present in both sources.
 
 ### Guardrails
 
-- Prompt-level policy for min/max tool usage and `task_steps_manager init first` is injected in the prompt.
-- MCP server enforces `task_steps_manager init first` and `max_tools_used` limits.
-- `--tools ""` disables Claude Code native built-ins to avoid duplicate native tool execution paths.
+- Prompt-level policy for min/max tool usage is injected in the prompt.
+- The MCP server never exposes `task_steps_manager` to Claude Code. When
+  init-first is configured, Claude is asked to create and maintain the plan with
+  its installed native `TodoWrite` or `TaskCreate`/`TaskUpdate` tools; this is
+  advisory rather than hard-enforced.
+- Native planning calls do not count toward Chack's non-task tool limits.
 
 ---
 
@@ -201,6 +284,8 @@ This folder contains 6 runtime backends:
 - Local `_conversation` stores user/assistant text history for Chack-level APIs/observability only.
 - Bounded by `agent.memory_max_messages` / `agent.memory_reset_to_messages`.
 - Tool events are parsed from Gemini `stream-json` events and mapped into intermediate steps.
+- The shared MCP-boundary counter supplies any calls missing from Gemini's
+  returned event stream without double-counting calls present in both sources.
 
 ### Guardrails
 

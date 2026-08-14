@@ -3,7 +3,9 @@ from __future__ import annotations
 import contextvars
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, TypedDict
+from typing import Any
+
+from typing_extensions import TypedDict
 
 from .researcher_administrator_agent import (
     RESEARCHER_REGISTRY,

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from .model_aliases import resolve_backend_alias, resolve_model_alias
-from .thinking_effort import normalize_thinking_effort
+from .thinking_effort import normalize_thinking_effort, validate_thinking_effort
 
 from chack_tools.config import ToolsConfig as BaseToolsConfig
 
@@ -42,6 +42,10 @@ def _interpolate_env(value: Any) -> Any:
 class ModelConfig:
     primary: str
     provider: str = ""
+    # Optional explicit credential family selected by the caller. This is
+    # distinct from provider because, for example, the Codex backend supports
+    # either a Codex account token or an OpenAI API key.
+    api_key_type: str = ""
     max_context_tokens: int = 0
     social_network: str = "CHEAP_BUT_QUALITY"
     scientific: str = "CHEAP_BUT_QUALITY"
@@ -96,8 +100,9 @@ class AgentConfig:
     max_runtime_minutes: int = 0
     max_cost_usd: float = 0.0
     require_task_steps_manager_init_first: bool = True
-    # Match Hermes's balanced context policy by default: keep full capacity,
-    # but compact once the active context reaches 50%.
+    # Trigger compaction when active input reaches this fraction of the context
+    # window. This is never a post-compaction retention ratio: compaction
+    # replaces old history with a much smaller native or generated summary.
     compaction_threshold_ratio: float = 0.50
     compaction_target_ratio: float = 0.20
     compaction_model: str = ""
@@ -190,6 +195,25 @@ class ChackConfig:
 
 def resolve_api_key_type(config: ChackConfig) -> str:
     provider = str(getattr(config.model, "provider", "") or "").strip().lower()
+    explicit_api_key_type = str(
+        getattr(config.model, "api_key_type", "") or ""
+    ).strip().lower()
+    explicit_aliases = {
+        "codex": "codex_token",
+        "codex_token": "codex_token",
+        "openai": "openai",
+        "openai_api": "openai",
+        "anthropic": "anthropic",
+        "anthropic_api": "anthropic",
+        "claude": "anthropic",
+        "claude_token": "anthropic",
+        "openrouter": "openrouter",
+        "openrouter_api": "openrouter",
+        "gemini": "gemini",
+        "gemini_api": "gemini",
+    }
+    if explicit_api_key_type:
+        return explicit_aliases.get(explicit_api_key_type, explicit_api_key_type)
     credentials = getattr(config, "credentials", CredentialsConfig())
 
     codex_access_token = (
@@ -282,35 +306,56 @@ def _load_section(data: Dict[str, Any], key: str, cls):
     return cls(**filtered)
 
 
+ROLE_AGENT_FIELDS = {
+    "social_network": "social_network_agent",
+    "scientific": "scientific_agent",
+    "websearcher": "websearcher_agent",
+    "business": "business_agent",
+    "product": "product_agent",
+    "travel": "travel_agent",
+    "legal": "legal_agent",
+    "data_statistics": "data_statistics_agent",
+    "news_media": "news_media_agent",
+    "knowledge_graph": "knowledge_graph_agent",
+    "religious": "religious_agent",
+    "cli": "cli_agent",
+    "subchack": "subchack_agent",
+    "researcher_administrator": "researcher_administrator_agent",
+    # researcher_queue has no model of its own; it runs on agent.primary.
+    "researcher_queue": "researcher_queue_agent",
+}
+
+
+def _role_model_name(model_cfg: ModelConfig, role: str, provider: str, credentials: Any) -> str:
+    """Model a role actually runs on, resolved through the alias table."""
+    raw = str(getattr(model_cfg, role, "") or "").strip()
+    if not raw:
+        return str(model_cfg.primary or "")
+    try:
+        resolved = resolve_model_alias(raw, provider=provider, credentials=credentials)
+    except ValueError:
+        # An unresolvable alias is reported elsewhere; skip effort validation.
+        return ""
+    return resolved or str(model_cfg.primary or "")
+
+
 def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
     credentials = getattr(config, "credentials", CredentialsConfig())
     model_cfg = config.model
     config.agent.thinking_effort = normalize_thinking_effort(
         getattr(config.agent, "thinking_effort", "high")
     )
-    role_effort_fields = {
-        "social_network": "social_network_agent",
-        "scientific": "scientific_agent",
-        "websearcher": "websearcher_agent",
-        "business": "business_agent",
-        "product": "product_agent",
-        "travel": "travel_agent",
-        "legal": "legal_agent",
-        "data_statistics": "data_statistics_agent",
-        "news_media": "news_media_agent",
-        "knowledge_graph": "knowledge_graph_agent",
-        "religious": "religious_agent",
-        "cli": "cli_agent",
-        "subchack": "subchack_agent",
-        "researcher_administrator": "researcher_administrator_agent",
-        "researcher_queue": "researcher_queue_agent",
-    }
-    for role, tools_field in role_effort_fields.items():
+    for role, tools_field in ROLE_AGENT_FIELDS.items():
         effort_field = f"{role}_thinking_effort"
         effort = normalize_thinking_effort(getattr(model_cfg, effort_field, "high"))
         setattr(model_cfg, effort_field, effort)
         role_settings = dict(getattr(config.tools, tools_field, {}) or {})
-        role_settings.setdefault("thinking_effort", effort)
+        if role_settings.get("thinking_effort"):
+            role_settings["thinking_effort"] = normalize_thinking_effort(
+                role_settings["thinking_effort"]
+            )
+        else:
+            role_settings["thinking_effort"] = effort
         setattr(config.tools, tools_field, role_settings)
 
     provider = resolve_backend_alias(
@@ -372,6 +417,32 @@ def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
             provider=provider,
             credentials=credentials,
         )
+
+    # Model names are final at this point, so every configured effort can be
+    # resolved against the levels its own model accepts.
+    config.agent.thinking_effort = validate_thinking_effort(
+        config.agent.thinking_effort,
+        model=model_cfg.primary,
+        setting="agent.thinking_effort",
+    )
+    for role, tools_field in ROLE_AGENT_FIELDS.items():
+        role_model = _role_model_name(model_cfg, role, provider, credentials)
+        setattr(
+            model_cfg,
+            f"{role}_thinking_effort",
+            validate_thinking_effort(
+                getattr(model_cfg, f"{role}_thinking_effort", "high"),
+                model=role_model,
+                setting=f"agent.{role}_thinking_effort",
+            ),
+        )
+        role_settings = dict(getattr(config.tools, tools_field, {}) or {})
+        role_settings["thinking_effort"] = validate_thinking_effort(
+            role_settings.get("thinking_effort", "high"),
+            model=role_model,
+            setting=f"tools.{tools_field}.thinking_effort",
+        )
+        setattr(config.tools, tools_field, role_settings)
     return config
 
 

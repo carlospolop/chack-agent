@@ -34,6 +34,7 @@ from .long_term_memory import (
     save_long_term_memory,
 )
 from chack_tools.task_steps_manager_state import STORE, reset_active_context, set_active_context
+from chack_tools.native_planning import native_planning_backend, native_planning_prompt
 from chack_tools.tool_usage_state import (
     STORE as TOOL_USAGE_STORE,
     reset_active_max_tools_used,
@@ -53,7 +54,13 @@ from chack_tools.cancellation import (
     reset_cancellation_event,
     set_cancellation_event,
 )
-from chack_tools.run_lifecycle import cleanup_run_state, read_live_cost, write_live_cost
+from chack_tools.run_lifecycle import (
+    cleanup_run_state,
+    read_live_cost,
+    read_mcp_tool_usage,
+    task_manager_initialized,
+    write_live_cost,
+)
 from .live_cost_state import (
     LiveCostLimitExceeded,
     reset_active_live_cost_callback,
@@ -79,34 +86,62 @@ from .pricing import (
     load_pricing,
     resolve_pricing_path,
 )
+from .resume_compaction import (
+    DEFAULT_RESUME_COMPACTION_INSTRUCTIONS,
+    ResumeCompactionResult,
+)
 
 
-def _build_self_critique_prompt(*, mention_task_steps_manager: bool) -> str:
+def _build_self_critique_prompt(
+    *,
+    mention_task_steps_manager: bool,
+    native_task_planning_backend: str = "",
+) -> str:
     extra_line = ""
-    if mention_task_steps_manager:
+    native_line = native_planning_prompt(
+        native_task_planning_backend,
+        required_first=False,
+    )
+    if native_line:
+        extra_line = f"\n  - If you continue with more tool calls, {native_line[2:]}"
+    elif mention_task_steps_manager:
         extra_line = (
             "\n  - If you continue with more tool calls, keep the live task plan updated with"
             " task_steps_manager"
         )
-    return f"""Is this the best you can do? Make sure you have gathered ALL the context about the request: Check the web for latest info, read more terraform/code files, read all logs needed, be 10000% sure you got EVERY CONTEXT NEEDED and up to date information to be sure that your repsonse is correct. Now check everything you have done and improve whatever you can:
-  - Get more context about the request and the needed info to answer it
-  - Check the web for latest info about errors, services, terraform, etc. related to the request
-  - Read more repos/files/code/logs related to the request to get more context
-  - Then, recheck if your answer was actually accurate and the best possible
-  - Improve the PR if you made one
-  - Improve the answer recommendation you gave{extra_line}
-Your response to this improvement request will be the final one you give to the user, so don't mention the previous answer, just give the improved final answer or PR and give the user the best possible solution and answer."""
+    return f"""Review the work already completed and produce the best final result.
+  - Reuse the conversation context and every tool result already gathered.
+  - Recheck the result against the original goal, required output, and unresolved assumptions.
+  - Make targeted tool calls only for a specific missing fact, unresolved candidate, failed operation, or changed state.
+  - Preserve correct completed work and improve or correct only what the evidence requires.
+  - If the existing result is already complete and accurate, return it without repeating unchanged discovery or verification work.{extra_line}
+Your response to this review is the final response. Return the improved final result directly without discussing the earlier draft or the review process."""
 
 def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _runtime_cleanup_enabled(executor: Any = None) -> bool:
+    raw = os.environ.get("CHACK_CLEANUP_CODEX_HOME_AFTER_RUN", "")
+    runtime_value = getattr(executor, "_runtime_env_value", None)
+    if callable(runtime_value):
+        raw = runtime_value("CHACK_CLEANUP_CODEX_HOME_AFTER_RUN", raw)
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _build_initial_system_prompt(
     *,
     task_steps_manager_enabled: bool,
     require_task_steps_manager_init_first: bool,
+    native_task_planning_backend: str = "",
 ) -> str:
-    if task_steps_manager_enabled and require_task_steps_manager_init_first:
+    native_backend = native_planning_backend(native_task_planning_backend)
+    if task_steps_manager_enabled and native_backend:
+        task_note = native_planning_prompt(
+            native_backend,
+            required_first=require_task_steps_manager_init_first,
+        ) + "\n"
+    elif task_steps_manager_enabled and require_task_steps_manager_init_first:
         task_note = (
             "- Your first tool call must be task_steps_manager action=init with a concise plan. "
             "Keep it updated as work progresses.\n"
@@ -116,13 +151,26 @@ def _build_initial_system_prompt(
     else:
         task_note = ""
     tool_note = (
-        "- task_steps_manager calls do not count toward non-task tool requirements.\n"
+        "- Planning-tool calls do not count toward non-task tool requirements.\n"
         if task_steps_manager_enabled
         else ""
     )
+    if task_steps_manager_enabled and require_task_steps_manager_init_first:
+        planning_note = (
+            "Your first step on any task should be think and organize all the steps "
+            "the requested task will require and keep updating this task list."
+        )
+    else:
+        # An agent that is not required to keep a tracked task list should not be told
+        # its first step is to build and maintain one: every update is a tool round it
+        # was never asked to spend. Thinking the steps through costs nothing.
+        planning_note = (
+            "Before acting, think through the steps the task will require, and revisit "
+            "that plan as you learn more."
+        )
     return f"""### CHACK RUNTIME
 You are Chack, a very helpful and organized autonomous assistant. You must work as hard as possible, always completing the extra miles, to perform the task assigned as perfectly as possible.
-Your first step on any task should be think and organize all the steps the requested task will require and keep updating this task list.
+{planning_note}
 Usually the most important part of a task is to truly obtain all the information needed to understand all the components perfectly to be able to find the actual best solution. Therefore, you must always obtain all the context needed (using as many times as needed the tools). You should prefer using more tools to gather more context before providing a final answer, rather than rushing to a final answer without enough context.
 
 ### OPERATING RULES
@@ -161,6 +209,16 @@ class RunResult:
     total_cost: Optional[float] = None
     tool_counts_text: str = ""
     suffix: str = ""
+    time_to_first_token_seconds: Optional[float] = None
+    time_to_first_token_source: str = "unavailable"
+    initial_prompt_chars: int = 0
+    resume_compaction_attempted: bool = False
+    resume_compaction_succeeded: bool = False
+    resume_compaction_backend: str = ""
+    resume_compaction_method: str = ""
+    resume_compaction_duration_seconds: float = 0.0
+    resume_compaction_error: str = ""
+    error: str = ""
 
 
 TaskStepsSnapshotCallback = Callable[[Dict[str, Any]], None]
@@ -194,6 +252,39 @@ def _task_snapshot_is_complete(snapshot: Dict[str, Any]) -> bool:
     return bool(snapshot.get("completed")) and total > 0 and done == total
 
 
+_BACKEND_FAILURE_OUTPUT_PREFIXES = (
+    "error: codex exec failed",
+    "error: failed to launch codex cli",
+    "error: codex cli executable was not found",
+    "error: codex execution timed out",
+    "error: codex execution cancelled",
+    "error: codex exec produced no usable response",
+    "error: claude exec failed",
+    "error: failed to launch claude cli",
+    "error: claude cli executable was not found",
+    "error: claude execution timed out",
+    "error: claude execution cancelled",
+    "error: claude returned an error in final result event",
+    "error: required claude mcp server failed to start",
+    "error: gemini exec failed",
+    "error: failed to launch gemini cli",
+    "error: gemini cli executable was not found",
+    "error: gemini execution timed out",
+    "error: gemini result error",
+    "error: copilot exec failed",
+    "error: failed to launch copilot cli",
+    "error: copilot cli executable was not found",
+    "error: copilot execution timed out",
+)
+
+
+def _looks_like_backend_failure_output(output: Any) -> bool:
+    normalized = str(output or "").strip().lower()
+    return bool(normalized) and any(
+        normalized.startswith(prefix) for prefix in _BACKEND_FAILURE_OUTPUT_PREFIXES
+    )
+
+
 class Chack:
     def __init__(
         self,
@@ -216,17 +307,23 @@ class Chack:
         self._last_activity_at: Dict[str, float] = {}
         self._session_started_at: Dict[str, float] = {}
         self._pricing = load_pricing(resolve_pricing_path())
-        self._self_critique_prompt = _build_self_critique_prompt(
-            mention_task_steps_manager=(
-                bool(getattr(self.config.tools, "task_steps_manager_enabled", True))
-                and bool(getattr(self.config.agent, "require_task_steps_manager_init_first", True))
-            ),
-        )
-        export_env(self.config, self.config_path)
         try:
             backend = resolve_backend_type(self.config)
         except Exception:
             backend = str(getattr(self.config.model, "provider", "") or "").strip().lower() or "unknown"
+        native_backend = native_planning_backend(backend)
+        planning_enabled = bool(
+            getattr(self.config.tools, "task_steps_manager_enabled", True)
+        )
+        self._self_critique_prompt = _build_self_critique_prompt(
+            mention_task_steps_manager=(
+                planning_enabled
+                and not native_backend
+                and bool(getattr(self.config.agent, "require_task_steps_manager_init_first", True))
+            ),
+            native_task_planning_backend=native_backend if planning_enabled else "",
+        )
+        export_env(self.config, self.config_path)
         self.logger.info(
             "Agent instantiated: model=%s backend=%s api_key_type=%s",
             str(getattr(self.config.model, "primary", "") or "").strip(),
@@ -492,14 +589,32 @@ class Chack:
             return action == "init"
         return False
 
-    def _non_task_tool_count(self, steps) -> int:
-        return sum(1 for step in steps if self._tool_name(step) != "task_steps_manager")
-
     @staticmethod
-    def _non_task_tool_count_from_counter(counter: Counter[str]) -> int:
+    def _is_planning_tool_name(name: Any) -> bool:
+        normalized = str(name or "").strip().split("__")[-1].lower()
+        return normalized in {
+            "task_steps_manager",
+            "todowrite",
+            "taskcreate",
+            "taskupdate",
+            "tasklist",
+            "taskget",
+            "enterplanmode",
+            "exitplanmode",
+        }
+
+    def _non_task_tool_count(self, steps) -> int:
+        return sum(
+            1
+            for step in steps
+            if not self._is_planning_tool_name(self._tool_name(step))
+        )
+
+    @classmethod
+    def _non_task_tool_count_from_counter(cls, counter: Counter[str]) -> int:
         total = 0
         for name, count in counter.items():
-            if name == "task_steps_manager":
+            if cls._is_planning_tool_name(name):
                 continue
             total += count
         return total
@@ -544,6 +659,26 @@ class Chack:
 
     def _missing_required_tool_names(self, steps, required_tool_names: Sequence[str]) -> list[str]:
         called = [self._tool_name(step) for step in steps]
+        return self._missing_required_tool_names_from_called(
+            called,
+            required_tool_names,
+        )
+
+    def _missing_required_tool_names_from_counter(
+        self,
+        counts: Counter[str],
+        required_tool_names: Sequence[str],
+    ) -> list[str]:
+        return self._missing_required_tool_names_from_called(
+            list(counts),
+            required_tool_names,
+        )
+
+    def _missing_required_tool_names_from_called(
+        self,
+        called: Sequence[str],
+        required_tool_names: Sequence[str],
+    ) -> list[str]:
         missing: list[str] = []
         for required_name in required_tool_names:
             if not any(self._tool_name_satisfies_required(tool, required_name) for tool in called):
@@ -557,6 +692,37 @@ class Chack:
             if name:
                 counts[name] += 1
         return counts
+
+    def _merge_mcp_tool_counts(
+        self,
+        step_counts: Counter[str],
+        mcp_counts: Counter[str],
+    ) -> Counter[str]:
+        """Merge duplicate observations while retaining MCP-only calls.
+
+        A provider-returned step and the MCP boundary counter usually describe
+        the same top-level call. Prefer the exact MCP name and the larger count
+        instead of adding both. Calls absent from provider output—commonly after
+        provider compaction or timeout—remain visible.
+        """
+        merged = Counter(step_counts)
+        for mcp_name, mcp_count in mcp_counts.items():
+            matching_names = [
+                step_name
+                for step_name in merged
+                if self._tool_name_satisfies_required(step_name, mcp_name)
+                or self._tool_name_satisfies_required(mcp_name, step_name)
+            ]
+            observed_count = max(
+                [int(merged.pop(name, 0) or 0) for name in matching_names]
+                or [0]
+            )
+            merged[mcp_name] = max(
+                int(merged.get(mcp_name, 0) or 0),
+                observed_count,
+                int(mcp_count or 0),
+            )
+        return merged
 
     @staticmethod
     def _usage_from_raw_result(raw_result) -> tuple[int, int, int, int]:
@@ -603,6 +769,10 @@ class Chack:
 
     def _system_prompt_for_session(self, session_id: str, system_prompt_override: Optional[str] = None) -> str:
         base = system_prompt_override or self.config.session.system_prompt or self.config.system_prompt
+        try:
+            backend = resolve_backend_type(self.config)
+        except Exception:
+            backend = str(getattr(self.config.model, "provider", "") or "")
 
         initial_system_prompt = _build_initial_system_prompt(
             task_steps_manager_enabled=bool(
@@ -611,6 +781,7 @@ class Chack:
             require_task_steps_manager_init_first=bool(
                 getattr(self.config.agent, "require_task_steps_manager_init_first", True)
             ),
+            native_task_planning_backend=native_planning_backend(backend),
         )
         if initial_system_prompt:
             base = f"{initial_system_prompt}\n\n{base}"
@@ -1132,6 +1303,7 @@ class Chack:
         tools_append: Optional[list[Any]] = None,
         exec_cwd: Optional[str] = None,
         output_schema_json_override: Optional[Dict[str, Any]] = None,
+        reuse_session_executor: bool = False,
     ):
         config = self.config
         exec_cwd_value = str(exec_cwd or "").strip()
@@ -1152,7 +1324,9 @@ class Chack:
         memory_max_messages = int(self.config.session.memory_max_messages)
         memory_reset_to_messages = int(self.config.session.memory_reset_to_messages)
         memory_summary_max_chars = int(self.config.session.memory_summary_max_chars)
-        if tools_override is not None or tools_append is not None:
+        if (
+            tools_override is not None or tools_append is not None
+        ) and not reuse_session_executor:
             return build_executor(
                 config,
                 system_prompt=system_prompt_override or self.config.system_prompt,
@@ -1176,6 +1350,11 @@ class Chack:
                 _log_timestamp(),
             )
             system_prompt = self._system_prompt_for_session(session_id, system_prompt_override)
+            executor_tool_kwargs: dict[str, Any] = {}
+            if tools_override is not None:
+                executor_tool_kwargs["tools_override"] = tools_override
+            if tools_append is not None:
+                executor_tool_kwargs["tools_append"] = tools_append
             executor = build_executor(
                 config,
                 system_prompt=system_prompt,
@@ -1183,6 +1362,7 @@ class Chack:
                 memory_max_messages=memory_max_messages,
                 memory_reset_to_messages=memory_reset_to_messages,
                 memory_summary_max_chars=memory_summary_max_chars,
+                **executor_tool_kwargs,
             )
             self._executors[cache_key] = executor
         else:
@@ -1342,6 +1522,9 @@ class Chack:
         prompt_variables_override: Optional[Dict[str, Any]] = None,
         exec_cwd: Optional[str] = None,
         stop_requested: Optional[Callable[[], bool]] = None,
+        compact_before_resume: bool = False,
+        resume_compaction_instructions: Optional[str] = None,
+        reuse_session_executor: bool = False,
     ) -> RunResult:
         return await asyncio.to_thread(
             self.run,
@@ -1363,6 +1546,9 @@ class Chack:
             prompt_variables_override=prompt_variables_override,
             exec_cwd=exec_cwd,
             stop_requested=stop_requested,
+            compact_before_resume=compact_before_resume,
+            resume_compaction_instructions=resume_compaction_instructions,
+            reuse_session_executor=reuse_session_executor,
         )
 
     def run(
@@ -1388,7 +1574,17 @@ class Chack:
         exec_cwd: Optional[str] = None,
         stop_requested: Optional[Callable[[], bool]] = None,
         output_schema_json_override: Optional[Dict[str, Any]] = None,
+        compact_before_resume: bool = False,
+        resume_compaction_instructions: Optional[str] = None,
+        reuse_session_executor: bool = False,
     ) -> RunResult:
+        """Run one turn in a logical session.
+
+        Set ``reuse_session_executor`` when per-run tool overrides must remain
+        attached to the same executor across continuation turns. The first
+        executor configuration for a session/cache key remains authoritative
+        until that session is reset.
+        """
         log_token = set_log_context(
             main_action=str(self.config.agent.main_action or ""),
             sub_action=str(self.config.agent.sub_action or ""),
@@ -1402,6 +1598,7 @@ class Chack:
         metrics_thread: Optional[threading.Thread] = None
         inherited_cancel_event = current_cancellation_event()
         run_cancel_event = inherited_cancel_event or threading.Event()
+        executor = None
         try:
             def _coerce_nonnegative_int(value: Any, default: int = 0) -> int:
                 try:
@@ -1434,14 +1631,16 @@ class Chack:
             )
 
             self._prepare_session_for_run(session_id)
-            executor = self._get_executor(
-                session_id,
-                system_prompt_override=system_prompt_override,
-                tools_override=tools_override,
-                tools_append=tools_append,
-                exec_cwd=exec_cwd,
-                output_schema_json_override=output_schema_json_override,
-            )
+            executor_kwargs: dict[str, Any] = {
+                "system_prompt_override": system_prompt_override,
+                "tools_override": tools_override,
+                "tools_append": tools_append,
+                "exec_cwd": exec_cwd,
+                "output_schema_json_override": output_schema_json_override,
+            }
+            if reuse_session_executor:
+                executor_kwargs["reuse_session_executor"] = True
+            executor = self._get_executor(session_id, **executor_kwargs)
             self._last_activity_at[session_id] = time.time()
             run_started_at = self._last_activity_at[session_id]
             max_runtime_minutes = max(0, int(self.config.agent.max_runtime_minutes or 0))
@@ -1458,6 +1657,11 @@ class Chack:
             cost_warning_threshold = max_cost_usd * budget_warning_ratio
             cost_critical_threshold = max_cost_usd * budget_critical_ratio
             estimated_cost_spent = 0.0
+            resume_compaction = ResumeCompactionResult(
+                backend=str(getattr(self.config.model, "provider", "") or ""),
+                method="unavailable",
+            )
+            resume_compaction_usage = (0, 0, 0, 0)
             progress_state = {"runtime_percent": 0, "cost_percent": 0}
             limit_event_state = {"runtime": False, "cost": False, "tools": False}
             completion_preserved_state = {
@@ -1465,6 +1669,8 @@ class Chack:
                 "cost": False,
                 "tools": False,
             }
+            time_to_first_token_seconds: Optional[float] = None
+            time_to_first_token_source = "unavailable"
 
             # Export budget env vars for MCP subprocess backends
             export_budget_env(
@@ -1497,7 +1703,7 @@ class Chack:
                 ),
             )
 
-            # Internal bookkeeping/session key for TaskStepsManager state.
+            # Common plan store for either Chack's manager or a backend-native planner.
             task_session_id = f"{session_id}:{uuid.uuid4().hex}"
             # If this run was spawned by a tool (sub-agent), usage_session_id is the
             # parent run id; reuse it for telemetry so tool executions show under the
@@ -1513,7 +1719,7 @@ class Chack:
                 memory_max_messages=int(self.config.session.memory_max_messages or 0),
                 memory_reset_to_messages=int(self.config.session.memory_reset_to_messages or 0),
             )
-            STORE.create_session(task_session_id, title="Task Steps Manager")
+            STORE.create_session(task_session_id, title="Agent Plan")
             TOOL_USAGE_STORE.reset_session(task_session_id)
             write_live_cost(task_session_id, 0.0)
 
@@ -1545,10 +1751,23 @@ class Chack:
 
             available_tool_names = self._available_tool_names(executor)
             update_log_context(available_tool_names=available_tool_names)
+            native_backend = native_planning_backend(
+                getattr(executor, "_native_task_planning_backend", "")
+            )
+            require_native_plan_first = bool(
+                require_task_steps_manager_init_first and native_backend
+            )
+            if hasattr(executor, "_require_native_plan_first"):
+                executor._require_native_plan_first = require_native_plan_first
             require_task_steps_manager_init_first = bool(
                 require_task_steps_manager_init_first
+                and not native_backend
                 and self._task_steps_manager_available(available_tool_names=available_tool_names)
             )
+            if hasattr(executor, "_require_task_steps_manager_init_first"):
+                executor._require_task_steps_manager_init_first = (
+                    require_task_steps_manager_init_first
+                )
 
             log_event(
                 "agent_start",
@@ -1568,6 +1787,8 @@ class Chack:
                     "self_critique_enabled": bool(enable_self_critique),
                     "self_critique_rounds": int(self_critique_rounds),
                     "require_task_steps_manager_init_first": bool(require_task_steps_manager_init_first),
+                    "native_task_planning_backend": native_backend,
+                    "require_native_plan_first": require_native_plan_first,
                     "system_prompt_override": bool(system_prompt_override),
                     "tools_override": bool(tools_override),
                     "tools_append": bool(tools_append),
@@ -1595,6 +1816,114 @@ class Chack:
                 spent_usd=0.0,
                 max_cost_usd=max_cost_usd,
             )
+
+            if compact_before_resume:
+                compact_for_resume = getattr(executor, "compact_for_resume", None)
+                if callable(compact_for_resume):
+                    focus = str(
+                        resume_compaction_instructions
+                        if resume_compaction_instructions is not None
+                        else DEFAULT_RESUME_COMPACTION_INSTRUCTIONS
+                    ).strip()
+                    try:
+                        compacted = compact_for_resume(focus)
+                        if isinstance(compacted, ResumeCompactionResult):
+                            resume_compaction = compacted
+                        elif isinstance(compacted, dict):
+                            resume_compaction = ResumeCompactionResult(
+                                backend=str(
+                                    compacted.get("backend")
+                                    or getattr(self.config.model, "provider", "")
+                                    or ""
+                                ),
+                                method=str(
+                                    compacted.get("method") or "backend_native"
+                                ),
+                                attempted=bool(compacted.get("attempted")),
+                                succeeded=bool(compacted.get("succeeded")),
+                                duration_seconds=max(
+                                    0.0,
+                                    float(
+                                        compacted.get("duration_seconds", 0.0)
+                                        or 0.0
+                                    ),
+                                ),
+                                raw_responses=list(
+                                    compacted.get("raw_responses") or []
+                                ),
+                                error=str(compacted.get("error") or ""),
+                            )
+                        else:
+                            resume_compaction = ResumeCompactionResult(
+                                backend=str(
+                                    getattr(self.config.model, "provider", "")
+                                    or ""
+                                ),
+                                method="backend_native",
+                                attempted=bool(compacted),
+                                succeeded=bool(compacted),
+                            )
+                    except Exception as exc:
+                        resume_compaction = ResumeCompactionResult(
+                            backend=str(
+                                getattr(self.config.model, "provider", "") or ""
+                            ),
+                            method="backend_native",
+                            attempted=True,
+                            succeeded=False,
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                    resume_compaction_usage = self._usage_from_raw_result(
+                        type(
+                            "_ResumeCompactionRawResult",
+                            (),
+                            {
+                                "raw_responses": list(
+                                    resume_compaction.raw_responses or []
+                                )
+                            },
+                        )()
+                    )
+                    resume_cost = self._estimate_model_cost(
+                        self._pricing,
+                        str(self.config.model.primary or ""),
+                        prompt_tokens=resume_compaction_usage[0],
+                        completion_tokens=resume_compaction_usage[1],
+                        cached_prompt_tokens=resume_compaction_usage[2],
+                        cache_write_tokens=resume_compaction_usage[3],
+                    )
+                    estimated_cost_spent += float(resume_cost or 0.0)
+                    update_spent_usd(estimated_cost_spent)
+                    export_spent_usd_env(estimated_cost_spent)
+                    log_event(
+                        "agent_resume_compaction",
+                        payload={
+                            "session_id": session_id,
+                            "task_session_id": telemetry_task_session_id,
+                            "backend": resume_compaction.backend,
+                            "method": resume_compaction.method,
+                            "attempted": resume_compaction.attempted,
+                            "succeeded": resume_compaction.succeeded,
+                            "duration_seconds": resume_compaction.duration_seconds,
+                            "prompt_tokens": resume_compaction_usage[0],
+                            "completion_tokens": resume_compaction_usage[1],
+                            "cached_prompt_tokens": resume_compaction_usage[2],
+                            "cache_write_prompt_tokens": resume_compaction_usage[3],
+                            "error": resume_compaction.error[:500],
+                        },
+                    )
+                    if (
+                        resume_compaction.attempted
+                        and not resume_compaction.succeeded
+                    ):
+                        self.logger.warning(
+                            "Pre-resume compaction failed open for session %s "
+                            "(backend=%s method=%s error=%s).",
+                            session_id,
+                            resume_compaction.backend,
+                            resume_compaction.method,
+                            resume_compaction.error,
+                        )
 
             def _listener(board_text: str) -> None:
                 if on_task_steps_manager_update is None:
@@ -1658,7 +1987,7 @@ class Chack:
                 require_task_steps_manager_init: Optional[bool] = None,
                 required_tools_target: Optional[Sequence[str]] = None,
             ):
-                nonlocal estimated_cost_spent
+                nonlocal estimated_cost_spent, time_to_first_token_seconds, time_to_first_token_source
                 result = {}
                 all_steps: list = []
                 prompt_total = 0
@@ -2039,6 +2368,13 @@ class Chack:
                     result = _invoke_with_budget()
                     if result.get("error") == "stopped":
                         break
+                    if _looks_like_backend_failure_output(result.get("output")):
+                        # The backend did not produce an agent response. Do not
+                        # resume the same failed thread merely to satisfy tool
+                        # minimums or required-tool reminders; the caller owns
+                        # provider-aware retry, fallback, and quota handling.
+                        result["error"] = "backend_failure"
+                        break
 
                     (
                         attempt_prompt,
@@ -2046,6 +2382,30 @@ class Chack:
                         attempt_cached,
                         attempt_cache_write,
                     ) = self._usage_from_raw_result(result.get("raw_result"))
+                    raw_time_to_first_token = getattr(
+                        result.get("raw_result"),
+                        "time_to_first_token_seconds",
+                        None,
+                    )
+                    if (
+                        time_to_first_token_seconds is None
+                        and raw_time_to_first_token is not None
+                    ):
+                        try:
+                            time_to_first_token_seconds = max(
+                                0.0,
+                                float(raw_time_to_first_token),
+                            )
+                            time_to_first_token_source = str(
+                                getattr(
+                                    result.get("raw_result"),
+                                    "time_to_first_token_source",
+                                    "backend_first_response_event",
+                                )
+                                or "backend_first_response_event"
+                            )
+                        except (TypeError, ValueError):
+                            pass
 
                     if max_cost_usd > 0:
                         attempt_cost = 0.0
@@ -2209,12 +2569,21 @@ class Chack:
                     all_steps.extend(current_steps)
                     if result.get("completion_preserved_after_limit"):
                         break
-                    has_init = any(self._is_task_steps_manager_init_step(step) for step in all_steps)
-                    non_task_tools = self._non_task_tool_count(all_steps)
+                    observed_tool_counts = self._merge_mcp_tool_counts(
+                        self._step_tool_counts(all_steps),
+                        read_mcp_tool_usage(task_session_id),
+                    )
+                    has_init = any(
+                        self._is_task_steps_manager_init_step(step)
+                        for step in all_steps
+                    ) or task_manager_initialized(task_session_id)
+                    non_task_tools = self._non_task_tool_count_from_counter(
+                        observed_tool_counts
+                    )
                     missing_init = effective_require_init and not has_init
                     missing_tools = effective_min_tools > 0 and non_task_tools < effective_min_tools
-                    missing_required_tools = self._missing_required_tool_names(
-                        all_steps,
+                    missing_required_tools = self._missing_required_tool_names_from_counter(
+                        observed_tool_counts,
                         effective_required_tools,
                     )
                     missing_required = bool(missing_required_tools)
@@ -2325,6 +2694,12 @@ class Chack:
                 raise ValueError(
                     "No user input text provided and config.user_prompt is empty."
                 )
+            initial_prompt_chars = len(request_text) + len(
+                self._system_prompt_for_session(
+                    session_id,
+                    system_prompt_override=system_prompt_override,
+                )
+            )
 
             (
                 result,
@@ -2334,18 +2709,31 @@ class Chack:
                 cached_prompt_tokens,
                 cache_write_prompt_tokens,
             ) = _invoke_with_min_tools(request_text, "Run 1")
+            prompt_tokens += resume_compaction_usage[0]
+            completion_tokens += resume_compaction_usage[1]
+            cached_prompt_tokens += resume_compaction_usage[2]
+            cache_write_prompt_tokens += resume_compaction_usage[3]
             output = result.get("output", "")
             run1_output = output
             if result.get("error") == "stopped":
                 enable_self_critique = False
                 self_critique_rounds = 0
             rounds_used = len(run1_all_steps) + (1 if run1_output else 0)
-            tools_used = self._non_task_tool_count(run1_all_steps)
+            mcp_counts_run1 = read_mcp_tool_usage(task_session_id)
+            run1_observed_counts = self._merge_mcp_tool_counts(
+                self._step_tool_counts(run1_all_steps),
+                mcp_counts_run1,
+            )
+            tools_used = self._non_task_tool_count_from_counter(
+                run1_observed_counts
+            )
             self.logger.info(
-                "Run 1 complete: output_chars=%s steps=%s non_task_tools=%s ts=%s.",
+                "Run 1 complete: output_chars=%s steps=%s non_task_tools=%s "
+                "mcp_boundary_tools=%s ts=%s.",
                 len(run1_output or ""),
                 len(run1_all_steps),
                 tools_used,
+                sum(mcp_counts_run1.values()),
                 _log_timestamp(),
             )
 
@@ -2404,7 +2792,16 @@ class Chack:
                     output = critique_output or output
                     result = critique_result
                     rounds_used += len(critique_steps) + (1 if critique_output else 0)
-                    tools_used = self._non_task_tool_count(run1_all_steps + run2_all_steps)
+                    current_mcp_counts = read_mcp_tool_usage(task_session_id)
+                    current_observed_counts = self._merge_mcp_tool_counts(
+                        self._step_tool_counts(
+                            run1_all_steps + run2_all_steps
+                        ),
+                        current_mcp_counts,
+                    )
+                    tools_used = self._non_task_tool_count_from_counter(
+                        current_observed_counts
+                    )
                     self.logger.info(
                         "%s complete: output_chars=%s steps=%s non_task_tools=%s ts=%s.",
                         run_label,
@@ -2419,8 +2816,25 @@ class Chack:
             nested_counts_run2.subtract(nested_counts_run1)
             nested_counts_run2 = Counter({k: v for k, v in nested_counts_run2.items() if v > 0})
 
-            run1_tool_counts = self._step_tool_counts(run1_all_steps)
-            run2_tool_counts = self._step_tool_counts(run2_all_steps)
+            mcp_counts_total = read_mcp_tool_usage(task_session_id)
+            mcp_counts_run2 = Counter(mcp_counts_total)
+            mcp_counts_run2.subtract(mcp_counts_run1)
+            mcp_counts_run2 = Counter(
+                {
+                    key: value
+                    for key, value in mcp_counts_run2.items()
+                    if value > 0
+                }
+            )
+
+            run1_tool_counts = self._merge_mcp_tool_counts(
+                self._step_tool_counts(run1_all_steps),
+                mcp_counts_run1,
+            )
+            run2_tool_counts = self._merge_mcp_tool_counts(
+                self._step_tool_counts(run2_all_steps),
+                mcp_counts_run2,
+            )
             run1_tool_counts.update(nested_counts_run1)
             run2_tool_counts.update(nested_counts_run2)
 
@@ -2429,13 +2843,19 @@ class Chack:
             nested_usage_by_model = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
 
             run1_tools_used = (
-                self._non_task_tool_count(run1_all_steps)
+                self._non_task_tool_count_from_counter(run1_observed_counts)
                 + self._non_task_tool_count_from_counter(nested_counts_run1)
             )
             run2_tools_used = (
-                self._non_task_tool_count(run2_all_steps)
+                self._non_task_tool_count_from_counter(
+                    self._merge_mcp_tool_counts(
+                        self._step_tool_counts(run2_all_steps),
+                        mcp_counts_run2,
+                    )
+                )
                 + self._non_task_tool_count_from_counter(nested_counts_run2)
             )
+            tools_used = run1_tools_used + run2_tools_used
 
             model_name = self.config.model.primary
             main_cost = estimate_cost(
@@ -2527,6 +2947,15 @@ class Chack:
                     "cached_prompt_tokens": cached_prompt_tokens,
                     "cache_write_prompt_tokens": cache_write_prompt_tokens,
                     "total_cost": total_cost,
+                    "time_to_first_token_seconds": time_to_first_token_seconds,
+                    "time_to_first_token_source": time_to_first_token_source,
+                    "initial_prompt_chars": initial_prompt_chars,
+                    "resume_compaction_attempted": resume_compaction.attempted,
+                    "resume_compaction_succeeded": resume_compaction.succeeded,
+                    "resume_compaction_backend": resume_compaction.backend,
+                    "resume_compaction_method": resume_compaction.method,
+                    "resume_compaction_duration_seconds": resume_compaction.duration_seconds,
+                    "resume_compaction_error": resume_compaction.error[:500],
                     "main_cost": main_cost,
                     "nested_cost": nested_cost,
                     "pricing_model": model_name,
@@ -2541,6 +2970,7 @@ class Chack:
                     "tool_counts": dict(tool_counts),
                     "nested_tool_counts": dict(nested_counts_total),
                     "nested_usage_by_model": nested_usage_by_model,
+                    "error": str(result.get("error") or ""),
                 },
             )
 
@@ -2576,6 +3006,16 @@ class Chack:
                 total_cost=total_cost,
                 tool_counts_text=tool_counts_text,
                 suffix=suffix,
+                time_to_first_token_seconds=time_to_first_token_seconds,
+                time_to_first_token_source=time_to_first_token_source,
+                initial_prompt_chars=initial_prompt_chars,
+                resume_compaction_attempted=resume_compaction.attempted,
+                resume_compaction_succeeded=resume_compaction.succeeded,
+                resume_compaction_backend=resume_compaction.backend,
+                resume_compaction_method=resume_compaction.method,
+                resume_compaction_duration_seconds=resume_compaction.duration_seconds,
+                resume_compaction_error=resume_compaction.error,
+                error=str(result.get("error") or ""),
             )
         except Exception as exc:
             limit_text = str(exc or "").lower()
@@ -2672,6 +3112,26 @@ class Chack:
                         "Run cleanup failed: session=%s task_session=%s ts=%s.",
                         session_id,
                         task_session_id,
+                        _log_timestamp(),
+                        exc_info=True,
+                    )
+            if executor is not None and _runtime_cleanup_enabled(executor):
+                try:
+                    cleanup_runtime_artifacts = getattr(
+                        executor, "cleanup_runtime_artifacts", None
+                    )
+                    if callable(cleanup_runtime_artifacts):
+                        cleanup_runtime_artifacts()
+                    self._executors = {
+                        key: value
+                        for key, value in self._executors.items()
+                        if value is not executor
+                    }
+                except Exception:
+                    self.logger.warning(
+                        "Runtime artifact cleanup failed: session=%s task_session=%s ts=%s.",
+                        session_id,
+                        telemetry_task_session_id or task_session_id,
                         _log_timestamp(),
                         exc_info=True,
                     )
