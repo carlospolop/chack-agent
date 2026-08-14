@@ -227,19 +227,36 @@ def case_gate(parsed: dict[str, Any], evidence: Path, raw: str) -> tuple[bool, l
     if parsed.get("research_worked") is not True:
         failures.append("research_worked is not true")
     findings = parsed.get("findings")
-    if not isinstance(findings, list) or not findings:
-        failures.append("findings are empty")
+    if not isinstance(findings, list) or len(findings) < 3:
+        failures.append("fewer than 3 substantive findings")
+    summary = str(parsed.get("overall_summary") or "").strip()
+    if len(summary) < 200:
+        failures.append("overall_summary is missing or too short")
     review = str(parsed.get("full_research_review") or "").strip()
-    if len(review) < 500 or review.lower() == "placeholder":
+    if len(review) < 2_000 or review.lower() == "placeholder":
         failures.append("full_research_review is missing or not substantive")
+    gaps = parsed.get("gaps")
+    if not isinstance(gaps, list) or not gaps:
+        failures.append("evidence gaps are missing")
+    tool_call_counts = parsed.get("tool_call_counts")
+    if not isinstance(tool_call_counts, dict) or not tool_call_counts:
+        failures.append("tool-call provenance is missing")
+    try:
+        total_tool_calls = int(parsed.get("total_tool_calls") or sum(int(value or 0) for value in (tool_call_counts or {}).values()))
+    except (TypeError, ValueError):
+        total_tool_calls = 0
+    if total_tool_calls < 3:
+        failures.append("fewer than 3 provider-backed tool calls")
     if not raw.strip():
         failures.append("raw output is empty")
     if not evidence.is_dir():
         failures.append("evidence directory is missing")
     else:
         stats = artifact_stats(evidence)
-        if stats["file_count"] <= 0:
-            failures.append("evidence directory has no files")
+        if stats["file_count"] < 3:
+            failures.append("evidence directory has fewer than 3 files")
+        if stats["bytes"] < 1_000:
+            failures.append("persisted evidence is smaller than 1000 bytes")
     return not failures, failures
 
 
@@ -330,6 +347,7 @@ def child_case(args: argparse.Namespace) -> int:
         "artifact_stats": artifact_stats(evidence),
         "functional_pass": passed,
         "validation_failures": failures,
+        "quality_gate_version": 2,
     }
     (case_dir / "raw_output.txt").write_text(raw, encoding="utf-8")
     (case_dir / "parsed_output.json").write_text(compact(parsed) + "\n", encoding="utf-8")
