@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import base64
 import uuid
@@ -674,6 +675,7 @@ class CodexExecutor:
         self._ensure_codex_home_and_config()
         command = [self._codex_path, "app-server", "--stdio"]
         env = self._build_env()
+        self._write_codex_explicit_mcp_env(env)
         exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
         timeout_seconds = max(
             30,
@@ -1407,6 +1409,7 @@ class CodexExecutor:
     ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         command = self._build_command()
         env = self._build_env()
+        self._write_codex_explicit_mcp_env(env)
         timeout_seconds = _resolve_codex_exec_timeout(self._sub_action, self._runtime_env())
         exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
         _LOGGER.info(
@@ -1685,6 +1688,20 @@ class CodexExecutor:
         unregister_process(cancel_registration)
         if return_code != 0:
             details = "\n".join(combined_output_lines).strip() or "No error output captured."
+            startup_status_path = str(
+                env.get("CHACK_MCP_STARTUP_STATUS_PATH", "") or ""
+            ).strip()
+            if startup_status_path:
+                try:
+                    with open(startup_status_path, "r", encoding="utf-8") as handle:
+                        startup_status = json.load(handle)
+                    details += "\nMCP startup status: " + json.dumps(
+                        startup_status,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    )
+                except (FileNotFoundError, OSError, ValueError, TypeError):
+                    pass
             self._log_codex_failure(
                 "codex_exec_failed",
                 command=command,
@@ -2040,6 +2057,16 @@ class CodexExecutor:
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         env["CHACK_MCP_PARENT_PID"] = str(os.getpid())
         env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        if self._codex_home and self._has_configured_tools():
+            startup_status_path = os.path.join(
+                self._codex_home,
+                "mcp_startup_status.json",
+            )
+            try:
+                os.unlink(startup_status_path)
+            except FileNotFoundError:
+                pass
+            env["CHACK_MCP_STARTUP_STATUS_PATH"] = startup_status_path
         return env
 
     def _set_env_or_file(
@@ -2072,6 +2099,7 @@ class CodexExecutor:
         ).strip() or os.path.expanduser("~/.codex/chack")
         base = os.path.join(home_base, safe_session)
         os.makedirs(base, exist_ok=True)
+        os.chmod(base, 0o700)
         self._codex_home = base
         self._write_codex_config(base)
         self._write_codex_auth(base)
@@ -2105,6 +2133,7 @@ class CodexExecutor:
             "CHACK_TOOLS_APPEND_B64_PATH",
             "CHACK_TOOLS_OVERRIDE_NAMES_JSON",
             "CHACK_TOOLS_APPEND_NAMES_JSON",
+            "CHACK_MCP_STARTUP_STATUS_PATH",
             "CHACK_CHATGPT_ASYNC_API_URL",
             "CHACK_CHATGPT_ASYNC_API_SECRET",
             "PYTHONPATH",
@@ -2218,6 +2247,12 @@ class CodexExecutor:
             "OPENROUTER_HTTP_REFERER",
             "OPENROUTER_APP_NAME",
         ]
+        # Retain the exact allowlist so the finalized per-run values can also
+        # be written explicitly below. Some containerized Codex builds do not
+        # reliably propagate dynamically-added parent variables via
+        # ``env_vars`` alone, which otherwise makes the required stdio MCP
+        # child exit before its initialize response.
+        self._codex_mcp_env_var_names = tuple(env_vars)
 
         def _toml_string(value: str) -> str:
             return json.dumps(str(value))
@@ -2347,6 +2382,41 @@ class CodexExecutor:
         config_body = "\n".join(config_lines)
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(config_body + "\n")
+        os.chmod(config_path, 0o600)
+
+    def _write_codex_explicit_mcp_env(self, env: dict[str, str]) -> None:
+        """Persist the isolated stdio MCP child's finalized environment.
+
+        ``env_vars`` remains in the generated config for compatibility, while
+        this explicit table makes file-backed dynamic tool payloads and their
+        model/session metadata deterministic across Codex CLI versions.
+        """
+        if (
+            not self._codex_home
+            or not self._has_configured_tools()
+            or self._runtime_env_value("CHACK_CODEX_MCP_URL").strip()
+        ):
+            return
+        config_path = os.path.join(self._codex_home, "config.toml")
+        try:
+            with open(config_path, "r", encoding="utf-8") as handle:
+                body = handle.read()
+        except FileNotFoundError:
+            return
+        marker = "# chack: explicit per-run MCP environment"
+        body = body.split(marker, 1)[0].rstrip()
+        names = tuple(getattr(self, "_codex_mcp_env_var_names", ()) or ())
+        lines = [body, "", marker, "[mcp_servers.chack_tools.env]"]
+        for name in names:
+            value = env.get(name)
+            if value is None:
+                continue
+            lines.append(f"{name} = {json.dumps(str(value), ensure_ascii=False)}")
+        temporary_path = f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, config_path)
 
     def _write_codex_auth(self, codex_home: str) -> None:
         if self._use_existing_codex_auth_file:
