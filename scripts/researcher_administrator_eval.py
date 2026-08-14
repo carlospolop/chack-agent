@@ -248,6 +248,17 @@ def validate_case(
             if artifact_files <= 0:
                 failures.append("preserved evidence workspace is empty")
             output_dir = root / "researcher_outputs"
+
+            def persisted_response_rank(record: dict[str, Any]) -> tuple[bool, bool, bool, int]:
+                review = str(record.get("full_research_review") or "").strip()
+                findings = record.get("findings")
+                return (
+                    record.get("research_worked") is True,
+                    not str(record.get("failure_reason") or "").strip(),
+                    isinstance(findings, list) and bool(findings),
+                    len(review),
+                )
+
             for path in sorted(output_dir.glob("*.json")):
                 try:
                     record = json.loads(path.read_text(encoding="utf-8"))
@@ -255,7 +266,14 @@ def validate_case(
                     failures.append(f"full parsed researcher output is unreadable: {path.name}")
                     continue
                 if isinstance(record, dict) and str(record.get("researcher_tool") or "").strip():
-                    full_records[str(record["researcher_tool"])] = record
+                    tool_name = str(record["researcher_tool"])
+                    existing = full_records.get(tool_name)
+                    # A lifecycle probe/retry can legitimately persist failed and
+                    # successful attempts for the same researcher. Validate the
+                    # strongest terminal response instead of allowing filename
+                    # order to make a later cancellation overwrite the success.
+                    if existing is None or persisted_response_rank(record) > persisted_response_rank(existing):
+                        full_records[tool_name] = record
             raw_files = sorted(output_dir.glob("*.raw.txt"))
             ignored_parts = {"researcher_outputs", "researcher_jobs", "admin_output.json"}
             source_files = [

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 
+import pytest
 from agents import function_tool
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -133,6 +134,10 @@ def test_stdio_server_completes_mcp_handshake() -> None:
     assert "exec" in asyncio.run(_list_tool_names())
 
 
+@pytest.mark.filterwarnings(
+    "ignore:Field 'lifespan' has an incomplete definition:"
+    "pydantic_settings.exceptions.IncompleteFieldDefinitionWarning"
+)
 def test_schema_type_preserves_string_or_array_union() -> None:
     annotation = _py_type_from_schema(
         {"type": ["string", "array"], "items": {"type": "string"}}

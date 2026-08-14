@@ -165,7 +165,7 @@ class ToolsConfig:
     chatgpt_cdp_url: str = ""
     # Total browser-output deadlines. Mode-specific values take precedence over
     # the deprecated shared timeout below. Zero/None means use the built-in
-    # defaults: 90 minutes for Pro, 30 minutes for Extra High, and 75 minutes
+    # defaults: 120 minutes for Pro, 30 minutes for Extra High, and 75 minutes
     # for Deep Research.
     chatgpt_pro_timeout_seconds: Optional[int] = None
     chatgpt_xhigh_timeout_seconds: Optional[int] = None

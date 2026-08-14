@@ -42,7 +42,10 @@ except ImportError:  # pragma: no cover - mirrors the other researcher modules
 
 Mode = Literal["deep", "pro", "xhigh"]
 
-CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 90 * 60
+# A provider-side generation failure followed by one successful UI retry took
+# just over 82 minutes in live acceptance. Keep the deadline finite while
+# leaving enough recovery headroom for Pro's slowest verified path.
+CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 120 * 60
 # Extra High research can legitimately spend well over ten minutes in the
 # browser before exposing an extractable answer. Keep a finite deadline, but
 # give it a bounded 30-minute window.
@@ -66,6 +69,7 @@ _REMOTE_METADATA_FIELDS = {
     "selected_effort",
     "selected_power",
     "selector_ui",
+    "provider_retry_count",
 }
 # Rolling-deployment compatibility for brokers that predate the native xhigh
 # enum. The authenticated worker strips this transport marker before sending the
@@ -353,7 +357,15 @@ class ChatGPTWebResearchAgentTool:
         except Exception:
             pass
 
-    def _emit_progress(self, stage: str, *, answer_chars: int = 0, running: bool = True, forced_answer: bool = False) -> None:
+    def _emit_progress(
+        self,
+        stage: str,
+        *,
+        answer_chars: int = 0,
+        source_url_count: int = 0,
+        running: bool = True,
+        forced_answer: bool = False,
+    ) -> None:
         """Refresh async-job activity without counting a new researcher tool call."""
         callback = current_log_context().get("_chack_tool_progress_callback")
         if not callable(callback):
@@ -366,6 +378,7 @@ class ChatGPTWebResearchAgentTool:
                     "tool_start_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "stage": stage,
                     "answer_chars": int(answer_chars or 0),
+                    "source_url_count": int(source_url_count or 0),
                     "running": bool(running),
                     "forced_answer": bool(forced_answer),
                 },
@@ -760,12 +773,43 @@ class ChatGPTWebResearchAgentTool:
         return False
 
     @staticmethod
+    def _click_provider_retry_if_present(page) -> bool:
+        """Retry one provider-side failed generation without resubmitting manually."""
+        candidates = []
+        try:
+            candidates.append(page.locator('[data-testid="regenerate-thread-error-button"]'))
+        except Exception:
+            pass
+        for pattern in (
+            re.compile(r"^\s*Retry\s*$", re.I),
+            re.compile(r"^\s*Try again\s*$", re.I),
+            re.compile(r"^\s*Reintentar\s*$", re.I),
+            re.compile(r"^\s*Volver a intentar\s*$", re.I),
+        ):
+            try:
+                candidates.append(page.get_by_role("button", name=pattern))
+            except Exception:
+                continue
+        for buttons in candidates:
+            for index in range(buttons.count()):
+                try:
+                    button = buttons.nth(index)
+                    if button.is_visible() and button.is_enabled():
+                        button.click(timeout=5000)
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    @staticmethod
     def _is_running(page) -> bool:
         running_patterns = (
             re.compile(r"stop (generating|research|thinking|answering)", re.I),
             re.compile(r"detener (la )?(generaci[oó]n|investigaci[oó]n|respuesta)", re.I),
             re.compile(r"^\s*Answer now\s*$", re.I),
             re.compile(r"^\s*Responder ahora\s*$", re.I),
+            re.compile(r"^\s*Searching the web\s*$", re.I),
+            re.compile(r"^\s*Buscando en la web\s*$", re.I),
         )
         for pattern in running_patterns:
             if page.get_by_role("button", name=pattern).count():
@@ -823,17 +867,31 @@ class ChatGPTWebResearchAgentTool:
 
         expression = r"""(()=>{
 const root=document.querySelector('#root'),doc=root?.contentDocument;
-if(!doc)return{text:'',textLen:0,buttons:[],links:[],hasStop:false,completed:false,planning:false,clickedStart:false};
+if(!doc)return{text:'',textLen:0,buttons:[],links:[],hasStop:false,completed:false,planning:false,clickedStart:false,widgetStatus:''};
 const buttons=[...doc.querySelectorAll('button')];
 let clickedStart=false;
-if(CLICK_START){const start=buttons.find(b=>/^\s*(Start|Iniciar)\s*$/i.test((b.innerText||b.getAttribute('aria-label')||'')));if(start){start.click();clickedStart=true;}}
+if(CLICK_START){const start=buttons.find(b=>/^\s*(Start|Iniciar)(?:\s|$)/i.test((b.innerText||b.getAttribute('aria-label')||'')));if(start){start.click();clickedStart=true;}}
 const text=doc.body?.innerText||root?.innerText||'';
 const labels=buttons.map(b=>(b.innerText||b.getAttribute('aria-label')||'').trim()).filter(Boolean);
-const links=[...doc.querySelectorAll('a[href]')].map(a=>({label:(a.innerText||a.getAttribute('aria-label')||'Source').trim(),url:a.href||''}));
+const domLinks=[...doc.querySelectorAll('a[href]')].map(a=>({label:(a.innerText||a.getAttribute('aria-label')||'Source').trim(),url:a.href||''}));
+const widgetState=root?.contentWindow?.openai?.widgetState||{};
+const reportMessage=widgetState?.report_message||{};
+const contentReferences=reportMessage?.metadata?.content_references||[];
+const citationLinks=[];
+for(const reference of Array.isArray(contentReferences)?contentReferences:[]){
+  for(const item of Array.isArray(reference?.items)?reference.items:[]){
+    if(item?.url)citationLinks.push({label:(item.title||item.attribution||'Source').trim(),url:item.url});
+    for(const supporting of Array.isArray(item?.supporting_websites)?item.supporting_websites:[]){
+      if(supporting?.url)citationLinks.push({label:(supporting.title||supporting.attribution||'Supporting source').trim(),url:supporting.url});
+    }
+  }
+}
+const links=[...domLinks,...citationLinks];
+const widgetStatus=String(widgetState?.status||'');
 const hasStop=labels.some(x=>/Stop research|Detener.*investigaci/i.test(x));
-const completed=/Research completed|Investigaci[oó]n completada/i.test(text)||(/\bSources\b|\bFuentes\b/i.test(text)&&text.length>1200&&!hasStop);
-const planning=labels.some(x=>/^\s*(Start|Iniciar)\s*$/i.test(x));
-return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,clickedStart};
+const completed=/completed|finished/i.test(widgetStatus)||/Research completed|Investigaci[oó]n completada/i.test(text)||(/\bSources\b|\bFuentes\b/i.test(text)&&text.length>1200&&!hasStop);
+const planning=labels.some(x=>/^\s*(Start|Iniciar)(?:\s|$)/i.test(x));
+return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,clickedStart,widgetStatus};
 })()""".replace("CLICK_START", "true" if click_start else "false")
         with connect(websocket_url, origin=None, open_timeout=10, close_timeout=5) as websocket:
             websocket.send(
@@ -921,8 +979,34 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         last_progress_at = 0.0
         forced_answer = False
         force_baseline = ""
+        provider_retry_count = 0
         while True:
             now = time.monotonic()
+            if provider_retry_count < 1 and self._click_provider_retry_if_present(page):
+                provider_retry_count += 1
+                previous = ""
+                stable_polls = 0
+                self._emit_progress(
+                    "provider_retry_requested",
+                    answer_chars=0,
+                    running=True,
+                    forced_answer=forced_answer,
+                )
+                self._write_json(
+                    run_state_path,
+                    {
+                        "mode": self.mode,
+                        "terminal_state": "retrying_provider_failure",
+                        "updated_at": time.time(),
+                        "provider_retry_count": provider_retry_count,
+                        "forced_answer": forced_answer,
+                        "output_timeout_seconds": timeout_seconds,
+                    },
+                )
+                remaining = max(0.0, hard_deadline - now)
+                if remaining > 0:
+                    page.wait_for_timeout(min(float(self._poll_seconds()), remaining) * 1000)
+                continue
             # Pro's Answer-now recovery window is inside the total output
             # deadline. It must never extend a broken browser request beyond the
             # configured total output deadline.
@@ -981,6 +1065,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     "answer_chars": len(answer),
                     "running": running,
                     "forced_answer": forced_answer,
+                    "provider_retry_count": provider_retry_count,
                     "output_timeout_seconds": timeout_seconds,
                 },
             )
@@ -1096,6 +1181,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                         run_state_path=run_state_path,
                     )
                     conversation_url = page.url
+                source_url_count = len(set(re.findall(r"https?://[^\s)>]+", answer)))
                 metadata = {
                     "mode": self.mode,
                     **selected_mode_metadata,
@@ -1103,10 +1189,16 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     "started_at": started_at,
                     "finished_at": time.time(),
                     "answer_chars": len(answer),
+                    "source_url_count": source_url_count,
                     "terminal_state": "extracted",
                 }
                 self._write_json(run_state_path, metadata)
-                self._emit_progress("answer_extracted", answer_chars=len(answer), running=False)
+                self._emit_progress(
+                    "answer_extracted",
+                    answer_chars=len(answer),
+                    source_url_count=source_url_count,
+                    running=False,
+                )
                 return answer, conversation_url, metadata
             except Exception as exc:
                 state = "timeout" if "did not reach an extractable terminal state" in str(exc) else "error"

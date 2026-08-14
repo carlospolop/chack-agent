@@ -70,7 +70,7 @@ def build_prompt_with_warning() -> str:
     return prompt
 
 
-def test_claude():
+def run_claude():
     """Run Claude Code CLI with budget warning in prompt."""
     claude_path = shutil.which("claude")
     if not claude_path:
@@ -134,7 +134,7 @@ def test_claude():
         return False
 
 
-def test_codex():
+def run_codex():
     """Run Codex CLI with budget warning in prompt."""
     codex_path = shutil.which("codex")
     if not codex_path:
@@ -217,7 +217,7 @@ def test_codex():
         return False
 
 
-def test_copilot():
+def run_copilot():
     """Run Copilot CLI with budget warning in prompt."""
     copilot_path = shutil.which("copilot")
     if not copilot_path:
@@ -317,11 +317,11 @@ def main():
 
     results = {}
     if "claude" in targets:
-        results["claude"] = test_claude()
+        results["claude"] = run_claude()
     if "codex" in targets:
-        results["codex"] = test_codex()
+        results["codex"] = run_codex()
     if "copilot" in targets:
-        results["copilot"] = test_copilot()
+        results["copilot"] = run_copilot()
 
     print(f"\n{'='*60}")
     print("SUMMARY")

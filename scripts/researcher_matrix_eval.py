@@ -116,6 +116,17 @@ def artifact_stats(root: Path) -> dict[str, Any]:
     }
 
 
+def matrix_parent_max_turns(child_max_turns: int) -> int:
+    """Give the synthetic matrix parent enough turns for the requested child budget.
+
+    Production subagents intentionally inherit at most half of their parent's
+    turn budget.  A direct specialist matrix has no real parent, so using the
+    requested child budget as the synthetic parent budget silently halves it.
+    """
+
+    return max(4, max(2, int(child_max_turns or 0)) * 2)
+
+
 def make_config(researcher: str, thinking_effort: str = "high") -> ToolsConfig:
     cfg = ToolsConfig(task_steps_manager_enabled=False, exec_enabled=True, pdf_text_enabled=True)
     # The direct specialist builders use role-specific flags. Enabling the full
@@ -216,19 +227,36 @@ def case_gate(parsed: dict[str, Any], evidence: Path, raw: str) -> tuple[bool, l
     if parsed.get("research_worked") is not True:
         failures.append("research_worked is not true")
     findings = parsed.get("findings")
-    if not isinstance(findings, list) or not findings:
-        failures.append("findings are empty")
+    if not isinstance(findings, list) or len(findings) < 3:
+        failures.append("fewer than 3 substantive findings")
+    summary = str(parsed.get("overall_summary") or "").strip()
+    if len(summary) < 200:
+        failures.append("overall_summary is missing or too short")
     review = str(parsed.get("full_research_review") or "").strip()
-    if len(review) < 500 or review.lower() == "placeholder":
+    if len(review) < 2_000 or review.lower() == "placeholder":
         failures.append("full_research_review is missing or not substantive")
+    gaps = parsed.get("gaps")
+    if not isinstance(gaps, list) or not gaps:
+        failures.append("evidence gaps are missing")
+    tool_call_counts = parsed.get("tool_call_counts")
+    if not isinstance(tool_call_counts, dict) or not tool_call_counts:
+        failures.append("tool-call provenance is missing")
+    try:
+        total_tool_calls = int(parsed.get("total_tool_calls") or sum(int(value or 0) for value in (tool_call_counts or {}).values()))
+    except (TypeError, ValueError):
+        total_tool_calls = 0
+    if total_tool_calls < 3:
+        failures.append("fewer than 3 provider-backed tool calls")
     if not raw.strip():
         failures.append("raw output is empty")
     if not evidence.is_dir():
         failures.append("evidence directory is missing")
     else:
         stats = artifact_stats(evidence)
-        if stats["file_count"] <= 0:
-            failures.append("evidence directory has no files")
+        if stats["file_count"] < 3:
+            failures.append("evidence directory has fewer than 3 files")
+        if stats["bytes"] < 1_000:
+            failures.append("persisted evidence is smaller than 1000 bytes")
     return not failures, failures
 
 
@@ -264,7 +292,7 @@ def child_case(args: argparse.Namespace) -> int:
         os.environ["CODEX_HOME"] = "/home/tester/.codex"
     token = set_log_context(
         session_id=f"matrix-{researcher}-{os.getpid()}",
-        max_turns=args.max_turns,
+        max_turns=matrix_parent_max_turns(args.max_turns),
         max_runtime_minutes=args.runtime_minutes,
         remaining_runtime_minutes=args.runtime_minutes,
         max_cost_usd=0,
@@ -319,6 +347,7 @@ def child_case(args: argparse.Namespace) -> int:
         "artifact_stats": artifact_stats(evidence),
         "functional_pass": passed,
         "validation_failures": failures,
+        "quality_gate_version": 2,
     }
     (case_dir / "raw_output.txt").write_text(raw, encoding="utf-8")
     (case_dir / "parsed_output.json").write_text(compact(parsed) + "\n", encoding="utf-8")
@@ -474,6 +503,17 @@ def run_one(args: argparse.Namespace, researcher: str, out_dir: Path) -> dict[st
     return summary
 
 
+def resume_summary_matches(summary: dict[str, Any], args: argparse.Namespace) -> bool:
+    """Only reuse a pass produced by the exact requested provider configuration."""
+    return bool(
+        isinstance(summary, dict)
+        and summary.get("functional_pass") is True
+        and str(summary.get("provider") or "") == str(args.provider)
+        and str(summary.get("model") or "") == str(args.model)
+        and str(summary.get("thinking_effort") or "") == str(args.thinking_effort)
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=ORDINARY)
@@ -497,7 +537,7 @@ def main() -> int:
         if args.resume and summary_path.is_file():
             try:
                 old = json.loads(summary_path.read_text(encoding="utf-8"))
-                if isinstance(old, dict) and old.get("functional_pass") is True:
+                if resume_summary_matches(old, args):
                     rows.append(old)
                     print(compact({"skip": researcher, "functional_pass": True}), flush=True)
                     continue
