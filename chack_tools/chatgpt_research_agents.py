@@ -44,7 +44,7 @@ Mode = Literal["deep", "pro", "xhigh"]
 CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 90 * 60
 # Extra High research can legitimately spend well over ten minutes in the
 # browser before exposing an extractable answer. Keep a finite deadline, but
-# give it the same 30-minute window configured for the factchecker contract.
+# give it a bounded 30-minute window.
 CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS = 30 * 60
 CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS = 75 * 60
 _MODE_TOOL_NAMES: dict[Mode, str] = {
