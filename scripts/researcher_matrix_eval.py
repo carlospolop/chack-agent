@@ -474,6 +474,17 @@ def run_one(args: argparse.Namespace, researcher: str, out_dir: Path) -> dict[st
     return summary
 
 
+def resume_summary_matches(summary: dict[str, Any], args: argparse.Namespace) -> bool:
+    """Only reuse a pass produced by the exact requested provider configuration."""
+    return bool(
+        isinstance(summary, dict)
+        and summary.get("functional_pass") is True
+        and str(summary.get("provider") or "") == str(args.provider)
+        and str(summary.get("model") or "") == str(args.model)
+        and str(summary.get("thinking_effort") or "") == str(args.thinking_effort)
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=ORDINARY)
@@ -497,7 +508,7 @@ def main() -> int:
         if args.resume and summary_path.is_file():
             try:
                 old = json.loads(summary_path.read_text(encoding="utf-8"))
-                if isinstance(old, dict) and old.get("functional_pass") is True:
+                if resume_summary_matches(old, args):
                     rows.append(old)
                     print(compact({"skip": researcher, "functional_pass": True}), flush=True)
                     continue

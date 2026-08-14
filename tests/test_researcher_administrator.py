@@ -821,6 +821,135 @@ def test_administrator_deduplicates_overlapping_launch_count_observations(monkey
     assert payload["total_researcher_calls"] == 1
 
 
+def test_cancelled_async_then_successful_replacement_has_exact_terminal_accounting(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    output_dir = tmp_path / "researcher_outputs"
+    output_dir.mkdir()
+    cancelled = {
+        "research_worked": False,
+        "failure_reason": "Researcher did not return parseable JSON.",
+        "overall_summary": "The cancelled attempt produced no usable response.",
+        "findings": [],
+        "gaps": ["The worker was deliberately cancelled before evidence collection."],
+        "open_topics": [],
+        "full_research_review": "",
+        "researcher_tool": "scientific_research",
+    }
+    successful = {
+        "research_worked": True,
+        "failure_reason": "",
+        "overall_summary": "The replacement completed with primary scientific evidence.",
+        "findings": [
+            {
+                "claim": "The replacement researcher completed the requested evidence review.",
+                "summary": (
+                    "It returned substantive primary-source findings after the intentionally "
+                    "cancelled lifecycle probe had physically unwound."
+                ),
+            }
+        ],
+        "gaps": [],
+        "open_topics": [],
+        "full_research_review": "Primary-source review with methods, contradictions, and caveats. " * 20,
+        "researcher_tool": "scientific_research",
+        "tool_call_counts": {"search_europe_pmc": 3},
+        "total_tool_calls": 3,
+    }
+    (output_dir / "async_cancelled_scientific_research.json").write_text(
+        json.dumps(cancelled), encoding="utf-8"
+    )
+    (output_dir / "async_replacement_scientific_research.json").write_text(
+        json.dumps(successful), encoding="utf-8"
+    )
+    steps = [
+        {
+            "tool": "poll_researchers_async",
+            "output": json.dumps(
+                {
+                    "complete": True,
+                    "outputs_included": False,
+                    "tasks": [
+                        {
+                            "task_id": "task-cancelled",
+                            "researcher": "scientific",
+                            "researcher_tool": "scientific_research",
+                            "status": "cancelled",
+                            "execution_active": False,
+                            "latest_action": "cancelled; worker unwound",
+                            "tool_call_counts": {"scientific_research": 1},
+                            "total_tool_calls": 1,
+                        }
+                    ],
+                }
+            ),
+        },
+        {
+            "tool": "poll_researchers_async",
+            "output": json.dumps(
+                {
+                    "complete": True,
+                    "outputs_included": False,
+                    "tasks": [
+                        {
+                            "task_id": "task-replacement",
+                            "researcher": "scientific",
+                            "researcher_tool": "scientific_research",
+                            "status": "done",
+                            "execution_active": False,
+                            "latest_action": "done",
+                            "result_available": True,
+                            "tool_call_counts": {"search_europe_pmc": 3},
+                            "total_tool_calls": 3,
+                        }
+                    ],
+                }
+            ),
+        },
+    ]
+
+    responses = admin_mod._researcher_responses_from_async_output_files(str(tmp_path))
+    payload = json.loads(
+        admin_mod.finalize_researcher_administrator_output(
+            json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "administrator_conclusions": (
+                        "The replacement supplied substantive evidence after the lifecycle probe "
+                        "was cancelled and physically settled, so the final synthesis is supported."
+                    ),
+                }
+            ),
+            evidence_dir=str(tmp_path),
+            save_artifacts=True,
+            researcher_responses=responses,
+            researcher_failures=[],
+            tool_counts=Counter({"scientific_research": 2}),
+            steps=steps,
+            required_researchers=["scientific"],
+        )
+    )
+
+    assert payload["research_worked"] is True
+    assert payload["required_researchers_satisfied"] is True
+    assert len(payload["researcher_responses"]) == 1
+    assert payload["researcher_responses"][0]["research_worked"] is True
+    assert payload["researcher_failures"] == [
+        {
+            "researcher_tool": "scientific_research",
+            "status": "cancelled",
+            "failure_reason": "cancelled; worker unwound",
+            "task_id": "task-cancelled",
+            "tool_call_counts": {"scientific_research": 1},
+            "total_tool_calls": 1,
+        }
+    ]
+    assert payload["researcher_call_counts"] == {"scientific_research": 2}
+    assert payload["total_researcher_calls"] == 2
+    assert payload["researcher_tool_call_counts"] == {"search_europe_pmc": 3}
+
+
 def test_administrator_capability_map_lists_internal_researcher_tools():
     cfg = ToolsConfig(
         researcher_administrator_enabled=True,
@@ -2554,6 +2683,264 @@ def test_administrator_async_cancel_terminates_registered_running_process(tmp_pa
     assert payload["tasks"][0]["execution_active"] is False
     assert payload["tasks"][0]["termination"]["term_sent"] is True
     assert payload["tasks"][0]["termination"]["process_alive_after"] is False
+
+
+def test_async_cancel_kills_term_ignoring_grandchild_in_private_process_group(tmp_path):
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    root = tmp_path / "cancel-grandchild"
+    root.mkdir()
+    pid_path = root / "grandchild.pid"
+
+    class GrandchildResearchTool:
+        name = "scientific_research"
+
+        def __init__(self, marker: Path):
+            self.marker = str(marker)
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            code = (
+                "import os,signal,time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({self.marker!r}, 'w').write(str(os.getpid())); "
+                "time.sleep(60)"
+            )
+            subprocess.Popen(
+                [sys.executable, "-c", code],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            cancel_event = current_cancellation_event()
+            while not (cancel_event is not None and cancel_event.is_set()):
+                await asyncio.sleep(0.02)
+            return "ERROR: parent worker cancelled"
+
+    def pid_is_active(pid: int) -> bool:
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+            close = stat.rfind(")")
+            return close >= 0 and stat[close + 2 :].split()[0] != "Z"
+        except (OSError, IndexError):
+            return False
+
+    tools = helper._build_async_tools(
+        {"scientific_research": GrandchildResearchTool(pid_path)},
+        ["scientific"],
+        artifact_root=str(root),
+    )
+    by_name = {tool.name: tool for tool in tools}
+    prompt = "Investigate process-tree cancellation with exact evidence, adversarial cases, and portable fallbacks. " * 10
+    started = json.loads(
+        helper._invoke_tool_sync(
+            by_name["start_researchers_async"],
+            {
+                "requests_json": json.dumps([{"researcher": "scientific", "prompt": prompt}]),
+                "save_artifacts": False,
+            },
+        )
+    )
+    job_id = started["job_id"]
+    grandchild_pid = 0
+    try:
+        assert _wait_for_file(pid_path, 10)
+        grandchild_pid = int(pid_path.read_text(encoding="utf-8"))
+        assert pid_is_active(grandchild_pid)
+
+        cancelled = json.loads(
+            helper._invoke_tool_sync(by_name["cancel_researchers_async"], {"job_id": job_id})
+        )
+        assert len(cancelled["cancellation_requested"]) == 1
+
+        payload = {}
+        for _ in range(200):
+            payload = json.loads(
+                helper._invoke_tool_sync(by_name["poll_researchers_async"], {"job_id": job_id})
+            )
+            task = payload.get("tasks", [{}])[0]
+            if payload.get("complete") and task.get("execution_active") is False:
+                break
+            time.sleep(0.05)
+        task = payload["tasks"][0]
+        termination = task["termination"]
+        assert task["status"] == "cancelled"
+        assert termination["term_sent"] is True
+        assert termination["kill_sent"] is True
+        assert grandchild_pid in termination["descendant_pids_after_term"]
+        assert termination["descendant_pids_after"] == []
+        assert termination["process_alive_after"] is False
+        deadline = time.monotonic() + 3
+        while pid_is_active(grandchild_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pid_is_active(grandchild_pid) is False
+    finally:
+        if grandchild_pid and pid_is_active(grandchild_pid):
+            try:
+                os.kill(grandchild_pid, 9)
+            except ProcessLookupError:
+                pass
+
+
+def test_isolated_worker_cgroup_kills_setsided_term_ignoring_grandchild(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    probe_cgroup = admin_mod._create_researcher_cgroup()
+    if not probe_cgroup:
+        pytest.skip("writable cgroup-v2 delegation is unavailable")
+    assert admin_mod._remove_empty_researcher_cgroup(probe_cgroup) is True
+
+    marker = tmp_path / "escaped-grandchild.pid"
+    cancel_event = threading.Event()
+
+    class EscapingResearchTool:
+        name = "scientific_research"
+
+        def __init__(self, marker_path: Path):
+            self.marker_path = str(marker_path)
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            code = (
+                "import os,signal,time; "
+                "os.setsid(); "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({self.marker_path!r}, 'w').write(str(os.getpid())); "
+                "time.sleep(60)"
+            )
+            subprocess.Popen(
+                [sys.executable, "-c", code],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            child_cancel = current_cancellation_event()
+            while not (child_cancel is not None and child_cancel.is_set()):
+                await asyncio.sleep(0.02)
+            return "ERROR: parent worker cancelled"
+
+    def pid_is_active(pid: int) -> bool:
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+            close = stat.rfind(")")
+            return close >= 0 and stat[close + 2 :].split()[0] != "Z"
+        except (OSError, IndexError):
+            return False
+
+    def request_cancel_after_spawn() -> None:
+        if _wait_for_file(marker, 10):
+            cancel_event.set()
+
+    canceller = threading.Thread(target=request_cancel_after_spawn, daemon=True)
+    canceller.start()
+    escaped_pid = 0
+    try:
+        result = admin_mod._run_researcher_in_process(
+            EscapingResearchTool(marker),
+            {"prompt": "Research escaped descendants with complete evidence. " * 10},
+            evidence_dir=str(tmp_path),
+            cancel_event=cancel_event,
+            termination_grace_seconds=0.5,
+        )
+        canceller.join(timeout=2)
+        assert marker.is_file()
+        escaped_pid = int(marker.read_text(encoding="utf-8"))
+        termination = result["termination"]
+        assert result["cancelled"] is True
+        assert termination["cgroup_kill_sent"] is True
+        assert termination["cgroup_populated_after"] is False
+        assert termination["cgroup_removed"] is True
+        deadline = time.monotonic() + 3
+        while pid_is_active(escaped_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pid_is_active(escaped_pid) is False
+    finally:
+        cancel_event.set()
+        if escaped_pid and pid_is_active(escaped_pid):
+            try:
+                os.kill(escaped_pid, 9)
+            except ProcessLookupError:
+                pass
+
+
+def test_successful_worker_cleans_daemonized_descendant_before_return(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    probe_cgroup = admin_mod._create_researcher_cgroup()
+    if not probe_cgroup:
+        pytest.skip("writable cgroup-v2 delegation is unavailable")
+    assert admin_mod._remove_empty_researcher_cgroup(probe_cgroup) is True
+
+    marker = tmp_path / "successful-daemon.pid"
+
+    class ReturningResearchTool:
+        name = "scientific_research"
+
+        async def on_invoke_tool(self, _ctx, _raw_args):
+            code = (
+                "import os,signal,time; "
+                "os.setsid(); "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({str(marker)!r}, 'w').write(str(os.getpid())); "
+                "time.sleep(60)"
+            )
+            subprocess.Popen(
+                [sys.executable, "-c", code],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            while not marker.exists():
+                await asyncio.sleep(0.02)
+            return json.dumps(
+                {
+                    "research_worked": True,
+                    "failure_reason": "",
+                    "findings": [
+                        {
+                            "claim": "The researcher returned before its accidental daemon.",
+                            "summary": "The supervisor must clean the inherited execution boundary before publishing success.",
+                        }
+                    ],
+                    "full_research_review": "substantive evidence " * 100,
+                }
+            )
+
+    def pid_is_active(pid: int) -> bool:
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+            close = stat.rfind(")")
+            return close >= 0 and stat[close + 2 :].split()[0] != "Z"
+        except (OSError, IndexError):
+            return False
+
+    daemon_pid = 0
+    try:
+        result = admin_mod._run_researcher_in_process(
+            ReturningResearchTool(),
+            {"prompt": "Return a complete result while testing descendant cleanup. " * 10},
+            evidence_dir=str(tmp_path),
+            cancel_event=threading.Event(),
+            termination_grace_seconds=0.2,
+        )
+        daemon_pid = int(marker.read_text(encoding="utf-8"))
+        assert "cancelled" not in result
+        assert json.loads(result["output"])["research_worked"] is True
+        assert result["termination"]["cgroup_kill_sent"] is True
+        assert result["termination"]["cgroup_populated_after"] is False
+        assert result["termination"]["cgroup_removed"] is True
+        assert pid_is_active(daemon_pid) is False
+    finally:
+        if daemon_pid and pid_is_active(daemon_pid):
+            try:
+                os.kill(daemon_pid, 9)
+            except ProcessLookupError:
+                pass
 
 
 def test_mcp_shutdown_reconciles_active_async_task_before_exit(tmp_path):

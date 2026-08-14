@@ -340,13 +340,145 @@ def _live_process_group_members(pgid: int) -> list[int]:
     return [group]
 
 
+def _current_cgroup_v2_dir() -> Path | None:
+    """Return this process's delegated cgroup-v2 directory when writable."""
+    root = Path("/sys/fs/cgroup")
+    if not (root / "cgroup.controllers").is_file():
+        return None
+    try:
+        rows = Path("/proc/self/cgroup").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    relative = ""
+    for row in rows:
+        parts = row.split(":", 2)
+        if len(parts) == 3 and parts[0] == "0" and parts[1] == "":
+            relative = parts[2].lstrip("/")
+            break
+    try:
+        current = (root / relative).resolve()
+        current.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+    if not current.is_dir() or not os.access(current, os.W_OK):
+        return None
+    return current
+
+
+def _safe_researcher_cgroup(path: str) -> Path | None:
+    value = str(path or "").strip()
+    if not value:
+        return None
+    root = Path("/sys/fs/cgroup").resolve()
+    try:
+        candidate = Path(value).resolve()
+        candidate.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    if not candidate.name.startswith("chack-researcher-"):
+        return None
+    return candidate
+
+
+def _create_researcher_cgroup() -> str:
+    """Create an optional per-attempt cgroup containment boundary.
+
+    User systemd services commonly delegate a writable cgroup even when no
+    resource controllers are enabled. That is enough for inherited membership,
+    ``cgroup.kill``, and the recursive ``populated`` completion proof. Systems
+    without delegation keep the existing process-group fallback.
+    """
+    parent = _current_cgroup_v2_dir()
+    if parent is None:
+        return ""
+    for _ in range(3):
+        candidate = parent / f"chack-researcher-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        try:
+            candidate.mkdir(mode=0o700)
+            if not os.access(candidate / "cgroup.procs", os.W_OK):
+                candidate.rmdir()
+                continue
+            if not os.access(candidate / "cgroup.kill", os.W_OK):
+                candidate.rmdir()
+                continue
+            if not (candidate / "cgroup.events").is_file():
+                candidate.rmdir()
+                continue
+            return str(candidate)
+        except OSError:
+            try:
+                candidate.rmdir()
+            except OSError:
+                pass
+    return ""
+
+
+def _attach_current_process_to_cgroup(path: str) -> bool:
+    candidate = _safe_researcher_cgroup(path)
+    if candidate is None:
+        return False
+    try:
+        (candidate / "cgroup.procs").write_text(str(os.getpid()), encoding="utf-8")
+        members = {
+            int(value)
+            for value in (candidate / "cgroup.procs").read_text(encoding="utf-8", errors="replace").split()
+            if value.isdigit()
+        }
+        return os.getpid() in members
+    except (OSError, ValueError):
+        return False
+
+
+def _researcher_cgroup_populated(path: str) -> bool:
+    candidate = _safe_researcher_cgroup(path)
+    if candidate is None or not candidate.is_dir():
+        return False
+    try:
+        values = dict(
+            line.split(None, 1)
+            for line in (candidate / "cgroup.events").read_text(encoding="utf-8", errors="replace").splitlines()
+            if len(line.split(None, 1)) == 2
+        )
+        return values.get("populated") == "1"
+    except (OSError, ValueError):
+        return False
+
+
+def _remove_empty_researcher_cgroup(path: str) -> bool:
+    candidate = _safe_researcher_cgroup(path)
+    if candidate is None:
+        return False
+    if not candidate.exists():
+        return True
+    if _researcher_cgroup_populated(str(candidate)):
+        return False
+    try:
+        candidate.rmdir()
+        return True
+    except OSError:
+        return False
+
+
+def _kill_researcher_cgroup(path: str) -> bool:
+    candidate = _safe_researcher_cgroup(path)
+    if candidate is None or not _researcher_cgroup_populated(str(candidate)):
+        return False
+    try:
+        (candidate / "cgroup.kill").write_text("1", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
 def _researcher_process_entry(
     connection: Any,
     serialized_tool: bytes,
     payload: dict[str, Any],
     evidence_dir: str,
+    cgroup_path: str,
 ) -> None:
     """Invoke one researcher inside a separate, administrator-killable process."""
+    cgroup_attached = _attach_current_process_to_cgroup(cgroup_path)
     try:
         # Every subprocess launched by the researcher inherits this private
         # session/process group and is terminated together with the child.
@@ -388,7 +520,13 @@ def _researcher_process_entry(
         process_group_id = int(getpgrp()) if callable(getpgrp) else 0
         _send_researcher_process_message(
             connection,
-            {"kind": "started", "pid": os.getpid(), "process_group_id": process_group_id},
+            {
+                "kind": "started",
+                "pid": os.getpid(),
+                "process_group_id": process_group_id,
+                "cgroup_id": Path(cgroup_path).name if cgroup_attached else "",
+                "cgroup_attached": cgroup_attached,
+            },
         )
         tool = _deserialize_researcher_tool(serialized_tool)
         output = ResearcherAdministratorAgentTool._invoke_tool_sync(tool, payload)
@@ -432,6 +570,10 @@ def _terminate_researcher_process(
     info: dict[str, Any] = {
         "term_sent": False,
         "kill_sent": False,
+        "cgroup_kill_sent": False,
+        "cgroup_populated_after_term": False,
+        "cgroup_populated_after": False,
+        "cgroup_removed": False,
         "process_alive_after": False,
         "process_exitcode": None,
         "descendant_pids_after_term": [],
@@ -448,6 +590,10 @@ def _terminate_researcher_process(
         pgid = int(getattr(process, "_chack_process_group_id", 0) or 0)
     except (TypeError, ValueError):
         pgid = 0
+    cgroup_path = str(getattr(process, "_chack_cgroup_path", "") or "")
+    cgroup = _safe_researcher_cgroup(cgroup_path)
+    info["cgroup_id"] = cgroup.name if cgroup is not None else ""
+    info["cgroup_attached"] = bool(getattr(process, "_chack_cgroup_attached", False))
     try:
         getpgrp = getattr(os, "getpgrp", None)
         supervisor_pgid = int(getpgrp()) if callable(getpgrp) else 0
@@ -477,12 +623,14 @@ def _terminate_researcher_process(
     except Exception:
         alive = False
     group_members_before = _live_process_group_members(pgid) if pgid > 1 else []
-    if not alive and not group_members_before:
+    cgroup_populated_before = _researcher_cgroup_populated(cgroup_path)
+    if not alive and not group_members_before and not cgroup_populated_before:
         try:
             process.join(timeout=0)
         except Exception:
             pass
         info["process_exitcode"] = getattr(process, "exitcode", None)
+        info["cgroup_removed"] = _remove_empty_researcher_cgroup(cgroup_path)
         return info
 
     try:
@@ -507,13 +655,20 @@ def _terminate_researcher_process(
         still_alive = False
     group_members = _live_process_group_members(pgid) if pgid > 1 else []
     info["descendant_pids_after_term"] = list(group_members)
-    if still_alive or group_members:
-        try:
-            if pgid > 1:
-                os.killpg(pgid, signal.SIGKILL)
-            else:
-                process.kill()
+    cgroup_populated = _researcher_cgroup_populated(cgroup_path)
+    info["cgroup_populated_after_term"] = cgroup_populated
+    if still_alive or group_members or cgroup_populated:
+        cgroup_killed = _kill_researcher_cgroup(cgroup_path) if cgroup_populated else False
+        if cgroup_killed:
+            info["cgroup_kill_sent"] = True
             info["kill_sent"] = True
+        try:
+            if not cgroup_killed and pgid > 1:
+                os.killpg(pgid, signal.SIGKILL)
+            elif not cgroup_killed:
+                process.kill()
+            if not cgroup_killed:
+                info["kill_sent"] = True
         except (ProcessLookupError, PermissionError, OSError):
             try:
                 process.kill()
@@ -525,10 +680,16 @@ def _terminate_researcher_process(
         except Exception:
             pass
         deadline = time.monotonic() + 2.0
-        while pgid > 1 and _live_process_group_members(pgid) and time.monotonic() < deadline:
+        while time.monotonic() < deadline and (
+            (pgid > 1 and _live_process_group_members(pgid))
+            or _researcher_cgroup_populated(cgroup_path)
+        ):
             time.sleep(0.05)
     remaining_group_members = _live_process_group_members(pgid) if pgid > 1 else []
     info["descendant_pids_after"] = list(remaining_group_members)
+    info["cgroup_populated_after"] = _researcher_cgroup_populated(cgroup_path)
+    if not info["cgroup_populated_after"]:
+        info["cgroup_removed"] = _remove_empty_researcher_cgroup(cgroup_path)
     try:
         info["process_alive_after"] = bool(process.is_alive())
     except Exception:
@@ -555,12 +716,15 @@ def _run_researcher_in_process(
     context = _warm_researcher_process_context()
     parent_connection, child_connection = context.Pipe(duplex=False)
     serialized_tool = _serialize_researcher_tool(tool)
+    cgroup_path = _create_researcher_cgroup()
     process = context.Process(
         target=_researcher_process_entry,
-        args=(child_connection, serialized_tool, payload, str(evidence_dir or "")),
+        args=(child_connection, serialized_tool, payload, str(evidence_dir or ""), cgroup_path),
         name="chack-researcher-child",
     )
     process.daemon = False
+    process._chack_cgroup_path = cgroup_path
+    process._chack_cgroup_attached = False
     registration = None
     latest_message: dict[str, Any] | None = None
     termination_info: dict[str, Any] = {}
@@ -637,6 +801,10 @@ def _run_researcher_in_process(
                             process._chack_process_group_id = int(message.get("process_group_id") or 0)
                         except (AttributeError, TypeError, ValueError):
                             pass
+                        try:
+                            process._chack_cgroup_attached = bool(message.get("cgroup_attached"))
+                        except AttributeError:
+                            pass
                         if callable(on_process_started) and not process_started_notified:
                             process_started_notified = True
                             started_pid = int(message.get("pid") or process.pid or 0)
@@ -672,6 +840,13 @@ def _run_researcher_in_process(
                 break
             if isinstance(message, dict) and str(message.get("kind") or "") in {"result", "error"}:
                 latest_message = message
+        # A well-behaved researcher exits with an empty cgroup. If it returned
+        # while a daemonized or setsid descendant survived, clean that physical
+        # execution before publishing the logical terminal result.
+        if _researcher_cgroup_populated(cgroup_path):
+            _terminate_registered_child(process)
+        else:
+            _remove_empty_researcher_cgroup(cgroup_path)
         if cancel_event.is_set():
             return {
                 "cancelled": True,
@@ -709,9 +884,11 @@ def _run_researcher_in_process(
         }
     finally:
         _capture_external_termination_info()
-        if process.is_alive():
+        if process.is_alive() or _researcher_cgroup_populated(cgroup_path):
             _terminate_researcher_process(process, grace_seconds=termination_grace_seconds)
             _capture_external_termination_info()
+        else:
+            _remove_empty_researcher_cgroup(cgroup_path)
         unregister_process(registration)
         try:
             parent_connection.close()
@@ -2120,6 +2297,12 @@ def _researcher_failures_from_poll_output(output: Any) -> list[dict[str, Any]]:
         parsed_ok = parsed is not None or researcher_response_from_output(tool_name, result.get("output")) is not None
         if status == "done" and parsed_ok:
             continue
+        if status == "done" and task.get("result_available") is True and not result:
+            # Status-only polling deliberately omits completed output. The
+            # durable async ledger/output file is harvested separately, so a
+            # terminal success with an advertised result is not an unparseable
+            # failure merely because include_outputs=false was used.
+            continue
         if status not in {"done", "error", "cancelled", "deadline_exceeded", "unparsed"} and not result.get("output") and not task.get("error"):
             continue
         row = _researcher_failure_record(
@@ -2312,8 +2495,12 @@ def _researcher_responses_from_async_output_files(evidence_dir: str) -> list[dic
         if not isinstance(payload, dict):
             continue
         tool_name = str(payload.get("researcher_tool") or "").strip()
-        if tool_name:
-            responses.append(payload)
+        normalized = normalize_researcher_response_payload(payload)
+        if tool_name and normalized.get("research_worked") is True:
+            # Cancellation/error placeholders are persisted for audit, but they
+            # belong in researcher_failures from the durable task ledger. Do not
+            # expose the same failed attempt again as a researcher response.
+            responses.append(normalized)
     return responses
 
 
@@ -2692,7 +2879,13 @@ def finalize_researcher_administrator_output(
         payload["researcher_failures"] = unique_failures
     else:
         payload["researcher_failures"] = []
-    payload["researcher_tool_call_counts"] = aggregate_tool_call_counts(responses + payload["researcher_failures"])
+    inner_tool_counts = aggregate_tool_call_counts(responses + payload["researcher_failures"])
+    outer_researcher_tools = {tool_name for _short, (_field, tool_name) in RESEARCHER_REGISTRY.items()}
+    payload["researcher_tool_call_counts"] = {
+        name: count
+        for name, count in inner_tool_counts.items()
+        if name not in outer_researcher_tools
+    }
     calls = _researcher_call_counts(tool_counts, responses, payload["researcher_failures"])
     payload["researcher_call_counts"] = calls
     payload["total_researcher_calls"] = int(sum(calls.values()))
