@@ -764,6 +764,63 @@ def test_administrator_error_output_keeps_exact_attempted_researcher_count(monke
     assert "synthetic administrator failure" in payload["failure_reason"]
 
 
+def test_administrator_deduplicates_overlapping_launch_count_observations(monkeypatch, tmp_path):
+    import chack_agent
+
+    helper = ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai",
+        fallback_model="m",
+        researchers=["scientific"],
+    )
+    monkeypatch.setattr(
+        helper,
+        "_build_subagent_tools",
+        lambda _enabled, **_kwargs: [SimpleNamespace(name="task_steps_manager")],
+    )
+
+    class FakeChack:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self, **kwargs):
+            # The same physical launch is visible both in model telemetry and in
+            # the pre-spawn reservation ledger. It must still be reported once.
+            helper._launched_researcher_counts["scientific"] += 1
+            return SimpleNamespace(
+                output=json.dumps(
+                    {
+                        "research_worked": True,
+                        "failure_reason": "",
+                        "administrator_conclusions": (
+                            "One supervised scientific worker completed; overlapping telemetry "
+                            "sources describe that same launch rather than separate calls."
+                        ),
+                    }
+                ),
+                tool_counts=Counter({"scientific_research": 1}),
+                all_steps=[],
+            )
+
+    monkeypatch.setattr(chack_agent, "Chack", FakeChack)
+    output = helper._run_single(
+        "Research a bounded scientific question using primary evidence and explicit caveats. " * 12,
+        {
+            "max_turns": 20,
+            "max_runtime_minutes": 0,
+            "remaining_runtime_minutes": 0,
+            "max_cost_usd": 0,
+            "remaining_cost_usd": 0,
+            "research_master_dir": str(tmp_path / "count-observations"),
+        },
+        save_artifacts=True,
+    )
+    payload = json.loads(output)
+
+    assert payload["researcher_call_counts"] == {"scientific_research": 1}
+    assert payload["total_researcher_calls"] == 1
+
+
 def test_administrator_capability_map_lists_internal_researcher_tools():
     cfg = ToolsConfig(
         researcher_administrator_enabled=True,

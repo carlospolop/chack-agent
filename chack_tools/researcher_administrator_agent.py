@@ -2389,6 +2389,24 @@ def _researcher_call_counts_from_async_jobs(job_ids: list[str]) -> Counter[str]:
     return counts
 
 
+def _merge_count_observations(
+    target: Counter[str],
+    *sources: Counter[str] | dict[str, int],
+) -> Counter[str]:
+    """Merge overlapping launch observations without double-counting workers.
+
+    Model step telemetry, async task ledgers, and the pre-spawn reservation ledger
+    observe the same calls. Their per-tool maximum is the conservative exact count;
+    adding them inflates one physical worker into multiple reported launches.
+    """
+    for source in sources:
+        for name, raw_count in (source or {}).items():
+            count = max(0, int(raw_count or 0))
+            if count > int(target.get(name, 0) or 0):
+                target[name] = count
+    return target
+
+
 def _dedupe_researcher_responses(responses: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
@@ -5530,8 +5548,10 @@ class ResearcherAdministratorAgentTool:
                 combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
                 combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
                 combined_failures.extend(async_deadline_failures)
-                combined_tool_counts = _researcher_call_counts_from_async_jobs(_owned_async_job_ids())
-                combined_tool_counts.update(self._launched_researcher_tool_counts())
+                combined_tool_counts = _merge_count_observations(
+                    _researcher_call_counts_from_async_jobs(_owned_async_job_ids()),
+                    self._launched_researcher_tool_counts(),
+                )
                 failure_payload = {
                     "research_worked": False,
                     "failure_reason": f"{type(exc).__name__}: {exc}",
@@ -5555,8 +5575,10 @@ class ResearcherAdministratorAgentTool:
                 combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
                 combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
                 combined_failures.extend(async_deadline_failures)
-                combined_tool_counts = _researcher_call_counts_from_async_jobs(_owned_async_job_ids())
-                combined_tool_counts.update(self._launched_researcher_tool_counts())
+                combined_tool_counts = _merge_count_observations(
+                    _researcher_call_counts_from_async_jobs(_owned_async_job_ids()),
+                    self._launched_researcher_tool_counts(),
+                )
                 recovered_output = _recover_synthesis_only(output, combined_responses)
                 if recovered_output:
                     return finalize_researcher_administrator_output(
@@ -5586,8 +5608,11 @@ class ResearcherAdministratorAgentTool:
                 )
             async_deadline_failures = _harvest_async_jobs()
             tool_counts = result.tool_counts.copy()
-            tool_counts.update(_researcher_call_counts_from_async_jobs(_owned_async_job_ids()))
-            tool_counts.update(self._launched_researcher_tool_counts())
+            _merge_count_observations(
+                tool_counts,
+                _researcher_call_counts_from_async_jobs(_owned_async_job_ids()),
+                self._launched_researcher_tool_counts(),
+            )
             combined_responses = list(researcher_responses or [])
             combined_responses.extend(_researcher_responses_from_async_jobs(_owned_async_job_ids()))
             combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
