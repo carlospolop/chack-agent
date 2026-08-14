@@ -116,6 +116,17 @@ def artifact_stats(root: Path) -> dict[str, Any]:
     }
 
 
+def matrix_parent_max_turns(child_max_turns: int) -> int:
+    """Give the synthetic matrix parent enough turns for the requested child budget.
+
+    Production subagents intentionally inherit at most half of their parent's
+    turn budget.  A direct specialist matrix has no real parent, so using the
+    requested child budget as the synthetic parent budget silently halves it.
+    """
+
+    return max(4, max(2, int(child_max_turns or 0)) * 2)
+
+
 def make_config(researcher: str, thinking_effort: str = "high") -> ToolsConfig:
     cfg = ToolsConfig(task_steps_manager_enabled=False, exec_enabled=True, pdf_text_enabled=True)
     # The direct specialist builders use role-specific flags. Enabling the full
@@ -264,7 +275,7 @@ def child_case(args: argparse.Namespace) -> int:
         os.environ["CODEX_HOME"] = "/home/tester/.codex"
     token = set_log_context(
         session_id=f"matrix-{researcher}-{os.getpid()}",
-        max_turns=args.max_turns,
+        max_turns=matrix_parent_max_turns(args.max_turns),
         max_runtime_minutes=args.runtime_minutes,
         remaining_runtime_minutes=args.runtime_minutes,
         max_cost_usd=0,

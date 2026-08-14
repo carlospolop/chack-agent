@@ -1,6 +1,11 @@
 from argparse import Namespace
 
-from scripts.researcher_matrix_eval import parse_output, resume_summary_matches
+from chack_tools.subagent_config import inherit_subagent_limits
+from scripts.researcher_matrix_eval import (
+    matrix_parent_max_turns,
+    parse_output,
+    resume_summary_matches,
+)
 
 
 def test_parse_output_extracts_fenced_research_result_after_narrative() -> None:
@@ -42,3 +47,16 @@ def test_resume_requires_same_provider_model_and_reasoning_effort() -> None:
     assert resume_summary_matches({**matching, "model": "gpt-5.5"}, args) is False
     assert resume_summary_matches({**matching, "thinking_effort": "max"}, args) is False
     assert resume_summary_matches({**matching, "functional_pass": False}, args) is False
+
+
+def test_matrix_parent_budget_preserves_requested_child_turns() -> None:
+    requested_child_turns = 18
+
+    effective_turns, _, _ = inherit_subagent_limits(
+        default_max_turns=requested_child_turns,
+        parent_max_turns=matrix_parent_max_turns(requested_child_turns),
+        parent_remaining_runtime_minutes=60,
+        parent_remaining_cost_usd=0,
+    )
+
+    assert effective_turns == requested_child_turns
