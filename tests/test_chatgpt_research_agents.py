@@ -54,10 +54,10 @@ def test_chatgpt_research_tools_register_only_when_enabled():
 
 def test_chatgpt_modes_have_distinct_total_output_deadlines():
     config = ToolsConfig()
-    assert resolve_chatgpt_timeout_seconds(config, "pro") == 90 * 60
+    assert resolve_chatgpt_timeout_seconds(config, "pro") == 120 * 60
     assert resolve_chatgpt_timeout_seconds(config, "xhigh") == 30 * 60
     assert resolve_chatgpt_timeout_seconds(config, "deep") == 75 * 60
-    assert CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS == 5400
+    assert CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS == 7200
     assert CHATGPT_XHIGH_OUTPUT_TIMEOUT_SECONDS == 1800
     assert CHATGPT_DEEP_OUTPUT_TIMEOUT_SECONDS == 4500
 

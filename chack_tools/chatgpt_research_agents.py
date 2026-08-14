@@ -42,7 +42,10 @@ except ImportError:  # pragma: no cover - mirrors the other researcher modules
 
 Mode = Literal["deep", "pro", "xhigh"]
 
-CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 90 * 60
+# A provider-side generation failure followed by one successful UI retry took
+# just over 82 minutes in live acceptance. Keep the deadline finite while
+# leaving enough recovery headroom for Pro's slowest verified path.
+CHATGPT_PRO_OUTPUT_TIMEOUT_SECONDS = 120 * 60
 # Extra High research can legitimately spend well over ten minutes in the
 # browser before exposing an extractable answer. Keep a finite deadline, but
 # give it a bounded 30-minute window.
