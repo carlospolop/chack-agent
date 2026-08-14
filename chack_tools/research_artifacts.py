@@ -311,7 +311,7 @@ class ResearchArtifactsTool:
         self.config = config
         # When set, these tools are pinned to this directory regardless of the
         # per-run research context/env. Used to expose the file tools over a fixed
-        # folder (e.g. the shared researcher-queue evidence folder for factcheckers).
+        # folder (e.g. a shared researcher-queue evidence folder for verifiers).
         self._explicit_root = str(root or "").strip()
 
     def _root(self) -> Path:
@@ -623,7 +623,7 @@ def get_research_artifact_tools(helper: ResearchArtifactsTool, *, readonly: bool
     ]
     if readonly:
         # Browse-only subset: list + read + grep (no delete/register). Used to give
-        # non-researcher agents (e.g. factchecker verifiers) safe access to a folder.
+        # non-researcher verifier agents safe access to a folder.
         return built[:3]
     return built
 

@@ -255,17 +255,26 @@ def estimate_cost(
     completion_tokens: int,
     cached_prompt_tokens: int = 0,
     cache_write_tokens: int = 0,
+    cache_write_rate_multiplier: float = 1.0,
 ) -> Optional[float]:
     lookup = _resolve_model_lookup(pricing, model)
     if not lookup:
         return None
 
     rates = pricing.models[lookup]
-    billable_prompt = max(prompt_tokens - cached_prompt_tokens, 0)
+    # Provider usage reports total prompt tokens plus disjoint cache-read and
+    # cache-write subsets. Cache writes are billed at their dedicated rate,
+    # not once as ordinary input and again as a write.
+    billable_prompt = max(
+        prompt_tokens - cached_prompt_tokens - cache_write_tokens,
+        0,
+    )
     total = (
         billable_prompt * rates.input
         + cached_prompt_tokens * rates.cached_input
-        + cache_write_tokens * rates.cache_write
+        + cache_write_tokens
+        * rates.cache_write
+        * max(0.0, float(cache_write_rate_multiplier or 0.0))
         + completion_tokens * rates.output
     )
     return total / 1_000_000.0
@@ -274,6 +283,8 @@ def estimate_cost(
 def estimate_costs_by_model(
     pricing: PricingTable,
     usage_by_model: Dict[str, Tuple[int, int, int, int]],
+    *,
+    cache_write_rate_multiplier: float = 1.0,
 ) -> tuple[float, List[str]]:
     total = 0.0
     missing_models: List[str] = []
@@ -290,6 +301,7 @@ def estimate_costs_by_model(
             completion_tokens=completion_tokens,
             cached_prompt_tokens=cached_prompt_tokens,
             cache_write_tokens=cache_write_tokens,
+            cache_write_rate_multiplier=cache_write_rate_multiplier,
         )
         if model_cost is None:
             missing_models.append(model_name)

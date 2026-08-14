@@ -225,7 +225,7 @@ class ToolsConfig:
     # Stable logical queue id. All researcher_queue calls sharing this id batch
     # together and write to one shared evidence folder; distinct ids are fully
     # isolated (separate batches + folders). Set it per job so concurrent
-    # factchecks — even in one process — never mix their researches. Empty falls
+    # jobs — even in one process — never mix their research results. Empty falls
     # back to the CHACK_RESEARCHER_QUEUE_ID env var, then the process-default queue.
     researcher_queue_id: str = ""
     # Seconds to wait for more queue callers before launching a batch. During this
