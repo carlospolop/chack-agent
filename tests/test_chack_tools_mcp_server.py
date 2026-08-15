@@ -133,7 +133,6 @@ def test_stdio_server_completes_mcp_handshake() -> None:
 
 @pytest.mark.filterwarnings(
     "ignore:Field 'lifespan' has an incomplete definition:"
-    "pydantic_settings.exceptions.IncompleteFieldDefinitionWarning"
 )
 def test_schema_type_preserves_string_or_array_union() -> None:
     annotation = _py_type_from_schema(
