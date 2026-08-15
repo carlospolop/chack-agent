@@ -87,6 +87,7 @@ models:
   o3-mini-high: [high]
   o4-mini-high: [high]
   qwen3-8-2-4t-a95b: [low, medium, xhigh]
+  qwen3-8-27b: [low, medium, xhigh]
   qwen3-8-max: [minimal, low, medium, high, xhigh]
   ring-2-6-1t: [high, xhigh]
   sakana-namazu: [none, high]
