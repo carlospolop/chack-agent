@@ -292,9 +292,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.07966
-    cache_read: 0.015932
-    output: 0.15932
+    input: 0.06426
+    cache_read: 0.012852
+    output: 0.12852
   deepseek/deepseek-v4-flash-0731:
     input: 0.14
     cache_read: 0.028
@@ -307,6 +307,10 @@ models:
     input: 0.435
     cache_read: 0.003625
     output: 0.87
+  dots-studio/dots-3-note-preview:free:
+    input: 0
+    cache_read: 0
+    output: 0
   google/gemini-2.5-flash:
     input: 0.3
     cache_read: 0.03
@@ -603,8 +607,8 @@ models:
     cache_read: 0.2
     output: 1.1
   minimax/minimax-m1:
-    input: 0.55
-    cache_read: 0.55
+    input: 0.4
+    cache_read: 0.4
     output: 2.2
   minimax/minimax-m2:
     input: 0.255
@@ -1290,10 +1294,9 @@ models:
     cache_read: 0.26
     output: 0.78
   qwen/qwen-plus-2025-07-28:thinking:
-    input: 0.4
-    cache_read: 0.4
-    cache_write: 0.5
-    output: 1.2
+    input: 0.26
+    cache_read: 0.26
+    output: 0.78
   qwen/qwen2.5-vl-72b-instruct:
     input: 0.25
     cache_read: 0.25
@@ -1315,9 +1318,9 @@ models:
     cache_read: 0.23
     output: 2.3
   qwen/qwen3-30b-a3b:
-    input: 0.12
-    cache_read: 0.12
-    output: 0.5
+    input: 0.13
+    cache_read: 0.13
+    output: 0.52
   qwen/qwen3-30b-a3b-instruct-2507:
     input: 0.04815
     cache_read: 0.04815
@@ -1538,9 +1541,9 @@ models:
     cache_read: 0.033
     output: 0.528
   tencent/hy3-preview:
-    input: 0.063
-    cache_read: 0.021
-    output: 0.21
+    input: 0.18
+    cache_read: 0.06
+    output: 0.6
   thedrummer/cydonia-24b-v4.1:
     input: 0.3
     cache_read: 0.15
@@ -1658,9 +1661,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.49
-    cache_read: 0.091
-    output: 1.54
+    input: 0.462
+    cache_read: 0.0858
+    output: 1.452
   z-ai/glm-5.2:batch:
     input: 0.7
     cache_read: 0.13
@@ -1690,9 +1693,9 @@ models:
     cache_write: 2.5
     output: 10
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.07966
-    cache_read: 0.015932
-    output: 0.15932
+    input: 0.0675
+    cache_read: 0.0135
+    output: 0.135
   ~google/gemini-flash-latest:
     input: 0.375
     cache_read: 0.0375
