@@ -281,8 +281,8 @@ models:
     output: 0.8
   deepseek/deepseek-v3.1-terminus:
     input: 0.27
-    cache_read: 0.13
-    output: 0.95
+    cache_read: 0.27
+    output: 1
   deepseek/deepseek-v3.2:
     input: 0.269
     cache_read: 0.1345
@@ -292,9 +292,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.08386
-    cache_read: 0.016772
-    output: 0.16772
+    input: 0.0826
+    cache_read: 0.01652
+    output: 0.1652
   deepseek/deepseek-v4-flash-0731:
     input: 0.14
     cache_read: 0.028
@@ -538,10 +538,6 @@ models:
     input: 0.74
     cache_read: 0.15
     output: 2.96
-  liquid/lfm-2.5-2.6b:free:
-    input: 0
-    cache_read: 0
-    output: 0
   mancer/weaver:
     input: 0.5
     cache_read: 0.5
@@ -1059,15 +1055,15 @@ models:
     cache_read: 0.25
     output: 15
   openai/gpt-5.6-luna:
-    input: 0.1
-    cache_read: 0.01
-    cache_write: 0.125
-    output: 0.6
+    input: 0.2
+    cache_read: 0.02
+    cache_write: 0.25
+    output: 1.2
   openai/gpt-5.6-luna-pro:
-    input: 0.1
-    cache_read: 0.01
-    cache_write: 0.125
-    output: 0.6
+    input: 0.2
+    cache_read: 0.02
+    cache_write: 0.25
+    output: 1.2
   openai/gpt-5.6-luna-pro:batch:
     input: 0.1
     cache_read: 0.01
@@ -1077,33 +1073,33 @@ models:
     cache_read: 0.01
     output: 0.6
   openai/gpt-5.6-sol:
-    input: 5
-    cache_read: 0.5
-    cache_write: 6.25
-    output: 30
+    input: 2.5
+    cache_read: 0.25
+    cache_write: 3.125
+    output: 15
   openai/gpt-5.6-sol-pro:
-    input: 5
-    cache_read: 0.5
-    cache_write: 6.25
-    output: 30
+    input: 2.5
+    cache_read: 0.25
+    cache_write: 3.125
+    output: 15
   openai/gpt-5.6-sol-pro:batch:
-    input: 2.5
-    cache_read: 0.25
-    output: 15
+    input: 1.25
+    cache_read: 0.125
+    output: 7.5
   openai/gpt-5.6-sol:batch:
-    input: 2.5
-    cache_read: 0.25
-    output: 15
+    input: 1.25
+    cache_read: 0.125
+    output: 7.5
   openai/gpt-5.6-terra:
-    input: 1
-    cache_read: 0.1
-    cache_write: 1.25
-    output: 6
+    input: 2
+    cache_read: 0.2
+    cache_write: 2.5
+    output: 12
   openai/gpt-5.6-terra-pro:
-    input: 1
-    cache_read: 0.1
-    cache_write: 1.25
-    output: 6
+    input: 2
+    cache_read: 0.2
+    cache_write: 2.5
+    output: 12
   openai/gpt-5.6-terra-pro:batch:
     input: 1
     cache_read: 0.1
@@ -1405,9 +1401,9 @@ models:
     cache_read: 0.18
     output: 2.1
   qwen/qwen3.5-122b-a10b:
-    input: 0.29
-    cache_read: 0.29
-    output: 2.4
+    input: 0.26
+    cache_read: 0.26
+    output: 2.08
   qwen/qwen3.5-27b:
     input: 0.195
     cache_read: 0.195
@@ -1438,9 +1434,9 @@ models:
     cache_write: 0.375
     output: 1.8
   qwen/qwen3.6-27b:
-    input: 0.289
-    cache_read: 0.289
-    output: 2.4
+    input: 0.6
+    cache_read: 0.12
+    output: 3.6
   qwen/qwen3.6-35b-a3b:
     input: 0.14
     cache_read: 0.05
@@ -1661,9 +1657,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.76
-    cache_read: 0.14
-    output: 2.42
+    input: 0.5
+    cache_read: 0.115
+    output: 3.15
   z-ai/glm-5.2:batch:
     input: 0.7
     cache_read: 0.13
@@ -1697,9 +1693,9 @@ models:
     cache_write: 2.5
     output: 10
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.0603
-    cache_read: 0.01206
-    output: 0.1206
+    input: 0.078596
+    cache_read: 0.0157192
+    output: 0.157192
   ~google/gemini-flash-latest:
     input: 0.375
     cache_read: 0.0375
@@ -1715,10 +1711,10 @@ models:
     cache_read: 0.29
     output: 13
   ~openai/gpt-latest:
-    input: 5
-    cache_read: 0.5
-    cache_write: 6.25
-    output: 30
+    input: 2.5
+    cache_read: 0.25
+    cache_write: 3.125
+    output: 15
   ~openai/gpt-mini-latest:
     input: 0.75
     cache_read: 0.075
