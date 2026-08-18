@@ -36,6 +36,7 @@ from ..live_cost_state import LiveCostLimitExceeded, report_live_usage
 from ..openrouter_routing import get_openrouter_route
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
+from ..provider_launch_hooks import run_provider_pre_launch_hook
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
@@ -988,7 +989,32 @@ class CodexExecutor:
             )
         return str(user_input or "")
 
+    def _refresh_provider_credentials(self) -> None:
+        credentials = run_provider_pre_launch_hook("codex")
+        if credentials.get("clear_access_token", "").lower() == "true":
+            self._codex_access_token = ""
+            self._openai_api_key = self._fallback_openai_api_key
+            self._use_codex_access_token = False
+            self._use_existing_codex_auth_file = False
+            self._existing_codex_auth_file = ""
+            self._thread_id = None
+            self._remove_codex_auth_file()
+            return
+        access_token = str(credentials.get("access_token", "") or "").strip()
+        if access_token and access_token != self._codex_access_token:
+            self._codex_access_token = access_token
+            self._openai_api_key = access_token
+            self._use_codex_access_token = True
+            self._use_existing_codex_auth_file = False
+            self._existing_codex_auth_file = ""
+            # A thread belongs to the account that created it and must never be
+            # resumed after credential rotation.
+            self._thread_id = None
+            if self._codex_home:
+                self._write_codex_auth(self._codex_home)
+
     def _run_codex(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        self._refresh_provider_credentials()
         self._ensure_codex_home_and_config()
         if self._should_use_direct_prompt_cache():
             try:
@@ -1999,6 +2025,7 @@ class CodexExecutor:
             env.pop("CODEX_API_KEY", None)
             env.pop("CODEX_ACCESS_TOKEN", None)
         else:
+            env.pop("CODEX_ACCESS_TOKEN", None)
             env.setdefault("OPENAI_API_KEY", self._openai_api_key)
             env.setdefault("CODEX_API_KEY", self._openai_api_key)
         if self._codex_home:

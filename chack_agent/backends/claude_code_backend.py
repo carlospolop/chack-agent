@@ -32,6 +32,7 @@ from ..resume_compaction import ResumeCompactionResult
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
+from ..provider_launch_hooks import run_provider_pre_launch_hook
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
@@ -693,7 +694,21 @@ class ClaudeCodeExecutor:
             )
         return str(user_input or "")
 
+    def _refresh_provider_credentials(self) -> None:
+        credentials = run_provider_pre_launch_hook("claude")
+        if credentials.get("clear_access_token", "").lower() == "true":
+            self._claude_access_token = ""
+            self._claude_session_id = None
+            return
+        access_token = str(credentials.get("access_token", "") or "").strip()
+        if access_token and access_token != self._claude_access_token:
+            self._claude_access_token = access_token
+            # Claude resume IDs are account-scoped; start a fresh session when
+            # the ordered credential pool advances.
+            self._claude_session_id = None
+
     def _run_claude(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        self._refresh_provider_credentials()
         result = self._run_claude_once(prompt)
         if self._should_retry_with_anthropic_api_key(result[0]):
             _LOGGER.warning(
@@ -1597,6 +1612,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             if self._openrouter_app_name:
                 env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
         else:
+            env.pop("CLAUDE_ACCESS_TOKEN", None)
             if self._claude_access_token:
                 # Claude Code subscription tokens created by `claude setup-token`
                 # are consumed through CLAUDE_CODE_OAUTH_TOKEN. Keep accepting the
@@ -1607,6 +1623,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
                 env.pop("CLAUDE_API_KEY", None)
                 env.pop("ANTHROPIC_AUTH_TOKEN", None)
             else:
+                env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
                 _api_key = str(
                     self._anthropic_api_key
                     or os.environ.get("ANTHROPIC_API_KEY", "")
