@@ -36,6 +36,7 @@ models:
   gemini-flash-latest: [low, medium, high]
   gemini-pro-latest: [low, medium, high]
   glm-5-2: [high, xhigh]
+  glm-5-3: [low, high, max]
   gpt-5: [minimal, low, medium, high]
   gpt-5-1: [none, low, medium, high]
   gpt-5-1-codex: [low, medium, high]
