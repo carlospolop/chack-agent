@@ -277,7 +277,7 @@ models:
     output: 0.8
   deepseek/deepseek-v3.1-terminus:
     input: 0.27
-    cache_read: 0.27
+    cache_read: 0.135
     output: 1
   deepseek/deepseek-v3.2:
     input: 0.269
@@ -288,17 +288,17 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.088606
-    cache_read: 0.0177212
-    output: 0.177212
+    input: 0.0826
+    cache_read: 0.01652
+    output: 0.1652
   deepseek/deepseek-v4-flash-0731:
     input: 0.14
     cache_read: 0.028
     output: 0.28
   deepseek/deepseek-v4-pro:
-    input: 1.44
-    cache_read: 0.1215
-    output: 2.88
+    input: 1.6
+    cache_read: 0.135
+    output: 3.2
   deepseek/deepseek-v4-pro-0813:
     input: 1.188
     cache_read: 0.0396
@@ -475,8 +475,8 @@ models:
     cache_read: 0
     output: 0
   google/gemma-4-31b-it:
-    input: 0.09
-    cache_read: 0.05
+    input: 0.1
+    cache_read: 0.1
     output: 0.34
   google/gemma-4-31b-it:free:
     input: 0
@@ -538,6 +538,10 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  mancer/weaver:
+    input: 0.5
+    cache_read: 0.5
+    output: 0.75
   meituan/longcat-2.0:
     input: 0.3
     cache_read: 0.006
@@ -575,9 +579,9 @@ models:
     cache_read: 0.18
     output: 0.18
   meta/muse-glimmer-30b:
-    input: 0.35
+    input: 0.3
     cache_read: 0.04
-    output: 1.5
+    output: 1.1
   meta/muse-spark-1.1:
     input: 1.25
     cache_read: 0.15
@@ -615,9 +619,9 @@ models:
     cache_read: 0.03
     output: 1.2
   minimax/minimax-m2.5:
-    input: 0.225
-    cache_read: 0.06
-    output: 0.9
+    input: 0.27
+    cache_read: 0.03
+    output: 0.95
   minimax/minimax-m2.7:
     input: 0.3
     cache_read: 0.06
@@ -642,6 +646,10 @@ models:
     input: 0.1
     cache_read: 0.01
     output: 0.1
+  mistralai/ministral-8b:
+    input: 0.11
+    cache_read: 0.11
+    output: 0.11
   mistralai/ministral-8b-2512:
     input: 0.15
     cache_read: 0.015
@@ -723,9 +731,9 @@ models:
     cache_read: 0.16
     output: 4
   moonshotai/kimi-k2.7-code:
-    input: 0.71
-    cache_read: 0.15
-    output: 3.5
+    input: 0.67
+    cache_read: 0.17
+    output: 3.4
   moonshotai/kimi-k2.7-code:batch:
     input: 0.95
     cache_read: 0.19
@@ -1516,6 +1524,10 @@ models:
     input: 0.65
     cache_read: 0.65
     output: 0.75
+  stealth/ox-alpha:
+    input: 0
+    cache_read: 0
+    output: 0
   stepfun/step-3.5-flash:
     input: 0.1
     cache_read: 0.1
@@ -1528,6 +1540,14 @@ models:
     input: 0.14
     cache_read: 0.14
     output: 0.57
+  tencent/hy-mt2-1.8b:
+    input: 0.044
+    cache_read: 0.044
+    output: 0.177
+  tencent/hy-mt2-30b-a3b:
+    input: 0.074
+    cache_read: 0.074
+    output: 0.295
   tencent/hy3:
     input: 0.132
     cache_read: 0.033
