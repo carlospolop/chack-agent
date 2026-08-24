@@ -284,21 +284,21 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.05306
-    cache_read: 0.010612
-    output: 0.10612
+    input: 0.0574
+    cache_read: 0.01148
+    output: 0.1148
   deepseek/deepseek-v4-flash-0731:
-    input: 0.08
-    cache_read: 0.016
-    output: 0.18
+    input: 0.14
+    cache_read: 0.028
+    output: 0.28
   deepseek/deepseek-v4-flash-vision-exp:
     input: 0.22
     cache_read: 0.007
     output: 0.66
   deepseek/deepseek-v4-pro:
-    input: 0.413772
-    cache_read: 0.034481
-    output: 0.827544
+    input: 0.526176
+    cache_read: 0.043848
+    output: 1.052352
   deepseek/deepseek-v4-pro-0813:
     input: 1.122
     cache_read: 0.0374
@@ -627,9 +627,9 @@ models:
     cache_read: 0.027
     output: 1.08
   minimax/minimax-m2.7:
-    input: 0.3
-    cache_read: 0.06
-    output: 1.2
+    input: 0.24
+    cache_read: 0.048
+    output: 0.96
   minimax/minimax-m3:
     input: 0.3
     cache_read: 0.06
@@ -1419,9 +1419,9 @@ models:
     cache_read: 0.25
     output: 1.25
   qwen/qwen3.5-397b-a17b:
-    input: 0.39
-    cache_read: 0.39
-    output: 2.34
+    input: 0.5
+    cache_read: 0.3
+    output: 3.6
   qwen/qwen3.5-9b:
     input: 0.1
     cache_read: 0.1
@@ -1440,9 +1440,9 @@ models:
     cache_write: 0.375
     output: 1.8
   qwen/qwen3.6-27b:
-    input: 0.6
-    cache_read: 0.12
-    output: 3.6
+    input: 0.32
+    cache_read: 0.32
+    output: 3.2
   qwen/qwen3.6-35b-a3b:
     input: 0.14
     cache_read: 0.05
@@ -1727,9 +1727,9 @@ models:
     cache_write: 2.5
     output: 10
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.055
-    cache_read: 0.01
-    output: 0.14
+    input: 0.04
+    cache_read: 0.008
+    output: 0.08
   ~google/gemini-flash-latest:
     input: 0.375
     cache_read: 0.0375
