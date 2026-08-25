@@ -284,21 +284,21 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.0574
-    cache_read: 0.01148
-    output: 0.1148
+    input: 0.088606
+    cache_read: 0.0177212
+    output: 0.177212
   deepseek/deepseek-v4-flash-0731:
     input: 0.14
     cache_read: 0.028
     output: 0.28
   deepseek/deepseek-v4-flash-vision-exp:
-    input: 0.22
-    cache_read: 0.007
-    output: 0.66
+    input: 0.44
+    cache_read: 0.014
+    output: 1.32
   deepseek/deepseek-v4-pro:
-    input: 0.526176
-    cache_read: 0.043848
-    output: 1.052352
+    input: 0.790308
+    cache_read: 0.065859
+    output: 1.580616
   deepseek/deepseek-v4-pro-0813:
     input: 1.122
     cache_read: 0.0374
@@ -506,22 +506,10 @@ models:
     input: 0.25
     cache_read: 0.025
     output: 0.75
-  inclusionai/ling-2.6-1t:
-    input: 0.075
-    cache_read: 0.015
-    output: 0.625
-  inclusionai/ling-2.6-flash:
-    input: 0.01
-    cache_read: 0.002
-    output: 0.03
   inclusionai/ling-3.0-flash:
     input: 0.021
     cache_read: 0.0042
     output: 0.063
-  inclusionai/ring-2.6-1t:
-    input: 0.075
-    cache_read: 0.015
-    output: 0.625
   kwaipilot/kat-coder-air-v2.5:
     input: 0.15
     cache_read: 0.03
@@ -627,9 +615,13 @@ models:
     cache_read: 0.027
     output: 1.08
   minimax/minimax-m2.7:
-    input: 0.24
-    cache_read: 0.048
-    output: 0.96
+    input: 0.3
+    cache_read: 0.06
+    output: 1.2
+  minimax/minimax-m2.7:free:
+    input: 0
+    cache_read: 0
+    output: 0
   minimax/minimax-m3:
     input: 0.3
     cache_read: 0.06
@@ -642,6 +634,10 @@ models:
     input: 0.3
     cache_read: 0.03
     output: 0.9
+  mistralai/devstral-2512:
+    input: 0.44
+    cache_read: 0.044
+    output: 2.2
   mistralai/ministral-14b-2512:
     input: 0.2
     cache_read: 0.02
@@ -727,16 +723,16 @@ models:
     cache_read: 0.15
     output: 2.5
   moonshotai/kimi-k2.5:
-    input: 0.45
-    cache_read: 0.07
-    output: 2.25
+    input: 0.6
+    cache_read: 0.1
+    output: 3
   moonshotai/kimi-k2.6:
     input: 0.95
     cache_read: 0.16
     output: 4
   moonshotai/kimi-k2.7-code:
     input: 0.67
-    cache_read: 0.17
+    cache_read: 0.19
     output: 3.4
   moonshotai/kimi-k2.7-code:batch:
     input: 0.95
@@ -782,10 +778,6 @@ models:
     input: 0.05
     cache_read: 0.03
     output: 0.2
-  nvidia/nemotron-3-nano-30b-a3b:free:
-    input: 0
-    cache_read: 0
-    output: 0
   nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free:
     input: 0
     cache_read: 0
@@ -819,14 +811,6 @@ models:
     cache_read: 0.04
     output: 0.2
   nvidia/nemotron-3.5-lightning:free:
-    input: 0
-    cache_read: 0
-    output: 0
-  nvidia/nemotron-nano-12b-v2-vl:free:
-    input: 0
-    cache_read: 0
-    output: 0
-  nvidia/nemotron-nano-9b-v2:free:
     input: 0
     cache_read: 0
     output: 0
@@ -1579,8 +1563,8 @@ models:
     cache_read: 0.4
     output: 0.4
   thinkingmachines/inkling:
-    input: 1
-    cache_read: 0.17
+    input: 0.95
+    cache_read: 0.16
     output: 4.05
   thinkingmachines/inkling-small:
     input: 0.45
@@ -1687,9 +1671,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.966
-    cache_read: 0.1932
-    output: 3.036
+    input: 1.19
+    cache_read: 0.221
+    output: 3.74
   z-ai/glm-5.2:batch:
     input: 1.4
     cache_read: 0.26
@@ -1727,9 +1711,9 @@ models:
     cache_write: 2.5
     output: 10
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.04
+    input: 0.035
     cache_read: 0.008
-    output: 0.08
+    output: 0.075
   ~google/gemini-flash-latest:
     input: 0.375
     cache_read: 0.0375
@@ -1741,9 +1725,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 2.6
+    input: 2.8
     cache_read: 0.29
-    output: 13
+    output: 14
   ~openai/gpt-latest:
     input: 2
     cache_read: 0.2
