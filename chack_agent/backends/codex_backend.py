@@ -2241,6 +2241,10 @@ class CodexExecutor:
             "CHACK_RESEARCHER_ADMINISTRATOR_MAX_TURNS",
             "CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION",
             "CHACK_CODEX_EXEC_TIMEOUT_SECONDS",
+            # The stdio MCP server is the hard enforcement boundary for
+            # Codex-originated tool calls.  Keep the run-scoped ceiling in the
+            # explicit allowlist so it does not silently fall back to unlimited.
+            "CHACK_MAX_TOOLS_USED",
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",

@@ -181,6 +181,17 @@ def test_codex_mcp_env_allowlist_propagates_parent_codex_auth_home():
     assert "CODEX_HOME" in env_vars
 
 
+def test_codex_mcp_env_allowlist_propagates_hard_tool_ceiling():
+    env_vars = _load_list_literal(
+        MODULE_PATH,
+        "CodexExecutor",
+        "_write_codex_config",
+        "env_vars",
+    )
+
+    assert "CHACK_MAX_TOOLS_USED" in env_vars
+
+
 def test_codex_mcp_env_allowlist_transports_all_researcher_models_and_travel_credentials():
     env_vars = _load_list_literal(
         MODULE_PATH,
