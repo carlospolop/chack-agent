@@ -76,6 +76,7 @@ models:
   grok-latest: [low, medium, high, xhigh]
   hy3: [none, low, high]
   hy3-preview: [none, low, high]
+  hy4-preview: [none, low, high]
   inkling: [none, minimal, low, medium, high, max]
   inkling-small: [none, minimal, low, medium, high, max]
   kimi-k3: [low, high, max]
