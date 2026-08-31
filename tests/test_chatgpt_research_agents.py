@@ -26,6 +26,17 @@ from chack_tools.researcher_administrator_agent import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_async_broker_environment(monkeypatch):
+    """Unit tests must never inherit credentials for the production broker."""
+    for name in (
+        "CHACK_CHATGPT_ASYNC_API_URL",
+        "CHACK_CHATGPT_ASYNC_API_SECRET",
+        "CHACK_CHATGPT_EXECUTION_BACKEND",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _tool_names(tools):
     return {str(getattr(tool, "name", "")) for tool in tools}
 
@@ -339,7 +350,9 @@ def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
 
 
 def test_five_same_mode_runs_use_distinct_artifact_directories(monkeypatch, tmp_path):
-    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="pro")
+    # Explicit local mode prevents a developer's broker environment from turning
+    # this browser-mocked concurrency test into five real Pro submissions.
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(chatgpt_execution_backend="local"), mode="pro")
     evidence = tmp_path / "evidence"
     monkeypatch.setattr(
         "chack_tools.chatgpt_research_agents.create_subagent_evidence_dir",
@@ -770,6 +783,30 @@ def test_pro_retries_one_provider_generation_error_within_original_deadline(monk
     assert clock["now"] == 6.0
     state = json.loads(run_state.read_text())
     assert state["provider_retry_count"] == 1
+
+
+def test_pro_accepts_a_short_stable_completed_answer(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_pro_timeout_seconds=120, chatgpt_research_poll_seconds=2),
+        mode="pro",
+    )
+    clock = {"now": 0.0}
+    answer = "I received the repeated test prompt. What would you like me to do with it?"
+
+    class Page:
+        url = "https://chatgpt.com/c/short-answer"
+
+        def wait_for_timeout(self, milliseconds):
+            clock["now"] += milliseconds / 1000.0
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(helper, "_click_provider_retry_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: answer)
+    monkeypatch.setattr(helper, "_is_running", lambda _page: False)
+
+    assert helper._wait_and_extract(Page()) == answer
+    assert clock["now"] == 8.0
 
 
 def test_pro_timeout_forces_answer_early_and_extracts_within_total_deadline(monkeypatch, tmp_path):

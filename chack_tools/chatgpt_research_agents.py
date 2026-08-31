@@ -1070,14 +1070,19 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 },
             )
             # Two identical polls plus no running control avoids saving a streaming
-            # partial answer. After forcing, require material growth beyond the
-            # pre-force acknowledgement before accepting a stable terminal answer.
+            # partial answer. Short Pro/xhigh replies are also valid (for example,
+            # a clarification request), but require a longer stability window.
+            # After forcing, require material growth beyond the pre-force
+            # acknowledgement before accepting a stable terminal answer.
             min_chars = 1200 if self.mode == "deep" else 200
+            short_answer = self.mode in {"pro", "xhigh"} and 20 <= len(answer) < min_chars
+            required_stable_polls = 4 if short_answer else 2
             changed_after_force = (
                 not forced_answer
                 or (answer != force_baseline and len(answer) >= max(min_chars, len(force_baseline) + 100))
             )
-            if len(answer) >= min_chars and changed_after_force and not running and stable_polls >= 2:
+            extractable = len(answer) >= min_chars or short_answer
+            if extractable and changed_after_force and not running and stable_polls >= required_stable_polls:
                 return answer
             if now >= hard_deadline:
                 raise ChatGPTWebResearchError(
