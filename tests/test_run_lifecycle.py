@@ -49,6 +49,7 @@ from chack_tools.tool_usage_state import (
 @pytest.fixture
 def isolated_run_state(tmp_path, monkeypatch):
     monkeypatch.setenv("CHACK_RUN_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("CHACK_TASK_SESSION_ID", raising=False)
     yield tmp_path
 
 

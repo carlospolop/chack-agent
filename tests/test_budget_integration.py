@@ -29,10 +29,12 @@ from chack_agent.budget_warning_state import (
 
 @pytest.fixture(autouse=True)
 def _clean_budget_env():
-    """Remove budget env vars after each test."""
+    """Remove budget and inherited run identity env vars around each test."""
+    os.environ.pop("CHACK_TASK_SESSION_ID", None)
     yield
     for key in BUDGET_ENV_KEYS:
         os.environ.pop(key, None)
+    os.environ.pop("CHACK_TASK_SESSION_ID", None)
 
 
 # ---------------------------------------------------------------------------
