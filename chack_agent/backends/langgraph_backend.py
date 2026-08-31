@@ -21,7 +21,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
 from chack_tools.telemetry import log_event
-from chack_tools.tool_usage_state import current_max_tools_used
+from chack_tools.tool_usage_state import current_max_tools_used, is_non_counted_tool_name
 
 from ..config import ChackConfig
 from ..thinking_effort import normalize_thinking_effort
@@ -570,7 +570,7 @@ class LangGraphExecutor:
                         )
                         continue
 
-                is_non_task = call_name != "task_steps_manager"
+                is_non_task = not is_non_counted_tool_name(call_name)
                 if (
                     is_non_task
                     and configured_max_non_task_tools > 0

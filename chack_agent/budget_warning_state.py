@@ -16,7 +16,7 @@ import os
 import time
 from typing import Optional
 
-from chack_tools.run_lifecycle import read_live_cost
+from chack_tools.run_lifecycle import active_task_session_id, read_live_cost
 
 
 # ── Env-var names (used by subprocess MCP and backend _build_env) ─────
@@ -220,6 +220,15 @@ def inject_budget_warning(tool_output: str) -> str:
 
 # ── MCP subprocess injection (env vars) ───────────────────────────────
 
+def _current_spent_usd_from_env() -> float:
+    env_spent = float(os.environ.get("CHACK_BUDGET_SPENT_USD", "0") or "0")
+    session_id = active_task_session_id()
+    shared_spent = read_live_cost(session_id) if session_id else None
+    if shared_spent is not None:
+        return max(0.0, float(shared_spent or 0.0))
+    return max(0.0, env_spent)
+
+
 def inject_budget_warning_from_env(tool_output: str) -> str:
     """Append live runtime/cost warnings for an MCP subprocess.
 
@@ -245,9 +254,7 @@ def inject_budget_warning_from_env(tool_output: str) -> str:
             parts.append(_runtime_warning_text(elapsed, max_runtime, is_critical=False))
 
     max_cost = float(os.environ.get("CHACK_BUDGET_MAX_COST_USD", "0") or "0")
-    env_spent = float(os.environ.get("CHACK_BUDGET_SPENT_USD", "0") or "0")
-    shared_spent = read_live_cost()
-    spent = max(env_spent, float(shared_spent or 0.0))
+    spent = _current_spent_usd_from_env()
     if max_cost > 0 and spent > 0:
         ratio = spent / max_cost
         if ratio >= critical_ratio:
@@ -355,9 +362,7 @@ def budget_status_from_env() -> str:
         lines.append("Runtime: No limit configured.")
 
     max_cost = float(os.environ.get("CHACK_BUDGET_MAX_COST_USD", "0") or "0")
-    env_spent = float(os.environ.get("CHACK_BUDGET_SPENT_USD", "0") or "0")
-    shared_spent = read_live_cost()
-    spent = max(env_spent, float(shared_spent or 0.0))
+    spent = _current_spent_usd_from_env()
     if max_cost > 0:
         remaining_cost = max(0.0, max_cost - spent)
         ratio = spent / max_cost if max_cost > 0 else 0.0

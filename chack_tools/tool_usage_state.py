@@ -15,6 +15,30 @@ _ACTIVE_MAX_TOOLS_USED: contextvars.ContextVar[int | None] = contextvars.Context
     default=None,
 )
 
+_NON_COUNTED_TOOL_NAMES = frozenset(
+    {
+        "task_steps_manager",
+        "update_plan",
+        "todowrite",
+        "taskcreate",
+        "taskupdate",
+        "tasklist",
+        "taskget",
+        "enterplanmode",
+        "exitplanmode",
+        "check_budget_status",
+    }
+)
+
+
+def canonical_tool_name(tool_name: str) -> str:
+    return str(tool_name or "").strip().split("__")[-1].lower()
+
+
+def is_non_counted_tool_name(tool_name: str) -> bool:
+    name = canonical_tool_name(tool_name)
+    return not name or name in _NON_COUNTED_TOOL_NAMES
+
 
 class ToolUsageStore:
     def __init__(self) -> None:
@@ -128,8 +152,7 @@ def effective_max_tools_used(configured: int) -> int:
 def non_task_tool_count(counter: Counter[str]) -> int:
     total = 0
     for tool_name, count in counter.items():
-        name = (tool_name or "").lower()
-        if name.startswith("task_steps_manager"):
+        if is_non_counted_tool_name(tool_name):
             continue
-        total += int(count or 0)
+        total += max(0, int(count or 0))
     return total

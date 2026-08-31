@@ -18,7 +18,9 @@ from chack_agent.budget_warning_state import (
     set_budget_context,
     update_spent_usd,
 )
+from chack_agent.agent import Chack
 from chack_agent.config import AgentConfig
+from chack_tools.run_lifecycle import write_live_cost
 
 
 # ---------------------------------------------------------------------------
@@ -206,14 +208,29 @@ def test_both_runtime_and_cost():
 
 @pytest.fixture(autouse=True)
 def _clean_budget_env():
-    """Remove budget env vars after each test."""
+    """Remove budget and inherited run identity env vars around each test."""
+    os.environ.pop("CHACK_TASK_SESSION_ID", None)
     yield
     for key in BUDGET_ENV_KEYS:
         os.environ.pop(key, None)
+    os.environ.pop("CHACK_TASK_SESSION_ID", None)
 
 
 def test_env_no_env_set():
     assert inject_budget_warning_from_env("hello") == "hello"
+
+
+def test_shared_live_cost_is_authoritative_over_stale_env_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHACK_RUN_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("CHACK_TASK_SESSION_ID", "authoritative-live-cost")
+    os.environ["CHACK_BUDGET_MAX_COST_USD"] = "10"
+    os.environ["CHACK_BUDGET_SPENT_USD"] = "9"
+    os.environ["CHACK_BUDGET_WARNING_RATIO"] = "0.6"
+    os.environ["CHACK_BUDGET_CRITICAL_RATIO"] = "0.9"
+    write_live_cost("authoritative-live-cost", 1.0)
+
+    assert inject_budget_warning_from_env("result") == "result"
+    assert "$1.0000/$10.0000" in budget_status_from_env()
 
 
 def test_env_runtime_warning():
@@ -375,3 +392,36 @@ def test_budget_status_cost():
     status = budget_status_from_env()
     assert "Cost:" in status
     assert "$7.5" in status
+
+
+
+# ---------------------------------------------------------------------------
+# Final user-facing threshold notice
+# ---------------------------------------------------------------------------
+
+def test_final_budget_notice_is_absent_below_real_thresholds():
+    assert Chack._append_budget_limit_warning(
+        "done",
+        total_cost=5.9,
+        max_cost_usd=10.0,
+        tools_used=5,
+        max_tools_used=10,
+        warning_ratio=0.6,
+        critical_ratio=0.9,
+    ) == "done"
+
+
+def test_final_budget_notice_uses_counted_tools_and_computed_cost_once():
+    result = Chack._append_budget_limit_warning(
+        "done",
+        total_cost=6.0,
+        max_cost_usd=10.0,
+        tools_used=9,
+        max_tools_used=10,
+        warning_ratio=0.6,
+        critical_ratio=0.9,
+    )
+    assert result.count("Budget critical:") == 1
+    assert "$6.0000/$10.0000" in result
+    assert "9/10 counted tools" in result
+    assert "Planning and budget-status calls are excluded" in result
