@@ -41,6 +41,7 @@ from chack_tools.tool_usage_state import (
     reset_active_usage_session,
     set_active_max_tools_used,
     set_active_usage_session,
+    is_non_counted_tool_name,
 )
 from chack_tools.telemetry import (
     log_event,
@@ -593,18 +594,62 @@ class Chack:
 
     @staticmethod
     def _is_planning_tool_name(name: Any) -> bool:
-        normalized = str(name or "").strip().split("__")[-1].lower()
-        return normalized in {
-            "task_steps_manager",
-            "update_plan",
-            "todowrite",
-            "taskcreate",
-            "taskupdate",
-            "tasklist",
-            "taskget",
-            "enterplanmode",
-            "exitplanmode",
-        }
+        return is_non_counted_tool_name(str(name or ""))
+
+    @staticmethod
+    def _append_budget_limit_warning(
+        output: str,
+        *,
+        total_cost: float | None,
+        max_cost_usd: float,
+        tools_used: int,
+        max_tools_used: int,
+        warning_ratio: float,
+        critical_ratio: float,
+    ) -> str:
+        """Append one user-facing notice only when a real limit is approaching."""
+        warning_threshold = max(0.0, min(1.0, float(warning_ratio or 0.0)))
+        critical_threshold = max(
+            warning_threshold,
+            min(1.0, float(critical_ratio or 0.0)),
+        )
+        approaching: list[str] = []
+        critical = False
+
+        if max_cost_usd > 0 and total_cost is not None:
+            cost_ratio = max(0.0, float(total_cost)) / float(max_cost_usd)
+            if cost_ratio >= warning_threshold:
+                approaching.append(
+                    f"cost ${float(total_cost):.4f}/${float(max_cost_usd):.4f} "
+                    f"({cost_ratio * 100:.0f}%)"
+                )
+                critical = critical or cost_ratio >= critical_threshold
+
+        if max_tools_used > 0:
+            tool_ratio = max(0, int(tools_used)) / int(max_tools_used)
+            if tool_ratio >= warning_threshold:
+                approaching.append(
+                    f"{max(0, int(tools_used))}/{int(max_tools_used)} counted tools "
+                    f"({tool_ratio * 100:.0f}%)"
+                )
+                critical = critical or tool_ratio >= critical_threshold
+
+        if not approaching:
+            return str(output or "")
+
+        level = "critical" if critical else "warning"
+        icon = "🚨" if critical else "⚠️"
+        exclusion = (
+            " Planning and budget-status calls are excluded from the tool count."
+            if any("counted tools" in item for item in approaching)
+            else ""
+        )
+        return (
+            str(output or "").rstrip()
+            + f"\n\n{icon} Budget {level}: "
+            + "; ".join(approaching)
+            + f".{exclusion}"
+        )
 
     def _non_task_tool_count(self, steps) -> int:
         return sum(
@@ -2777,6 +2822,16 @@ class Chack:
                 cost_text = "unknown"
             else:
                 cost_text = f"${total_cost:.4f}"
+
+            output = self._append_budget_limit_warning(
+                output,
+                total_cost=total_cost,
+                max_cost_usd=max_cost_usd,
+                tools_used=tools_used,
+                max_tools_used=max_tools_used,
+                warning_ratio=budget_warning_ratio,
+                critical_ratio=budget_critical_ratio,
+            )
 
             run1_steps = len(run1_all_steps)
             run2_steps = len(run2_all_steps)

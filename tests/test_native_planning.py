@@ -281,6 +281,9 @@ def test_native_planning_calls_do_not_count_as_non_task_tools() -> None:
             "TaskUpdate": 3,
             "mcp__chack_tools__task_steps_manager": 1,
             "update_plan": 2,
+            "EnterPlanMode": 1,
+            "ExitPlanMode": 1,
+            "mcp__chack_tools__check_budget_status": 3,
             "Read": 4,
         }
     )

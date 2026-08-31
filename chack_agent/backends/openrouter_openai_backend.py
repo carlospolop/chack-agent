@@ -40,6 +40,7 @@ from chack_tools.tool_usage_state import (
     STORE as TOOL_USAGE_STORE,
     current_max_tools_used,
     current_usage_session_id,
+    is_non_counted_tool_name,
     non_task_tool_count,
 )
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_instance
@@ -552,7 +553,7 @@ def _require_task_steps_manager_init_first(data) -> ToolGuardrailFunctionOutput:
 @tool_input_guardrail(name="respect_max_tools_used")
 def _respect_max_tools_used(data) -> ToolGuardrailFunctionOutput:
     tool_name = str(getattr(data.context, "tool_name", "") or "").strip().lower()
-    if tool_name.startswith("task_steps_manager"):
+    if is_non_counted_tool_name(tool_name):
         return ToolGuardrailFunctionOutput.allow()
 
     max_tools_used = current_max_tools_used()
