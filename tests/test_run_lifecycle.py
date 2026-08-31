@@ -729,7 +729,9 @@ def test_exact_tool_cap_is_terminal_and_skips_critique(isolated_run_state, compl
         require_task_steps_manager_init_first=False,
     )
 
-    assert result.output == "ACTUAL_TOOL_CAP_FINAL_ANSWER"
+    assert result.output.startswith("ACTUAL_TOOL_CAP_FINAL_ANSWER")
+    assert result.output.count("Budget critical:") == 1
+    assert "1/1 counted tools" in result.output
     assert result.limit_reached == ("tools_after_completion" if complete else "tools")
     assert result.completion_preserved_after_limit is complete
     assert executor.calls == 1
