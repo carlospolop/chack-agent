@@ -219,6 +219,8 @@ class RunResult:
     resume_compaction_duration_seconds: float = 0.0
     resume_compaction_error: str = ""
     error: str = ""
+    limit_reached: str = ""
+    completion_preserved_after_limit: bool = False
 
 
 TaskStepsSnapshotCallback = Callable[[Dict[str, Any]], None]
@@ -594,6 +596,7 @@ class Chack:
         normalized = str(name or "").strip().split("__")[-1].lower()
         return normalized in {
             "task_steps_manager",
+            "update_plan",
             "todowrite",
             "taskcreate",
             "taskupdate",
@@ -607,16 +610,18 @@ class Chack:
         return sum(
             1
             for step in steps
-            if not self._is_planning_tool_name(self._tool_name(step))
+            if (name := self._tool_name(step))
+            and not self._is_planning_tool_name(name)
         )
 
     @classmethod
     def _non_task_tool_count_from_counter(cls, counter: Counter[str]) -> int:
         total = 0
         for name, count in counter.items():
-            if cls._is_planning_tool_name(name):
+            canonical_name = cls._canonical_tool_name(str(name or ""))
+            if not canonical_name or cls._is_planning_tool_name(canonical_name):
                 continue
-            total += count
+            total += max(0, int(count or 0))
         return total
 
     @staticmethod
@@ -797,67 +802,6 @@ class Chack:
         if not memory_text:
             return base
         return f"{base}\n\n### LONG TERM MEMORY\n{memory_text}"
-
-    @staticmethod
-    def _append_admin_runtime_warning(
-        output: str,
-        elapsed_seconds: float,
-        max_runtime_minutes: int,
-        *,
-        is_critical: bool = False,
-    ) -> str:
-        if output is None:
-            return ""
-        base_output = str(output)
-        elapsed_minutes = elapsed_seconds / 60.0
-        remaining_minutes = max(0.0, (max_runtime_minutes * 60.0 - elapsed_seconds) / 60.0)
-        if is_critical:
-            notice = "[Admin Critical Notice] Runtime budget is nearly exhausted."
-            guidance = (
-                "Finish immediately, avoid extra exploration, and focus only on the minimum work needed "
-                "to complete safely before the configured limit is reached."
-            )
-        else:
-            notice = "[Admin Notice] Runtime budget is starting to run low."
-            guidance = (
-                "Please prioritize completion and organize output to finish before the configured limit is reached."
-            )
-        return (
-            f"{base_output}\n\n======\n{notice} "
-            f"You have used {elapsed_minutes:.1f} of {max_runtime_minutes:.1f} minutes "
-            f"({remaining_minutes:.1f} minutes remaining). "
-            f"{guidance}"
-        )
-
-    @staticmethod
-    def _append_admin_cost_warning(
-        output: str,
-        spent_usd: float,
-        max_cost_usd: float,
-        *,
-        is_critical: bool = False,
-    ) -> str:
-        if output is None:
-            return ""
-        base_output = str(output)
-        remaining_usd = max(0.0, max_cost_usd - spent_usd)
-        if is_critical:
-            notice = "[Admin Critical Notice] Cost budget is nearly exhausted."
-            guidance = (
-                "Finish immediately, avoid extra tool usage where possible, and focus only on the minimum work "
-                "needed to complete before the configured limit is reached."
-            )
-        else:
-            notice = "[Admin Notice] Cost budget is starting to run low."
-            guidance = (
-                "Please prioritize completion and organize output to finish before the configured limit is reached."
-            )
-        return (
-            f"{base_output}\n\n======\n{notice} "
-            f"You have spent ${spent_usd:.4f} of ${max_cost_usd:.4f} "
-            f"(${remaining_usd:.4f} remaining). "
-            f"{guidance}"
-        )
 
     @staticmethod
     def _milestone_percent(consumed: float, limit: float) -> int:
@@ -1659,14 +1603,10 @@ class Chack:
             budget_warning_ratio = float(getattr(self.config.agent, "budget_warning_ratio", 0.7) or 0.7)
             budget_critical_ratio = float(getattr(self.config.agent, "budget_critical_ratio", 0.9) or 0.9)
             budget_tool_injection_enabled = bool(getattr(self.config.agent, "budget_tool_injection_enabled", True))
-            runtime_warning_threshold_seconds = max_runtime_seconds * budget_warning_ratio
-            runtime_critical_threshold_seconds = max_runtime_seconds * budget_critical_ratio
             try:
                 max_cost_usd = max(0.0, float(self.config.agent.max_cost_usd or 0.0))
             except (TypeError, ValueError):
                 max_cost_usd = 0.0
-            cost_warning_threshold = max_cost_usd * budget_warning_ratio
-            cost_critical_threshold = max_cost_usd * budget_critical_ratio
             estimated_cost_spent = 0.0
             resume_compaction = ResumeCompactionResult(
                 backend=str(getattr(self.config.model, "provider", "") or ""),
@@ -1741,24 +1681,15 @@ class Chack:
                 result: dict[str, Any],
                 limit_type: str,
             ) -> None:
+                """Keep a completed answer and expose the limit as internal metadata.
+
+                Limit details belong in telemetry/RunResult. Mutating ``output``
+                leaks an orchestration message through chat adapters even though
+                the model has already produced its user-facing final answer.
+                """
                 completion_preserved_state[limit_type] = True
                 result["completion_preserved_after_limit"] = True
                 result["limit_reached"] = f"{limit_type}_after_completion"
-                base_output = str(result.get("output", "") or "").rstrip()
-                labels = {
-                    "cost": "cost limit",
-                    "runtime": "runtime limit",
-                    "tools": "tool-call limit",
-                }
-                label = labels.get(limit_type, f"{limit_type} limit")
-                notice_start = f"[Admin Notice] The {label} was reached after all task steps completed"
-                if notice_start in base_output:
-                    return
-                result["output"] = (
-                    f"{base_output}\n\n======\n"
-                    f"{notice_start}; "
-                    "this final answer was preserved and no follow-up or self-critique run will start."
-                ).strip()
 
             available_tool_names = self._available_tool_names(executor)
             update_log_context(available_tool_names=available_tool_names)
@@ -2478,26 +2409,6 @@ class Chack:
                                     f"Agent run exceeded max cost budget (${max_cost_usd:.4f})."
                                 )
                             _mark_completion_preserved(result, "cost")
-                        elif cost_critical_threshold > 0 and estimated_cost_spent >= cost_critical_threshold:
-                            output = result.get("output", "")
-                            if output is not None:
-                                result["output"] = self._append_admin_cost_warning(
-                                    str(output),
-                                    estimated_cost_spent,
-                                    max_cost_usd,
-                                    is_critical=True,
-                                )
-                        elif (
-                            cost_warning_threshold > 0
-                            and estimated_cost_spent >= cost_warning_threshold
-                        ):
-                            output = result.get("output", "")
-                            if output is not None:
-                                result["output"] = self._append_admin_cost_warning(
-                                    str(output),
-                                    estimated_cost_spent,
-                                    max_cost_usd,
-                                )
 
                     if (
                         completion_preserved_state["cost"]
@@ -2537,30 +2448,6 @@ class Chack:
                                 f"Agent run exceeded max runtime ({max_runtime_minutes} minutes)."
                             )
                         _mark_completion_preserved(result, "runtime")
-                    elif (
-                        runtime_critical_threshold_seconds > 0
-                        and elapsed_runtime_seconds >= runtime_critical_threshold_seconds
-                    ):
-                        output = result.get("output", "")
-                        if output is not None:
-                            result["output"] = self._append_admin_runtime_warning(
-                                str(output),
-                                elapsed_runtime_seconds,
-                                max_runtime_minutes,
-                                is_critical=True,
-                            )
-                    elif (
-                        runtime_warning_threshold_seconds > 0
-                        and elapsed_runtime_seconds >= runtime_warning_threshold_seconds
-                    ):
-                        output = result.get("output", "")
-                        if output is not None:
-                            result["output"] = self._append_admin_runtime_warning(
-                                str(output),
-                                elapsed_runtime_seconds,
-                                max_runtime_minutes,
-                            )
-
                     prompt_total += attempt_prompt
                     completion_total += attempt_completion
                     cached_total += attempt_cached
@@ -2982,6 +2869,10 @@ class Chack:
                     "tool_counts": dict(tool_counts),
                     "nested_tool_counts": dict(nested_counts_total),
                     "nested_usage_by_model": nested_usage_by_model,
+                    "limit_reached": str(result.get("limit_reached") or ""),
+                    "completion_preserved_after_limit": bool(
+                        result.get("completion_preserved_after_limit")
+                    ),
                     "error": str(result.get("error") or ""),
                 },
             )
@@ -3027,6 +2918,10 @@ class Chack:
                 resume_compaction_method=resume_compaction.method,
                 resume_compaction_duration_seconds=resume_compaction.duration_seconds,
                 resume_compaction_error=resume_compaction.error,
+                limit_reached=str(result.get("limit_reached") or ""),
+                completion_preserved_after_limit=bool(
+                    result.get("completion_preserved_after_limit")
+                ),
                 error=str(result.get("error") or ""),
             )
         except Exception as exc:

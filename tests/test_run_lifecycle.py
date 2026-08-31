@@ -291,6 +291,31 @@ class _DeadlineCrossingResult(dict):
         return super().get(key, default)
 
 
+class _WarningThresholdResult(dict):
+    def __init__(self, clock, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._clock = clock
+
+    def get(self, key, default=None):
+        if key == "error":
+            self._clock.now = 1040.0
+        return super().get(key, default)
+
+
+class _RuntimeWarningExecutor:
+    def __init__(self, clock):
+        self.clock = clock
+
+    def invoke(self, payload, context=None):
+        del payload, context
+        return _WarningThresholdResult(
+            self.clock,
+            output="CLEAN_USER_FACING_ANSWER",
+            intermediate_steps=[],
+            raw_result=None,
+        )
+
+
 class _RuntimeCrossingExecutor:
     def __init__(self, clock, *, complete: bool = True):
         self.clock = clock
@@ -589,8 +614,9 @@ def test_completed_live_cost_crossing_preserves_actual_executor_output(isolated_
         require_task_steps_manager_init_first=False,
     )
 
-    assert "ACTUAL_FINAL_ANSWER_FROM_EXECUTOR" in result.output
-    assert "this final answer was preserved" in result.output
+    assert result.output == "ACTUAL_FINAL_ANSWER_FROM_EXECUTOR"
+    assert result.limit_reached == "cost_after_completion"
+    assert result.completion_preserved_after_limit is True
     assert _CompletedWithLiveCostExecutor.calls == 1
 
 
@@ -608,6 +634,30 @@ def test_task_snapshot_completion_requires_all_tasks_done():
     assert not _task_snapshot_is_complete({"completed": True, "tasks_total": 2, "tasks_done": 1})
     assert not _task_snapshot_is_complete({"completed": True, "tasks_total": 0, "tasks_done": 0})
     assert _task_snapshot_is_complete({"completed": True, "tasks_total": 2, "tasks_done": 2})
+
+
+def test_runtime_warning_is_internal_and_does_not_modify_user_output(
+    isolated_run_state,
+    monkeypatch,
+):
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(agent_module, "time", SimpleNamespace(time=lambda: clock.now))
+    config = _fallback_config()
+    config = replace(
+        config,
+        agent=replace(config.agent, max_runtime_minutes=1, max_cost_usd=0),
+    )
+    agent = _InjectedExecutorChack(config)
+    agent.executor = _RuntimeWarningExecutor(clock)
+
+    result = agent.run(
+        "runtime-warning",
+        "do work",
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert result.output == "CLEAN_USER_FACING_ANSWER"
 
 
 @pytest.mark.parametrize("complete", [True, False])
@@ -648,8 +698,9 @@ def test_runtime_crossing_after_result_is_strict_and_skips_critique(
             self_critique_rounds_override=2,
             require_task_steps_manager_init_first=False,
         )
-        assert "ACTUAL_RUNTIME_FINAL_ANSWER" in result.output
-        assert "runtime limit was reached" in result.output
+        assert result.output == "ACTUAL_RUNTIME_FINAL_ANSWER"
+        assert result.limit_reached == "runtime_after_completion"
+        assert result.completion_preserved_after_limit is True
     assert executor.calls == 1
 
 
@@ -677,8 +728,9 @@ def test_exact_tool_cap_is_terminal_and_skips_critique(isolated_run_state, compl
         require_task_steps_manager_init_first=False,
     )
 
-    assert "ACTUAL_TOOL_CAP_FINAL_ANSWER" in result.output
-    assert ("tool-call limit was reached" in result.output) is complete
+    assert result.output == "ACTUAL_TOOL_CAP_FINAL_ANSWER"
+    assert result.limit_reached == ("tools_after_completion" if complete else "tools")
+    assert result.completion_preserved_after_limit is complete
     assert executor.calls == 1
 
 
@@ -704,8 +756,9 @@ def test_runtime_watchdog_preserves_success_queued_during_cancellation(
         require_task_steps_manager_init_first=False,
     )
 
-    assert "QUEUED_RUNTIME_FINAL_ANSWER" in result.output
-    assert "runtime limit was reached" in result.output
+    assert result.output == "QUEUED_RUNTIME_FINAL_ANSWER"
+    assert result.limit_reached == "runtime_after_completion"
+    assert result.completion_preserved_after_limit is True
     assert executor.calls == 1
 
 
@@ -733,6 +786,7 @@ def test_tool_limit_event_is_terminal_when_denied_step_is_omitted(isolated_run_s
         require_task_steps_manager_init_first=False,
     )
 
-    assert "TOOL_EVENT_FINAL_ANSWER" in result.output
-    assert "tool-call limit was reached" in result.output
+    assert result.output == "TOOL_EVENT_FINAL_ANSWER"
+    assert result.limit_reached == "tools_after_completion"
+    assert result.completion_preserved_after_limit is True
     assert executor.calls == 1

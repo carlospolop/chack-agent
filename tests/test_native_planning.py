@@ -280,11 +280,34 @@ def test_native_planning_calls_do_not_count_as_non_task_tools() -> None:
             "TaskCreate": 1,
             "TaskUpdate": 3,
             "mcp__chack_tools__task_steps_manager": 1,
+            "update_plan": 2,
             "Read": 4,
         }
     )
 
     assert Chack._non_task_tool_count_from_counter(counts) == 4
+
+
+def test_non_tool_steps_and_empty_counter_entries_do_not_consume_tool_budget() -> None:
+    agent = object.__new__(Chack)
+    steps = [
+        {"output": "assistant text"},
+        {"tool": ""},
+        "plain model response",
+        SimpleNamespace(output="another model response"),
+        {"tool": "web_search", "output": "result"},
+    ]
+    counts = Counter(
+        {
+            "": 20,
+            "task_steps_manager": 3,
+            "update_plan": 2,
+            "web_search": 1,
+        }
+    )
+
+    assert agent._non_task_tool_count(steps) == 1
+    assert Chack._non_task_tool_count_from_counter(counts) == 1
 
 
 def test_codex_stream_item_updates_reach_live_plan_callback(monkeypatch) -> None:
