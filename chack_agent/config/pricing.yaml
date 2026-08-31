@@ -180,9 +180,9 @@ models:
     cache_write: 1.25
     output: 5
   arcee-ai/trinity-large-thinking:
-    input: 0.22
+    input: 0.25
     cache_read: 0.06
-    output: 0.85
+    output: 0.8
   baidu/ernie-4.5-vl-424b-a47b:
     input: 0.42
     cache_read: 0.42
@@ -276,9 +276,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.08064
-    cache_read: 0.016128
-    output: 0.16128
+    input: 0.088606
+    cache_read: 0.0177212
+    output: 0.177212
   deepseek/deepseek-v4-flash-0731:
     input: 0.065
     cache_read: 0.016
@@ -288,17 +288,17 @@ models:
     cache_read: 0.03
     output: 0.28
   deepseek/deepseek-v4-flash-vision-exp:
-    input: 0.22
-    cache_read: 0.007
-    output: 0.66
+    input: 0.44
+    cache_read: 0.014
+    output: 1.32
   deepseek/deepseek-v4-pro:
-    input: 0.498336
-    cache_read: 0.041528
-    output: 0.996672
+    input: 1.6
+    cache_read: 0.135
+    output: 3.2
   deepseek/deepseek-v4-pro-0813:
-    input: 0.66
-    cache_read: 0.022
-    output: 1.98
+    input: 1.32
+    cache_read: 0.044
+    output: 3.96
   deepseek/deepseek-v4-pro-0813:batch:
     input: 1.32
     cache_read: 0.13
@@ -561,7 +561,7 @@ models:
   meta-llama/llama-4-maverick:
     input: 0.2
     cache_read: 0.2
-    output: 0.8
+    output: 0.696
   meta-llama/llama-4-scout:
     input: 0.11
     cache_read: 0.055
@@ -651,9 +651,9 @@ models:
     cache_read: 0.03
     output: 0.9
   mistralai/devstral-2512:
-    input: 0.44
-    cache_read: 0.044
-    output: 2.2
+    input: 0.4
+    cache_read: 0.04
+    output: 2
   mistralai/ministral-14b-2512:
     input: 0.2
     cache_read: 0.02
@@ -755,9 +755,9 @@ models:
     cache_read: 0.15
     output: 2.5
   moonshotai/kimi-k2.5:
-    input: 0.6
-    cache_read: 0.1
-    output: 3
+    input: 0.45
+    cache_read: 0.07
+    output: 2.25
   moonshotai/kimi-k2.6:
     input: 0.95
     cache_read: 0.16
@@ -884,7 +884,7 @@ models:
     output: 1.6
   openai/gpt-4.1-nano:
     input: 0.1
-    cache_read: 0.03
+    cache_read: 0.025
     output: 0.4
   openai/gpt-4o:
     input: 2.5
@@ -1624,8 +1624,8 @@ models:
     output: 10
   ~deepseek/deepseek-v4-flash-latest:
     input: 0.03
-    cache_read: 0.01
-    output: 0.14
+    cache_read: 0.013
+    output: 0.16
   ~google/gemini-flash-latest:
     input: 0.75
     cache_read: 0.075
@@ -1654,6 +1654,6 @@ models:
     cache_read: 0.5
     output: 6
   ~z-ai/glm-latest:
-    input: 1.1875
-    cache_read: 0.247
-    output: 4.18
+    input: 0
+    cache_read: 0
+    output: 0
