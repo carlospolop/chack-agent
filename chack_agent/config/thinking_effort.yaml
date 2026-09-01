@@ -69,6 +69,7 @@ models:
   gpt-mini-latest: [none, low, medium, high, xhigh]
   gpt-oss-120b: [low, medium, high]
   gpt-oss-20b: [low, medium, high]
+  granite-4-2-8b: [none, low, high]
   grok-4-20-multi-agent: [low, medium, high, xhigh]
   grok-4-3: [none, low, medium, high]
   grok-4-5: [low, medium, high]
