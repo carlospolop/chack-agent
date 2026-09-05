@@ -103,6 +103,14 @@ class ChatGPTRemoteWorker:
         self.worker_id = os.environ.get("CHACK_CHATGPT_WORKER_ID", "").strip() or f"{socket.gethostname()}-{os.getpid()}"
         self.poll_seconds = max(2, int(os.environ.get("CHACK_CHATGPT_WORKER_POLL_SECONDS", "10")))
         self.heartbeat_seconds = max(10, int(os.environ.get("CHACK_CHATGPT_WORKER_HEARTBEAT_SECONDS", "30")))
+        # The browser helper enforces its own output deadline, but a blocked
+        # Playwright/CDP call could prevent that code from regaining control.
+        # Give normal browser startup/cleanup a bounded grace period, then let
+        # an independent thread terminalize the lease and restart this worker.
+        self.hard_timeout_grace_seconds = max(
+            30,
+            min(900, int(os.environ.get("CHACK_CHATGPT_WORKER_HARD_TIMEOUT_GRACE_SECONDS", "180"))),
+        )
         # Five is the deliberately tested workstation/browser ceiling. Keep a
         # hard cap even if a service environment is accidentally set higher.
         self.concurrency = max(1, min(5, int(os.environ.get("CHACK_CHATGPT_WORKER_CONCURRENCY", "1"))))
@@ -199,6 +207,68 @@ class ChatGPTRemoteWorker:
             except ChatGPTAsyncApiError as exc:
                 LOG.warning("job=%s heartbeat failed (%s)", job_id, exc.error_code or type(exc).__name__)
 
+    def _hard_deadline_loop(
+        self,
+        *,
+        stop: threading.Event,
+        job_id: str,
+        lease_id: str,
+        run_state_path: Path,
+        partial_path: Path,
+        timeout_seconds: float,
+    ) -> None:
+        """Terminalize and restart if browser execution never returns.
+
+        ChatGPT's visible answer can legitimately remain tiny while Extra High
+        is thinking, so progress-by-character watchdogs create false failures.
+        This outer wall-clock guard instead allows the full broker output
+        timeout plus a bounded launch/cleanup grace period.  ``os._exit`` is
+        deliberate: Python cannot safely kill a thread blocked inside
+        Playwright, and systemd restarts this single-concurrency worker.
+        """
+        if stop.wait(max(0.0, float(timeout_seconds))):
+            return
+        try:
+            state = _read_json(run_state_path)
+            partial = _read_text(partial_path)
+            state.update(
+                {
+                    "terminal_state": "worker_hard_timeout",
+                    "finished_at": time.time(),
+                    "answer_chars": max(len(partial), int(state.get("answer_chars") or 0)),
+                    "worker_hard_timeout_seconds": int(timeout_seconds),
+                }
+            )
+            _write_secure_json(run_state_path, state)
+            metadata = _public_metadata(state)
+            metadata.update({"execution_backend": "local_worker"})
+            self._send_or_save_completion(
+                job_id,
+                {
+                    "lease_id": lease_id,
+                    "status": "TIMED_OUT",
+                    "partial_result": partial,
+                    "metadata": metadata,
+                    "error_code": "WORKER_HARD_DEADLINE",
+                    "error_message": (
+                        "The local browser executor exceeded its total worker wall-clock deadline; "
+                        "the worker is restarting so later queued jobs can continue."
+                    ),
+                },
+            )
+        except Exception:
+            # Restart even if terminal persistence itself fails. The broker lease
+            # will expire and the next attempt will hit the duplicate-submission
+            # guard instead of keeping this worker permanently occupied.
+            LOG.exception("job=%s could not persist hard-deadline completion", job_id)
+        finally:
+            LOG.critical(
+                "job=%s exceeded worker hard deadline=%ss; restarting to release browser execution",
+                job_id,
+                int(timeout_seconds),
+            )
+            os._exit(75)
+
     def process(self, lease: dict[str, Any]) -> None:
         job_id = str(lease.get("job_id") or "")
         lease_id = str(lease.get("lease_id") or "")
@@ -290,6 +360,7 @@ class ChatGPTRemoteWorker:
 
         helper = ChatGPTWebResearchAgentTool(self._config(mode, output_timeout), mode=cast(Mode, mode))
         stop = threading.Event()
+        hard_deadline_stop = threading.Event()
         cancelled = threading.Event()
         heartbeats = threading.Thread(
             target=self._heartbeat_loop,
@@ -304,9 +375,24 @@ class ChatGPTRemoteWorker:
             name=f"chatgpt-heartbeat-{job_id}",
             daemon=True,
         )
+        hard_timeout_seconds = output_timeout + self.hard_timeout_grace_seconds
+        hard_deadline = threading.Thread(
+            target=self._hard_deadline_loop,
+            kwargs={
+                "stop": hard_deadline_stop,
+                "job_id": job_id,
+                "lease_id": lease_id,
+                "run_state_path": run_state_path,
+                "partial_path": partial_path,
+                "timeout_seconds": hard_timeout_seconds,
+            },
+            name=f"chatgpt-hard-deadline-{job_id}",
+            daemon=True,
+        )
         try:
             self.client.heartbeat(job_id, lease_id=lease_id, stage="launching_browser", answer_chars=0)
             heartbeats.start()
+            hard_deadline.start()
             LOG.info("job=%s mode=%s launching local ChatGPT browser executor", job_id, mode)
             _write_secure_json(
                 submission_marker,
@@ -317,6 +403,7 @@ class ChatGPTRemoteWorker:
                 run_state_path=run_state_path,
                 partial_path=partial_path,
             )
+            hard_deadline_stop.set()
             metadata = _public_metadata(dict(metadata or {}))
             metadata.update({"execution_backend": "local_worker"})
             completion_status = "CANCELLED" if cancelled.is_set() else "SUCCEEDED"
@@ -332,6 +419,7 @@ class ChatGPTRemoteWorker:
                 },
             )
         except Exception as exc:
+            hard_deadline_stop.set()
             state = _read_json(run_state_path)
             partial = _read_text(partial_path)
             terminal_state = str(state.get("terminal_state") or "").lower()
@@ -349,7 +437,10 @@ class ChatGPTRemoteWorker:
                 },
             )
         finally:
+            hard_deadline_stop.set()
             stop.set()
+            if hard_deadline.is_alive():
+                hard_deadline.join(timeout=5)
             if heartbeats.is_alive():
                 heartbeats.join(timeout=5)
 

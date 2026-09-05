@@ -30,6 +30,7 @@ def _worker(tmp_path: Path) -> tuple[ChatGPTRemoteWorker, FakeWorkerClient]:
     worker.worker_id = "test-worker"
     worker.poll_seconds = 2
     worker.heartbeat_seconds = 10
+    worker.hard_timeout_grace_seconds = 180
     worker.concurrency = 1
     worker.state_root = tmp_path
     worker._completion_lock = threading.Lock()
@@ -45,6 +46,92 @@ def test_worker_concurrency_environment_is_bounded_to_five(monkeypatch, tmp_path
 
     monkeypatch.setenv("CHACK_CHATGPT_WORKER_CONCURRENCY", "0")
     assert ChatGPTRemoteWorker().concurrency == 1
+
+
+def test_worker_hard_timeout_grace_environment_is_bounded(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHACK_CHATGPT_ASYNC_API_URL", "https://broker.example")
+    monkeypatch.setenv("CHACK_CHATGPT_ASYNC_WORKER_SECRET", "worker-test-secret")
+    monkeypatch.setenv("CHACK_CHATGPT_WORKER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("CHACK_CHATGPT_WORKER_HARD_TIMEOUT_GRACE_SECONDS", "9999")
+    assert ChatGPTRemoteWorker().hard_timeout_grace_seconds == 900
+
+    monkeypatch.setenv("CHACK_CHATGPT_WORKER_HARD_TIMEOUT_GRACE_SECONDS", "0")
+    assert ChatGPTRemoteWorker().hard_timeout_grace_seconds == 30
+
+
+def test_worker_hard_deadline_terminalizes_and_requests_restart(monkeypatch, tmp_path):
+    worker, client = _worker(tmp_path)
+    job_id = "job_00000000-0000-0000-0000-000000000097"
+    job_dir = tmp_path / "jobs" / job_id
+    state_path = job_dir / "chatgpt-run.json"
+    partial_path = job_dir / "chatgpt-xhigh-partial.md"
+    job_dir.mkdir(parents=True)
+    state_path.write_text('{"mode":"xhigh","terminal_state":"running","answer_chars":8}')
+    partial_path.write_text("partial evidence")
+    exits: list[int] = []
+    monkeypatch.setattr("chack_tools.chatgpt_remote_worker.os._exit", exits.append)
+
+    worker._hard_deadline_loop(
+        stop=threading.Event(),
+        job_id=job_id,
+        lease_id="lease-hard-timeout",
+        run_state_path=state_path,
+        partial_path=partial_path,
+        timeout_seconds=0,
+    )
+
+    assert exits == [75]
+    assert len(client.completions) == 1
+    completed_job_id, completion = client.completions[0]
+    assert completed_job_id == job_id
+    assert completion["lease_id"] == "lease-hard-timeout"
+    assert completion["status"] == "TIMED_OUT"
+    assert completion["partial_result"] == "partial evidence"
+    assert completion["metadata"]["mode"] == "xhigh"
+    assert completion["metadata"]["terminal_state"] == "worker_hard_timeout"
+    assert completion["metadata"]["answer_chars"] == len("partial evidence")
+    assert completion["metadata"]["execution_backend"] == "local_worker"
+    assert completion["metadata"]["finished_at"] > 0
+    assert completion["error_code"] == "WORKER_HARD_DEADLINE"
+    assert "worker is restarting" in completion["error_message"]
+    assert '"terminal_state": "worker_hard_timeout"' in state_path.read_text()
+
+
+def test_worker_hard_deadline_stops_without_completion(tmp_path):
+    worker, client = _worker(tmp_path)
+    stop = threading.Event()
+    stop.set()
+    worker._hard_deadline_loop(
+        stop=stop,
+        job_id="job_00000000-0000-0000-0000-000000000096",
+        lease_id="lease-finished",
+        run_state_path=tmp_path / "state.json",
+        partial_path=tmp_path / "partial.md",
+        timeout_seconds=0,
+    )
+    assert not client.completions
+
+
+def test_worker_hard_deadline_restarts_even_if_persistence_fails(monkeypatch, tmp_path):
+    worker, client = _worker(tmp_path)
+    exits: list[int] = []
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_remote_worker._write_secure_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+    monkeypatch.setattr("chack_tools.chatgpt_remote_worker.os._exit", exits.append)
+
+    worker._hard_deadline_loop(
+        stop=threading.Event(),
+        job_id="job_00000000-0000-0000-0000-000000000095",
+        lease_id="lease-persistence-failure",
+        run_state_path=tmp_path / "state.json",
+        partial_path=tmp_path / "partial.md",
+        timeout_seconds=0,
+    )
+
+    assert exits == [75]
+    assert not client.completions
 
 
 def test_worker_forces_local_backend_and_posts_success(monkeypatch, tmp_path):
