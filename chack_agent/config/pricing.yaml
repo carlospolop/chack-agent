@@ -271,9 +271,9 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.088606
-    cache_read: 0.0177212
-    output: 0.177212
+    input: 0.08694
+    cache_read: 0.017388
+    output: 0.17388
   deepseek/deepseek-v4-flash-0731:
     input: 0.065
     cache_read: 0.016
@@ -283,17 +283,17 @@ models:
     cache_read: 0.03
     output: 0.28
   deepseek/deepseek-v4-flash-vision-exp:
-    input: 0.44
-    cache_read: 0.014
-    output: 1.32
+    input: 0.22
+    cache_read: 0.007
+    output: 0.66
   deepseek/deepseek-v4-pro:
-    input: 1.04226
-    cache_read: 0.086855
-    output: 2.08452
+    input: 0.971442
+    cache_read: 0.0809535
+    output: 1.942884
   deepseek/deepseek-v4-pro-0813:
-    input: 1.1154
-    cache_read: 0.03718
-    output: 3.3462
+    input: 1.12068
+    cache_read: 0.037356
+    output: 3.36204
   deepseek/deepseek-v4-pro-0813:batch:
     input: 1.32
     cache_read: 0.13
@@ -503,10 +503,6 @@ models:
     input: 0.017
     cache_read: 0.017
     output: 0.112
-  ibm-granite/granite-4.1-8b:
-    input: 0.05
-    cache_read: 0.05
-    output: 0.1
   ibm-granite/granite-4.2-8b:
     input: 0.1
     cache_read: 0.05
@@ -528,6 +524,10 @@ models:
     cache_read: 0.012
     output: 0.18
   inclusionai/ling-3.0-flash-fin:free:
+    input: 0
+    cache_read: 0
+    output: 0
+  inclusionai/ling-3.0-flash-sante:free:
     input: 0
     cache_read: 0
     output: 0
@@ -1135,6 +1135,26 @@ models:
     input: 0.625
     cache_read: 0.0625
     output: 5
+  openai/gpt-6-astra:
+    input: 10
+    cache_read: 1
+    cache_write: 12.5
+    output: 50
+  openai/gpt-6-astra-pro:
+    input: 10
+    cache_read: 1
+    cache_write: 12.5
+    output: 50
+  openai/gpt-6-astra-pro:batch:
+    input: 5
+    cache_read: 0.5
+    cache_write: 6.25
+    output: 25
+  openai/gpt-6-astra:batch:
+    input: 5
+    cache_read: 0.5
+    cache_write: 6.25
+    output: 25
   openai/gpt-audio:
     input: 2.5
     cache_read: 2.5
@@ -1309,9 +1329,9 @@ models:
     cache_read: 0.455
     output: 1.82
   qwen/qwen3-235b-a22b-2507:
-    input: 0.0875
-    cache_read: 0.0175
-    output: 0.35
+    input: 0.09
+    cache_read: 0.09
+    output: 0.55
   qwen/qwen3-235b-a22b-thinking-2507:
     input: 0.23
     cache_read: 0.23
@@ -1412,9 +1432,9 @@ models:
     cache_read: 0.195
     output: 1.56
   qwen/qwen3.5-35b-a3b:
-    input: 0.25
-    cache_read: 0.25
-    output: 1.25
+    input: 0.08
+    cache_read: 0.08
+    output: 0.75
   qwen/qwen3.5-397b-a17b:
     input: 0.55
     cache_read: 0.225
@@ -1441,9 +1461,9 @@ models:
     cache_write: 0.375
     output: 1.8
   qwen/qwen3.6-27b:
-    input: 0.6
-    cache_read: 0.12
-    output: 3.6
+    input: 0.3
+    cache_read: 0.03
+    output: 2
   qwen/qwen3.6-35b-a3b:
     input: 0.1
     cache_read: 0.05
@@ -1745,9 +1765,9 @@ models:
     cache_write: 2.5
     output: 10
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.05
-    cache_read: 0.013
-    output: 0.16
+    input: 0.04998
+    cache_read: 0.009996
+    output: 0.09996
   ~google/gemini-flash-latest:
     input: 0.75
     cache_read: 0.075
