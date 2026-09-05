@@ -58,6 +58,9 @@ def test_chatgpt_researchers_are_never_cancelled_for_elapsed_time():
     assert "Every researcher is async-only" in prompt
     assert "Always launch ordinary and browser researchers with `start_researchers_async`" in prompt
     assert "provider/MCP tool bridges can time out while healthy children continue" in prompt
+    assert "Never run blocking polls concurrently" in prompt
+    assert "positive `wait_seconds` in `Promise.all`" in prompt
+    assert "Only `wait_seconds=0` snapshots may be batched" in prompt
     assert "Never use `wait(..., terminate=true)`" in prompt
     assert "configured hard timeout" in prompt
     assert "up to 180 minutes" in prompt
