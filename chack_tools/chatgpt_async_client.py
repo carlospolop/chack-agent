@@ -157,6 +157,27 @@ class ChatGPTAsyncApiClient:
         )
         return payload or None
 
+    def set_worker_draining(
+        self,
+        *,
+        worker_id: str,
+        draining: bool,
+        ttl_seconds: int = 3600,
+    ) -> dict[str, Any]:
+        """Enable or clear broker-side lease draining for one worker ID."""
+
+        body: dict[str, Any] = {
+            "worker_id": str(worker_id),
+            "draining": bool(draining),
+        }
+        if draining:
+            body["ttl_seconds"] = max(60, int(ttl_seconds))
+        return self._request(
+            "POST",
+            "/v1/chatgpt/worker/drain",
+            json_body=body,
+        )
+
     def heartbeat(
         self,
         job_id: str,

@@ -595,6 +595,37 @@ def test_async_client_sends_bearer_secret_only_in_header():
     assert kwargs["allow_redirects"] is False
 
 
+def test_async_client_sets_and_clears_worker_drain():
+    class Response:
+        status_code = 200
+        content = b"{}"
+
+        @staticmethod
+        def json():
+            return {"draining": True}
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            return Response()
+
+    session = Session()
+    client = ChatGPTAsyncApiClient("https://broker.example", "worker-secret", session=session)  # type: ignore[arg-type]
+    client.set_worker_draining(worker_id="worker-a", draining=True, ttl_seconds=900)
+    client.set_worker_draining(worker_id="worker-a", draining=False)
+
+    assert session.calls[0][0:2] == ("POST", "https://broker.example/v1/chatgpt/worker/drain")
+    assert session.calls[0][2]["json"] == {
+        "worker_id": "worker-a",
+        "draining": True,
+        "ttl_seconds": 900,
+    }
+    assert session.calls[1][2]["json"] == {"worker_id": "worker-a", "draining": False}
+
+
 def test_async_client_rejects_non_origin_or_credential_bearing_urls():
     for url in (
         "http://broker.example",
