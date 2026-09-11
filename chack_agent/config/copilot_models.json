@@ -1,13 +1,15 @@
 {
   "models": [
     "claude-sonnet-5",
-    "claude-fable-5.1",
     "claude-fable-5",
     "claude-opus-5",
     "claude-opus-4.8",
     "claude-opus-4.8-fast",
     "claude-opus-4.7",
     "claude-sonnet-4.6",
+    "claude-opus-4.6",
+    "claude-sonnet-4.5",
+    "claude-opus-4.5",
     "claude-haiku-4.5",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
@@ -19,10 +21,10 @@
     "gpt-5-mini",
     "mai-code-1.1-flash",
     "mai-code-1-flash-picker",
-    "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
+    "gemini-3.1-pro-preview",
     "grok-4.5",
     "kimi-k3",
     "kimi-k2.7-code"
