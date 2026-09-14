@@ -203,6 +203,20 @@ def _descendant_pids(pid: int) -> list[int]:
 
 
 def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    if os.name == "nt":  # pragma: no cover - exercised on Windows
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(int(process.pid)), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        return
     pids = list(reversed(_descendant_pids(int(process.pid)))) + [int(process.pid)]
     for sig in (signal.SIGTERM, signal.SIGKILL):
         for pid in pids:
