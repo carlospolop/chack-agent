@@ -11,6 +11,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 
+from chack_agent.backends import chack_tools_mcp_server as mcp_server_module
 from chack_agent.backends.chack_tools_mcp_server import (
     _ServerPolicyState,
     _load_toolset,
@@ -103,6 +104,25 @@ def test_mcp_watchdog_treats_missing_owner_as_dead(monkeypatch) -> None:
     monkeypatch.setattr("chack_agent.backends.chack_tools_mcp_server.os.kill", fake_kill)
 
     assert _process_is_alive(424242) is False
+
+
+def test_mcp_watchdog_never_uses_os_kill_for_windows_liveness(monkeypatch) -> None:
+    queried: list[int] = []
+
+    monkeypatch.setattr(mcp_server_module, "_uses_windows_process_api", lambda: True)
+    monkeypatch.setattr(
+        mcp_server_module,
+        "_windows_process_is_alive",
+        lambda pid: queried.append(pid) or True,
+    )
+    monkeypatch.setattr(
+        mcp_server_module.os,
+        "kill",
+        lambda *_args: pytest.fail("os.kill(pid, 0) terminates the process on Windows"),
+    )
+
+    assert _process_is_alive(424242) is True
+    assert queried == [424242]
 
 
 def test_stdio_server_completes_mcp_handshake() -> None:
