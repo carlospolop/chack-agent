@@ -364,7 +364,13 @@ def test_codex_stream_item_updates_reach_live_plan_callback(monkeypatch) -> None
             return 0
 
     process = _Process()
-    monkeypatch.setattr(codex_backend_module.subprocess, "Popen", lambda *args, **kwargs: process)
+    popen_kwargs: dict[str, object] = {}
+
+    def _popen(*args, **kwargs):
+        popen_kwargs.update(kwargs)
+        return process
+
+    monkeypatch.setattr(codex_backend_module.subprocess, "Popen", _popen)
     monkeypatch.setattr(
         codex_backend_module,
         "_readline_when_ready",
@@ -405,6 +411,8 @@ def test_codex_stream_item_updates_reach_live_plan_callback(monkeypatch) -> None
         reset_active_context(tokens)
 
     assert output == "done"
+    assert popen_kwargs["encoding"] == "utf-8"
+    assert popen_kwargs["errors"] == "replace"
     assert [task["status"] for task in STORE.snapshot(session_id)["runs"][0]["tasks"]] == [
         "done",
         "done",

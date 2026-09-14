@@ -202,6 +202,8 @@ def _descendant_pids(pid: int) -> list[int]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=False,
             )
         except Exception:
@@ -778,6 +780,8 @@ class CodexExecutor:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             env=env,
             cwd=exec_cwd or None,
@@ -1571,6 +1575,8 @@ class CodexExecutor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env=env,
                 cwd=exec_cwd or None,
