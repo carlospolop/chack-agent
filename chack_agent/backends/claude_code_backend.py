@@ -32,6 +32,7 @@ from ..resume_compaction import ResumeCompactionResult
 from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
+from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -710,6 +711,18 @@ class ClaudeCodeExecutor:
     def _run_claude(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._refresh_provider_credentials()
         result = self._run_claude_once(prompt)
+        while self._looks_like_credential_failure(result[0]):
+            rotated = rotate_environment_credentials("claude", self._claude_access_token)
+            rotated_token = str(rotated.get("access_token", "") or "").strip()
+            if not rotated_token or rotated_token == self._claude_access_token:
+                break
+            _LOGGER.warning(
+                "Claude access token hit an auth or quota limit. Retrying with "
+                "the next credential from CLAUDE_TOKEN_POOL_JSON."
+            )
+            self._claude_access_token = rotated_token
+            self._claude_session_id = None
+            result = self._run_claude_once(prompt)
         if self._should_retry_with_anthropic_api_key(result[0]):
             _LOGGER.warning(
                 "Claude Code OAuth token is unavailable for this request. "
@@ -735,6 +748,32 @@ class ClaudeCodeExecutor:
         time.sleep(wait_seconds)
         self._claude_session_id = None
         return self._run_claude_once(prompt)
+
+    def _looks_like_credential_failure(self, output: str) -> bool:
+        if self._uses_openrouter_route or not self._claude_access_token:
+            return False
+        text = str(output or "").strip().lower()
+        if not text.startswith("error:"):
+            return False
+        return any(
+            marker in text
+            for marker in (
+                "authentication",
+                "unauthorized",
+                "invalid token",
+                "invalid oauth",
+                "oauth token",
+                "status code 401",
+                "http 401",
+                "authentication_error",
+                "session limit",
+                "usage limit",
+                "rate limit",
+                "hit your limit",
+                "quota exceeded",
+                "credit balance",
+            )
+        )
 
     def _should_retry_with_anthropic_api_key(self, output: str) -> bool:
         if self._uses_openrouter_route:

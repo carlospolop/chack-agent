@@ -30,7 +30,9 @@ def run_provider_pre_launch_hook(provider: str) -> dict[str, str]:
     with _HOOK_LOCK:
         hook = _provider_pre_launch_hook
     if hook is None:
-        return {}
+        from .environment_credential_pool import active_environment_credentials
+
+        return active_environment_credentials(normalized_provider)
     try:
         values = hook(normalized_provider)
     except Exception as exc:

@@ -37,6 +37,7 @@ from ..live_cost_state import LiveCostLimitExceeded, report_live_usage
 from ..openrouter_routing import get_openrouter_route
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
+from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -1926,11 +1927,28 @@ class CodexExecutor:
             return result
         if not self._use_codex_access_token:
             return result
-        if not self._fallback_openai_api_key:
-            return result
         if not codex_exec_failed:
             return result
         if not self._looks_like_auth_failure(result[0]):
+            return result
+
+        rotated = rotate_environment_credentials("codex", self._codex_access_token)
+        rotated_token = str(rotated.get("access_token", "") or "").strip()
+        if rotated_token and rotated_token != self._codex_access_token:
+            _LOGGER.warning(
+                "Codex access token hit an auth or quota limit. Retrying with the "
+                "next credential from CODEX_TOKEN_POOL_JSON."
+            )
+            self._codex_access_token = rotated_token
+            self._openai_api_key = rotated_token
+            self._thread_id = None
+            self._use_existing_codex_auth_file = False
+            self._existing_codex_auth_file = ""
+            if self._codex_home:
+                self._write_codex_auth(self._codex_home)
+            return self._run_codex_once(prompt, allow_api_key_fallback=True)
+
+        if not self._fallback_openai_api_key:
             return result
 
         _LOGGER.warning(
