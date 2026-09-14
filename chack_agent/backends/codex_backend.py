@@ -2013,7 +2013,7 @@ class CodexExecutor:
             f'model_reasoning_effort="{codex_thinking_effort(self._thinking_effort)}"',
         ]
         stable_prompt_args: list[str] = []
-        if self._cacheable_developer_prompt:
+        if self._cacheable_developer_prompt and not _uses_windows_pipe_reader():
             # Codex accepts developer_instructions as a real developer message.
             # json.dumps emits a TOML-compatible quoted string while safely
             # preserving newlines and quotes in large context blocks.
@@ -2222,6 +2222,13 @@ class CodexExecutor:
 
     def _ensure_codex_home_and_config(self) -> None:
         if self._codex_home:
+            # On Windows the stable developer prompt lives in config.toml so
+            # it does not exceed the process command-line limit. Refresh it
+            # before every turn because one executor may compose a new cache
+            # prefix between invocations.
+            if _uses_windows_pipe_reader():
+                self._write_codex_config(self._codex_home)
+                self._write_output_schema_file(self._codex_home)
             return
         safe_session = re.sub(r"[^A-Za-z0-9._-]", "_", str(current_session_id() or "default"))
         home_base = self._runtime_env_value(
@@ -2398,6 +2405,11 @@ class CodexExecutor:
         ) + "]"
 
         config_lines = [f"model = {_toml_string(self._model_name)}"]
+        if _uses_windows_pipe_reader() and self._cacheable_developer_prompt:
+            config_lines.append(
+                "developer_instructions = "
+                + _toml_string(self._cacheable_developer_prompt)
+            )
 
         # Keep the configured model capacity available, but trigger Codex's
         # native summarizing compactor at the configured fraction of it. This is

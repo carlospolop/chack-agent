@@ -632,6 +632,37 @@ def test_codex_unmarked_prompt_still_caches_shared_system_layer() -> None:
     )
 
 
+def test_codex_windows_writes_long_developer_prompt_to_config(
+    monkeypatch, tmp_path
+) -> None:
+    import tomllib
+
+    from chack_agent.backends import codex_backend
+    from chack_agent.backends.prompt_cache import PROMPT_CACHE_BREAKPOINT
+
+    executor = _make_stub_codex_executor()
+    stable_context = "stable repository context\n" * 2_000
+    executor._compose_prompt(
+        f"{stable_context}{PROMPT_CACHE_BREAKPOINT}\nchanging checks"
+    )
+    monkeypatch.setattr(codex_backend, "_uses_windows_pipe_reader", lambda: True)
+    monkeypatch.setenv("CHACK_CODEX_HOME_BASE", str(tmp_path))
+
+    executor._ensure_codex_home_and_config()
+    command = executor._build_command()
+    config_path = os.path.join(executor._codex_home, "config.toml")
+    body = open(config_path, "r", encoding="utf-8").read()
+
+    assert not any(arg.startswith("developer_instructions=") for arg in command)
+    assert "developer_instructions = " in body
+    assert "stable repository context" in body
+    assert "changing checks" not in body
+    assert (
+        tomllib.loads(body)["developer_instructions"]
+        == executor._cacheable_developer_prompt
+    )
+
+
 def test_codex_mcp_startup_timeout_is_configurable(monkeypatch, tmp_path):
     executor = _make_stub_codex_executor()
     executor._allowed_tools_json = '["read_context"]'
