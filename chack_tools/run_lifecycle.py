@@ -102,6 +102,20 @@ def _state_path(kind: str, session_id: str) -> Path | None:
     return _state_root() / f"{digest}.{kind}.json"
 
 
+def _open_state_file(path: Path, mode: str):
+    """Open a run-state file through brief Windows sharing races."""
+    last_error: PermissionError | None = None
+    for delay_seconds in (0.0, 0.02, 0.05, 0.1, 0.2):
+        if delay_seconds:
+            time.sleep(delay_seconds)
+        try:
+            return path.open(mode, encoding="utf-8")
+        except PermissionError as exc:
+            last_error = exc
+    assert last_error is not None
+    raise last_error
+
+
 def _read_locked_json(handle, default: Any, *, strict: bool = False) -> Any:
     handle.seek(0)
     raw = handle.read()
@@ -285,17 +299,23 @@ def write_live_cost(session_id: str, spent_usd: float) -> None:
     path = _state_path("budget", session_id)
     if path is None:
         return
-    with path.open("a+", encoding="utf-8") as handle:
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        _lock_file(handle, exclusive=True)
-        previous = _read_locked_json(handle, {"spent_usd": 0.0})
-        previous_spent = max(0.0, float((previous or {}).get("spent_usd", 0.0) or 0.0))
-        current = max(previous_spent, max(0.0, float(spent_usd or 0.0)))
-        _write_locked_json(handle, {"spent_usd": current})
-        _unlock_file(handle)
+    try:
+        with _open_state_file(path, "a+") as handle:
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            _lock_file(handle, exclusive=True)
+            previous = _read_locked_json(handle, {"spent_usd": 0.0})
+            previous_spent = max(0.0, float((previous or {}).get("spent_usd", 0.0) or 0.0))
+            current = max(previous_spent, max(0.0, float(spent_usd or 0.0)))
+            _write_locked_json(handle, {"spent_usd": current})
+            _unlock_file(handle)
+    except (OSError, TypeError, ValueError):
+        # The in-process cost callback still enforces the current agent's
+        # budget. A transient shared-ledger failure must not discard its work;
+        # later writes preserve the maximum observed value.
+        return
 
 
 def read_live_cost(session_id: str = "") -> float | None:
@@ -303,7 +323,7 @@ def read_live_cost(session_id: str = "") -> float | None:
     if path is None or not path.exists():
         return None
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with _open_state_file(path, "r") as handle:
             _lock_file(handle, exclusive=False)
             state = _read_locked_json(handle, {})
             _unlock_file(handle)

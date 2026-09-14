@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -85,6 +86,36 @@ def test_windows_file_lock_backend_preserves_json_state(tmp_path, monkeypatch):
         FakeMsvcrt.LK_UNLCK,
     ]
     assert all(size == 1 for _, _, size in calls)
+
+
+def test_state_file_open_retries_transient_permission_errors(monkeypatch):
+    stream = io.StringIO()
+    attempts = []
+    delays = []
+
+    class FlakyPath:
+        def open(self, mode, encoding):
+            attempts.append((mode, encoding))
+            if len(attempts) < 3:
+                raise PermissionError("busy")
+            return stream
+
+    monkeypatch.setattr(run_lifecycle_module.time, "sleep", delays.append)
+
+    assert run_lifecycle_module._open_state_file(FlakyPath(), "a+") is stream
+    assert attempts == [("a+", "utf-8")] * 3
+    assert delays == [0.02, 0.05]
+
+
+def test_live_cost_write_does_not_abort_on_transient_ledger_failure(
+    isolated_run_state, monkeypatch
+):
+    def unavailable(*_args, **_kwargs):
+        raise PermissionError("busy")
+
+    monkeypatch.setattr(run_lifecycle_module, "_open_state_file", unavailable)
+
+    assert write_live_cost("windows-ledger-contention", 1.25) is None
 
 
 def test_windows_process_group_termination_uses_taskkill(monkeypatch):
