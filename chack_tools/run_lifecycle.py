@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import math
 import os
 import signal
+import subprocess
 import tempfile
 import time
 from collections import Counter
@@ -13,9 +13,51 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    _fcntl = None
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX
+    _msvcrt = None
+
 
 _STATE_ROOT_ENV = "CHACK_RUN_STATE_DIR"
 _TASK_SESSION_ENV = "CHACK_TASK_SESSION_ID"
+
+
+def _lock_file(handle, *, exclusive: bool) -> None:
+    if _fcntl is not None:
+        mode = _fcntl.LOCK_EX if exclusive else _fcntl.LOCK_SH
+        _fcntl.flock(handle.fileno(), mode)
+        return
+    if _msvcrt is None:  # pragma: no cover - every supported OS has one backend
+        raise RuntimeError("No supported file-lock backend is available")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write("\n")
+        handle.flush()
+    handle.seek(0)
+    mode = _msvcrt.LK_LOCK if exclusive else _msvcrt.LK_RLCK
+    _msvcrt.locking(handle.fileno(), mode, 1)
+    handle.seek(0)
+
+
+def _unlock_file(handle) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        return
+    if _msvcrt is None:  # pragma: no cover - every supported OS has one backend
+        raise RuntimeError("No supported file-lock backend is available")
+    handle.seek(0)
+    _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+
+
+def _current_process_group() -> int:
+    getpgrp = getattr(os, "getpgrp", None)
+    return int(getpgrp()) if callable(getpgrp) else int(os.getpid())
 
 
 @dataclass(frozen=True)
@@ -111,7 +153,7 @@ def claim_non_task_tool_slot(
             os.chmod(path, 0o600)
         except OSError:
             pass
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        _lock_file(handle, exclusive=True)
         state = _read_locked_json(
             handle,
             {"used": 0, "milestone": 0},
@@ -120,7 +162,7 @@ def claim_non_task_tool_slot(
         used = max(0, int((state or {}).get("used", 0) or 0))
         emitted = max(0, int((state or {}).get("milestone", 0) or 0))
         if used >= maximum:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
             return ToolBudgetClaim(False, used, maximum, "limit")
 
         used += 1
@@ -132,7 +174,7 @@ def claim_non_task_tool_slot(
             emitted = 1
             milestone = "warning"
         _write_locked_json(handle, {"used": used, "milestone": emitted})
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        _unlock_file(handle)
     return ToolBudgetClaim(True, used, maximum, milestone)
 
 
@@ -173,7 +215,7 @@ def record_mcp_tool_usage(tool_name: str, session_id: str = "") -> None:
                 os.chmod(path, 0o600)
             except OSError:
                 pass
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _lock_file(handle, exclusive=True)
             state = _read_locked_json(handle, {"counts": {}})
             raw_counts = (state or {}).get("counts") or {}
             counts = {
@@ -183,7 +225,7 @@ def record_mcp_tool_usage(tool_name: str, session_id: str = "") -> None:
             }
             counts[normalized_name] = counts.get(normalized_name, 0) + 1
             _write_locked_json(handle, {"counts": counts})
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
     except (OSError, TypeError, ValueError):
         # Observability must never prevent the requested tool from executing.
         return
@@ -196,9 +238,9 @@ def read_mcp_tool_usage(session_id: str = "") -> Counter[str]:
         return Counter()
     try:
         with path.open("r", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            _lock_file(handle, exclusive=False)
             state = _read_locked_json(handle, {"counts": {}})
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
         return Counter(
             {
                 str(name): max(0, int(count or 0))
@@ -220,9 +262,9 @@ def mark_task_manager_initialized(session_id: str) -> None:
             os.chmod(path, 0o600)
         except OSError:
             pass
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        _lock_file(handle, exclusive=True)
         _write_locked_json(handle, {"initialized": True})
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        _unlock_file(handle)
 
 
 def task_manager_initialized(session_id: str) -> bool:
@@ -231,9 +273,9 @@ def task_manager_initialized(session_id: str) -> bool:
         return False
     try:
         with path.open("r", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            _lock_file(handle, exclusive=False)
             state = _read_locked_json(handle, {})
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
         return bool((state or {}).get("initialized"))
     except (OSError, TypeError, ValueError):
         return False
@@ -248,12 +290,12 @@ def write_live_cost(session_id: str, spent_usd: float) -> None:
             os.chmod(path, 0o600)
         except OSError:
             pass
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        _lock_file(handle, exclusive=True)
         previous = _read_locked_json(handle, {"spent_usd": 0.0})
         previous_spent = max(0.0, float((previous or {}).get("spent_usd", 0.0) or 0.0))
         current = max(previous_spent, max(0.0, float(spent_usd or 0.0)))
         _write_locked_json(handle, {"spent_usd": current})
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        _unlock_file(handle)
 
 
 def read_live_cost(session_id: str = "") -> float | None:
@@ -262,9 +304,9 @@ def read_live_cost(session_id: str = "") -> float | None:
         return None
     try:
         with path.open("r", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            _lock_file(handle, exclusive=False)
             state = _read_locked_json(handle, {})
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
         return max(0.0, float((state or {}).get("spent_usd", 0.0) or 0.0))
     except (OSError, TypeError, ValueError):
         return None
@@ -273,22 +315,36 @@ def read_live_cost(session_id: str = "") -> float | None:
 def register_process_group(session_id: str, pgid: int) -> None:
     path = _state_path("process-groups", session_id)
     group = int(pgid or 0)
-    if path is None or group <= 1 or group == os.getpgrp():
+    if path is None or group <= 1 or group == _current_process_group():
         return
     with path.open("a+", encoding="utf-8") as handle:
         try:
             os.chmod(path, 0o600)
         except OSError:
             pass
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        _lock_file(handle, exclusive=True)
         state = _read_locked_json(handle, {"groups": []})
         groups = {int(value) for value in ((state or {}).get("groups") or []) if int(value) > 1}
         groups.add(group)
         _write_locked_json(handle, {"groups": sorted(groups)})
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        _unlock_file(handle)
 
 
 def _signal_group(pgid: int, sig: int) -> bool:
+    if os.name == "nt":  # pragma: no cover - exercised on Windows
+        if sig == 0:
+            try:
+                os.kill(int(pgid), 0)
+                return True
+            except (OSError, ProcessLookupError, PermissionError):
+                return False
+        result = subprocess.run(
+            ["taskkill", "/PID", str(int(pgid)), "/T", "/F"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
     try:
         os.killpg(int(pgid), sig)
         return True
@@ -300,7 +356,10 @@ def _signal_group(pgid: int, sig: int) -> bool:
 
 def terminate_process_group(pgid: int, *, grace_seconds: float = 0.5) -> None:
     group = int(pgid or 0)
-    if group <= 1 or group == os.getpgrp():
+    if group <= 1 or group == _current_process_group():
+        return
+    if os.name == "nt":  # pragma: no cover - exercised on Windows
+        _signal_group(group, signal.SIGTERM)
         return
     if not _signal_group(group, signal.SIGTERM):
         return
@@ -323,9 +382,9 @@ def cleanup_process_groups(session_id: str, *, grace_seconds: float = 0.5) -> li
     groups: list[int] = []
     try:
         with path.open("r", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            _lock_file(handle, exclusive=False)
             state = _read_locked_json(handle, {"groups": []})
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
         groups = sorted({int(value) for value in ((state or {}).get("groups") or []) if int(value) > 1})
     except (OSError, TypeError, ValueError):
         groups = []

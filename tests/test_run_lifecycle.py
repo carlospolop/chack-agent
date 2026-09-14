@@ -17,6 +17,7 @@ from chack_agent.budget_warning_state import inject_budget_warning_from_env
 from chack_agent.live_cost_state import report_live_usage
 from chack_agent.limit_event_state import emit_limit_reached
 from chack_agent.resume_compaction import ResumeCompactionResult
+import chack_tools.run_lifecycle as run_lifecycle_module
 from chack_agent.config import (
     AgentConfig,
     ChackConfig,
@@ -51,6 +52,54 @@ def isolated_run_state(tmp_path, monkeypatch):
     monkeypatch.setenv("CHACK_RUN_STATE_DIR", str(tmp_path))
     monkeypatch.delenv("CHACK_TASK_SESSION_ID", raising=False)
     yield tmp_path
+
+
+def test_windows_file_lock_backend_preserves_json_state(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeMsvcrt:
+        LK_LOCK = 1
+        LK_RLCK = 2
+        LK_UNLCK = 3
+
+        @staticmethod
+        def locking(file_descriptor, mode, size):
+            calls.append((file_descriptor, mode, size))
+
+    monkeypatch.setattr(run_lifecycle_module, "_fcntl", None)
+    monkeypatch.setattr(run_lifecycle_module, "_msvcrt", FakeMsvcrt)
+    path = tmp_path / "state.json"
+    with path.open("a+", encoding="utf-8") as handle:
+        run_lifecycle_module._lock_file(handle, exclusive=True)
+        run_lifecycle_module._write_locked_json(handle, {"used": 1})
+        run_lifecycle_module._unlock_file(handle)
+    with path.open("r", encoding="utf-8") as handle:
+        run_lifecycle_module._lock_file(handle, exclusive=False)
+        assert run_lifecycle_module._read_locked_json(handle, {}) == {"used": 1}
+        run_lifecycle_module._unlock_file(handle)
+
+    assert [mode for _, mode, _ in calls] == [
+        FakeMsvcrt.LK_LOCK,
+        FakeMsvcrt.LK_UNLCK,
+        FakeMsvcrt.LK_RLCK,
+        FakeMsvcrt.LK_UNLCK,
+    ]
+    assert all(size == 1 for _, _, size in calls)
+
+
+def test_windows_process_group_termination_uses_taskkill(monkeypatch):
+    calls = []
+    monkeypatch.setattr(run_lifecycle_module.os, "name", "nt")
+    monkeypatch.setattr(run_lifecycle_module, "_current_process_group", lambda: 999)
+    monkeypatch.setattr(
+        run_lifecycle_module.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)) or SimpleNamespace(returncode=0),
+    )
+
+    run_lifecycle_module.terminate_process_group(123)
+
+    assert calls[0][0] == ["taskkill", "/PID", "123", "/T", "/F"]
 
 
 def test_tool_budget_survives_independent_claimers(isolated_run_state):
