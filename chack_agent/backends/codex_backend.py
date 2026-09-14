@@ -4,6 +4,7 @@ import glob
 import json
 import logging
 import os
+import queue
 import re
 import selectors
 import shutil
@@ -217,6 +218,9 @@ def _descendant_pids(pid: int) -> list[int]:
 
 
 def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    stdout = getattr(process, "stdout", None)
+    if stdout is not None:
+        _discard_windows_pipe_reader(stdout)
     pids = list(reversed(_descendant_pids(int(process.pid)))) + [int(process.pid)]
     for sig in (signal.SIGTERM, signal.SIGKILL):
         for pid in pids:
@@ -256,6 +260,55 @@ def _preview_text(value: Any, *, max_chars: int = 2000) -> str:
     return text[:head_chars] + marker + text[-tail_chars:]
 
 
+class _BackgroundLineReader:
+    """Read a subprocess text pipe without blocking the caller.
+
+    Windows selectors only support sockets, not anonymous subprocess pipes.
+    A daemon reader thread gives the deadline loop the same bounded wait while
+    preserving any lines already buffered by ``TextIOWrapper``.
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._lines: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self._thread = threading.Thread(target=self._read_lines, daemon=True)
+        self._thread.start()
+
+    def _read_lines(self) -> None:
+        try:
+            while True:
+                line = self._stream.readline()
+                self._lines.put(("line", line))
+                if line == "":
+                    return
+        except BaseException as exc:
+            self._lines.put(("error", exc))
+
+    def readline(self, wait_seconds: float) -> Optional[str]:
+        try:
+            kind, value = self._lines.get(
+                timeout=max(0.0, float(wait_seconds)),
+            )
+        except queue.Empty:
+            return None
+        if kind == "error":
+            raise value
+        return str(value)
+
+
+_WINDOWS_PIPE_READERS: dict[int, tuple[Any, _BackgroundLineReader]] = {}
+_WINDOWS_PIPE_READERS_LOCK = threading.Lock()
+
+
+def _discard_windows_pipe_reader(stream: Any) -> None:
+    with _WINDOWS_PIPE_READERS_LOCK:
+        _WINDOWS_PIPE_READERS.pop(id(stream), None)
+
+
+def _uses_windows_pipe_reader() -> bool:
+    return os.name == "nt"
+
+
 def _readline_when_ready(stream: Any, wait_seconds: float) -> Optional[str]:
     """Read one subprocess line only when its pipe is ready.
 
@@ -264,6 +317,22 @@ def _readline_when_ready(stream: Any, wait_seconds: float) -> Optional[str]:
     enforcing execution deadlines and cancellation while the provider is
     silent.
     """
+    if _uses_windows_pipe_reader():
+        stream_id = id(stream)
+        with _WINDOWS_PIPE_READERS_LOCK:
+            entry = _WINDOWS_PIPE_READERS.get(stream_id)
+            if entry is None or entry[0] is not stream:
+                entry = (stream, _BackgroundLineReader(stream))
+                _WINDOWS_PIPE_READERS[stream_id] = entry
+        try:
+            line = entry[1].readline(wait_seconds)
+        except BaseException:
+            _discard_windows_pipe_reader(stream)
+            raise
+        if line == "":
+            _discard_windows_pipe_reader(stream)
+        return line
+
     selector = selectors.DefaultSelector()
     try:
         selector.register(stream, selectors.EVENT_READ)
@@ -701,14 +770,11 @@ class CodexExecutor:
         )
         cancel_registration = register_process(process, _terminate_process_tree)
         deadline = time.monotonic() + timeout_seconds
-        selector = selectors.DefaultSelector()
         compaction_usage: dict[str, Any] = {}
         if process.stdout is None or process.stdin is None:
             _terminate_process_tree(process)
             unregister_process(cancel_registration)
             raise RuntimeError("Codex app-server did not expose stdio pipes")
-        selector.register(process.stdout, selectors.EVENT_READ)
-
         def _send(message: dict[str, Any]) -> None:
             if process.stdin is None:
                 raise RuntimeError("Codex app-server stdin closed unexpectedly")
@@ -734,10 +800,12 @@ class CodexExecutor:
                         f"{str(stderr or '').strip()[-1000:]}"
                     )
                 remaining = max(0.0, deadline - time.monotonic())
-                events = selector.select(timeout=min(1.0, remaining))
-                if not events:
+                line = _readline_when_ready(
+                    process.stdout,
+                    min(1.0, remaining),
+                )
+                if line is None:
                     continue
-                line = process.stdout.readline()
                 if not line:
                     continue
                 try:
@@ -900,7 +968,6 @@ class CodexExecutor:
                 return [{"usage": dict(compaction_usage)}]
             return []
         finally:
-            selector.close()
             try:
                 process.stdin.close()
             except Exception:

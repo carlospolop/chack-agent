@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
+from chack_agent.backends import codex_backend as codex_backend_module
 from chack_agent.backends.codex_backend import (
     CodexExecutor,
     _cleanup_isolated_codex_home,
     _preview_text,
 )
+
+
+def test_windows_pipe_reader_handles_buffered_subprocess_lines(monkeypatch):
+    monkeypatch.setattr(
+        codex_backend_module,
+        "_uses_windows_pipe_reader",
+        lambda: True,
+    )
+    stream = io.StringIO("first\nsecond\n")
+
+    assert codex_backend_module._readline_when_ready(stream, 1.0) == "first\n"
+    assert codex_backend_module._readline_when_ready(stream, 1.0) == "second\n"
+    assert codex_backend_module._readline_when_ready(stream, 1.0) == ""
+    assert id(stream) not in codex_backend_module._WINDOWS_PIPE_READERS
 
 
 def test_failure_preview_preserves_start_and_terminal_error():
