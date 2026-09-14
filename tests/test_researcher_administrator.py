@@ -2691,6 +2691,10 @@ def test_administrator_async_cancel_terminates_registered_running_process(tmp_pa
     assert payload["tasks"][0]["termination"]["process_alive_after"] is False
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="This process-state assertion reads Linux /proc directly",
+)
 def test_async_cancel_kills_term_ignoring_grandchild_in_private_process_group(tmp_path):
     helper = ResearcherAdministratorAgentTool(
         ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
