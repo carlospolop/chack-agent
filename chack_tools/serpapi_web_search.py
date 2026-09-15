@@ -30,6 +30,7 @@ from .serpapi_keys import (
 SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS = 45
 SERPAPI_WEB_TIMEOUT_MIN_SECONDS = 45
 SERPAPI_WEB_TIMEOUT_MAX_SECONDS = 120
+SERPAPI_WEB_REQUEST_ATTEMPTS = 2
 
 
 def _clamp(value: int, minimum: int, maximum: int) -> int:
@@ -115,12 +116,25 @@ class SerpApiWebSearchTool:
             req_params = dict(params)
             req_params["api_key"] = api_key
             req_params["output"] = "json"
-            try:
-                response = requests.get("https://serpapi.com/search", params=req_params, timeout=timeout_seconds)
-            except requests.exceptions.Timeout:
-                return "ERROR: SerpAPI request timed out"
-            except requests.exceptions.ConnectionError:
-                return "ERROR: Failed to connect to SerpAPI"
+            response = None
+            for attempt in range(SERPAPI_WEB_REQUEST_ATTEMPTS):
+                try:
+                    response = requests.get(
+                        "https://serpapi.com/search",
+                        params=req_params,
+                        timeout=timeout_seconds,
+                    )
+                    break
+                except requests.exceptions.Timeout:
+                    last_error = "ERROR: SerpAPI request timed out"
+                except requests.exceptions.ConnectionError:
+                    last_error = "ERROR: Failed to connect to SerpAPI"
+                if attempt < SERPAPI_WEB_REQUEST_ATTEMPTS - 1:
+                    time.sleep(1)
+            if response is None:
+                if idx < len(api_keys) - 1:
+                    continue
+                return last_error
 
             if response.status_code >= 400:
                 body = (response.text or "").strip().replace("\n", " ")
@@ -158,7 +172,7 @@ class SerpApiWebSearchTool:
         if isinstance(payload, str):
             return payload
         artifact = _write_json_artifact(str(params.get("engine", "serpapi")), str(params.get("q", "query")), payload)
-        results = payload.get("organic_results") if isinstance(payload, dict) else []
+        results = (payload.get("organic_results") or []) if isinstance(payload, dict) else []
         if not isinstance(results, list):
             return "ERROR: Unexpected SerpAPI response format"
         if not results:
@@ -343,7 +357,7 @@ class SerpApiWebSearchTool:
         max_results: Optional[int] = None,
         include_structured: bool = True,
     ) -> str:
-        results = payload.get("organic_results") if isinstance(payload, dict) else []
+        results = (payload.get("organic_results") or []) if isinstance(payload, dict) else []
         if not isinstance(results, list):
             return "ERROR: Unexpected SerpAPI response format"
 

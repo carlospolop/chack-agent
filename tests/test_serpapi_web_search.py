@@ -1,3 +1,5 @@
+import requests
+
 from chack_tools.config import ToolsConfig
 from chack_tools.serpapi_web_search import SerpApiWebSearchTool
 
@@ -95,6 +97,20 @@ class _RichGoogleResponse:
         }
 
 
+class _StructuredOnlyGoogleResponse:
+    status_code = 200
+    text = "{}"
+
+    def json(self):
+        return {
+            "answer_box": {
+                "title": "Direct answer",
+                "answer": "42",
+                "link": "https://example.com/answer",
+            }
+        }
+
+
 def test_serpapi_web_search_clamps_too_short_timeouts(monkeypatch):
     seen = {}
 
@@ -133,6 +149,39 @@ def test_serpapi_web_search_clamps_excessive_timeouts(monkeypatch):
 
     assert result.startswith("SUCCESS: SerpAPI bing web results")
     assert seen["timeout"] == 120
+
+
+def test_serpapi_web_search_retries_transient_timeout(monkeypatch):
+    calls = []
+
+    def fake_get(url, *, params, timeout):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise requests.exceptions.Timeout()
+        return _Response()
+
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    monkeypatch.setattr("chack_tools.serpapi_web_search.requests.get", fake_get)
+    monkeypatch.setattr("chack_tools.serpapi_web_search.time.sleep", lambda _seconds: None)
+
+    result = SerpApiWebSearchTool(ToolsConfig()).search_google_web("retry query")
+
+    assert result.startswith("SUCCESS: SerpAPI google web results")
+    assert calls == [45, 45]
+
+
+def test_google_web_search_accepts_structured_results_without_organic_rows(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "chack_tools.serpapi_web_search.requests.get",
+        lambda *_args, **_kwargs: _StructuredOnlyGoogleResponse(),
+    )
+
+    result = SerpApiWebSearchTool(ToolsConfig()).search_google_web("direct answer")
+
+    assert result.startswith("SUCCESS: SerpAPI google web results")
+    assert "Answer box:" in result
+    assert "Unexpected SerpAPI response format" not in result
 
 
 def test_serpapi_web_search_treats_no_results_as_success(monkeypatch):
