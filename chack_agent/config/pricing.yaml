@@ -235,9 +235,9 @@ models:
     cache_read: 0
     output: 0
   deepseek/deepseek-chat:
-    input: 0.2574
-    cache_read: 0.2574
-    output: 1.0287
+    input: 0.32
+    cache_read: 0.32
+    output: 0.89
   deepseek/deepseek-chat-v3-0324:
     input: 0.25
     cache_read: 0.25
@@ -282,10 +282,14 @@ models:
     input: 0.11
     cache_read: 0.0035
     output: 0.33
+  deepseek/deepseek-v4-flash-0731:free:
+    input: 0
+    cache_read: 0
+    output: 0
   deepseek/deepseek-v4-flash-vision-exp:
-    input: 0.22
-    cache_read: 0.007
-    output: 0.66
+    input: 0.2156
+    cache_read: 0.00686
+    output: 0.6468
   deepseek/deepseek-v4-flash-vision-exp:batch:
     input: 0.11
     cache_read: 0.0035
@@ -599,9 +603,9 @@ models:
     cache_read: 0.18
     output: 0.18
   meta/muse-glimmer-30b:
-    input: 0.35
+    input: 0.3
     cache_read: 0.04
-    output: 1.5
+    output: 1.1
   meta/muse-glimmer-30b:batch:
     input: 0.175
     cache_read: 0.02
@@ -795,9 +799,9 @@ models:
     cache_read: 0.18
     output: 3.21
   moonshotai/kimi-k3:
-    input: 3
-    cache_read: 0.3
-    output: 15
+    input: 2.1
+    cache_read: 0.23
+    output: 10.95
   moonshotai/kimi-k3:batch:
     input: 3
     cache_read: 0.3
@@ -1187,9 +1191,9 @@ models:
     cache_read: 0.5
     output: 30
   openai/gpt-oss-120b:
-    input: 0.037
-    cache_read: 0.037
-    output: 0.17
+    input: 0.15
+    cache_read: 0.075
+    output: 0.6
   openai/gpt-oss-120b:batch:
     input: 0.15
     cache_read: 0.15
@@ -1525,6 +1529,10 @@ models:
     input: 0.214
     cache_read: 0.15
     output: 2.55
+  qwen/qwen3.8-27b:free:
+    input: 0
+    cache_read: 0
+    output: 0
   qwen/qwen3.8-flash:
     input: 0.15
     cache_read: 0.016
@@ -1579,10 +1587,6 @@ models:
     input: 0.65
     cache_read: 0.65
     output: 0.75
-  stealth/union-alpha:
-    input: 0
-    cache_read: 0
-    output: 0
   stepfun/step-3.5-flash:
     input: 0.1
     cache_read: 0.1
@@ -1651,6 +1655,10 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  unbiased/pareto:
+    input: 2.5
+    cache_read: 0.25
+    output: 7.5
   undi95/remm-slerp-l2-13b:
     input: 0.35
     cache_read: 0.35
@@ -1804,9 +1812,9 @@ models:
     cache_read: 0.033
     output: 2.96
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.03
-    cache_read: 0.01
-    output: 0.13
+    input: 0.0558
+    cache_read: 0.0088
+    output: 0.1767
   ~google/gemini-flash-latest:
     input: 0.75
     cache_read: 0.075
@@ -1818,9 +1826,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 2
-    cache_read: 0.232
-    output: 11.2
+    input: 2.1
+    cache_read: 0.23
+    output: 10.95
   ~openai/gpt-astra-latest:
     input: 10
     cache_read: 1
@@ -1854,6 +1862,6 @@ models:
     cache_read: 0.015
     output: 0.25
   ~z-ai/glm-latest:
-    input: 0.8925
-    cache_read: 0.146625
-    output: 2.805
+    input: 0.7735
+    cache_read: 0.127075
+    output: 2.431
