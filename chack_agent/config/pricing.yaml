@@ -271,13 +271,13 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.088606
-    cache_read: 0.0177212
-    output: 0.177212
+    input: 0.04844
+    cache_read: 0.009688
+    output: 0.09688
   deepseek/deepseek-v4-flash-0731:
-    input: 0.06
-    cache_read: 0.012
-    output: 0.12
+    input: 0.065
+    cache_read: 0.016
+    output: 0.18
   deepseek/deepseek-v4-flash-0731:batch:
     input: 0.11
     cache_read: 0.0035
@@ -295,21 +295,21 @@ models:
     cache_read: 0.0035
     output: 0.33
   deepseek/deepseek-v4-pro:
-    input: 1.6
-    cache_read: 0.135
-    output: 3.2
+    input: 0.645366
+    cache_read: 0.0537805
+    output: 1.290732
   deepseek/deepseek-v4-pro-0813:
-    input: 1.32
-    cache_read: 0.044
-    output: 3.96
+    input: 0.57816
+    cache_read: 0.018396
+    output: 1.73448
   deepseek/deepseek-v4-pro-0813:batch:
     input: 0.66
     cache_read: 0.022
     output: 1.98
   deepseek/deepseek-v4.1-flash:
-    input: 0.3
-    cache_read: 0.006
-    output: 1.2
+    input: 0.15
+    cache_read: 0.003
+    output: 0.6
   dots-studio/dots-3-note-preview:free:
     input: 0
     cache_read: 0
@@ -603,9 +603,9 @@ models:
     cache_read: 0.18
     output: 0.18
   meta/muse-glimmer-30b:
-    input: 0.3
+    input: 0.35
     cache_read: 0.04
-    output: 1.1
+    output: 1.5
   meta/muse-glimmer-30b:batch:
     input: 0.175
     cache_read: 0.02
@@ -710,10 +710,6 @@ models:
     input: 2
     cache_read: 0.2
     output: 6
-  mistralai/mistral-large-2512:
-    input: 0.5
-    cache_read: 0.05
-    output: 1.5
   mistralai/mistral-large-2512:batch:
     input: 0.25
     cache_read: 0.025
@@ -851,9 +847,9 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3-ultra-550b-a55b:
-    input: 0.625
-    cache_read: 0.1875
-    output: 3.125
+    input: 0.6
+    cache_read: 0.12
+    output: 2.4
   nvidia/nemotron-3-ultra-550b-a55b:free:
     input: 0
     cache_read: 0
@@ -867,7 +863,7 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3.5-lightning:
-    input: 0.08
+    input: 0.07
     cache_read: 0.04
     output: 0.2
   nvidia/nemotron-3.5-lightning:free:
@@ -1314,6 +1310,10 @@ models:
     input: 0
     cache_read: 0
     output: 0
+  prism-ml/ternary-bonsai-2-27b:
+    input: 0.075
+    cache_read: 0.075
+    output: 0.5
   qwen/qwen-2.5-72b-instruct:
     input: 0.36
     cache_read: 0.36
@@ -1423,9 +1423,9 @@ models:
     cache_read: 0.4
     output: 4
   qwen/qwen3-vl-30b-a3b-instruct:
-    input: 0.13
-    cache_read: 0.13
-    output: 0.52
+    input: 0.2
+    cache_read: 0.2
+    output: 0.7
   qwen/qwen3-vl-30b-a3b-thinking:
     input: 0.2
     cache_read: 0.2
@@ -1752,9 +1752,9 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 1.4
-    cache_read: 0.14
-    output: 4.4
+    input: 0.5544
+    cache_read: 0.10296
+    output: 1.7424
   z-ai/glm-5.2:batch:
     input: 0.7
     cache_read: 0.07
@@ -1764,9 +1764,9 @@ models:
     cache_read: 0
     output: 0
   z-ai/glm-5.3:
-    input: 1.4
-    cache_read: 0.26
-    output: 4.4
+    input: 0.91
+    cache_read: 0.169
+    output: 2.86
   z-ai/glm-5.3-flash:
     input: 0.09
     cache_read: 0.018
@@ -1775,6 +1775,10 @@ models:
     input: 0.075
     cache_read: 0.015
     output: 0.25
+  z-ai/glm-5.3-flashx:
+    input: 0.37
+    cache_read: 0.075
+    output: 1.25
   z-ai/glm-5.3:batch:
     input: 0.7
     cache_read: 0.13
@@ -1804,17 +1808,17 @@ models:
     cache_write: 2.5
     output: 10
   ~deepseek/deepseek-flash-latest:
-    input: 0.15
-    cache_read: 0.015
-    output: 0.6
+    input: 0.135
+    cache_read: 0.00405
+    output: 0.54
   ~deepseek/deepseek-pro-latest:
-    input: 0.7
-    cache_read: 0.033
-    output: 2.96
+    input: 0.57816
+    cache_read: 0.018396
+    output: 1.73448
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.0558
-    cache_read: 0.0088
-    output: 0.1767
+    input: 0.04928
+    cache_read: 0.001568
+    output: 0.14784
   ~google/gemini-flash-latest:
     input: 0.75
     cache_read: 0.075
@@ -1862,6 +1866,6 @@ models:
     cache_read: 0.015
     output: 0.25
   ~z-ai/glm-latest:
-    input: 0.7735
-    cache_read: 0.127075
-    output: 2.431
+    input: 0.8918
+    cache_read: 0.16562
+    output: 2.8028
