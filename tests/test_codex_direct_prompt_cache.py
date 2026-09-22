@@ -219,6 +219,28 @@ def test_invalid_direct_response_timeout_falls_back_to_cli_timeout():
     ) == 3600
 
 
+def test_direct_response_timeout_is_a_wall_clock_deadline(monkeypatch):
+    executor = _executor()
+    executor._runtime_env_json = json.dumps(
+        {"CHACK_CODEX_DIRECT_CACHE_TIMEOUT_SECONDS": "900"}
+    )
+    response = _Response()
+    timestamps = iter([100.0, 1000.0])
+    monkeypatch.setattr(codex_backend.time, "monotonic", lambda: next(timestamps))
+    monkeypatch.setattr(
+        codex_backend.requests,
+        "post",
+        lambda *args, **kwargs: response,
+    )
+
+    output, steps, raw = executor._run_direct_cached_response("round two")
+
+    assert output == "ERROR: Codex direct cached request timeout after 900s."
+    assert steps == []
+    assert raw.raw_responses == []
+    assert response.closed is True
+
+
 def test_direct_transport_falls_back_to_codex_cli_on_provider_error():
     executor = _executor()
     executor._ensure_codex_home_and_config = lambda: None

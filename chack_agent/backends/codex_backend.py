@@ -1442,6 +1442,14 @@ class CodexExecutor:
                     _RawResult(raw_responses=[]),
                 )
             for raw_line in response.iter_lines():
+                if (time.monotonic() - started_at) >= timeout_seconds:
+                    response.close()
+                    return (
+                        "ERROR: Codex direct cached request timeout after "
+                        f"{timeout_seconds}s.",
+                        [],
+                        _RawResult(raw_responses=[]),
+                    )
                 if cancellation_requested():
                     response.close()
                     return (
