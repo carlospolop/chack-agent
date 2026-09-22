@@ -168,6 +168,24 @@ def _resolve_codex_exec_timeout(
     return default
 
 
+def _resolve_codex_direct_cache_timeout(
+    sub_action: str,
+    runtime_env: Optional[dict[str, str]] = None,
+) -> int:
+    """Return the direct HTTP read timeout without shortening CLI fallback time."""
+    runtime_env = runtime_env or {}
+    direct_timeout = runtime_env.get(
+        "CHACK_CODEX_DIRECT_CACHE_TIMEOUT_SECONDS",
+        os.environ.get("CHACK_CODEX_DIRECT_CACHE_TIMEOUT_SECONDS", ""),
+    )
+    if str(direct_timeout or "").strip():
+        try:
+            return max(1, int(direct_timeout))
+        except (TypeError, ValueError):
+            pass
+    return _resolve_codex_exec_timeout(sub_action, runtime_env)
+
+
 # Optional host-process callback invoked whenever a codex process times out, so the
 # host application can alert its operator. Called with a dict describing the
 # timed-out agent. Runs in the same process/thread that monitors the codex subprocess.
@@ -1397,7 +1415,7 @@ class CodexExecutor:
                 _RawResult(raw_responses=[]),
             )
 
-        timeout_seconds = _resolve_codex_exec_timeout(
+        timeout_seconds = _resolve_codex_direct_cache_timeout(
             self._sub_action,
             self._runtime_env(),
         )

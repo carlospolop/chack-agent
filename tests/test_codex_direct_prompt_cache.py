@@ -182,6 +182,43 @@ def test_direct_response_reports_real_cache_read_telemetry(monkeypatch):
     assert response.closed is True
 
 
+def test_direct_response_can_use_shorter_timeout_than_cli(monkeypatch):
+    executor = _executor()
+    executor._runtime_env_json = json.dumps(
+        {
+            "CHACK_CODEX_EXEC_TIMEOUT_SECONDS": "3600",
+            "CHACK_CODEX_DIRECT_CACHE_TIMEOUT_SECONDS": "900",
+        }
+    )
+    captured = {}
+
+    def fake_post(url, *, headers, json, stream, timeout):
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr(codex_backend.requests, "post", fake_post)
+
+    executor._run_direct_cached_response("round two")
+
+    assert captured["timeout"] == (30, 900)
+    assert codex_backend._resolve_codex_exec_timeout(
+        executor._sub_action,
+        executor._runtime_env(),
+    ) == 3600
+
+
+def test_invalid_direct_response_timeout_falls_back_to_cli_timeout():
+    runtime_env = {
+        "CHACK_CODEX_EXEC_TIMEOUT_SECONDS": "3600",
+        "CHACK_CODEX_DIRECT_CACHE_TIMEOUT_SECONDS": "invalid",
+    }
+
+    assert codex_backend._resolve_codex_direct_cache_timeout(
+        "sensitive_context_compactor",
+        runtime_env,
+    ) == 3600
+
+
 def test_direct_transport_falls_back_to_codex_cli_on_provider_error():
     executor = _executor()
     executor._ensure_codex_home_and_config = lambda: None
