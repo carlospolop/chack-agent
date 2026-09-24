@@ -11,6 +11,14 @@ models:
     input: 0.7
     cache_read: 0.18
     output: 1.4
+  aion-labs/aion-3.5:
+    input: 3
+    cache_read: 0.75
+    output: 6
+  aion-labs/aion-3.5-mini:
+    input: 0.7
+    cache_read: 0.18
+    output: 1.4
   aion-labs/aion-rp-llama-3.1-8b:
     input: 0.8
     cache_read: 0.8
@@ -292,17 +300,17 @@ models:
     cache_read: 0.007
     output: 0.66
   deepseek/deepseek-v4-pro:
-    input: 0.95526
-    cache_read: 0.079605
-    output: 1.91052
+    input: 0.9396
+    cache_read: 0.0783
+    output: 1.8792
   deepseek/deepseek-v4-pro-0813:
-    input: 1.32
-    cache_read: 0.044
-    output: 3.96
+    input: 0.462
+    cache_read: 0.0154
+    output: 1.386
   deepseek/deepseek-v4.1-flash:
-    input: 0.1
-    cache_read: 0.01
-    output: 0.5
+    input: 0.14
+    cache_read: 0.0042
+    output: 0.42
   deepseek/deepseek-v4.1-flash:batch:
     input: 0.112
     cache_read: 0.00336
@@ -535,10 +543,6 @@ models:
     input: 0.06
     cache_read: 0.012
     output: 0.18
-  inclusionai/ling-3.0-flash-vl:free:
-    input: 0
-    cache_read: 0
-    output: 0
   inference-net/schematron-v2-small:
     input: 0.05
     cache_read: 0.05
@@ -636,9 +640,9 @@ models:
     cache_read: 0.4
     output: 2.2
   minimax/minimax-m2:
-    input: 0.255
-    cache_read: 0.255
-    output: 1.02
+    input: 0.3
+    cache_read: 0.3
+    output: 1.2
   minimax/minimax-m2-her:
     input: 0.3
     cache_read: 0.03
@@ -667,10 +671,6 @@ models:
     input: 0.15
     cache_read: 0.015
     output: 0.45
-  mistralai/devstral-2512:
-    input: 0.4
-    cache_read: 0.04
-    output: 2
   mistralai/ministral-14b-2512:
     input: 0.2
     cache_read: 0.02
@@ -856,7 +856,7 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3.5-lightning:
-    input: 0.07
+    input: 0.08
     cache_read: 0.04
     output: 0.2
   nvidia/nemotron-3.5-lightning:free:
@@ -1223,6 +1223,10 @@ models:
     input: 0.15
     cache_read: 0.075
     output: 0.6
+  openai/gpt-oss-120b:batch:
+    input: 0.0296
+    cache_read: 0.0296
+    output: 0.136
   openai/gpt-oss-20b:
     input: 0.018
     cache_read: 0.018
@@ -1440,8 +1444,8 @@ models:
     cache_read: 0.78
     output: 3.9
   qwen/qwen3-next-80b-a3b-instruct:
-    input: 0.09
-    cache_read: 0.09
+    input: 0.1
+    cache_read: 0.07
     output: 1.1
   qwen/qwen3-next-80b-a3b-thinking:
     input: 0.15
@@ -1568,6 +1572,10 @@ models:
     cache_read: 0.25
     cache_write: 2.5
     output: 6
+  qwen/qwen3.8-max-prime:
+    input: 4
+    cache_read: 0.5
+    output: 12
   qwen/qwen3.8-omni-flash:
     input: 0.15
     cache_read: 0.016
@@ -1616,6 +1624,10 @@ models:
     input: 0.65
     cache_read: 0.65
     output: 0.75
+  stealth/space-bunny-alpha:
+    input: 0
+    cache_read: 0
+    output: 0
   stepfun/step-3.5-flash:
     input: 0.1
     cache_read: 0.1
@@ -1688,6 +1700,10 @@ models:
     input: 0.35
     cache_read: 0.35
     output: 0.65
+  upstage/solar-mini4:
+    input: 0.05
+    cache_read: 0.005
+    output: 0.2
   upstage/solar-pro-3:
     input: 0.15
     cache_read: 0.015
@@ -1814,12 +1830,16 @@ models:
     output: 0.2
   z-ai/glm-5.3-flashx:
     input: 0.37
-    cache_read: 0.075
+    cache_read: 0.09
     output: 1.25
+  z-ai/glm-5.3-prime:
+    input: 2.8
+    cache_read: 0.56
+    output: 8.8
   z-ai/glm-5.3:batch:
-    input: 0.72
-    cache_read: 0.12
-    output: 2.4
+    input: 0.45
+    cache_read: 0.1
+    output: 2
   z-ai/glm-5v-turbo:
     input: 1.2
     cache_read: 0.24
@@ -1845,17 +1865,17 @@ models:
     cache_write: 2.5
     output: 10
   ~deepseek/deepseek-flash-latest:
-    input: 0.1
-    cache_read: 0.01
-    output: 0.5
+    input: 0.099
+    cache_read: 0.06
+    output: 0.6
   ~deepseek/deepseek-pro-latest:
-    input: 0.4
-    cache_read: 0.033
-    output: 4.3
+    input: 0.3865
+    cache_read: 0.25
+    output: 2.9
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.03
-    cache_read: 0.008
-    output: 0.8
+    input: 0.038
+    cache_read: 0.0228
+    output: 0.55
   ~google/gemini-flash-latest:
     input: 0.75
     cache_read: 0.075
@@ -1867,9 +1887,9 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 1.4989
-    cache_read: 0.3
-    output: 10.758
+    input: 0.91
+    cache_read: 0.195
+    output: 6.9875
   ~openai/gpt-astra-latest:
     input: 10
     cache_read: 1

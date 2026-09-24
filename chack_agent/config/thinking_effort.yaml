@@ -2,6 +2,8 @@
 # Generated from OpenRouter's reasoning.supported_efforts by
 # scripts/update_openrouter_pricing.py -- do not edit by hand.
 models:
+  aion-3-5: [low, high, max]
+  aion-3-5-mini: [low, high, max]
   claude-fable-5: [low, medium, high, xhigh, max]
   claude-fable-5-1: [low, medium, high, xhigh, max]
   claude-fable-latest: [low, medium, high, xhigh, max]
@@ -45,6 +47,7 @@ models:
   glm-5-3: [low, high, max]
   glm-5-3-flash: [low, high, max]
   glm-5-3-flashx: [low, high, max]
+  glm-5-3-prime: [low, high, max]
   glm-flash-latest: [low, high, max]
   glm-latest: [low, high, max]
   gpt-5: [minimal, low, medium, high]
@@ -118,11 +121,14 @@ models:
   qwen3-8-2-4t-a95b: [low, medium, xhigh]
   qwen3-8-27b: [low, medium, xhigh]
   qwen3-8-max-0902: [minimal, low, medium, high, xhigh]
+  qwen3-8-max-prime: [minimal, low, medium, high, xhigh]
   sakana-namazu: [none, high]
   seed-2-0-code: [low, medium, high]
   seed-2-0-lite: [minimal, low, medium, high]
   seed-2-0-mini: [minimal, low, medium, high]
+  solar-mini4: [none, minimal, low, medium, high, xhigh, max]
   solar-pro-3: [none, minimal, low, medium, high]
   solar-pro4: [none, minimal, low, medium, high, xhigh, max]
+  space-bunny-alpha: [low, medium, high, xhigh, max]
   step-3-7-flash: [low, medium, high]
   ternary-bonsai-2-27b: [medium, xhigh]
