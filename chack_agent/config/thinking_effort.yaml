@@ -25,6 +25,7 @@ models:
   deepseek-v4-flash-vision-exp: [low, high, max]
   deepseek-v4-pro: [high, xhigh]
   deepseek-v4-pro-0813: [low, high, max]
+  ember-1: [low, high, max]
   fugu-max: [high, xhigh, max]
   fugu-ultra: [high, xhigh, max]
   fugu-ultra-v2: [high, xhigh, max]
