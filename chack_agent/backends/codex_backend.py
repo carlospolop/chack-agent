@@ -2347,6 +2347,12 @@ class CodexExecutor:
             "PIP_DISABLE_PIP_VERSION_CHECK",
             "PYTHONNOUSERSITE",
             "DYNAMIC_POC_VIRTUAL_ENV",
+            # Native Android tools run inside the MCP subprocess. Codex only
+            # forwards allowlisted variables to that child, so keep the SDK
+            # location and the shared host ADB socket available there.
+            "ANDROID_HOME",
+            "ANDROID_SDK_ROOT",
+            "ADB_SERVER_SOCKET",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
             "CHACK_SOCIAL_NETWORK_MODEL",

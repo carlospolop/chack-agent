@@ -192,6 +192,23 @@ def test_codex_mcp_env_allowlist_propagates_hard_tool_ceiling():
     assert "CHACK_MAX_TOOLS_USED" in env_vars
 
 
+def test_cli_mcp_env_allowlists_propagate_android_runtime():
+    required = {"ANDROID_HOME", "ANDROID_SDK_ROOT", "ADB_SERVER_SOCKET"}
+    sources = (
+        (MODULE_PATH, "CodexExecutor", "_write_codex_config", "env_vars"),
+        (CLAUDE_MODULE_PATH, "ClaudeCodeExecutor", "_mcp_env_map", "env_keys"),
+        (
+            COPILOT_MODULE_PATH,
+            "CopilotCliExecutor",
+            "_copilot_mcp_env_map",
+            "env_keys",
+        ),
+    )
+
+    for source in sources:
+        assert required <= set(_load_list_literal(*source))
+
+
 def test_codex_mcp_env_allowlist_transports_all_researcher_models_and_travel_credentials():
     env_vars = _load_list_literal(
         MODULE_PATH,
