@@ -193,7 +193,14 @@ def test_codex_mcp_env_allowlist_propagates_hard_tool_ceiling():
 
 
 def test_cli_mcp_env_allowlists_propagate_android_runtime():
-    required = {"ANDROID_HOME", "ANDROID_SDK_ROOT", "ADB_SERVER_SOCKET"}
+    required = {
+        "ANDROID_HOME",
+        "ANDROID_SDK_ROOT",
+        "ADB_SERVER_SOCKET",
+        "ANDROID_SERIAL",
+        "DYNAMIC_ANDROID_SERIALS",
+        "CHACK_EXEC_DENY_REGEX",
+    }
     sources = (
         (MODULE_PATH, "CodexExecutor", "_write_codex_config", "env_vars"),
         (CLAUDE_MODULE_PATH, "ClaudeCodeExecutor", "_mcp_env_map", "env_keys"),
