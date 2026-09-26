@@ -2,6 +2,7 @@ import subprocess
 import time
 import traceback
 import os
+import re
 from datetime import datetime, timezone
 
 try:
@@ -35,6 +36,17 @@ class ExecTool:
         return None
 
     def run(self, command: str, cwd: str = "") -> str:
+        deny_pattern = os.environ.get("CHACK_EXEC_DENY_REGEX", "").strip()
+        if deny_pattern:
+            try:
+                blocked = re.search(deny_pattern, str(command or ""), flags=re.IGNORECASE)
+            except re.error as exc:
+                raise ValueError(f"Invalid CHACK_EXEC_DENY_REGEX: {exc}") from exc
+            if blocked:
+                raise PermissionError(
+                    "Command blocked by the runtime execution policy. Use the assigned runtime "
+                    "resources without stopping, rebooting, or reconfiguring shared infrastructure."
+                )
         timeout = max(1, int(self.config.exec_timeout_seconds or 60))
         max_chars = max(1, int(self.config.exec_max_output_chars or 5000))
         resolved_cwd = self._resolve_cwd(cwd)
