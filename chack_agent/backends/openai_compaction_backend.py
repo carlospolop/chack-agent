@@ -334,6 +334,10 @@ class AgentsExecutor:
         self.agent.instructions = self._base_system_prompt
         result = self._invoke_runner_with_recovery(user_input=user_input, context=context)
         output = result.final_output or ""
+        # JsonSchemaOutput returns a parsed object. Chack's public result is
+        # text, so serialize it before budget notices and callers handle it.
+        if isinstance(output, (dict, list)):
+            output = json.dumps(output, ensure_ascii=False)
         updated_transcript = result.to_input_list()
         if isinstance(updated_transcript, list) and updated_transcript:
             # Keep the full transcript (tool calls + outputs + messages) so a
