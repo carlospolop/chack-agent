@@ -797,6 +797,26 @@ def test_openai_backend_passes_effort_to_model_settings() -> None:
     assert executor.agent.model_settings.reasoning.effort == "low"
 
 
+def test_openai_backend_compacts_during_runner_turns() -> None:
+    from chack_agent.backends.openai_compaction_backend import build_executor
+
+    config = _config("openai", "high")
+    config.model.max_context_tokens = 350_000
+    config.agent.compaction_threshold_ratio = 0.75
+    executor = build_executor(
+        config,
+        system_prompt="test",
+        max_turns=220,
+        memory_max_messages=250,
+        memory_reset_to_messages=40,
+        tools_override=[],
+    )
+
+    assert executor.agent.model_settings.context_management == [
+        {"type": "compaction", "compact_threshold": 262_500}
+    ]
+
+
 def test_openrouter_backend_passes_effort_to_model_settings() -> None:
     from chack_agent.backends.openrouter_openai_backend import build_executor
 

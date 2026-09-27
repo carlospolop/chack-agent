@@ -21,7 +21,7 @@ dependencies = [
   "pypdf>=4.0.0",
   # Chack uses mcp.server.fastmcp, which was removed in the breaking 2.0 release.
   "mcp>=1.19.0,<2.0.0",
-  "openai-agents>=0.7.0",
+  "openai-agents>=0.17.2",
   "langchain>=1.0.0",
   "langgraph>=1.0.0",
   "langchain-openai>=0.3.0",
@@ -30,7 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 openai_agents = [
-  "openai-agents>=0.7.0",
+  "openai-agents>=0.17.2",
 ]
 
 [project.scripts]
