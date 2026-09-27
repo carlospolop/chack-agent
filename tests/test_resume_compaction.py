@@ -129,6 +129,50 @@ def test_openrouter_compaction_summarizes_and_rotates_server_chain():
     assert calls[0][1]["focus_instructions"] == "preserve checks"
 
 
+def test_openrouter_automatic_threshold_compaction_rotates_server_chain():
+    executor = OpenRouterExecutor.__new__(OpenRouterExecutor)
+    executor._conversation = [
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "middle"},
+        {"role": "user", "content": "keep"},
+    ]
+    executor._summary = ""
+    executor._summary_keep_messages = 1
+    executor._summary_trigger_messages = 100
+    executor._max_context_tokens = 100
+    executor._compaction_threshold_ratio = 0.75
+    executor._previous_response_id = "response-1"
+    executor._conversation_id = "conversation-1"
+    executor._summarize_items = lambda *args, **kwargs: "summary"
+
+    executor._maybe_summarize_for_next_turn(input_tokens=75)
+
+    assert executor._summary == "summary"
+    assert executor._conversation == [{"role": "user", "content": "keep"}]
+    assert executor._previous_response_id is None
+    assert executor._conversation_id is None
+
+
+def test_openrouter_automatic_compaction_preserves_chain_if_summary_is_empty():
+    executor = OpenRouterExecutor.__new__(OpenRouterExecutor)
+    executor._conversation = [{"role": "user", "content": "context"}]
+    executor._summary = ""
+    executor._summary_keep_messages = 0
+    executor._summary_trigger_messages = 100
+    executor._max_context_tokens = 100
+    executor._compaction_threshold_ratio = 0.75
+    executor._previous_response_id = "response-1"
+    executor._conversation_id = "conversation-1"
+    executor._summarize_items = lambda *args, **kwargs: ""
+
+    executor._maybe_summarize_for_next_turn(input_tokens=75)
+
+    assert executor._summary == ""
+    assert executor._conversation == [{"role": "user", "content": "context"}]
+    assert executor._previous_response_id == "response-1"
+    assert executor._conversation_id == "conversation-1"
+
+
 def test_langgraph_compaction_summarizes_and_rotates_checkpoint_thread():
     executor = LangGraphExecutor.__new__(LangGraphExecutor)
     executor._thread_id = "thread-1"
