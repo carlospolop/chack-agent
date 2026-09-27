@@ -128,6 +128,8 @@ class GeminiCliExecutor:
         travel_max_turns: int = 50,
         serialized_tools_override_names_json: str = "",
         serialized_tools_append_names_json: str = "",
+        max_context_tokens: int = 0,
+        compaction_threshold_ratio: float = 0.75,
     ) -> None:
         self._conversation = conversation
         self._memory_limit = memory_max_messages
@@ -174,6 +176,8 @@ class GeminiCliExecutor:
         self._serialized_tools_append_names_json = str(
             serialized_tools_append_names_json or ""
         )
+        self._max_context_tokens = max(0, int(max_context_tokens or 0))
+        self._compaction_threshold_ratio = float(compaction_threshold_ratio or 0)
 
         self._gemini_home: str | None = None
         self._gemini_session_id: str | None = None
@@ -195,6 +199,46 @@ class GeminiCliExecutor:
             if reset_to < 1:
                 reset_to = 1
             self._conversation = self._conversation[-reset_to:]
+
+        threshold_tokens = int(self._max_context_tokens * self._compaction_threshold_ratio)
+        input_tokens = max(
+            (
+                int(response.get("usage", {}).get("input_tokens", 0) or 0)
+                for response in raw_result.raw_responses
+                if isinstance(response, dict) and isinstance(response.get("usage"), dict)
+            ),
+            default=0,
+        )
+        if (
+            threshold_tokens > 0
+            and input_tokens >= threshold_tokens
+            and not str(output or "").strip().lower().startswith("error:")
+        ):
+            log_event(
+                "agent_compaction_triggered",
+                payload={
+                    "backend": "gemini",
+                    "input_tokens": input_tokens,
+                    "threshold_tokens": threshold_tokens,
+                    "max_context_tokens": self._max_context_tokens,
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
+            compacted = self.compact_for_resume()
+            raw_result.raw_responses.extend(compacted.raw_responses)
+            log_event(
+                "agent_compaction_completed" if compacted.succeeded else "agent_compaction_failed",
+                payload={
+                    "backend": "gemini",
+                    "method": compacted.method,
+                    "input_tokens": input_tokens,
+                    "threshold_tokens": threshold_tokens,
+                    "error": compacted.error[:500],
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
 
         return {
             "output": output,
@@ -975,4 +1019,8 @@ def build_executor(
         output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
         output_schema_strict=bool(getattr(config.agent, "output_schema_strict", False)),
         thinking_effort=normalize_thinking_effort(config.agent.thinking_effort),
+        max_context_tokens=int(getattr(config.agent, "max_context_tokens", 0) or 0),
+        compaction_threshold_ratio=float(
+            getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75
+        ),
     )

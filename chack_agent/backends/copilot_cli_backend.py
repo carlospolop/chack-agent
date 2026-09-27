@@ -97,6 +97,8 @@ class CopilotCliExecutor:
         travel_max_turns: int = 50,
         serialized_tools_override_names_json: str = "",
         serialized_tools_append_names_json: str = "",
+        max_context_tokens: int = 0,
+        compaction_threshold_ratio: float = 0.75,
     ) -> None:
         self._conversation = conversation
         self._memory_limit = memory_max_messages
@@ -141,6 +143,10 @@ class CopilotCliExecutor:
         self._serialized_tools_append_names_json = str(
             serialized_tools_append_names_json or ""
         )
+        self._max_context_tokens = max(0, int(max_context_tokens or 0))
+        self._compaction_threshold_ratio = float(compaction_threshold_ratio or 0)
+        self._copilot_context_tokens = 0
+        self._copilot_context_limit = 0
 
         self._copilot_home: str | None = None
         self._copilot_session_id: str | None = None
@@ -162,6 +168,47 @@ class CopilotCliExecutor:
             if reset_to < 1:
                 reset_to = 1
             self._conversation = self._conversation[-reset_to:]
+
+        effective_capacity = self._max_context_tokens
+        if self._copilot_context_limit > 0:
+            effective_capacity = min(effective_capacity, self._copilot_context_limit)
+        threshold_tokens = int(effective_capacity * self._compaction_threshold_ratio)
+        if (
+            threshold_tokens > 0
+            and self._copilot_context_tokens >= threshold_tokens
+            and not str(output or "").strip().lower().startswith("error:")
+        ):
+            observed_tokens = self._copilot_context_tokens
+            log_event(
+                "agent_compaction_triggered",
+                payload={
+                    "backend": "copilot",
+                    "context_tokens": observed_tokens,
+                    "threshold_tokens": threshold_tokens,
+                    "max_context_tokens": self._max_context_tokens,
+                    "provider_context_limit": self._copilot_context_limit,
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
+            compacted = self.compact_for_resume()
+            raw_result.raw_responses.extend(compacted.raw_responses)
+            if compacted.succeeded:
+                # The CLI may omit a post-/compact usage event. Await the next
+                # observed snapshot before deciding to compact again.
+                self._copilot_context_tokens = 0
+            log_event(
+                "agent_compaction_completed" if compacted.succeeded else "agent_compaction_failed",
+                payload={
+                    "backend": "copilot",
+                    "method": compacted.method,
+                    "context_tokens": observed_tokens,
+                    "threshold_tokens": threshold_tokens,
+                    "error": compacted.error[:500],
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
 
         return {
             "output": output,
@@ -235,6 +282,21 @@ class CopilotCliExecutor:
 
         prompt_parts = [p for p in (base, user_input, policy_block, schema_block) if p.strip()]
         return "\n".join(prompt_parts)
+
+    def _record_context_usage(self, data: dict[str, Any]) -> None:
+        """Capture the CLI's measured context usage, not an estimated transcript size."""
+        try:
+            current_tokens = int(data.get("currentTokens", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if current_tokens >= 0:
+            self._copilot_context_tokens = current_tokens
+        try:
+            token_limit = int(data.get("tokenLimit", 0) or 0)
+        except (TypeError, ValueError):
+            token_limit = 0
+        if token_limit > 0:
+            self._copilot_context_limit = token_limit
 
     # ------------------------------------------------------------------
     #  Core execution
@@ -346,6 +408,10 @@ class CopilotCliExecutor:
 
                 if event_type == "session.tools_updated":
                     # Indicates the model being used
+                    continue
+
+                if event_type == "session.usage_info":
+                    self._record_context_usage(data)
                     continue
 
                 if event_type.startswith("session."):
@@ -991,4 +1057,8 @@ def build_executor(
             else ""
         ),
         thinking_effort=normalize_thinking_effort(config.agent.thinking_effort),
+        max_context_tokens=int(getattr(config.agent, "max_context_tokens", 0) or 0),
+        compaction_threshold_ratio=float(
+            getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75
+        ),
     )

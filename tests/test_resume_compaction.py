@@ -78,6 +78,28 @@ def test_gemini_compaction_uses_compress_command():
     assert calls == ["/compress"]
 
 
+def test_gemini_compacts_after_turn_crosses_configured_threshold():
+    executor = GeminiCliExecutor.__new__(GeminiCliExecutor)
+    executor._conversation = []
+    executor._memory_limit = 0
+    executor._max_context_tokens = 20
+    executor._compaction_threshold_ratio = 0.5
+    executor._gemini_session_id = "session-1"
+    executor._compose_prompt = lambda text: text
+    calls = []
+    executor._run_gemini = lambda prompt: (
+        calls.append(prompt) or ("Compressed" if prompt == "/compress" else "Answer"),
+        [],
+        _raw_result(),
+    )
+
+    result = executor.invoke({"input": "Question"})
+
+    assert result["output"] == "Answer"
+    assert calls == ["Question", "/compress"]
+    assert len(result["raw_result"].raw_responses) == 2
+
+
 def test_copilot_compaction_uses_manual_command_with_focus():
     executor = CopilotCliExecutor.__new__(CopilotCliExecutor)
     executor._copilot_session_id = "session-1"
@@ -90,6 +112,42 @@ def test_copilot_compaction_uses_manual_command_with_focus():
 
     assert result.succeeded is True
     assert calls == ["/compact preserve checks"]
+
+
+def test_copilot_compacts_after_reported_context_crosses_threshold():
+    executor = CopilotCliExecutor.__new__(CopilotCliExecutor)
+    executor._conversation = []
+    executor._memory_limit = 0
+    executor._max_context_tokens = 350
+    executor._compaction_threshold_ratio = 0.75
+    executor._copilot_context_tokens = 0
+    executor._copilot_context_limit = 0
+    executor._copilot_session_id = "session-1"
+    executor._compose_prompt = lambda text: text
+    calls = []
+
+    def run(prompt):
+        calls.append(prompt)
+        if prompt != "/compact":
+            executor._record_context_usage({"currentTokens": 75, "tokenLimit": 100})
+        return ("Compacted" if prompt == "/compact" else "Answer", [], _raw_result())
+
+    executor._run_copilot = run
+    result = executor.invoke({"input": "Question"})
+
+    assert result["output"] == "Answer"
+    assert calls == ["Question", "/compact"]
+    assert executor._copilot_context_tokens == 0
+    assert len(result["raw_result"].raw_responses) == 2
+
+
+def test_copilot_ignores_invalid_context_usage_snapshot():
+    executor = CopilotCliExecutor.__new__(CopilotCliExecutor)
+    executor._copilot_context_tokens = 42
+    executor._copilot_context_limit = 100
+    executor._record_context_usage({"currentTokens": "not-a-number"})
+    assert executor._copilot_context_tokens == 42
+    assert executor._copilot_context_limit == 100
 
 
 def test_openai_compaction_rotates_to_compacted_response():
@@ -197,3 +255,40 @@ def test_langgraph_compaction_summarizes_and_rotates_checkpoint_thread():
     assert executor._pending_resume_summary == "summary"
     assert executor._conversation == []
     assert calls[0][1]["focus_instructions"] == "preserve checks"
+
+
+def test_langgraph_threshold_compaction_rotates_checkpoint_after_turn():
+    executor = LangGraphExecutor.__new__(LangGraphExecutor)
+    executor._thread_id = "thread-1"
+    executor._recursion_limit = 10
+    executor._conversation = []
+    executor._memory_limit = 0
+    executor._max_context_tokens = 100
+    executor._compaction_threshold_ratio = 0.75
+    executor._pending_resume_summary = ""
+    executor._extract_output = lambda messages: "Answer"
+    executor._summarize_messages = lambda *args, **kwargs: "summary"
+    state = {"invoked": False}
+
+    def get_state(_config):
+        if not state["invoked"]:
+            return SimpleNamespace(values={})
+        return SimpleNamespace(values={
+            "messages": [SimpleNamespace(content="Question"), SimpleNamespace(content="Answer")],
+            "summary": "",
+            "tool_events": [],
+            "usage_events": [{"input_tokens": 75, "output_tokens": 3}],
+        })
+
+    def invoke(_input, config):
+        state["invoked"] = True
+        return get_state(config).values
+
+    executor._graph = SimpleNamespace(get_state=get_state, invoke=invoke)
+
+    result = executor.invoke({"input": "Question"})
+
+    assert result["output"] == "Answer"
+    assert executor._thread_id != "thread-1"
+    assert executor._pending_resume_summary == "summary"
+    assert executor._conversation == []

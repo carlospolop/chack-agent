@@ -28,7 +28,7 @@ The Codex direct transport is limited to eligible no-tool GPT-5.6+ runs. Public 
 
 ## Memory and schemas
 
-OpenAI and OpenRouter prefer provider-side response chains and retain bounded local history for recovery. Codex, Claude, Gemini, and Copilot use their CLI session or thread state and retain local text for Chack APIs and telemetry. LangGraph uses checkpointed thread memory. Automatic compaction is driven by `max_context_tokens` and `compaction_threshold_ratio`; summary-backed routes use the configured message and summary bounds.
+OpenAI and OpenRouter prefer provider-side response chains and retain bounded local history for recovery. Codex, Claude, Gemini, and Copilot use their CLI session or thread state and retain local text for Chack APIs and telemetry. LangGraph uses checkpointed thread memory. Automatic compaction is driven by `max_context_tokens` and `compaction_threshold_ratio`; summary-backed routes use the configured message and summary bounds. At the threshold, OpenRouter rotates its provider response chain after summarizing, Gemini sends `/compress` after a turn whose reported input usage reaches the limit, Copilot sends `/compact` after its `session.usage_info` context measurement reaches the limit, and LangGraph summarizes and rotates its checkpoint thread. Copilot also retains its own native automatic compaction if usage events are unavailable.
 
 OpenAI/OpenRouter use their structured-output path. CLI backends pass supported schema controls to the CLI and validate returned JSON where needed. The output schema is part of cache identity when it changes the stable provider prefix.
 
