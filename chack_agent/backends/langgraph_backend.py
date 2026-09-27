@@ -212,6 +212,42 @@ class LangGraphExecutor:
                 reset_to = 1
             self._conversation = self._conversation[-reset_to:]
 
+        threshold_tokens = int(self._max_context_tokens * self._compaction_threshold_ratio)
+        latest_input_tokens = max(
+            (
+                int(usage.get("input_tokens", 0) or 0)
+                for usage in new_usage_events
+                if isinstance(usage, dict)
+            ),
+            default=0,
+        )
+        if threshold_tokens > 0 and latest_input_tokens >= threshold_tokens:
+            log_event(
+                "agent_compaction_triggered",
+                payload={
+                    "backend": "langgraph",
+                    "input_tokens": latest_input_tokens,
+                    "threshold_tokens": threshold_tokens,
+                    "max_context_tokens": self._max_context_tokens,
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
+            compacted = self.compact_for_resume()
+            raw_responses.extend(compacted.raw_responses)
+            log_event(
+                "agent_compaction_completed" if compacted.succeeded else "agent_compaction_failed",
+                payload={
+                    "backend": "langgraph",
+                    "method": compacted.method,
+                    "input_tokens": latest_input_tokens,
+                    "threshold_tokens": threshold_tokens,
+                    "error": compacted.error[:500],
+                },
+                task_session_id=current_session_id() or "",
+                run_label=current_run_label() or "",
+            )
+
         return {
             "output": output,
             "intermediate_steps": steps,
@@ -504,7 +540,14 @@ class LangGraphExecutor:
             prompt_messages: list[AnyMessage] = [
                 SystemMessage(content=self._system_prompt(maybe_new_summary))
             ]
-            prompt_messages.extend(messages[-self._summary_keep_messages:])
+            # Until a summary exists, every message is still part of the live
+            # conversation. Silently keeping only the tail here discards facts
+            # before the configured compaction threshold is reached.
+            if maybe_new_summary:
+                if self._summary_keep_messages > 0:
+                    prompt_messages.extend(messages[-self._summary_keep_messages:])
+            else:
+                prompt_messages.extend(messages)
 
             response = self._model_with_tools.invoke(prompt_messages)
             usage = getattr(response, "usage_metadata", None) or {}

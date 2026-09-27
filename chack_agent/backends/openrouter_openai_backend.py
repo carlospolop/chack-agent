@@ -879,7 +879,7 @@ class AgentsExecutor:
         if not older_items:
             return
 
-        self._summary = self._summarize_items(
+        summary = self._summarize_items(
             self._summary,
             older_items,
             trigger_input_tokens=input_tokens,
@@ -889,10 +889,21 @@ class AgentsExecutor:
             triggered_by_messages=should_summarize_by_messages,
             triggered_by_tokens=should_summarize_by_tokens,
         )
+        if not summary:
+            _LOGGER.warning(
+                "OpenRouter automatic compaction returned no summary; preserving the active response chain."
+            )
+            return
+        self._summary = summary
         if keep:
             self._conversation = self._conversation[-keep:]
         else:
             self._conversation = []
+        # Trimming local recovery history alone does not compact a provider-side
+        # Responses conversation. Start the next turn from the summary and kept
+        # messages instead of reattaching the full server response chain.
+        self._previous_response_id = None
+        self._conversation_id = None
 
     def _build_runner_input(self, user_input: str, include_history: bool) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []
