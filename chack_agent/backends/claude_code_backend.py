@@ -341,6 +341,7 @@ class ClaudeCodeExecutor:
     _output_schema_name: str = "output_schema"
     _output_schema_strict: bool = True
     _max_context_tokens: int = 0
+    _compaction_threshold_ratio: float = 0.50
     _uses_openrouter_route: bool = False
     _anthropic_api_key: str = ""
     _claude_access_token: str = ""
@@ -1695,6 +1696,10 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             if self._claude_access_token and not self._uses_openrouter_route:
                 compact_window = min(compact_window, _CLAUDE_DEFAULT_CONTEXT_WINDOW)
             env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(compact_window)
+            # The window alone uses Claude Code's later default trigger. Honor
+            # Chack's configured fraction inside the running CLI conversation.
+            ratio = min(0.95, max(0.01, self._compaction_threshold_ratio))
+            env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(round(ratio * 100))
 
         # Allow --dangerously-skip-permissions when running as root inside Docker/CI.
         env.setdefault("IS_SANDBOX", "1")
@@ -2237,6 +2242,9 @@ def build_executor(
         _output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
         _output_schema_strict=bool(getattr(config.agent, "output_schema_strict", True)),
         _max_context_tokens=int(getattr(config.model, "max_context_tokens", 0) or 0),
+        _compaction_threshold_ratio=float(
+            getattr(config.agent, "compaction_threshold_ratio", 0.50) or 0.50
+        ),
         _thinking_effort=normalize_thinking_effort(config.agent.thinking_effort),
         _uses_openrouter_route=route is not None,
         _anthropic_api_key=str(

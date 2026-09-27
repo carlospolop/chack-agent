@@ -170,6 +170,27 @@ class CodexContextWindowConfigTests(unittest.TestCase):
         self.assertIn("model_auto_compact_token_limit = 187500", body)
         self.assertNotIn("model_context_window = 187500", body)
 
+    def test_350k_budget_compacts_during_codex_run_at_262500(self) -> None:
+        with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(
+            "chack_agent.model_aliases._get_backend_aliases", return_value={}
+        ), tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"CHACK_CODEX_HOME_BASE": tmpdir}):
+                config = resolve_config_aliases(_make_config("codex", 350_000))
+                config.agent.compaction_threshold_ratio = 0.75
+                executor = build_codex_executor(
+                    config,
+                    system_prompt="system",
+                    max_turns=2,
+                    memory_max_messages=250,
+                    memory_reset_to_messages=40,
+                )
+                executor._ensure_codex_home_and_config()
+                assert executor._codex_home is not None
+                with open(os.path.join(executor._codex_home, "config.toml"), encoding="utf-8") as handle:
+                    body = handle.read()
+
+        self.assertIn("model_auto_compact_token_limit = 262500", body)
+
     def test_omits_auto_compact_limit_when_unset(self) -> None:
         with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(
             "chack_agent.model_aliases._get_backend_aliases", return_value={}
@@ -333,6 +354,14 @@ class ClaudeContextBetaTests(unittest.TestCase):
         executor = _build_claude_executor(max_context_tokens=250_000)
         env = executor._build_env()
         self.assertEqual(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "250000")
+        self.assertEqual(env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"), "50")
+
+    def test_claude_auto_compacts_at_configured_ratio_during_run(self) -> None:
+        executor = _build_claude_executor(max_context_tokens=350_000)
+        executor._compaction_threshold_ratio = 0.75
+        env = executor._build_env()
+        self.assertEqual(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "350000")
+        self.assertEqual(env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"), "75")
 
     def test_caps_auto_compact_window_for_claude_oauth_token(self) -> None:
         executor = _build_claude_executor(
@@ -346,6 +375,7 @@ class ClaudeContextBetaTests(unittest.TestCase):
         executor = _build_claude_executor(max_context_tokens=0)
         env = executor._build_env()
         self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", env)
+        self.assertNotIn("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", env)
 
 
 if __name__ == "__main__":

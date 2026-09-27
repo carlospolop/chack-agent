@@ -500,8 +500,16 @@ class AgentsExecutor:
         threshold_tokens = 0
         if self._max_context_tokens > 0 and self._compaction_threshold_ratio > 0:
             threshold_tokens = int(self._compaction_threshold_ratio * self._max_context_tokens)
+        # Responses handles the token threshold inside each Runner.run_sync
+        # loop. A post-run token check cannot protect a long tool-using run and
+        # would repeat a compaction that the server has already performed.
+        server_compaction_enabled = bool(
+            getattr(getattr(self.agent, "model_settings", None), "context_management", None)
+        )
         should_compact_by_tokens = bool(
-            threshold_tokens > 0 and input_tokens >= threshold_tokens
+            not server_compaction_enabled
+            and threshold_tokens > 0
+            and input_tokens >= threshold_tokens
         )
         should_compact_by_messages = bool(
             self._memory_limit and len(self._conversation) > self._memory_limit
@@ -934,6 +942,12 @@ def build_executor(
             strict=bool(getattr(config.agent, "output_schema_strict", True)),
         )
 
+    threshold_tokens = 0
+    if config.model.max_context_tokens > 0 and config.agent.compaction_threshold_ratio > 0:
+        threshold_tokens = int(
+            config.model.max_context_tokens * config.agent.compaction_threshold_ratio
+        )
+
     agent = Agent(
         name="Chack",
         instructions=system_prompt,
@@ -943,7 +957,14 @@ def build_executor(
         model_settings=ModelSettings(
             reasoning={
                 "effort": openai_thinking_effort(config.agent.thinking_effort)
-            }
+            },
+            # Server-side compaction runs between model/tool turns inside a
+            # single Runner invocation, before the next request can overflow.
+            context_management=(
+                [{"type": "compaction", "compact_threshold": threshold_tokens}]
+                if threshold_tokens > 0
+                else None
+            ),
         ),
         output_type=output_schema,
     )

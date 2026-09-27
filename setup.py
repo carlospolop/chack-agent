@@ -23,12 +23,12 @@ setup(
         'playwright>=1.58.0',
         'PyYAML>=6.0.1',
         'pypdf>=4.0.0',
-        'openai-agents>=0.7.0',
+        'openai-agents>=0.17.2',
         'langchain>=1.0.0',
         'langgraph>=1.0.0',
         'langchain-openai>=0.3.0',
     ],
     extras_require={
-        'openai_agents': ['openai-agents>=0.7.0'],
+        'openai_agents': ['openai-agents>=0.17.2'],
     },
 )
