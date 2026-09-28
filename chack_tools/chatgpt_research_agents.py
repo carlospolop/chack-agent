@@ -717,11 +717,24 @@ class ChatGPTWebResearchAgentTool:
         return cls._append_source_links(text, links)
 
     @classmethod
+    def _assistant_unit_text(cls, unit) -> str:
+        """Read the body of a speaker-verified turn, excluding its UI heading."""
+        bodies = unit.locator(":scope > :not(h4):not(script):not(style)")
+        candidates: list[str] = []
+        for index in range(bodies.count()):
+            try:
+                text = cls._element_text_with_links(bodies.nth(index))
+                if text:
+                    candidates.append(text)
+            except Exception:
+                continue
+        return max(candidates, key=len, default="")
+
+    @classmethod
     def _longest_answer(cls, page) -> str:
         candidates: list[str] = []
-        # ChatGPT's newer conversation UI omits data-message-author-role but
-        # marks the assistant's rendered Markdown explicitly. Never fall back to
-        # all Markdown roots: a longer user prompt could be mistaken for evidence.
+        # Prefer explicit assistant markup; never scrape all Markdown roots or
+        # main.innerText, which may contain a longer user prompt.
         for selector in (
             '[data-message-author-role="assistant"]',
             'main [data-markdown-text-style="assistant-message"]',
@@ -730,6 +743,39 @@ class ChatGPTWebResearchAgentTool:
             for index in range(assistant.count()):
                 try:
                     text = cls._element_text_with_links(assistant.nth(index))
+                    if text:
+                        candidates.append(text)
+                except Exception:
+                    continue
+
+        if not candidates:
+            # ChatGPT's search index independently labels each conversation
+            # unit with its speaker. A CSS/class or markdown-style rename must
+            # not make a completed specialist result disappear for 90 minutes.
+            units = page.locator(
+                'main [data-content-search-unit-key$=":assistant"], '
+                'main [data-chatgpt-search-unit-key$=":assistant"]'
+            )
+            for index in range(units.count()):
+                try:
+                    text = cls._assistant_unit_text(units.nth(index))
+                    if text:
+                        candidates.append(text)
+                except Exception:
+                    continue
+
+        if not candidates:
+            # An accessible speaker heading is an independent last-resort role
+            # cue if both the message and search-index attributes change.
+            headings = page.locator("main h4.sr-only")
+            for index in range(headings.count()):
+                try:
+                    heading = headings.nth(index)
+                    if not re.fullmatch(
+                        r"ChatGPT (?:said|dice):?", heading.inner_text(timeout=1000).strip(), re.I
+                    ):
+                        continue
+                    text = cls._assistant_unit_text(heading.locator("xpath=.."))
                     if text:
                         candidates.append(text)
                 except Exception:

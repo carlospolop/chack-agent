@@ -816,6 +816,69 @@ def test_legacy_chatgpt_assistant_markup_still_extracts():
     assert ChatGPTWebResearchAgentTool._longest_answer(Page()) == "Legacy assistant answer"
 
 
+@pytest.mark.parametrize("role_cue", ["search_key", "accessible_heading", "none"])
+def test_assistant_extraction_survives_markup_changes_but_fails_closed(role_cue):
+    """Use independent speaker cues, not a global Markdown/body selector."""
+    class Locator:
+        def __init__(self, text="", children=(), parent=None, href=""):
+            self.text, self.children, self.parent, self.href = text, children, parent, href
+
+        def count(self):
+            return len(self.children)
+
+        def nth(self, index):
+            return self.children[index]
+
+        def inner_text(self, timeout=0):
+            return self.text
+
+        def get_attribute(self, name):
+            return self.href if name == "href" else None
+
+        def locator(self, selector):
+            if selector == "a[href]":
+                return Locator(children=(Locator("Official source", href="https://example.org/source"),))
+            if selector == ":scope > :not(h4):not(script):not(style)":
+                return Locator(children=self.children)
+            if selector == "xpath=..":
+                return self.parent
+            raise AssertionError(f"unexpected selector: {selector}")
+
+    # Neither assistant content nor the user prompt has a Markdown class or a
+    # data-markdown-text-style attribute. Only the role cue may distinguish them.
+    answer = Locator("Specialist finding that remains readable after a CSS rename. " * 8)
+    assistant_turn = Locator(children=(answer,))
+    assistant_heading = Locator("ChatGPT said:", parent=assistant_turn)
+    user_heading = Locator("You said", parent=Locator(children=(Locator("USER PROMPT " * 500),)))
+
+    class Page:
+        frames = []
+
+        def locator(self, selector):
+            if selector in (
+                '[data-message-author-role="assistant"]',
+                'main [data-markdown-text-style="assistant-message"]',
+            ):
+                return Locator()
+            if selector == (
+                'main [data-content-search-unit-key$=":assistant"], '
+                'main [data-chatgpt-search-unit-key$=":assistant"]'
+            ):
+                return Locator(children=(assistant_turn,)) if role_cue == "search_key" else Locator()
+            if selector == "main h4.sr-only":
+                headings = (user_heading, assistant_heading) if role_cue == "accessible_heading" else (user_heading,)
+                return Locator(children=headings)
+            raise AssertionError(f"unexpected selector: {selector}")
+
+    extracted = ChatGPTWebResearchAgentTool._longest_answer(Page())
+    if role_cue == "none":
+        assert extracted == ""  # Never mistake the long user prompt for evidence.
+    else:
+        assert "Specialist finding" in extracted
+        assert "https://example.org/source" in extracted
+        assert "USER PROMPT" not in extracted
+
+
 def test_running_state_accepts_stop_answering_label():
     class Locator:
         def __init__(self, count):
