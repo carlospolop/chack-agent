@@ -719,14 +719,21 @@ class ChatGPTWebResearchAgentTool:
     @classmethod
     def _longest_answer(cls, page) -> str:
         candidates: list[str] = []
-        assistant = page.locator('[data-message-author-role="assistant"]')
-        for index in range(assistant.count()):
-            try:
-                text = cls._element_text_with_links(assistant.nth(index))
-                if text:
-                    candidates.append(text)
-            except Exception:
-                continue
+        # ChatGPT's newer conversation UI omits data-message-author-role but
+        # marks the assistant's rendered Markdown explicitly. Never fall back to
+        # all Markdown roots: a longer user prompt could be mistaken for evidence.
+        for selector in (
+            '[data-message-author-role="assistant"]',
+            'main [data-markdown-text-style="assistant-message"]',
+        ):
+            assistant = page.locator(selector)
+            for index in range(assistant.count()):
+                try:
+                    text = cls._element_text_with_links(assistant.nth(index))
+                    if text:
+                        candidates.append(text)
+                except Exception:
+                    continue
 
         # Deep Research is often rendered in an OOPIF and then a nested #root
         # iframe. Playwright exposes both as Frame objects, so inspect every frame.

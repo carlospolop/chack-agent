@@ -743,6 +743,79 @@ def test_source_links_are_not_repeated_when_already_rendered_in_text():
     assert answer == f"Evidence: {url}"
 
 
+def test_new_chatgpt_markup_extracts_only_assistant_answer_and_sources():
+    """The conversation UI no longer sets data-message-author-role."""
+    class Locator:
+        def __init__(self, text="", children=(), href=""):
+            self.text, self.children, self.href = text, children, href
+
+        def count(self):
+            return len(self.children)
+
+        def nth(self, index):
+            return self.children[index]
+
+        def inner_text(self, timeout=0):
+            return self.text
+
+        def get_attribute(self, name):
+            return self.href if name == "href" else None
+
+        def locator(self, selector):
+            assert selector == "a[href]"
+            return Locator(children=(Locator("Primary filing", href="https://example.org/filing"),))
+
+    answer = Locator("Substantive specialist finding with cited evidence. " * 12)
+    class Page:
+        frames = []
+
+        def locator(self, selector):
+            if selector == 'main [data-markdown-text-style="assistant-message"]':
+                return Locator(children=(answer,))
+            if selector == '[data-message-author-role="assistant"]':
+                return Locator()
+            # A long user prompt must never be treated as research evidence.
+            if selector == 'main [class*="MarkdownRoot"]':
+                return Locator(children=(Locator("USER PROMPT " * 300), answer))
+            raise AssertionError(f"unexpected selector: {selector}")
+
+    extracted = ChatGPTWebResearchAgentTool._longest_answer(Page())
+    assert "Substantive specialist finding" in extracted
+    assert "https://example.org/filing" in extracted
+    assert "USER PROMPT" not in extracted
+
+
+def test_legacy_chatgpt_assistant_markup_still_extracts():
+    class Locator:
+        def __init__(self, text="", children=()):
+            self.text, self.children = text, children
+
+        def count(self):
+            return len(self.children)
+
+        def nth(self, index):
+            return self.children[index]
+
+        def inner_text(self, timeout=0):
+            return self.text
+
+        def locator(self, selector):
+            assert selector == "a[href]"
+            return Locator()
+
+    class Page:
+        frames = []
+
+        def locator(self, selector):
+            if selector == '[data-message-author-role="assistant"]':
+                return Locator(children=(Locator("Legacy assistant answer"),))
+            if selector == 'main [data-markdown-text-style="assistant-message"]':
+                return Locator()
+            raise AssertionError(f"unexpected selector: {selector}")
+
+    assert ChatGPTWebResearchAgentTool._longest_answer(Page()) == "Legacy assistant answer"
+
+
 def test_running_state_accepts_stop_answering_label():
     class Locator:
         def __init__(self, count):
