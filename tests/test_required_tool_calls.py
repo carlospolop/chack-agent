@@ -185,6 +185,40 @@ def test_backend_failure_does_not_resume_to_satisfy_tool_requirements():
     assert result.completion_tokens == 0
 
 
+def test_policy_refusal_retains_provider_reason_without_resuming():
+    failure = (
+        "ERROR: Codex exec failed (exit=1).\n"
+        "This content was flagged for possible cybersecurity risk."
+    )
+    executor = _Executor([
+        {"output": failure, "intermediate_steps": [], "raw_result": None},
+        {"output": "must not run", "intermediate_steps": [], "raw_result": None},
+    ])
+    agent = _TestChack(executor, _config(min_tools_used=2))
+
+    result = agent.run("policy-refusal", "inspect the repository")
+
+    assert executor.calls == 1
+    assert result.error == "backend_policy_refusal"
+
+
+def test_model_capacity_retains_provider_reason_without_resuming():
+    failure = (
+        "ERROR: Codex exec failed (exit=1).\n"
+        "Selected model is at capacity, try a different model."
+    )
+    executor = _Executor([
+        {"output": failure, "intermediate_steps": [], "raw_result": None},
+        {"output": "must not run", "intermediate_steps": [], "raw_result": None},
+    ])
+    agent = _TestChack(executor, _config(min_tools_used=2))
+
+    result = agent.run("model-capacity", "inspect the repository")
+
+    assert executor.calls == 1
+    assert result.error == "backend_capacity"
+
+
 def test_self_critique_reuses_same_executor_session_without_repeating_previous_answer():
     executor = _Executor([
         {"output": "first answer", "intermediate_steps": [], "raw_result": None},

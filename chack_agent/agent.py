@@ -288,6 +288,16 @@ def _looks_like_backend_failure_output(output: Any) -> bool:
     )
 
 
+def _backend_failure_reason(output: Any) -> str:
+    """Preserve a bounded provider failure category without logging the prompt."""
+    normalized = str(output or "").lower()
+    if "this content was flagged for possible cybersecurity risk" in normalized:
+        return "backend_policy_refusal"
+    if "selected model is at capacity" in normalized:
+        return "backend_capacity"
+    return "backend_failure"
+
+
 class Chack:
     def __init__(
         self,
@@ -2360,7 +2370,7 @@ class Chack:
                         # resume the same failed thread merely to satisfy tool
                         # minimums or required-tool reminders; the caller owns
                         # provider-aware retry, fallback, and quota handling.
-                        result["error"] = "backend_failure"
+                        result["error"] = _backend_failure_reason(result.get("output"))
                         break
 
                     (
