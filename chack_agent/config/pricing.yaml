@@ -77,6 +77,16 @@ models:
     cache_read: 0.05
     cache_write: 0.625
     output: 2.5
+  anthropic/claude-haiku-5.5:
+    input: 0.1
+    cache_read: 0.01
+    cache_write: 0.125
+    output: 0.5
+  anthropic/claude-haiku-5.5:batch:
+    input: 0.05
+    cache_read: 0.005
+    cache_write: 0.0625
+    output: 0.25
   anthropic/claude-opus-4.1:
     input: 15
     cache_read: 1.5
@@ -179,12 +189,12 @@ models:
     output: 10
   anthropic/claude-sonnet-5.5:
     input: 2
-    cache_read: 0.2
+    cache_read: 0.1
     cache_write: 2.5
     output: 10
   anthropic/claude-sonnet-5.5:batch:
     input: 1
-    cache_read: 0.1
+    cache_read: 0.05
     cache_write: 1.25
     output: 5
   anthropic/claude-sonnet-5:batch:
@@ -285,29 +295,29 @@ models:
     cache_read: 0.27
     output: 1
   deepseek/deepseek-v3.2:
-    input: 0.28
-    cache_read: 0.028
+    input: 0.259
+    cache_read: 0.135
     output: 0.42
   deepseek/deepseek-v3.2-exp:
     input: 0.27
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.03
-    cache_read: 0.03
+    input: 0.0128
+    cache_read: 0.0128
     output: 1.28
   deepseek/deepseek-v4-flash-0731:
-    input: 0.018
-    cache_read: 0.018
+    input: 0.0079
+    cache_read: 0.0079
     output: 1.28
   deepseek/deepseek-v4-flash-vision-exp:
     input: 0.2156
     cache_read: 0.00686
     output: 0.6468
   deepseek/deepseek-v4-pro:
-    input: 0.2088
-    cache_read: 0.0174
-    output: 0.4176
+    input: 0.95526
+    cache_read: 0.079605
+    output: 1.91052
   deepseek/deepseek-v4-pro-0813:
     input: 1.32
     cache_read: 0.044
@@ -593,9 +603,9 @@ models:
     cache_read: 0.05
     output: 0.33
   meta-llama/llama-3.3-70b-instruct:
-    input: 0.22
-    cache_read: 0.11
-    output: 0.5
+    input: 0.1
+    cache_read: 0.1
+    output: 0.32
   meta-llama/llama-4-maverick:
     input: 0.1875
     cache_read: 0.05
@@ -793,16 +803,16 @@ models:
     cache_read: 0.07
     output: 2.25
   moonshotai/kimi-k2.6:
-    input: 0.95
-    cache_read: 0.16
-    output: 4
+    input: 0.465
+    cache_read: 0.0975
+    output: 2.45
   moonshotai/kimi-k2.7-code:
     input: 0.6712
     cache_read: 0.18
     output: 3.35
   moonshotai/kimi-k3:
-    input: 0.69
-    cache_read: 0.45
+    input: 0.65
+    cache_read: 0.43
     output: 15
   moonshotai/kimi-k3:batch:
     input: 2.28
@@ -837,17 +847,17 @@ models:
     cache_read: 1
     output: 3
   nvidia/nemotron-3-nano-30b-a3b:
-    input: 0.05
-    cache_read: 0.03
-    output: 0.2
+    input: 0.06
+    cache_read: 0.06
+    output: 0.24
   nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free:
     input: 0
     cache_read: 0
     output: 0
   nvidia/nemotron-3-super-120b-a12b:
-    input: 0.08
-    cache_read: 0.08
-    output: 0.45
+    input: 0.085
+    cache_read: 0.085
+    output: 0.4
   nvidia/nemotron-3-super-120b-a12b:free:
     input: 0
     cache_read: 0
@@ -869,9 +879,9 @@ models:
     cache_read: 0
     output: 0
   nvidia/nemotron-3.5-lightning:
-    input: 0.06
-    cache_read: 0.03
-    output: 0.16
+    input: 0.049
+    cache_read: 0.0245
+    output: 0.14
   nvidia/nemotron-3.5-lightning:free:
     input: 0
     cache_read: 0
@@ -1475,9 +1485,9 @@ models:
     cache_read: 0.78
     output: 3.9
   qwen/qwen3-next-80b-a3b-instruct:
-    input: 0.1
-    cache_read: 0.07
-    output: 1.1
+    input: 0.15
+    cache_read: 0.15
+    output: 1.5
   qwen/qwen3-next-80b-a3b-thinking:
     input: 0.15
     cache_read: 0.15
@@ -1515,9 +1525,9 @@ models:
     cache_read: 0.26
     output: 2.08
   qwen/qwen3.5-27b:
-    input: 0.195
-    cache_read: 0.195
-    output: 1.56
+    input: 0.26
+    cache_read: 0.26
+    output: 2.6
   qwen/qwen3.5-35b-a3b:
     input: 0.15
     cache_read: 0.05
@@ -1818,7 +1828,7 @@ models:
     output: 1.75
   z-ai/glm-4.6v:
     input: 0.3
-    cache_read: 0.05
+    cache_read: 0.055
     output: 0.9
   z-ai/glm-4.7:
     input: 0.6
@@ -1841,13 +1851,13 @@ models:
     cache_read: 0.1794
     output: 3.036
   z-ai/glm-5.2:
-    input: 0.152
+    input: 0.171
     cache_read: 0.15
     output: 12
   z-ai/glm-5.3:
-    input: 0.07
-    cache_read: 0.065
-    output: 7
+    input: 0.049
+    cache_read: 0.048
+    output: 3.39
   z-ai/glm-5.3-flash:
     input: 0.15
     cache_read: 0.03
@@ -1878,10 +1888,10 @@ models:
     cache_write: 12.5
     output: 50
   ~anthropic/claude-haiku-latest:
-    input: 1
-    cache_read: 0.1
-    cache_write: 1.25
-    output: 5
+    input: 0.1
+    cache_read: 0.01
+    cache_write: 0.125
+    output: 0.5
   ~anthropic/claude-opus-latest:
     input: 4
     cache_read: 0.2
@@ -1889,21 +1899,21 @@ models:
     output: 20
   ~anthropic/claude-sonnet-latest:
     input: 2
-    cache_read: 0.2
+    cache_read: 0.1
     cache_write: 2.5
     output: 10
   ~deepseek/deepseek-flash-latest:
-    input: 0.045
-    cache_read: 0.021
-    output: 0.3
+    input: 0.0184
+    cache_read: 0.01
+    output: 1.2
   ~deepseek/deepseek-pro-latest:
-    input: 0.3
-    cache_read: 0.3
+    input: 0.1773
+    cache_read: 0.13
     output: 4.2
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.018
-    cache_read: 0.018
-    output: 1.28
+    input: 0.00632
+    cache_read: 0.00632
+    output: 1.536
   ~google/gemini-flash-latest:
     input: 0.75
     cache_read: 0.075
@@ -1915,7 +1925,7 @@ models:
     cache_write: 0.375
     output: 12
   ~moonshotai/kimi-latest:
-    input: 0.68
+    input: 0.64
     cache_read: 0.45
     output: 13
   ~openai/gpt-astra-latest:
@@ -1947,10 +1957,10 @@ models:
     cache_read: 0.5
     output: 6
   ~z-ai/glm-flash-latest:
-    input: 0.0278
-    cache_read: 0.0278
-    output: 0.5
+    input: 0.032
+    cache_read: 0.02
+    output: 0.66
   ~z-ai/glm-latest:
-    input: 0.03
-    cache_read: 0.03
+    input: 0.0392
+    cache_read: 0.0365
     output: 12
