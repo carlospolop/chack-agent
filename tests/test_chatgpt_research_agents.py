@@ -976,6 +976,29 @@ def test_pro_accepts_a_short_stable_completed_answer(monkeypatch):
     assert clock["now"] == 8.0
 
 
+@pytest.mark.parametrize("mode,answer", [("pro", "SMOKE_PRO_OK"), ("xhigh", "SMOKE_XHIGH_OK")])
+def test_browser_accepts_stable_tiny_completed_verdict(monkeypatch, mode, answer):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_pro_timeout_seconds=120, chatgpt_xhigh_timeout_seconds=120, chatgpt_research_poll_seconds=2),
+        mode=mode,
+    )
+    clock = {"now": 0.0}
+
+    class Page:
+        url = "https://chatgpt.com/c/test"
+
+        def wait_for_timeout(self, milliseconds):
+            clock["now"] += milliseconds / 1000.0
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(helper, "_click_provider_retry_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: answer)
+    monkeypatch.setattr(helper, "_is_running", lambda _page: False)
+    assert helper._wait_and_extract(Page()) == answer
+    assert clock["now"] == 8.0
+
+
 def test_pro_timeout_forces_answer_early_and_extracts_within_total_deadline(monkeypatch, tmp_path):
     helper = ChatGPTWebResearchAgentTool(
         ToolsConfig(
