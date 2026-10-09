@@ -1123,12 +1123,12 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 },
             )
             # Two identical polls plus no running control avoids saving a streaming
-            # partial answer. Short Pro/xhigh replies are also valid (for example,
-            # a clarification request), but require a longer stability window.
+            # partial answer. Even a one-word verdict is valid for Pro/xhigh,
+            # but requires a longer stability window after generation stops.
             # After forcing, require material growth beyond the pre-force
             # acknowledgement before accepting a stable terminal answer.
             min_chars = 1200 if self.mode == "deep" else 200
-            short_answer = self.mode in {"pro", "xhigh"} and 20 <= len(answer) < min_chars
+            short_answer = self.mode in {"pro", "xhigh"} and 0 < len(answer) < min_chars
             required_stable_polls = 4 if short_answer else 2
             changed_after_force = (
                 not forced_answer
