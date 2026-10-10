@@ -24,6 +24,8 @@ setup(
         'PyYAML>=6.0.1',
         'pypdf>=4.0.0',
         'openai-agents>=0.17.2',
+        'qdrant-client[fastembed]>=1.15.0,<1.16',
+        'fastembed==0.7.4',
         'langchain>=1.0.0',
         'langgraph>=1.0.0',
         'langchain-openai>=0.3.0',

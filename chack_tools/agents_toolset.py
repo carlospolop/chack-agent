@@ -175,6 +175,7 @@ from .serpapi_web_search import (
 from .social_network_agent import SocialNetworkAgentTool, get_social_network_research_tool
 from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
 from .native_planning import uses_native_planning
+from .knowledge_store import add_knowledge_mcp_tools
 from .travel_search import (
     TravelSearchTool,
     get_amadeus_hotel_prices_tool,
@@ -446,6 +447,7 @@ class AgentsToolset:
         # private and reconstruct its tools inside the MCP child instead of
         # moving ContextVars/locks across process boundaries.
         self._researcher_administrator_helper = None
+        add_knowledge_mcp_tools(tools, self.config)
         if self.config.exec_enabled:
             exec_helper = ExecTool(self.config)
             tools.append(get_exec_tool(exec_helper))
@@ -948,18 +950,74 @@ class AgentsToolset:
                 0,
                 int(getattr(self.config, "researcher_queue_max_runtime_minutes", 0) or 0) * 60,
             )
+            synthesis_reserve_minutes = max(
+                0,
+                int(
+                    getattr(
+                        self.config,
+                        "researcher_administrator_synthesis_reserve_minutes",
+                        0,
+                    )
+                    or 0
+                ),
+            )
+            effective_synthesis_reserve_minutes = synthesis_reserve_minutes
+            if queue_runtime_seconds > 0:
+                # A positive queue runtime must retain at least one minute for
+                # its researcher phase. Clamp an invalid oversized reserve in
+                # the private config so the administrator and its tools use the
+                # same deadline geometry.
+                effective_synthesis_reserve_minutes = min(
+                    synthesis_reserve_minutes,
+                    max(0, (queue_runtime_seconds - 60) // 60),
+                )
+                queue_researcher_window_seconds = (
+                    queue_runtime_seconds - effective_synthesis_reserve_minutes * 60
+                )
+            else:
+                queue_researcher_window_seconds = 0
             pro_browser_timeout = resolve_chatgpt_timeout_seconds(self.config, "pro")
             xhigh_browser_timeout = resolve_chatgpt_timeout_seconds(self.config, "xhigh")
             deep_browser_timeout = resolve_chatgpt_timeout_seconds(self.config, "deep")
-            if queue_runtime_seconds > 0 and {
+            queue_async_max_wait_seconds = max(
+                1,
+                int(getattr(self.config, "chatgpt_async_max_wait_seconds", 0) or 1),
+            )
+            queue_child_timeout_seconds = max(
+                1,
+                int(
+                    getattr(
+                        self.config,
+                        "researcher_administrator_child_timeout_seconds",
+                        0,
+                    )
+                    or 1
+                ),
+            )
+            if queue_researcher_window_seconds > 0:
+                # Enforce the administrator/researcher wall-clock relationship
+                # in the private tool configuration as well as through the
+                # exported deadline. The tools can execute in a separate MCP
+                # process, so the environment deadline is useful defence in
+                # depth but must not be the only bound.
+                queue_async_max_wait_seconds = min(
+                    queue_async_max_wait_seconds,
+                    queue_researcher_window_seconds,
+                )
+                queue_child_timeout_seconds = min(
+                    queue_child_timeout_seconds,
+                    queue_researcher_window_seconds,
+                )
+            if queue_researcher_window_seconds > 0 and {
                 "deepchatgpt",
                 "prochatgpt",
                 "chatgptxhigh",
             }.intersection(queue_researchers):
                 # The Pro Answer-now recovery window is already contained within
-                # its total output deadline. Keep only a post-browser synthesis
-                # reserve before the administrator's own hard runtime.
-                max_browser_timeout = max(60, queue_runtime_seconds - 300)
+                # its total output deadline. Keep a bounded propagation margin
+                # before the researcher window closes; the administrator's
+                # separate synthesis reserve starts after that window.
+                max_browser_timeout = max(60, queue_researcher_window_seconds - 300)
                 pro_browser_timeout = min(pro_browser_timeout, max_browser_timeout)
                 xhigh_browser_timeout = min(xhigh_browser_timeout, max_browser_timeout)
                 deep_browser_timeout = min(deep_browser_timeout, max_browser_timeout)
@@ -974,7 +1032,12 @@ class AgentsToolset:
                 chatgpt_pro_timeout_seconds=pro_browser_timeout,
                 chatgpt_xhigh_timeout_seconds=xhigh_browser_timeout,
                 chatgpt_deep_timeout_seconds=deep_browser_timeout,
+                chatgpt_async_max_wait_seconds=queue_async_max_wait_seconds,
                 chatgpt_research_timeout_seconds=0,
+                researcher_administrator_child_timeout_seconds=queue_child_timeout_seconds,
+                researcher_administrator_synthesis_reserve_minutes=(
+                    effective_synthesis_reserve_minutes
+                ),
                 researcher_administrator_agent={
                     **dict(
                         getattr(queue_config, "researcher_administrator_agent", {}) or {}

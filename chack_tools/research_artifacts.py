@@ -637,6 +637,12 @@ def add_research_artifact_tools(tools: list[Any], config: ToolsConfig, *, root: 
     changing the inherited research context.
     """
     tools.extend(get_research_artifact_tools(ResearchArtifactsTool(config, root=root)))
+    # Every administrator and specialist receives the same read-only retrieval
+    # surface when the per-run knowledge policy permits it. Imports stay local
+    # to avoid a config/artifact/knowledge module cycle at startup.
+    from .knowledge_store import add_knowledge_read_tools
+
+    add_knowledge_read_tools(tools, config)
 
 
 def get_readonly_file_tools_for_root(config: ToolsConfig, root: str) -> list[Any]:

@@ -23,7 +23,7 @@ _ACTIVE_RESEARCHER_RESPONSE_COLLECTOR: contextvars.ContextVar[list[dict[str, Any
 
 
 RESEARCHER_COMMON_SYSTEM_PROMPT = """### RESEARCHER SPECIALIZATION
-You are an expert objective researcher. You will be asked to research a topic, and you must use the available tools as many times as needed to find all relevant data about that topic.
+You are an expert objective researcher. Use targeted tool calls to obtain enough independent, inspectable evidence for a defensible answer; tool-call volume is not a quality metric.
 You are objective and only looking for the real truth. Treat social norms and common sense as hypotheses to test, never as proof.
 
 - Stay source-first. Treat search results, snippets, summaries, model-generated answers, and social claims as discovery leads until supported by inspectable evidence.
@@ -37,6 +37,7 @@ You are objective and only looking for the real truth. Treat social norms and co
 - `gaps` are missing evidence that limits the current conclusion. `open_topics` are optional, concrete follow-up investigations that could add value but are not required to close the current claim. Do not repeat a gap as an open topic, and return an empty list when there is no worthwhile follow-up.
 - Digest limits are strict: `failure_reason` <= 500 characters; `overall_summary` <= 1000; at most 8 findings; each claim 30-220 and each finding summary 100-600; at most 5 gaps of 20-240 characters each; at most 5 open topics of 30-250 characters each.
 - Strong evidence survives serious attempts to disprove it. Actively look for disconfirming evidence, opposing sources, methodological weaknesses, and alternative explanations before concluding.
+- Stop searching when additional calls return the same underlying sources or no longer change a claim, uncertainty rating, contradiction, or material gap. Do not repeat equivalent queries across providers merely to increase coverage counts; record the remaining gap instead. A focused follow-up is justified only by a named unresolved claim or missing primary source.
 - Return only the configured JSON output object. Never omit relevant evidence from `full_research_review` merely to make the digest shorter. When research succeeds, make `full_research_review` at least 2000 characters if the evidence reasonably supports that much detail.
 """
 
@@ -194,8 +195,35 @@ ARTIFACT_RECONCILIATION_OUTPUT_SCHEMA = {
 }
 
 
-def researcher_output_schema(*, preserve_artifacts: bool) -> dict[str, Any]:
-    return deepcopy(RESEARCHER_OUTPUT_SCHEMA if preserve_artifacts else RESEARCHER_OUTPUT_SCHEMA_NO_ARTIFACTS)
+KNOWLEDGE_CANDIDATES_SCHEMA = {
+    "type": "array",
+    "maxItems": 200,
+    "description": (
+        "Knowledge disposition for every retained key_artifact, exactly once. "
+        "Files already deleted as useless are not listed."
+    ),
+    "items": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "filename": {"type": "string", "description": "Artifact filename relative to evidence_data_path."},
+            "disposition": {"type": "string", "enum": ["ingest_candidate", "archive_only", "discard"]},
+            "reason": {"type": "string", "minLength": 30, "maxLength": 400},
+            "title": {"type": "string", "maxLength": 250},
+            "source_url": {"type": "string"},
+            "evidence_type": {"type": "string", "maxLength": 100},
+        },
+        "required": ["filename", "disposition", "reason", "title", "source_url", "evidence_type"],
+    },
+}
+
+
+def researcher_output_schema(*, preserve_artifacts: bool, include_knowledge: bool = False) -> dict[str, Any]:
+    schema = deepcopy(RESEARCHER_OUTPUT_SCHEMA if preserve_artifacts else RESEARCHER_OUTPUT_SCHEMA_NO_ARTIFACTS)
+    if include_knowledge:
+        schema["properties"]["knowledge_candidates"] = deepcopy(KNOWLEDGE_CANDIDATES_SCHEMA)
+        schema["required"].append("knowledge_candidates")
+    return schema
 
 
 def _compact_counter(counter: Mapping[str, Any] | None) -> dict[str, int]:
@@ -314,6 +342,58 @@ def normalize_researcher_response_payload(payload: Mapping[str, Any]) -> dict[st
             if len(open_topics) >= 5:
                 break
     row["open_topics"] = open_topics
+    candidates: list[dict[str, str]] = []
+    raw_candidates = row.get("knowledge_candidates")
+    if isinstance(raw_candidates, list):
+        seen_candidates: set[tuple[str, str]] = set()
+        for raw_candidate in raw_candidates[:200]:
+            if not isinstance(raw_candidate, Mapping):
+                continue
+            filename = str(raw_candidate.get("filename") or "").strip()
+            disposition = str(raw_candidate.get("disposition") or "").strip().lower()
+            if not filename or disposition not in {"ingest_candidate", "archive_only", "discard"}:
+                continue
+            marker = (filename, disposition)
+            if marker in seen_candidates:
+                continue
+            seen_candidates.add(marker)
+            candidates.append({
+                "filename": filename,
+                "disposition": disposition,
+                "reason": _digest_text(raw_candidate.get("reason"), 400),
+                "title": _digest_text(raw_candidate.get("title"), 250),
+                "source_url": str(raw_candidate.get("source_url") or "").strip(),
+                "evidence_type": _digest_text(raw_candidate.get("evidence_type"), 100),
+            })
+
+        # Structured-output models can still omit rows despite an explicit
+        # instruction (and older agents were capped at twenty).  Make the safe
+        # disposition deterministic: every retained/key artifact reaches the
+        # administrator, while an omission can never cause automatic ingestion
+        # or deletion.  The administrator may promote this archive-only default
+        # after reviewing the source.
+        seen_filenames = {item[0] for item in seen_candidates}
+        raw_artifacts = row.get("key_artifacts")
+        if isinstance(raw_artifacts, list):
+            for artifact in raw_artifacts:
+                if len(candidates) >= 200 or not isinstance(artifact, Mapping):
+                    break
+                filename = str(artifact.get("filename") or "").strip()
+                if not filename or filename in seen_filenames:
+                    continue
+                seen_filenames.add(filename)
+                candidates.append({
+                    "filename": filename,
+                    "disposition": "archive_only",
+                    "reason": (
+                        "Retained as useful evidence but not explicitly nominated for embedding; "
+                        "administrator review is required before promotion."
+                    ),
+                    "title": _digest_text(Path(filename).stem.replace("_", " ").replace("-", " "), 250),
+                    "source_url": str(artifact.get("source_url") or "").strip(),
+                    "evidence_type": "retained_research_artifact",
+                })
+        row["knowledge_candidates"] = candidates
     return row
 
 
@@ -329,6 +409,15 @@ def compact_researcher_digest(payload: Mapping[str, Any]) -> dict[str, Any]:
         "gaps": list(row["gaps"]),
         "open_topics": list(row["open_topics"]),
     }
+    if "knowledge_candidates" in row:
+        digest["knowledge_candidates"] = deepcopy(row["knowledge_candidates"])
+    # Keep the child-owned evidence directory so the administrator and the
+    # deterministic finalizer can qualify candidate filenames relative to the
+    # shared administrator root.  This is required when two runs of the same
+    # researcher nominate identically named files (for example two Pro runs).
+    evidence_data_path = str(row.get("evidence_data_path") or "").strip()
+    if evidence_data_path:
+        digest["evidence_data_path"] = evidence_data_path
     researcher_tool = str(row.get("researcher_tool") or "").strip()
     if researcher_tool:
         digest["researcher_tool"] = researcher_tool
@@ -1213,7 +1302,32 @@ def build_subagent_config(
         "yes",
         "on",
     }
-    default_output_schema = researcher_output_schema(preserve_artifacts=preserve_artifacts)
+    knowledge_mode = str(getattr(base_tools, "knowledge_mode", "off") or "off").strip().lower().replace("-", "_")
+    knowledge_enabled = bool(getattr(base_tools, "knowledge_enabled", False))
+    knowledge_base = str(getattr(base_tools, "knowledge_base", "") or "").strip()
+    include_knowledge_read = knowledge_enabled and bool(knowledge_base) and knowledge_mode in {"read", "read_write"}
+    include_knowledge = knowledge_enabled and knowledge_mode in {"write", "read_write"}
+    default_output_schema = researcher_output_schema(
+        preserve_artifacts=preserve_artifacts,
+        include_knowledge=include_knowledge,
+    )
+    if include_knowledge_read:
+        prompt += (
+            f"\n- At the start, use the read-only `knowledge_search` tool on `{knowledge_base}` with a focused "
+            "query to identify prior findings and unresolved gaps before doing new work. Use returned source paths "
+            "as leads, verify central claims against primary evidence, and do not repeat searches already answered "
+            "by the curated knowledge base."
+        )
+    if include_knowledge:
+        prompt += (
+            "\n- Classify every retained `key_artifacts` file exactly once in `knowledge_candidates`: use "
+            "`ingest_candidate` only for durable, "
+            "non-duplicative evidence, `archive_only` for provenance outside retrieval, and `discard` for "
+            "downloads that added no value. Keep archive-only provenance compact: when a URL and receipt are "
+            "enough, discard bulky failed, non-extractable, or duplicate captures. Delete obviously useless "
+            "downloads before finalizing instead of retaining them. This is a recommendation; runtime code "
+            "performs writes."
+        )
 
     agent_overrides = overrides.get("agent") or {}
     sub_action = str(agent_overrides.get("sub_action") or "").strip().lower()

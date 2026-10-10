@@ -68,6 +68,47 @@ class ToolsConfig:
     # delete it. Keep true by default so preserved research folders are auditable.
     research_strict_artifact_manifest: bool = True
 
+    # Curated local research knowledge. Qdrant holds derived chunks/vectors;
+    # the SQLite catalogue records source hashes, versions, and ingest state.
+    # ``knowledge_mode`` is the profile default and can be narrowed per queue
+    # request: off, read, write, or read_write.
+    knowledge_enabled: bool = False
+    knowledge_mode: str = "off"
+    knowledge_base: str = ""
+    knowledge_allowed_bases: list = field(default_factory=list)
+    # Internal per-request guard. Queue administrators set this after resolving
+    # the request policy so every nested researcher gets a base-bound read tool
+    # and cannot accidentally query another allowed corpus.
+    knowledge_bind_configured_base: bool = False
+    knowledge_qdrant_url: str = "http://127.0.0.1:6333"
+    knowledge_collection: str = "chack_research_knowledge"
+    knowledge_catalog_path: str = "~/.local/share/chack-agent/knowledge/catalog.sqlite3"
+    knowledge_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    knowledge_chunk_size_chars: int = 1800
+    knowledge_chunk_overlap_chars: int = 250
+    knowledge_vector_results: int = 8
+    knowledge_exact_results: int = 5
+    knowledge_max_return_chars: int = 24000
+    # Browser-only researchers cannot call the MCP read tool directly. Their
+    # wrapper injects a smaller operator-bounded retrieval preface so the
+    # provider gets useful prior findings without overwhelming the research
+    # request with catalogue metadata.
+    knowledge_browser_vector_results: int = 6
+    knowledge_browser_exact_results: int = 4
+    knowledge_browser_max_return_chars: int = 6000
+    # When enabled for a persistent program, approved plain-text artifacts in
+    # the administrator's disposable evidence workspace are removed only after
+    # Qdrant contains a hash-verified exact source payload. Canonical manifest
+    # sources and lossy HTML/PDF/binary formats are never affected.
+    knowledge_delete_verified_text_artifacts: bool = False
+    # Stronger, explicitly opt-in policy for disposable queue downloads. Once
+    # Qdrant contains a hash-verified copy of the extracted source text, remove
+    # the original supported artifact too (including HTML/XML/PDF). This saves
+    # space but does not preserve the original bytes, layout, or markup.
+    knowledge_delete_verified_extracted_artifacts: bool = False
+    knowledge_allowed_roots: dict = field(default_factory=dict)
+    knowledge_seed_manifests: dict = field(default_factory=dict)
+
     websearcher_enabled: bool = False
     webresearcher_enabled: bool = False
     websearcher_brave_enabled: bool = False
