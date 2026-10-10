@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import threading
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -871,6 +872,41 @@ def test_async_client_rejects_non_origin_or_credential_bearing_urls():
             ChatGPTAsyncApiClient(url, "known-secret")
 
 
+def test_deep_mode_selection_requires_the_actual_composer_mention(monkeypatch):
+    page = MagicMock()
+    composer = MagicMock()
+    monkeypatch.setattr(ChatGPTWebResearchAgentTool, "_composer", lambda _page: composer)
+    composer.locator.return_value.count.return_value = 1
+    ChatGPTWebResearchAgentTool._select_deep_composer_mode(page)
+    assert page.get_by_role.call_count == 2
+    assert page.get_by_role.call_args_list[0].kwargs["name"].search("Add files and more")
+    assert page.get_by_role.call_args_list[1].kwargs["name"].search("Deep research")
+    composer.locator.assert_called_once_with('[app-mention-name="deep-research"]')
+
+    composer.locator.return_value.count.return_value = 0
+    with pytest.raises(ChatGPTWebResearchError, match="was not selected"):
+        ChatGPTWebResearchAgentTool._select_deep_composer_mode(page)
+
+
+def test_deep_send_fills_prompt_before_selecting_app(monkeypatch):
+    page = MagicMock()
+    composer = MagicMock()
+    monkeypatch.setattr(ChatGPTWebResearchAgentTool, "_composer", lambda _page: composer)
+    monkeypatch.setattr(ChatGPTWebResearchAgentTool, "_clear_stale_attachments", lambda _page: None)
+    seen = []
+    composer.fill.side_effect = lambda text: seen.append(("fill", text))
+    monkeypatch.setattr(
+        ChatGPTWebResearchAgentTool, "_select_deep_composer_mode",
+        lambda _page: seen.append(("select", "deep")),
+    )
+    page.locator.return_value.count.return_value = 1
+    page.locator.return_value.first.is_visible.return_value = True
+    page.locator.return_value.first.is_enabled.return_value = True
+    ChatGPTWebResearchAgentTool._send(page, "Synthetic research question", deep=True)
+    assert seen == [("fill", ""), ("fill", "Synthetic research question"), ("select", "deep")]
+    page.locator.return_value.first.click.assert_called_once()
+
+
 def test_deep_connector_discovery_accepts_current_hyphenated_target_url(monkeypatch):
     target = {
         "type": "iframe",
@@ -1237,6 +1273,54 @@ def test_browser_does_not_finish_on_stable_interim_progress(monkeypatch, mode):
     assert helper._wait_and_extract(Page(), terminal_marker=marker) == final.strip()
     assert clock["now"] >= 140
     assert clock["now"] < 240
+
+
+def test_deep_inline_report_waits_past_missing_connector_and_requires_marker(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_deep_timeout_seconds=300, chatgpt_research_poll_seconds=15), mode="deep",
+    )
+    clock = {"now": 0.0}
+    marker = "[CHACK_RESEARCH_COMPLETE_TEST]"
+    interim = "Research still running. " * 75
+    final = "Complete inline Deep report with verified sources. " * 35
+
+    class Page:
+        url = "https://chatgpt.com/c/deep-inline"
+
+        def wait_for_timeout(self, milliseconds):
+            clock["now"] += milliseconds / 1000.0
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(helper, "_click_provider_retry_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_click_deep_start_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: (
+        interim if clock["now"] < 90 else final + "\n" + marker
+    ))
+    monkeypatch.setattr(helper, "_is_running", lambda _page: False)
+    assert helper._wait_and_extract(Page(), terminal_marker=marker) == final.strip()
+    assert 90 <= clock["now"] < 150
+
+
+def test_deep_inline_report_never_accepts_quiet_answer_without_terminal_marker(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_deep_timeout_seconds=300, chatgpt_research_poll_seconds=30), mode="deep",
+    )
+    clock = {"now": 0.0}
+
+    class Page:
+        url = "https://chatgpt.com/c/deep-incomplete"
+
+        def wait_for_timeout(self, milliseconds):
+            clock["now"] += milliseconds / 1000.0
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(helper, "_click_provider_retry_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_click_deep_start_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: "A" * 1500)
+    monkeypatch.setattr(helper, "_is_running", lambda _page: False)
+    with pytest.raises(ChatGPTWebResearchError, match="did not reach an extractable terminal state"):
+        helper._wait_and_extract(Page(), terminal_marker="[missing]")
+    assert clock["now"] == 300
 
 
 def test_pro_final_without_completion_marker_needs_extended_quiet_window(monkeypatch):
