@@ -781,7 +781,18 @@ class ChatGPTWebResearchAgentTool:
         self._select_reasoning_mode(page)
 
     @staticmethod
-    def _send(page, prompt: str) -> None:
+    def _select_deep_composer_mode(page) -> None:
+        """Choose the Deep Research app, not a redirected legacy route."""
+        add = page.get_by_role("button", name=re.compile(r"Add files and more|Adjuntar|Agregar archivos", re.I))
+        add.first.click(timeout=5000)
+        option = page.get_by_role("button", name=re.compile(r"Deep research|Investigaci[oó]n profunda", re.I))
+        option.first.click(timeout=5000)
+        composer = ChatGPTWebResearchAgentTool._composer(page)
+        if composer.locator('[app-mention-name="deep-research"]').count() != 1:
+            raise ChatGPTWebResearchError("Deep Research was not selected in the composer; refusing a normal chat.")
+
+    @staticmethod
+    def _send(page, prompt: str, *, deep: bool = False) -> None:
         ChatGPTWebResearchAgentTool._clear_stale_attachments(page)
         composer = ChatGPTWebResearchAgentTool._composer(page)
         composer.click()
@@ -792,6 +803,10 @@ class ChatGPTWebResearchAgentTool:
             page.keyboard.press("Control+A")
             page.keyboard.press("Backspace")
             page.keyboard.insert_text(prompt)
+
+        if deep:
+            # Selecting the app first would be erased by composer.fill().
+            ChatGPTWebResearchAgentTool._select_deep_composer_mode(page)
 
         send_selectors = (
             "button[data-testid='send-button']",
@@ -1384,7 +1399,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 raise ChatGPTWebResearchError("The Chrome CDP endpoint has no browser context.")
             page = browser.contexts[0].new_page()
             try:
-                page.goto("https://chatgpt.com/deep-research" if self.mode == "deep" else "https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+                page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
                 # domcontentloaded fires before the authenticated React app has
                 # hydrated. Wait for the real composer, otherwise concurrent
                 # launches can falsely look signed-out or mode-less.
@@ -1394,18 +1409,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     timeout=30000,
                 )
                 page.wait_for_timeout(1500)
-                if self.mode == "deep":
-                    marker = page.get_by_text(
-                        re.compile(r"Ask a complex question|Get a full report|Deep research|investigaci[oó]n profunda|informe detallado", re.I)
-                    )
-                    try:
-                        marker.first.wait_for(state="visible", timeout=15000)
-                    except Exception:
-                        pass
-                    body = page.locator("body").inner_text(timeout=5000)
-                    if not re.search(r"deep research|full report|detailed report|investigaci[oó]n profunda|informe detallado", body, re.I):
-                        raise ChatGPTWebResearchError("The /deep-research route did not expose Deep Research mode; refusing to send a normal chat.")
-                else:
+                if self.mode != "deep":
                     selected_mode_metadata = self._select_reasoning_mode_with_retry(page)
                     self._write_json(run_state_path, selected_mode_metadata)
                 terminal_marker = (
@@ -1420,7 +1424,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 )
                 if run_state_path is not None:
                     (run_state_path.parent / "chatgpt-request.md").write_text(browser_prompt, encoding="utf-8")
-                self._send(page, browser_prompt)
+                self._send(page, browser_prompt, deep=self.mode == "deep")
                 page.wait_for_timeout(1000)
                 try:
                     page.wait_for_url(re.compile(r"https://chatgpt\.com/c/"), timeout=30000)
