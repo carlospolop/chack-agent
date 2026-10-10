@@ -867,6 +867,18 @@ class ChatGPTWebResearchAgentTool:
         terminal_marker = ""
         if lines and re.fullmatch(r"[A-Z][A-Z0-9_]{5,}", lines[-1].strip()):
             terminal_marker = lines.pop().strip()
+        else:
+            # ChatGPT can render attachment labels after the final transport
+            # marker, and source-link extraction can then append >1,000 chars.
+            # Move an exact marker line from the raw answer's short UI footer
+            # to the end; keep the strict terminal check in the caller.
+            for index in range(len(lines) - 1, -1, -1):
+                candidate = lines[index].strip()
+                if re.fullmatch(r"\[CHACK_RESEARCH_COMPLETE_[0-9a-f]{32}\]", candidate):
+                    if len("\n".join(lines[index + 1:])) <= 500:
+                        terminal_marker = candidate
+                        lines.pop(index)
+                    break
         combined = "\n".join(lines).rstrip() + "\n\n" + source_block
         if terminal_marker:
             combined += "\n\n" + terminal_marker

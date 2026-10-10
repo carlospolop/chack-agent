@@ -1013,6 +1013,21 @@ def test_source_links_are_not_repeated_when_already_rendered_in_text():
     assert answer == f"Evidence: {url}"
 
 
+def test_transport_marker_survives_chatgpt_attachment_footer_and_long_source_list():
+    marker = "[CHACK_RESEARCH_COMPLETE_" + "a" * 32 + "]"
+    raw = "Completed sourced report.\n" + marker + "\n\nfinal-report.pdf\nPDF\nmanifest.json\nCode"
+    links = [{"label": f"Source {i}", "url": f"https://example.org/source/{i}"} for i in range(30)]
+    answer = ChatGPTWebResearchAgentTool._append_source_links(raw, links)
+    assert answer.endswith(marker)
+    assert answer.count(marker) == 1
+    assert len(answer) > 1000
+    assert "https://example.org/source/29" in answer
+
+    interim = marker + "\n" + "Still researching. " * 100
+    not_terminal = ChatGPTWebResearchAgentTool._append_source_links(interim, links)
+    assert not not_terminal.endswith(marker)
+
+
 def test_new_chatgpt_markup_extracts_only_assistant_answer_and_sources():
     """The conversation UI no longer sets data-message-author-role."""
     class Locator:
