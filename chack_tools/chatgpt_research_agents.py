@@ -1345,17 +1345,13 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 and marker_at >= max(0, len(answer) - 1000)
                 and (marker_at == 0 or answer[marker_at - 1] == "\n")
             )
-            # Pro can temporarily hide its running controls while drafting an
-            # interim progress message. Require an explicit end marker, or a
-            # long quiet fallback when the provider omits the marker.
-            quiet_enough = (
-                not terminal_marker
-                or (self.mode != "deep" and now - last_answer_change_at >= 180
-                    and now - started_monotonic >= 240)
-            )
+            # Pro/Extra High can go quiet for minutes while drafting an interim
+            # progress message. Silence is never proof of a final answer.
+            # Production browser runs always send a unique terminal marker.
+            marker_or_legacy_completion = marker_complete or not terminal_marker
             if (extractable and changed_after_force and not running
                     and stable_polls >= required_stable_polls
-                    and (marker_complete or quiet_enough)):
+                    and marker_or_legacy_completion):
                 if marker_complete:
                     return (answer[:marker_at] + answer[marker_at + len(terminal_marker):]).strip()
                 return answer

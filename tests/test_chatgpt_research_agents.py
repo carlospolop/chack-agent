@@ -1323,9 +1323,11 @@ def test_deep_inline_report_never_accepts_quiet_answer_without_terminal_marker(m
     assert clock["now"] == 300
 
 
-def test_pro_final_without_completion_marker_needs_extended_quiet_window(monkeypatch):
+@pytest.mark.parametrize("mode", ["pro", "xhigh"])
+def test_stable_interim_never_finishes_without_completion_marker(monkeypatch, mode):
     helper = ChatGPTWebResearchAgentTool(
-        ToolsConfig(chatgpt_pro_timeout_seconds=400, chatgpt_research_poll_seconds=30), mode="pro",
+        ToolsConfig(chatgpt_pro_timeout_seconds=400, chatgpt_xhigh_timeout_seconds=400,
+                    chatgpt_research_poll_seconds=30), mode=mode,
     )
     clock = {"now": 0.0}
 
@@ -1340,8 +1342,9 @@ def test_pro_final_without_completion_marker_needs_extended_quiet_window(monkeyp
     monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: False)
     monkeypatch.setattr(helper, "_longest_answer", lambda _page: "A" * 300)
     monkeypatch.setattr(helper, "_is_running", lambda _page: False)
-    assert helper._wait_and_extract(Page(), terminal_marker="[missing]") == "A" * 300
-    assert clock["now"] == 240
+    with pytest.raises(ChatGPTWebResearchError, match="did not reach an extractable terminal state"):
+        helper._wait_and_extract(Page(), terminal_marker="[missing]")
+    assert clock["now"] == 400
 
 
 @pytest.mark.parametrize("mode,answer", [("pro", "SMOKE_PRO_OK"), ("xhigh", "SMOKE_XHIGH_OK")])
