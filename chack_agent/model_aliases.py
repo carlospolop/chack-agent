@@ -9,6 +9,7 @@ import requests
 
 # Local fallback only. Runtime resolution prefers the central model-alias Lambda.
 OPENAI_BEST_QUALITY = "gpt-5.6-sol"
+CODEX_BEST_QUALITY = "gpt-5.6-sol"
 OPENAI_CHEAP_BUT_QUALITY = "gpt-5.4-mini"
 OPENAI_BEST_CHEAPEST = "gpt-5.4-nano"
 ANTHROPIC_BEST_QUALITY = "claude-opus-4-6"
@@ -32,7 +33,7 @@ _ALIAS_EQUIVALENTS_BY_PROVIDER: Dict[str, Dict[str, str]] = {
         "BEST_CHEAPEST": "OPENAI_BEST_CHEAPEST",
     },
     "codex": {
-        "BEST_QUALITY": "OPENAI_BEST_QUALITY",
+        "BEST_QUALITY": "CODEX_BEST_QUALITY",
         "CHEAP_BUT_QUALITY": "OPENAI_CHEAP_BUT_QUALITY",
         "BEST_CHEAPEST": "OPENAI_BEST_CHEAPEST",
     },
@@ -118,6 +119,7 @@ _OPENAI_ALIAS_EQUIVALENTS: Dict[str, str] = {
 
 MODEL_ALIASES: Dict[str, str] = {
     "OPENAI_BEST_QUALITY": OPENAI_BEST_QUALITY,
+    "CODEX_BEST_QUALITY": CODEX_BEST_QUALITY,
     "OPENAI_CHEAP_BUT_QUALITY": OPENAI_CHEAP_BUT_QUALITY,
     "OPENAI_BEST_CHEAPEST": OPENAI_BEST_CHEAPEST,
     "ANTHROPIC_BEST_QUALITY": ANTHROPIC_BEST_QUALITY,
@@ -150,7 +152,7 @@ def get_public_model_aliases() -> Dict[str, str]:
     return {
         key: value
         for key, value in MODEL_ALIASES.items()
-        if key.startswith(("OPENAI_", "ANTHROPIC_", "OPENROUTER_"))
+        if key.startswith(("OPENAI_", "CODEX_", "ANTHROPIC_", "OPENROUTER_"))
     }
 
 
