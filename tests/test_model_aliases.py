@@ -158,6 +158,19 @@ class ModelAliasResolutionTests(unittest.TestCase):
                 "gpt-central-assignment",
             )
 
+    def test_codex_best_quality_stays_compatible_when_openai_alias_moves(self) -> None:
+        with patch("chack_agent.model_aliases._refresh_remote_alias_caches"), patch(
+            "chack_agent.model_aliases._REMOTE_MODEL_CACHE",
+            {"OPENAI_BEST_QUALITY": "gpt-6-sol", "CODEX_BEST_QUALITY": "gpt-5.6-sol"},
+        ):
+            self.assertEqual(resolve_model_alias("BEST_QUALITY", provider="openai"), "gpt-6-sol")
+            self.assertEqual(resolve_model_alias("BEST_QUALITY", provider="codex"), "gpt-5.6-sol")
+        # Older alias servers may not publish CODEX_BEST_QUALITY yet.
+        with patch("chack_agent.model_aliases._refresh_remote_alias_caches"), patch(
+            "chack_agent.model_aliases._REMOTE_MODEL_CACHE", {"OPENAI_BEST_QUALITY": "gpt-6-sol"}
+        ):
+            self.assertEqual(resolve_model_alias("BEST_QUALITY", provider="codex"), "gpt-5.6-sol")
+
     def test_resolve_model_alias_does_not_treat_codex_access_token_as_generic_model_priority(self) -> None:
         with patch.dict("os.environ", {"CODEX_ACCESS_TOKEN": "codex-access-token"}, clear=False):
             with self.assertRaisesRegex(ValueError, "requires one of OPENAI_API_KEY"):
@@ -340,6 +353,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
 
     def test_default_model_aliases_do_not_publish_generic_best_aliases(self) -> None:
         aliases = get_default_model_aliases()
+        self.assertEqual(aliases["CODEX_BEST_QUALITY"], "gpt-5.6-sol")
         self.assertNotIn("BEST_QUALITY", aliases)
         self.assertNotIn("CHEAP_BUT_QUALITY", aliases)
         self.assertNotIn("BEST_CHEAPEST", aliases)
