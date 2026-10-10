@@ -1058,6 +1058,7 @@ class ChatGPTWebResearchAgentTool:
     @staticmethod
     def _is_running(page) -> bool:
         running_patterns = (
+            re.compile(r"^\s*(?:Stop|Detener)\s*$", re.I),
             re.compile(r"stop (generating|research|thinking|answering)", re.I),
             re.compile(r"detener (la )?(generaci[oó]n|investigaci[oó]n|respuesta)", re.I),
             re.compile(r"^\s*Answer now\s*$", re.I),

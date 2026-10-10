@@ -1164,6 +1164,22 @@ def test_running_state_accepts_stop_answering_label():
     assert ChatGPTWebResearchAgentTool._is_running(Page()) is True
 
 
+@pytest.mark.parametrize("label,expected", [("Stop", True), ("Detener", True), ("Stop Voice", False)])
+def test_running_state_recognizes_generic_generation_stop_without_voice(label, expected):
+    class Locator:
+        def __init__(self, matches):
+            self.matches = matches
+
+        def count(self):
+            return int(self.matches)
+
+    class Page:
+        def get_by_role(self, _role, name):
+            return Locator(bool(name.search(label)))
+
+    assert ChatGPTWebResearchAgentTool._is_running(Page()) is expected
+
+
 def test_running_state_accepts_answer_now_label():
     class Locator:
         def count(self):
