@@ -204,8 +204,55 @@ class ChatGPTRemoteWorker:
                     last_partial = partial
                 if response.get("cancel_requested"):
                     cancelled.set()
+                    self._cancel_active_lease_and_restart(
+                        job_id=job_id,
+                        lease_id=lease_id,
+                        run_state_path=run_state_path,
+                        partial_path=partial_path,
+                    )
             except ChatGPTAsyncApiError as exc:
                 LOG.warning("job=%s heartbeat failed (%s)", job_id, exc.error_code or type(exc).__name__)
+
+    def _cancel_active_lease_and_restart(
+        self,
+        *,
+        job_id: str,
+        lease_id: str,
+        run_state_path: Path,
+        partial_path: Path,
+    ) -> None:
+        """Terminalize a cancelled browser lease and free the worker slot.
+
+        Playwright browser execution is synchronous and cannot be safely killed
+        from its heartbeat thread. The hard-deadline path already uses a process
+        restart for this boundary; cancellation needs the same fail-closed
+        behavior or a cancelled Deep/Pro job can monopolize the worker until its
+        full output deadline.
+        """
+
+        state = _read_json(run_state_path)
+        partial = _read_text(partial_path)
+        state.update(
+            {
+                "terminal_state": "cancelled",
+                "finished_at": time.time(),
+                "answer_chars": max(len(partial), int(state.get("answer_chars") or 0)),
+            }
+        )
+        _write_secure_json(run_state_path, state)
+        self._send_or_save_completion(
+            job_id,
+            {
+                "lease_id": lease_id,
+                "status": "CANCELLED",
+                "partial_result": partial,
+                "metadata": _public_metadata(state),
+                "error_code": "CANCEL_REQUESTED",
+                "error_message": "The owning research task cancelled this browser job.",
+            },
+        )
+        LOG.critical("job=%s cancellation accepted; restarting to release browser execution", job_id)
+        os._exit(76)
 
     def _hard_deadline_loop(
         self,

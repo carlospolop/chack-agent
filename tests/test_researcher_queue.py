@@ -88,6 +88,86 @@ def test_queue_passes_its_runtime_cap_to_the_nested_administrator(monkeypatch):
     assert seen["runtime_cap_minutes"] == 180
 
 
+def test_queue_caps_child_contracts_before_the_synthesis_reserve(monkeypatch):
+    import chack_tools.agents_toolset as agents_toolset_module
+
+    seen = {}
+
+    class FakeAdministrator:
+        def __init__(self, *args, **kwargs):
+            seen["config"] = args[0]
+            seen.update(kwargs)
+            self.max_turns = kwargs.get("max_turns", 30)
+
+    monkeypatch.setattr(
+        agents_toolset_module,
+        "ResearcherAdministratorAgentTool",
+        FakeAdministrator,
+    )
+    AgentsToolset(
+        ToolsConfig(
+            researcher_queue_enabled=True,
+            deepchatgpt_enabled=True,
+            prochatgpt_enabled=True,
+            researcher_queue_researchers=["deepchatgpt", "prochatgpt"],
+            researcher_queue_max_runtime_minutes=110,
+            researcher_administrator_synthesis_reserve_minutes=5,
+            researcher_administrator_child_timeout_seconds=9000,
+            chatgpt_async_max_wait_seconds=7200,
+            chatgpt_deep_timeout_seconds=9000,
+            chatgpt_pro_timeout_seconds=9000,
+        ),
+        model_provider="openai",
+        default_model="m",
+    )
+
+    private_config = seen["config"]
+    # 110 minutes minus a five-minute synthesis reserve.
+    assert private_config.chatgpt_async_max_wait_seconds == 6300
+    assert private_config.researcher_administrator_child_timeout_seconds == 6300
+    # Leave five minutes inside the researcher window for remote propagation.
+    assert private_config.chatgpt_deep_timeout_seconds == 6000
+    assert private_config.chatgpt_pro_timeout_seconds == 6000
+    assert seen["runtime_cap_minutes"] == 110
+
+
+def test_queue_clamps_an_oversized_synthesis_reserve(monkeypatch):
+    import chack_tools.agents_toolset as agents_toolset_module
+
+    seen = {}
+
+    class FakeAdministrator:
+        def __init__(self, *args, **kwargs):
+            seen["config"] = args[0]
+            self.max_turns = kwargs.get("max_turns", 30)
+
+    monkeypatch.setattr(
+        agents_toolset_module,
+        "ResearcherAdministratorAgentTool",
+        FakeAdministrator,
+    )
+    AgentsToolset(
+        ToolsConfig(
+            researcher_queue_enabled=True,
+            deepchatgpt_enabled=True,
+            researcher_queue_researchers=["deepchatgpt"],
+            researcher_queue_max_runtime_minutes=5,
+            researcher_administrator_synthesis_reserve_minutes=10,
+            researcher_administrator_child_timeout_seconds=9000,
+            chatgpt_async_max_wait_seconds=9000,
+            chatgpt_deep_timeout_seconds=9000,
+        ),
+        model_provider="openai",
+        default_model="m",
+    )
+
+    private_config = seen["config"]
+    assert private_config.researcher_administrator_synthesis_reserve_minutes == 4
+    assert private_config.chatgpt_async_max_wait_seconds == 60
+    assert private_config.researcher_administrator_child_timeout_seconds == 60
+    assert private_config.chatgpt_deep_timeout_seconds == 60
+
+
 
 def test_queue_runtime_forces_luna_max_over_legacy_aliases():
     config = ToolsConfig(

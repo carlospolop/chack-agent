@@ -168,6 +168,10 @@ The synchronous `run()` and asynchronous `arun()` APIs support per-run tool limi
 
 ## GitHub Action
 
+For queue requests with read-enabled curated knowledge, the client-side researcher wrapper queries the policy-bound local Qdrant corpus before submitting a Deep/Pro browser job. The bounded, provenance-tagged passages are embedded in the exact browser prompt as untrusted leads, and an audit receipt is preserved with the run; the browser cannot choose or write a corpus.
+
+`playwright_fetch` also requires the Python `playwright` package plus installed browser binaries. Once installed, set `tools.playwright_enabled: true` to expose it. If Playwright is missing or Chromium cannot launch, the tool is not registered.
+
 The composite Action accepts prompts, schemas, model settings, JSON overrides for tools/session/agent configuration, limits, and provider credentials. Track `master`, matching the Naxus consumers:
 
 ```yaml

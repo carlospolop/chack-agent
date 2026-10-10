@@ -36,6 +36,12 @@ from .subagent_config import (
     enforce_prompt_str_or_list_schema,
     normalize_subagent_prompts,
 )
+from .knowledge_store import (
+    decode_knowledge_policy,
+    encode_knowledge_policy,
+    normalize_knowledge_base,
+    normalize_knowledge_mode,
+)
 from .telemetry import reset_log_context, run_with_tool_logging, set_log_context
 
 try:
@@ -745,12 +751,33 @@ class ResearcherQueueAgentTool:
         self.queue = queue or RESEARCHER_QUEUE
 
     # -- public entrypoint (blocks until the batch finishes) --
-    def run(self, prompt: str | list[str], save_artifacts: bool = False, queue_id: str = "") -> str:
+    def run(
+        self,
+        prompt: str | list[str],
+        save_artifacts: bool = False,
+        queue_id: str = "",
+        knowledge_mode: str = "",
+        knowledge_base: str = "",
+    ) -> str:
         prompts, error = normalize_subagent_prompts(
             prompt, min_chars=self.min_prompt_chars, max_prompts=self.max_requests_per_call
         )
         if error:
             return error
+        mode = normalize_knowledge_mode(knowledge_mode, getattr(self.config, "knowledge_mode", "off"))
+        base = normalize_knowledge_base(knowledge_base or getattr(self.config, "knowledge_base", ""))
+        if mode != "off" and not getattr(self.config, "knowledge_enabled", False):
+            return "ERROR: knowledge_mode requested but knowledge is disabled for this queue."
+        allowed = {
+            normalize_knowledge_base(item)
+            for item in (getattr(self.config, "knowledge_allowed_bases", []) or [])
+            if item
+        }
+        if mode != "off" and not base:
+            return "ERROR: knowledge_base is required when knowledge_mode is not off."
+        if allowed and base and base not in allowed:
+            return f"ERROR: knowledge_base '{base}' is not allowed for this queue."
+        prompts = [encode_knowledge_policy(item, mode=mode, knowledge_base=base) for item in prompts]
         preserve_artifacts = bool(
             save_artifacts
             or getattr(self.config, "researcher_queue_force_save_artifacts", False)
@@ -766,6 +793,27 @@ class ResearcherQueueAgentTool:
             queue_id=queue_id,
         )
 
+    def _merge_prompts_by_knowledge_policy(self, prompts: list[str]) -> list[Any]:
+        partitions: dict[tuple[str, str], list[tuple[int, str]]] = {}
+        for index, prompt in enumerate(prompts):
+            policy, clean_prompt = decode_knowledge_policy(prompt)
+            key = (policy["mode"], policy["knowledge_base"])
+            partitions.setdefault(key, []).append((index, clean_prompt))
+        groups: list[Any] = []
+        for (mode, base), rows in partitions.items():
+            clean_prompts = [prompt for _index, prompt in rows]
+            try:
+                local_groups = self._merge_prompts(clean_prompts)
+            except Exception:
+                local_groups = [(prompt, [index], "merge failed; dispatched this request separately") for index, prompt in enumerate(clean_prompts)]
+            for group in local_groups:
+                merged, local_members, reason = self._normalize_group(group)
+                members = [rows[index][0] for index in local_members if 0 <= index < len(rows)]
+                if not members:
+                    continue
+                groups.append((encode_knowledge_policy(merged, mode=mode, knowledge_base=base), members, reason))
+        return groups
+
     # -- batch worker: merge, then one administrator per merged request --
     def _process_batch(
         self,
@@ -776,7 +824,7 @@ class ResearcherQueueAgentTool:
         progress: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> str:
         try:
-            groups = self._merge_prompts(list(prompts))
+            groups = self._merge_prompts_by_knowledge_policy(list(prompts))
         except Exception:
             groups = [(p, [i], "merge failed; dispatched this request separately") for i, p in enumerate(prompts)]
         if progress:
@@ -803,6 +851,7 @@ class ResearcherQueueAgentTool:
         )
         def _run_one_cluster(index: int, group: Any) -> dict[str, Any]:
             merged_prompt, members, merge_reason = self._normalize_group(group)
+            knowledge_policy, clean_prompt = decode_knowledge_policy(merged_prompt)
             research_id = f"research-{index:03d}-{uuid.uuid4().hex[:8]}"
             research_dir = os.path.join(queue_root, "researches", research_id)
             os.makedirs(research_dir, exist_ok=True)
@@ -817,13 +866,14 @@ class ResearcherQueueAgentTool:
                 },
             )
             entry: dict[str, Any] = {
-                "topic": _topic_of(merged_prompt),
+                "topic": _topic_of(clean_prompt),
                 "members": list(members),
                 "research_id": research_id,
             }
             if merge_reason:
                 entry["merge_reason"] = merge_reason
             run_ctx = dict(ctx)
+            run_ctx.update(knowledge_policy)
             run_ctx["research_master_dir"] = research_dir
             if batch_id:
                 run_ctx["session_id"] = f"{ctx.get('session_id')}:{batch_id}:{research_id}"
@@ -856,7 +906,7 @@ class ResearcherQueueAgentTool:
                 log_token = set_log_context(_chack_tool_progress_callback=_record_tool_event)
             try:
                 admin_result = self._run_admin(
-                    merged_prompt,
+                    clean_prompt,
                     run_ctx,
                     save_artifacts=save_artifacts,
                 )
@@ -1159,7 +1209,13 @@ def get_researcher_queue_tool(helper: ResearcherQueueAgentTool):
     max_n = helper.max_requests_per_call
 
     @function_tool(name_override="researcher_queue")
-    def researcher_queue(prompt: str | list[str], save_artifacts: bool = True, queue_id: str = "") -> str:
+    def researcher_queue(
+        prompt: str | list[str],
+        save_artifacts: bool = True,
+        queue_id: str = "",
+        knowledge_mode: str = "",
+        knowledge_base: str = "",
+    ) -> str:
         """Submit research to the shared research queue and wait for the results.
 
         Many agents can call this at the same time. Requests are collected for a short
@@ -1181,6 +1237,8 @@ def get_researcher_queue_tool(helper: ResearcherQueueAgentTool):
                 Use it when multiple MCP callers should intentionally share the same
                 long-lived queue evidence folder across requests. Leave empty for the
                 process-local default batching queue.
+            knowledge_mode: off, read, write, or read_write. Empty uses the queue profile default.
+            knowledge_base: Allowed logical knowledge base to query/update. Empty uses the profile default.
 
         Output: compact JSON listing each administrator synthesis plus one bounded
         digest per researcher. When artifacts are preserved, output_files maps every
@@ -1194,8 +1252,20 @@ def get_researcher_queue_tool(helper: ResearcherQueueAgentTool):
         try:
             return run_with_tool_logging(
                 "researcher_queue",
-                {"prompt": prompt, "save_artifacts": save_artifacts, "queue_id": effective_queue_id},
-                lambda: helper.run(prompt, save_artifacts=save_artifacts, queue_id=effective_queue_id),
+                {
+                    "prompt": prompt,
+                    "save_artifacts": save_artifacts,
+                    "queue_id": effective_queue_id,
+                    "knowledge_mode": knowledge_mode,
+                    "knowledge_base": knowledge_base,
+                },
+                lambda: helper.run(
+                    prompt,
+                    save_artifacts=save_artifacts,
+                    queue_id=effective_queue_id,
+                    knowledge_mode=knowledge_mode,
+                    knowledge_base=knowledge_base,
+                ),
             )
         except Exception as exc:
             return f"ERROR: researcher_queue failed ({exc})"
@@ -1206,6 +1276,7 @@ def get_researcher_queue_tool(helper: ResearcherQueueAgentTool):
         f"Parameters: prompt is one research request or a list of up to {max_n}. "
         "Set save_artifacts true when the batch should preserve evidence files and return evidence_data_path. "
         "Set queue_id to a value returned by researcher_queue_create when MCP callers should share one queue artifact folder. "
+        "Set knowledge_mode to off/read/write/read_write and knowledge_base to an allowed logical corpus; empty values use profile defaults. "
         "The call blocks until the shared queue processes the batch.\n"
         "Output: compact JSON listing relevant research for this caller (topic + administrator conclusions + bounded per-researcher digests). When preserved it also returns queue/request/evidence paths and an output manifest for the complete structured and exact raw researcher files."
     )

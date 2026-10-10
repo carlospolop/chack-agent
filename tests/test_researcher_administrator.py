@@ -83,6 +83,36 @@ def test_administrator_runtime_cap_is_explicit_and_configurable():
     assert queue.runtime_cap_minutes == 180
 
 
+def test_child_timeout_honors_long_browser_research_contracts():
+    remote = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            chatgpt_execution_backend="remote",
+            chatgpt_pro_timeout_seconds=5400,
+            chatgpt_deep_timeout_seconds=4500,
+            chatgpt_async_max_wait_seconds=7200,
+            researcher_administrator_child_timeout_seconds=2100,
+        ),
+        model_provider="openai",
+        fallback_model="m",
+    )
+    local = ResearcherAdministratorAgentTool(
+        ToolsConfig(
+            chatgpt_execution_backend="local",
+            chatgpt_pro_timeout_seconds=5400,
+            researcher_administrator_child_timeout_seconds=2100,
+        ),
+        model_provider="openai",
+        fallback_model="m",
+    )
+
+    assert remote._child_timeout_for_researchers(["scientific"]) == 2100
+    assert remote._child_timeout_for_researchers(["deepchatgpt", "prochatgpt"]) == 7200
+    assert local._child_timeout_for_researchers(["prochatgpt"]) == 5400
+    assert remote._termination_grace_for_researcher("scientific") == 5.0
+    assert remote._termination_grace_for_researcher("prochatgpt_researcher") == 45.0
+    assert local._termination_grace_for_researcher("prochatgpt_researcher") == 5.0
+
+
 def test_administrator_synthesis_reserve_defaults_to_five_minutes():
     assert ToolsConfig().researcher_administrator_synthesis_reserve_minutes == 5
 
@@ -250,6 +280,76 @@ def test_administrator_system_prompt_is_compact_and_has_one_first_wave_policy():
     assert "normally run 3-5" not in prompt
     assert "key_artifacts" not in prompt
     assert "CHACK_RESEARCH_DATA_DIR" not in prompt
+
+
+def test_durable_running_researcher_ledger_fails_closed(tmp_path):
+    from chack_tools.researcher_administrator_agent import _researcher_failures_from_async_ledgers
+
+    ledger_dir = tmp_path / "researcher_jobs"
+    ledger_dir.mkdir()
+    (ledger_dir / "research-job-example.json").write_text(json.dumps({
+        "complete": False,
+        "tasks": [{
+            "task_id": "task-deep",
+            "researcher": "deepchatgpt",
+            "researcher_tool": "deepchatgpt_researcher",
+            "status": "running",
+            "execution_active": True,
+            "failure_reason": "",
+        }],
+    }))
+
+    failures = _researcher_failures_from_async_ledgers(str(tmp_path))
+
+    assert failures == [{
+        "researcher_tool": "deepchatgpt_researcher",
+        "status": "running",
+        "task_id": "task-deep",
+        "failure_reason": (
+            "Administrator returned while launched researcher remained running; "
+            "the durable job ledger did not contain a terminal result."
+        ),
+    }]
+
+
+def test_terminal_failed_async_output_is_recovered_for_audit_and_call_count(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    output_dir = tmp_path / "researcher_outputs"
+    output_dir.mkdir()
+    (output_dir / "async_task-deep_deepchatgpt_researcher.json").write_text(
+        json.dumps({
+            "research_worked": False,
+            "failure_reason": "Browser output deadline expired before a terminal report.",
+            "researcher_tool": "deepchatgpt_researcher",
+            "tool_call_counts": {"chatgpt_web": 1},
+            "total_tool_calls": 1,
+        }),
+        encoding="utf-8",
+    )
+
+    failures = admin_mod._researcher_failures_from_async_output_files(str(tmp_path))
+    final = admin_mod.finalize_researcher_administrator_output(
+        '{"research_worked":false,"failure_reason":"required child failed",'
+        '"administrator_conclusions":"The administrator retained the successful evidence but failed the run because the required Deep researcher did not return a terminal report."}',
+        evidence_dir=str(tmp_path),
+        save_artifacts=False,
+        researcher_responses=[],
+        researcher_failures=failures,
+        tool_counts=Counter(),
+        steps=[],
+    )
+    payload = json.loads(final)
+
+    assert payload["researcher_failures"] == [{
+        "researcher_tool": "deepchatgpt_researcher",
+        "status": "research_failed",
+        "failure_reason": "Browser output deadline expired before a terminal report.",
+        "result_path": "researcher_outputs/async_task-deep_deepchatgpt_researcher.json",
+        "tool_call_counts": {"chatgpt_web": 1},
+        "total_tool_calls": 1,
+    }]
+    assert payload["researcher_call_counts"] == {"deepchatgpt_researcher": 1}
 
 
 def test_administrator_registered_only_when_enabled():
@@ -3701,6 +3801,185 @@ def test_administrator_finalizer_appends_researcher_outputs_and_usage():
         "websearcher_research": 2,
     }
     assert payload["total_researcher_calls"] == 3
+
+
+def test_administrator_finalizer_fails_closed_when_researcher_skips_required_knowledge_search():
+    from chack_tools.researcher_administrator_agent import finalize_researcher_administrator_output
+
+    researcher_response = {
+        "research_worked": True,
+        "failure_reason": "",
+        "overall_summary": "The web researcher returned a substantive evidence-backed review with provenance and limitations.",
+        "findings": [{
+            "claim": "The investigated claim is supported by directly inspectable evidence.",
+            "summary": "The researcher compared primary sources, retained provenance, and documented contradictions and uncertainty.",
+        }],
+        "full_research_review": "A complete review of the sources, dates, provenance, contradictions, and limitations.",
+        "researcher_tool": "websearcher_research",
+        "tool_call_counts": {"search_google_web": 2},
+        "total_tool_calls": 2,
+    }
+
+    final = finalize_researcher_administrator_output(
+        '{"research_worked":true,"failure_reason":"","administrator_conclusions":"The administrator compared the evidence, provenance, contradictions, and limitations before reaching this substantive synthesis."}',
+        evidence_dir="/tmp/evidence",
+        save_artifacts=False,
+        researcher_responses=[researcher_response],
+        tool_counts=Counter({"knowledge_search": 1, "websearcher_research": 1}),
+        steps=[],
+        require_knowledge_search=True,
+    )
+    payload = json.loads(final)
+
+    assert payload["research_worked"] is False
+    assert payload["researcher_responses"][0]["research_worked"] is False
+    assert payload["researcher_failures"][0]["status"] == "knowledge_search_missing"
+    assert "knowledge_search preflight" in payload["researcher_failures"][0]["failure_reason"]
+
+
+def test_administrator_finalizer_fails_closed_when_admin_skips_required_knowledge_search():
+    from chack_tools.researcher_administrator_agent import finalize_researcher_administrator_output
+
+    researcher_response = {
+        "research_worked": True,
+        "failure_reason": "",
+        "overall_summary": "The web researcher returned a substantive evidence-backed review with provenance and limitations.",
+        "findings": [{
+            "claim": "The investigated claim is supported by directly inspectable evidence.",
+            "summary": "The researcher compared primary sources, retained provenance, and documented contradictions and uncertainty.",
+        }],
+        "full_research_review": "A complete review of the sources, dates, provenance, contradictions, and limitations.",
+        "researcher_tool": "websearcher_research",
+        "tool_call_counts": {"knowledge_search": 1, "search_google_web": 2},
+        "total_tool_calls": 3,
+    }
+
+    final = finalize_researcher_administrator_output(
+        '{"research_worked":true,"failure_reason":"","administrator_conclusions":"The administrator compared the evidence, provenance, contradictions, and limitations before reaching this substantive synthesis."}',
+        evidence_dir="/tmp/evidence",
+        save_artifacts=False,
+        researcher_responses=[researcher_response],
+        tool_counts=Counter({"websearcher_research": 1}),
+        steps=[],
+        require_knowledge_search=True,
+    )
+    payload = json.loads(final)
+
+    assert payload["research_worked"] is False
+    assert payload["researcher_responses"][0]["research_worked"] is True
+    assert "administrator did not perform" in payload["failure_reason"]
+
+
+def test_administrator_finalizer_fails_closed_on_stale_knowledge_decisions(tmp_path):
+    from chack_tools.researcher_administrator_agent import finalize_researcher_administrator_output
+
+    child_dir = tmp_path / "websearcher"
+    child_dir.mkdir()
+    researcher_response = {
+        "research_worked": True,
+        "failure_reason": "",
+        "overall_summary": "The researcher returned a substantive evidence-backed review.",
+        "findings": [{
+            "claim": "The investigated claim has directly inspectable supporting evidence.",
+            "summary": "The researcher compared primary sources, retained provenance, and documented limitations and uncertainty in enough detail for administrator review.",
+        }],
+        "full_research_review": "A complete evidence review with provenance and limitations.",
+        "researcher_tool": "websearcher_research",
+        "evidence_data_path": str(child_dir),
+        "knowledge_candidates": [{
+            "filename": "current.txt",
+            "disposition": "ingest_candidate",
+            "reason": "Durable primary evidence suitable for retrieval.",
+            "title": "Current evidence",
+            "source_url": "https://example.test/current",
+            "evidence_type": "primary",
+        }],
+    }
+    output = json.dumps({
+        "research_worked": True,
+        "failure_reason": "",
+        "administrator_conclusions": "The administrator compared evidence, provenance, contradictions, and limitations before reaching this substantive conclusion.",
+        "knowledge_decisions": [{
+            "filename": "websearcher/stale.txt",
+            "disposition": "approved",
+            "reason": "This stale row deliberately replaces the real final candidate.",
+            "title": "Stale evidence",
+            "source_url": "https://example.test/stale",
+            "evidence_type": "primary",
+            "delete_after_ingest": False,
+        }],
+    })
+
+    final = finalize_researcher_administrator_output(
+        output,
+        evidence_dir=str(tmp_path),
+        save_artifacts=False,
+        researcher_responses=[researcher_response],
+        tool_counts=Counter({"websearcher_research": 1}),
+        steps=[],
+    )
+    payload = json.loads(final)
+
+    assert payload["research_worked"] is False
+    assert "did not exactly match" in payload["failure_reason"]
+    assert "missing=websearcher/current.txt" in payload["failure_reason"]
+    assert "unexpected=websearcher/stale.txt" in payload["failure_reason"]
+
+
+def test_administrator_finalizer_archives_pure_missing_knowledge_decision(tmp_path):
+    from chack_tools.researcher_administrator_agent import finalize_researcher_administrator_output
+
+    child_dir = tmp_path / "websearcher"
+    child_dir.mkdir()
+    researcher_response = {
+        "research_worked": True,
+        "failure_reason": "",
+        "overall_summary": "The researcher returned a substantive evidence-backed review.",
+        "findings": [],
+        "full_research_review": "A complete evidence review with provenance and limitations.",
+        "researcher_tool": "websearcher_research",
+        "evidence_data_path": str(child_dir),
+        "knowledge_candidates": [{
+            "filename": "omitted.txt",
+            "disposition": "ingest_candidate",
+            "reason": "Durable primary evidence suitable for administrator review.",
+            "title": "Omitted evidence",
+            "source_url": "https://example.test/omitted",
+            "evidence_type": "primary",
+        }],
+    }
+    output = json.dumps({
+        "research_worked": True,
+        "failure_reason": "",
+        "administrator_conclusions": "The administrator completed a substantive synthesis.",
+        "knowledge_decisions": [],
+    })
+
+    payload = json.loads(finalize_researcher_administrator_output(
+        output,
+        evidence_dir=str(tmp_path),
+        save_artifacts=False,
+        researcher_responses=[researcher_response],
+        tool_counts=Counter({"websearcher_research": 1}),
+        steps=[],
+    ))
+
+    assert payload["research_worked"] is True
+    assert payload["knowledge_decision_reconciliation"] == {
+        "archive_only_missing": ["websearcher/omitted.txt"],
+    }
+    assert payload["knowledge_decisions"] == [{
+        "filename": "websearcher/omitted.txt",
+        "disposition": "archive_only",
+        "reason": (
+            "Runtime fail-safe archived a researcher nomination omitted by the "
+            "administrator; it was not automatically approved or deleted."
+        ),
+        "title": "Omitted evidence",
+        "source_url": "https://example.test/omitted",
+        "evidence_type": "primary",
+        "delete_after_ingest": False,
+    }]
 
 
 def test_administrator_finalizer_counts_partial_artifact_researcher(tmp_path):

@@ -45,6 +45,21 @@ from .research_artifacts import (
     reset_research_artifact_context,
     set_research_artifact_context,
 )
+from .knowledge_store import (
+    KnowledgeStore,
+    delete_discarded_artifacts,
+    documents_from_admin_decisions,
+    knowledge_can_read,
+    knowledge_can_write,
+    knowledge_policy_instruction,
+    normalize_admin_knowledge_decisions,
+    normalize_knowledge_base,
+    normalize_knowledge_mode,
+    qualified_knowledge_candidates_from_responses,
+    qualified_nominated_filenames_from_responses,
+    reconcile_admin_knowledge_decisions,
+    validate_admin_knowledge_decisions,
+)
 from .cancellation import (
     register_process,
     request_cancel,
@@ -2099,13 +2114,35 @@ RESEARCHER_ADMINISTRATOR_OUTPUT_SCHEMA = {
 }
 
 
-def researcher_administrator_output_schema(*, preserve_artifacts: bool) -> dict:
+def researcher_administrator_output_schema(*, preserve_artifacts: bool, include_knowledge: bool = False) -> dict:
     del preserve_artifacts
-    return deepcopy(RESEARCHER_ADMINISTRATOR_OUTPUT_SCHEMA)
+    schema = deepcopy(RESEARCHER_ADMINISTRATOR_OUTPUT_SCHEMA)
+    if include_knowledge:
+        schema["properties"]["knowledge_decisions"] = {
+            "type": "array",
+            "maxItems": 500,
+            "description": "Final review of every researcher knowledge candidate, exactly once.",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "filename": {"type": "string", "description": "Path relative to the administrator evidence root, including the researcher subfolder."},
+                    "disposition": {"type": "string", "enum": ["approved", "archive_only", "discard", "rejected"]},
+                    "reason": {"type": "string", "minLength": 30, "maxLength": 500},
+                    "title": {"type": "string", "maxLength": 250},
+                    "source_url": {"type": "string"},
+                    "evidence_type": {"type": "string", "maxLength": 100},
+                    "delete_after_ingest": {"type": "boolean", "description": "True only for disposable text after verified ingestion; never for canonical or binary evidence."},
+                },
+                "required": ["filename", "disposition", "reason", "title", "source_url", "evidence_type", "delete_after_ingest"],
+            },
+        }
+        schema["required"].append("knowledge_decisions")
+    return schema
 
 
 _ADMINISTRATOR_SYSTEM_PROMPT = """### ROLE
-You are a research administrator tasked with a specific research and must obtain evidence only by orchestrating the available specialized researchers, then synthesize their results. Do not answer from prior knowledge except for a trivially certain request that genuinely needs no research. And be always ciritcal checking things from all angles taking into account all kind of edge cases.
+Obtain evidence by orchestrating the available specialist researchers, then synthesize it critically. Do not answer from prior knowledge unless the request is trivial and genuinely needs no research.
 
 ### WORKFLOW
 1. Map the needed coverage: entities, aliases, timeframe, jurisdictions, claims, and relevant web/scientific/business/product/travel/legal/social/data/news/entity or other source families.
@@ -2114,7 +2151,7 @@ You are a research administrator tasked with a specific research and must obtain
 4. Stop when the evidence supports a defensible answer or further work has low value. Preserve enough runtime to synthesize; state remaining gaps instead of timing out while chasing completeness.
 
 ### LONG-RUNNING RESEARCHERS
-Every researcher is async-only in this administrator. Always launch ordinary and browser researchers with `start_researchers_async`, then use completion-aware `poll_researchers_async` waits. Never attempt a synchronous batch: provider/MCP tool bridges can time out while healthy children continue, which loses the job handle and risks duplicate physical launches. Poll once immediately after launch. Never run blocking polls concurrently: do not put `poll_researchers_async` calls with positive `wait_seconds` in `Promise.all`, `Promise.allSettled`, or another parallel Code Mode/exec cell. Long-poll one job at a time; others continue independently. Only `wait_seconds=0` snapshots may be batched. `poll_researchers_async` is status-only by default (`include_outputs=false`): this preserves every full result outside your conversation while returning only lifecycle, health, heartbeat, tool counts, artifact counts, and failures. Do not set `include_outputs=true` during routine polling; that compatibility option injects each finished child's bounded digest again on every poll. A valid result contains only `research_worked`, `failure_reason`, `overall_summary`, `findings[{claim,summary}]`, `gaps`, and `open_topics`; unparseable results fall back to raw text. Treat open topics as optional leads, not mandatory tasks: launch a follow-up only when it can materially improve the requested conclusion within the remaining budget. Ordinary jobs normally use 30-120 second waits; ChatGPT browser jobs use 300-600 seconds and may take tens of minutes or up to 180 minutes. Queued/starting for a few minutes is not failure.
+Every researcher is async-only. Always launch ordinary and browser researchers with `start_researchers_async`, poll once, then use `poll_researchers_async`. Never use synchronous batches: provider/MCP tool bridges can time out while healthy children continue, losing handles and causing duplicates. Never run blocking polls concurrently: do not put positive `wait_seconds` in `Promise.all`. Long-poll one job while others continue. Only `wait_seconds=0` snapshots may be batched. Keep routine `include_outputs=false`; fetch finished results separately. Follow open topics only when they materially improve the answer within budget. Ordinary waits are 30-120 seconds; browser waits are 300-600 seconds and research can take up to 180 minutes. Queued/starting briefly is not failure.
 Use `list_researcher_jobs` if you lose a job id. Use `get_researcher_task` for one child's current diagnostics. When a child is done, call `get_researcher_result` with `view=summary` first. Read the lossless `parsed` or exact `raw` view page by page using `next_offset` whenever detailed evidence, citations, contradictions, provenance, or omitted context matters. Full reviews and evidence artifacts remain available even though summaries and status polls omit them.
 Use `cancel_researcher_task` to stop only a duplicated/stale ordinary child while preserving siblings, and `cancel_researchers_async` only when the whole ordinary job is no longer useful. Use `retry_researcher_task` at most once and only for a concrete transient failure or material missing source family; it privately reuses the original prompt. A `no_recent_progress` health label is a warning to inspect, not proof of death.
 Never use `wait(..., terminate=true)`, cancellation, or process termination on a running ChatGPT browser researcher merely because it is slow or finalizing. Cancel it only on explicit user request, a proven terminal error, or the configured hard timeout. Ordinary async work may be cancelled when clearly stalled, duplicated, or no longer useful.
@@ -2122,6 +2159,7 @@ Never use `wait(..., terminate=true)`, cancellation, or process termination on a
 ### EVIDENCE AND OUTPUT
 Stay source-first and objective. Prefer primary or directly inspectable evidence, preserve contradictions, distinguish source claims from inference, and actively consider disconfirming evidence. Never fabricate or fill gaps from assumptions.
 In `administrator_conclusions`, distinguish established, contradicted, weakly supported, and unresolved claims, with confidence and important caveats. Return only the configured compact JSON. Do not copy researcher JSON, counts, or evidence paths; runtime code appends them exactly.
+When `knowledge_decisions` is requested, return exactly one decision for every nominated artifact. Approve only durable, sourced, non-duplicative evidence; use `archive_only` for useful compact provenance that should stay outside retrieval and `discard` for noise. A URL/receipt is sufficient provenance for a bulky failed, non-extractable, or duplicate capture, so discard that capture instead of archiving its body. Set `delete_after_ingest=true` for approved disposable plain-text copies when Qdrant's verified exact-source payload should replace the local duplicate. Keep it false for canonical reports, repository content, HTML, PDFs, binaries, or anything whose original formatting matters. Runtime code performs and verifies ingestion before any deletion.
 """
 
 
@@ -2420,6 +2458,52 @@ def _researcher_failures_from_async_jobs(job_ids: list[str]) -> list[dict[str, A
     return failures
 
 
+def _researcher_failures_from_async_ledgers(evidence_dir: str) -> list[dict[str, Any]]:
+    """Fail closed when an inner MCP exits with launched work non-terminal.
+
+    Codex-backed administrators may run their function tools in a nested MCP
+    process.  Its in-memory job registry is not visible to the outer finalizer,
+    but the compact ledger is written into the administrator-owned workspace.
+    A model returning early must therefore never turn a still-running ledger
+    into a successful administrator result.
+    """
+
+    ledger_dir = Path(str(evidence_dir or "")).expanduser() / "researcher_jobs"
+    if not ledger_dir.is_dir():
+        return []
+    failures: list[dict[str, Any]] = []
+    for path in sorted(ledger_dir.glob("research-job-*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        tasks = payload.get("tasks") if isinstance(payload, dict) else None
+        if not isinstance(tasks, list):
+            continue
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status") or "unknown").strip().lower()
+            if status == "done":
+                continue
+            tool_name = str(task.get("researcher_tool") or "").strip()
+            if not tool_name:
+                researcher = normalize_researcher_name(str(task.get("researcher") or ""))
+                tool_name = RESEARCHER_REGISTRY.get(researcher, ("", ""))[1]
+            if not tool_name:
+                continue
+            failures.append({
+                "researcher_tool": tool_name,
+                "status": status,
+                "task_id": str(task.get("task_id") or ""),
+                "failure_reason": str(task.get("failure_reason") or "").strip() or (
+                    f"Administrator returned while launched researcher remained {status}; "
+                    "the durable job ledger did not contain a terminal result."
+                ),
+            })
+    return failures
+
+
 def _researcher_responses_from_poll_output(output: Any) -> list[dict[str, Any]]:
     payload = _json_from_output(str(output or ""))
     if payload is None:
@@ -2514,6 +2598,51 @@ def _researcher_responses_from_async_output_files(evidence_dir: str) -> list[dic
             # expose the same failed attempt again as a researcher response.
             responses.append(normalized)
     return responses
+
+
+def _researcher_failures_from_async_output_files(evidence_dir: str) -> list[dict[str, Any]]:
+    """Recover terminal failed results whose task ledger status is ``done``.
+
+    The durable async ledger uses ``done`` to mean that the worker process
+    returned a parseable payload.  It does not mean ``research_worked=true``.
+    Preserve those negative results as failures so final accounting cannot omit
+    timed-out/failed browser attempts after the in-memory job registry exits.
+    """
+    root = Path(str(evidence_dir or "")).expanduser()
+    output_dir = root / "researcher_outputs"
+    if not output_dir.is_dir():
+        return []
+    failures: list[dict[str, Any]] = []
+    for path in sorted(output_dir.glob("async_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict) or payload.get("research_worked") is not False:
+            continue
+        tool_name = str(payload.get("researcher_tool") or "").strip()
+        if not tool_name:
+            continue
+        counts = payload.get("tool_call_counts")
+        row: dict[str, Any] = {
+            "researcher_tool": tool_name,
+            "status": "research_failed",
+            "failure_reason": str(payload.get("failure_reason") or "").strip()
+            or "Researcher returned research_worked=false.",
+            "result_path": str(Path("researcher_outputs") / path.name),
+        }
+        if isinstance(counts, dict):
+            row["tool_call_counts"] = {
+                str(name): int(value or 0)
+                for name, value in counts.items()
+                if int(value or 0) > 0
+            }
+            row["total_tool_calls"] = int(
+                payload.get("total_tool_calls")
+                or sum(row["tool_call_counts"].values())
+            )
+        failures.append(row)
+    return failures
 
 
 def _researcher_responses_from_batch_output_files(evidence_dir: str) -> list[dict[str, Any]]:
@@ -2851,6 +2980,7 @@ def finalize_researcher_administrator_output(
     steps: list[Any],
     researcher_failures: list[dict[str, Any]] | None = None,
     required_researchers: list[str] | None = None,
+    require_knowledge_search: bool = False,
 ) -> str:
     payload = _json_from_output(output)
     if payload is None:
@@ -2871,12 +3001,87 @@ def finalize_researcher_administrator_output(
             if isinstance(response, dict)
         ]
     )
+    knowledge_policy_failures: list[dict[str, Any]] = []
+    if require_knowledge_search:
+        for response in responses:
+            if response.get("research_worked") is not True:
+                continue
+            counts = response.get("tool_call_counts") or {}
+            if int(counts.get("knowledge_search", 0) or 0) > 0:
+                continue
+            researcher_tool = str(response.get("researcher_tool") or "unknown_researcher").strip()
+            message = (
+                f"{researcher_tool} returned evidence without the required policy-bound "
+                "knowledge_search preflight."
+            )
+            response["research_worked"] = False
+            existing_reason = str(response.get("failure_reason") or "").strip()
+            response["failure_reason"] = f"{existing_reason} {message}".strip()
+            knowledge_policy_failures.append({
+                "researcher_tool": researcher_tool,
+                "status": "knowledge_search_missing",
+                "failure_reason": message,
+                "tool_call_counts": dict(sorted(counts.items())) if isinstance(counts, dict) else {},
+            })
     # Full responses are used internally for deterministic validation and are
     # written to the owned filesystem. The administrator/model boundary receives
     # only bounded digests; raw output and full parsed reviews never cross it.
     response_digests = [compact_researcher_digest(response) for response in responses]
     payload["researcher_responses"] = response_digests
-    failures = list(researcher_failures or []) + _researcher_failures_from_steps(steps)
+    decisions = payload.get("knowledge_decisions")
+    if isinstance(decisions, list):
+        candidates = qualified_knowledge_candidates_from_responses(
+            response_digests,
+            evidence_dir=evidence_dir,
+        )
+        nominations = set(candidates)
+        decision_errors = validate_admin_knowledge_decisions(
+            decisions,
+            nominated_filenames=nominations,
+        )
+        # Preserve the strict validator as the audit boundary, then reconcile
+        # only in a fail-safe direction. Exact decisions are honored;
+        # unambiguous provenance aliases are canonicalized; invented rows are
+        # ignored; omissions and conflicting duplicates are archived.
+        if any(decision_errors.values()):
+            had_usable_decision = any(
+                Path(str(row.get("filename") or "")).as_posix().lstrip("./") in nominations
+                for row in decisions
+                if isinstance(row, dict)
+            )
+            reconciled_decisions, reconciliation = reconcile_admin_knowledge_decisions(
+                decisions,
+                candidates=candidates,
+            )
+            canonicalized = bool(reconciliation.get("canonicalized_aliases"))
+            only_internal_unexpected = bool(decision_errors["unexpected"]) and all(
+                Path(filename).name == "_artifact_manifest.jsonl"
+                for filename in decision_errors["unexpected"]
+            )
+            if had_usable_decision or canonicalized or only_internal_unexpected or not decision_errors["unexpected"]:
+                decisions = reconciled_decisions
+                payload["knowledge_decisions"] = decisions
+                if reconciliation:
+                    payload["knowledge_decision_reconciliation"] = reconciliation
+                decision_errors = validate_admin_knowledge_decisions(
+                    decisions,
+                    nominated_filenames=nominations,
+                )
+        if any(decision_errors.values()):
+            details = "; ".join(
+                f"{name}={', '.join(values[:5])}"
+                + (f" (+{len(values) - 5} more)" if len(values) > 5 else "")
+                for name, values in decision_errors.items()
+                if values
+            )
+            message = (
+                "Administrator knowledge decisions did not exactly match the final "
+                f"researcher nominations: {details}."
+            )
+            payload["research_worked"] = False
+            existing_reason = str(payload.get("failure_reason") or "").strip()
+            payload["failure_reason"] = f"{existing_reason} {message}".strip()
+    failures = list(researcher_failures or []) + knowledge_policy_failures + _researcher_failures_from_steps(steps)
     failures.extend(_partial_artifact_failures(evidence_dir, responses, failures))
     failures = _enrich_failures_with_artifact_counts(evidence_dir, failures)
     if failures:
@@ -2901,6 +3106,11 @@ def finalize_researcher_administrator_output(
     calls = _researcher_call_counts(tool_counts, responses, payload["researcher_failures"])
     payload["researcher_call_counts"] = calls
     payload["total_researcher_calls"] = int(sum(calls.values()))
+    if require_knowledge_search and int(tool_counts.get("knowledge_search", 0) or 0) <= 0:
+        message = "Researcher administrator did not perform the required policy-bound knowledge_search preflight."
+        existing_reason = str(payload.get("failure_reason") or "").strip()
+        payload["research_worked"] = False
+        payload["failure_reason"] = f"{existing_reason} {message}".strip()
     required_shorts = ResearcherAdministratorAgentTool._normalize_researchers(required_researchers)
     if required_shorts:
         required_tools = [RESEARCHER_REGISTRY[short][1] for short in required_shorts]
@@ -3233,6 +3443,76 @@ class ResearcherAdministratorAgentTool:
 
     def _researcher_self_critique_rounds(self) -> int:
         return max(1, int(self.self_critique_rounds or 0))
+
+    def _child_timeout_for_researchers(self, researchers: Iterable[str]) -> int:
+        """Return a child wall-clock that honors enabled browser contracts.
+
+        The ordinary-researcher timeout remains the configured floor. Deep and
+        Pro jobs may legitimately spend longer queued/running at the remote
+        broker, so a generic 35-minute supervisor must not pre-empt their own
+        configured output/wait deadline. The administrator's parent research
+        deadline is still applied later as the final upper bound.
+        """
+
+        timeout = max(
+            1,
+            int(
+                getattr(
+                    self.config,
+                    "researcher_administrator_child_timeout_seconds",
+                    2100,
+                )
+                or 2100
+            ),
+        )
+        browser_modes = {
+            "deepchatgpt": "deep",
+            "prochatgpt": "pro",
+            "chatgptxhigh": "xhigh",
+        }
+        requested = {normalize_researcher_name(item) for item in researchers}
+        if not requested.intersection(browser_modes):
+            return timeout
+        from .chatgpt_research_agents import ChatGPTWebResearchAgentTool
+
+        for researcher, mode in browser_modes.items():
+            if researcher not in requested:
+                continue
+            helper = ChatGPTWebResearchAgentTool(self.config, mode=mode)
+            required = helper._timeout_seconds()
+            if helper._execution_backend() == "remote":
+                required = helper._async_max_wait_seconds()
+            timeout = max(timeout, int(required))
+        return timeout
+
+    def _termination_grace_for_researcher(self, researcher: str) -> float:
+        """Allow remote browser children time to propagate cancellation."""
+
+        configured = max(
+            0.0,
+            float(
+                getattr(
+                    self.config,
+                    "researcher_administrator_child_termination_grace_seconds",
+                    _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS,
+                )
+                or _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS
+            ),
+        )
+        short = normalize_researcher_name(researcher)
+        if short not in {"deepchatgpt", "prochatgpt", "chatgptxhigh"}:
+            return configured
+        backend = str(getattr(self.config, "chatgpt_execution_backend", "auto") or "auto").strip().lower()
+        if backend == "auto":
+            backend = "remote" if (
+                str(getattr(self.config, "chatgpt_async_api_url", "") or "").strip()
+                or os.environ.get("CHACK_CHATGPT_ASYNC_API_URL", "").strip()
+            ) else "local"
+        if backend != "remote":
+            return configured
+        poll = max(2, int(getattr(self.config, "chatgpt_async_poll_seconds", 10) or 10))
+        request = max(5, int(getattr(self.config, "chatgpt_async_request_timeout_seconds", 30) or 30))
+        return max(configured, float(poll + request + 5))
 
     def _enabled_researchers(self) -> list[str]:
         """Researcher short-names the administrator is allowed to launch.
@@ -3713,16 +3993,8 @@ class ResearcherAdministratorAgentTool:
                 requested_parallel = MAX_RESEARCHER_PARALLELISM
             worker_count = max(1, min(requested_parallel, MAX_RESEARCHER_PARALLELISM, len(normalized)))
 
-            child_timeout_seconds = max(
-                1,
-                int(
-                    getattr(
-                        self.config,
-                        "researcher_administrator_child_timeout_seconds",
-                        2100,
-                    )
-                    or 2100
-                ),
+            child_timeout_seconds = self._child_timeout_for_researchers(
+                row["researcher"] for row in normalized
             )
             batch_started = time.monotonic()
             parent_deadline = _CURRENT_RESEARCH_DEADLINE.get()
@@ -3923,14 +4195,7 @@ class ResearcherAdministratorAgentTool:
                             {"prompt": row["prompt"], "save_artifacts": bool(save_artifacts)},
                             evidence_dir=evidence_dir,
                             cancel_event=cancel_event,
-                            termination_grace_seconds=float(
-                                getattr(
-                                    self.config,
-                                    "researcher_administrator_child_termination_grace_seconds",
-                                    _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS,
-                                )
-                                or _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS
-                            ),
+                            termination_grace_seconds=self._termination_grace_for_researcher(tool_name),
                             on_process_started=_process_started,
                             on_progress=lambda event: _record_progress(
                                 str(event.get("event") or "research_progress"),
@@ -4538,14 +4803,7 @@ class ResearcherAdministratorAgentTool:
                         {"prompt": prompt, "save_artifacts": bool(save_artifacts)},
                         evidence_dir=evidence_dir,
                         cancel_event=cancel_event,
-                        termination_grace_seconds=float(
-                            getattr(
-                                self.config,
-                                "researcher_administrator_child_termination_grace_seconds",
-                                _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS,
-                            )
-                            or _DEFAULT_PROCESS_TERMINATION_GRACE_SECONDS
-                        ),
+                        termination_grace_seconds=self._termination_grace_for_researcher(tool_name),
                         on_process_started=_process_started,
                         on_progress=lambda event: _record_progress(
                             job_id,
@@ -4672,14 +4930,17 @@ class ResearcherAdministratorAgentTool:
             prepared_tasks: list[tuple[str, dict[str, str], threading.Event]] = []
             _async_job_store(job_id, job)
 
-            effective_child_timeout = child_timeout_seconds
+            requested_child_timeout = self._child_timeout_for_researchers(
+                row["researcher"] for row in normalized
+            )
+            effective_child_timeout = requested_child_timeout
             parent_deadline = _CURRENT_RESEARCH_DEADLINE.get()
             if parent_deadline is None:
                 parent_deadline = _researcher_deadline_from_environment()
             if parent_deadline is not None:
                 effective_child_timeout = max(
                     1,
-                    min(child_timeout_seconds, int(max(0.0, parent_deadline - time.monotonic()))),
+                    min(requested_child_timeout, int(max(0.0, parent_deadline - time.monotonic()))),
                 )
 
             # Register every task before submitting any future. A fast first future
@@ -5269,7 +5530,12 @@ class ResearcherAdministratorAgentTool:
             cancel_researchers_async,
         ]
 
-    def _build_subagent_tools(self, enabled_researchers: list[str], artifact_root: str = ""):
+    def _build_subagent_tools(
+        self,
+        enabled_researchers: list[str],
+        artifact_root: str = "",
+        run_config: ToolsConfig | None = None,
+    ):
         if function_tool is None:
             raise RuntimeError("OpenAI Agents SDK is not available in this runtime.")
 
@@ -5285,7 +5551,8 @@ class ResearcherAdministratorAgentTool:
         for short in enabled_researchers:
             attr, _tool = RESEARCHER_REGISTRY[short]
             overrides[attr] = True
-        sub_config = replace(self.config, **overrides)
+        effective_config = run_config or self.config
+        sub_config = replace(effective_config, **overrides)
 
         toolset = AgentsToolset(
             sub_config,
@@ -5349,18 +5616,126 @@ class ResearcherAdministratorAgentTool:
             artifact_root=artifact_root,
         )
         tools.extend(async_tools)
-        add_research_artifact_tools(tools, self.config, root=artifact_root)
+        add_research_artifact_tools(tools, effective_config, root=artifact_root)
         return tools
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
         accounting = _AdministratorRunAccounting()
         token = _ADMINISTRATOR_RUN_ACCOUNTING.set(accounting)
         try:
-            return self._run_single_scoped(prompt, ctx, save_artifacts=save_artifacts)
+            mode = normalize_knowledge_mode(ctx.get("knowledge_mode"), self.config.knowledge_mode)
+            knowledge_base = normalize_knowledge_base(ctx.get("knowledge_base") or self.config.knowledge_base)
+            if mode != "off" and not knowledge_base:
+                mode = "off"
+            run_config = replace(
+                self.config,
+                knowledge_mode=mode,
+                knowledge_base=knowledge_base,
+                knowledge_bind_configured_base=bool(mode != "off" and knowledge_base),
+            )
+            needs_ingest_workspace = knowledge_can_write(mode)
+            scoped_save_artifacts = bool(save_artifacts or needs_ingest_workspace)
+            if run_config == self.config and scoped_save_artifacts == bool(save_artifacts):
+                output = self._run_single_scoped(prompt, ctx, save_artifacts=scoped_save_artifacts)
+            else:
+                output = self._run_single_scoped(
+                    prompt,
+                    ctx,
+                    save_artifacts=scoped_save_artifacts,
+                    run_config=run_config,
+                )
+            if needs_ingest_workspace:
+                payload = _json_from_output(output)
+                if isinstance(payload, dict):
+                    evidence_dir = str(payload.get("evidence_data_path") or "")
+                    decisions = payload.get("knowledge_decisions")
+                    if payload.get("research_worked") is not True:
+                        payload["knowledge_update"] = {
+                            "knowledge_base": knowledge_base,
+                            "indexed": [],
+                            "deleted": [],
+                            "skipped": [{
+                                "reason": "administrator run did not pass all success and terminal-researcher gates"
+                            }],
+                        }
+                    elif evidence_dir and isinstance(decisions, list):
+                        try:
+                            decisions = normalize_admin_knowledge_decisions(decisions)
+                            payload["knowledge_decisions"] = decisions
+                            nominations = qualified_nominated_filenames_from_responses(
+                                payload.get("researcher_responses") or [],
+                                evidence_dir=evidence_dir,
+                            )
+                            documents = documents_from_admin_decisions(
+                                evidence_dir,
+                                decisions,
+                                nominated_filenames=nominations,
+                                delete_verified_text_artifacts=bool(
+                                    getattr(run_config, "knowledge_delete_verified_text_artifacts", False)
+                                ),
+                                delete_verified_extracted_artifacts=bool(
+                                    getattr(run_config, "knowledge_delete_verified_extracted_artifacts", False)
+                                ),
+                            )
+                            payload["knowledge_update"] = KnowledgeStore(run_config).ingest_documents(
+                                knowledge_base,
+                                documents,
+                            )
+                            payload["knowledge_update"]["discard_cleanup"] = delete_discarded_artifacts(
+                                evidence_dir,
+                                decisions,
+                                nominated_filenames=nominations,
+                            )
+                            receipt = Path(evidence_dir, "knowledge_decisions.json")
+                            receipt.write_text(
+                                json.dumps(
+                                    {
+                                        "knowledge_base": knowledge_base,
+                                        "decisions": decisions,
+                                        "result": payload["knowledge_update"],
+                                    },
+                                    ensure_ascii=False,
+                                    indent=2,
+                                ) + "\n",
+                                encoding="utf-8",
+                            )
+                        except Exception as exc:
+                            payload["knowledge_update"] = {
+                                "knowledge_base": knowledge_base,
+                                "error": f"{type(exc).__name__}: {exc}",
+                                "indexed": [],
+                                "deleted": [],
+                            }
+                    else:
+                        payload["knowledge_update"] = {
+                            "knowledge_base": knowledge_base,
+                            "indexed": [],
+                            "deleted": [],
+                            "skipped": [{"reason": "no administrator-approved knowledge decisions"}],
+                        }
+                    output = _compact_json(payload)
+                    if evidence_dir and save_artifacts:
+                        try:
+                            Path(evidence_dir, "admin_output.json").write_text(output, encoding="utf-8")
+                        except OSError:
+                            pass
+                    if evidence_dir and not save_artifacts:
+                        cleanup_research_artifacts(evidence_dir, save_artifacts=False)
+                        payload.pop("evidence_data_path", None)
+                        payload.pop("output_files", None)
+                        output = _compact_json(payload)
+            return output
         finally:
             _ADMINISTRATOR_RUN_ACCOUNTING.reset(token)
 
-    def _run_single_scoped(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
+    def _run_single_scoped(
+        self,
+        prompt: str,
+        ctx: dict[str, Any],
+        save_artifacts: bool = False,
+        run_config: ToolsConfig | None = None,
+    ) -> str:
+        run_config = run_config or self.config
         enabled_researchers = self._enabled_researchers()
         if not enabled_researchers:
             return (
@@ -5409,7 +5784,11 @@ class ResearcherAdministratorAgentTool:
         # Warm once per administrator run, before the model's hard deadline
         # starts. The child runner itself also tolerates direct callers.
         _warm_researcher_process_context()
-        tools = self._build_subagent_tools(enabled_researchers, artifact_root=master_dir)
+        tools = self._build_subagent_tools(
+            enabled_researchers,
+            artifact_root=master_dir,
+            run_config=run_config,
+        )
         if not tools:
             return "ERROR: no researcher tools available for researcher_administrator."
 
@@ -5557,14 +5936,19 @@ class ResearcherAdministratorAgentTool:
             "A repeated researcher prompt must include `Duplicate reason:` with at least 80 characters.\n"
             "Now plan the research and launch the needed researchers."
         )
-        prompt = f"{str(prompt or '').rstrip()}{admin_context}"
+        prompt = (
+            f"{str(prompt or '').rstrip()}"
+            f"{knowledge_policy_instruction(run_config.knowledge_mode, run_config.knowledge_base)}"
+            f"{admin_context}"
+        )
 
         overrides = {
             "agent": {
                 "self_critique_enabled": self.self_critique_enabled,
                 "self_critique_rounds": self.self_critique_rounds,
                 "output_schema_json": researcher_administrator_output_schema(
-                    preserve_artifacts=save_artifacts
+                    preserve_artifacts=save_artifacts,
+                    include_knowledge=knowledge_can_write(run_config.knowledge_mode),
                 ),
                 "output_schema_name": "researcher_administrator_result",
                 "output_schema_strict": True,
@@ -5604,7 +5988,7 @@ class ResearcherAdministratorAgentTool:
             overrides["agent"]["main_action"] = main_action
         overrides["agent"]["sub_action"] = "researcher_administrator"
         config = build_subagent_config(
-            self.config,
+            run_config,
             model_name=model_name,
             model_provider=self.model_provider,
             max_turns=effective_max_turns,
@@ -5648,7 +6032,8 @@ class ResearcherAdministratorAgentTool:
             recovery_overrides = {
                 "agent": {
                     "output_schema_json": researcher_administrator_output_schema(
-                        preserve_artifacts=save_artifacts
+                        preserve_artifacts=save_artifacts,
+                        include_knowledge=knowledge_can_write(run_config.knowledge_mode),
                     ),
                     "output_schema_name": "researcher_administrator_recovery_result",
                     "output_schema_strict": True,
@@ -5678,7 +6063,7 @@ class ResearcherAdministratorAgentTool:
                 },
             }
             recovery_config = build_subagent_config(
-                self.config,
+                run_config,
                 model_name=model_name,
                 model_provider=self.model_provider,
                 max_turns=max(2, min(8, int(effective_max_turns or 8))),
@@ -5743,6 +6128,8 @@ class ResearcherAdministratorAgentTool:
                 combined_responses.extend(_researcher_responses_from_async_jobs(_owned_async_job_ids()))
                 combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
                 combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
+                combined_failures.extend(_researcher_failures_from_async_ledgers(master_dir))
+                combined_failures.extend(_researcher_failures_from_async_output_files(master_dir))
                 combined_failures.extend(async_deadline_failures)
                 combined_tool_counts = _merge_count_observations(
                     _researcher_call_counts_from_async_jobs(_owned_async_job_ids()),
@@ -5762,6 +6149,7 @@ class ResearcherAdministratorAgentTool:
                     tool_counts=combined_tool_counts,
                     steps=[],
                     required_researchers=self.required_researchers,
+                    require_knowledge_search=knowledge_can_read(run_config.knowledge_mode),
                 )
             output = result.output.strip() if result.output else "ERROR: sub-agent returned an empty response."
             if output.startswith("ERROR:"):
@@ -5770,6 +6158,8 @@ class ResearcherAdministratorAgentTool:
                 combined_responses.extend(_researcher_responses_from_async_jobs(_owned_async_job_ids()))
                 combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
                 combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
+                combined_failures.extend(_researcher_failures_from_async_ledgers(master_dir))
+                combined_failures.extend(_researcher_failures_from_async_output_files(master_dir))
                 combined_failures.extend(async_deadline_failures)
                 combined_tool_counts = _merge_count_observations(
                     _researcher_call_counts_from_async_jobs(_owned_async_job_ids()),
@@ -5786,6 +6176,7 @@ class ResearcherAdministratorAgentTool:
                         tool_counts=combined_tool_counts,
                         steps=result.all_steps,
                         required_researchers=self.required_researchers,
+                        require_knowledge_search=knowledge_can_read(run_config.knowledge_mode),
                     )
                 failure_payload = {
                     "research_worked": False,
@@ -5801,6 +6192,7 @@ class ResearcherAdministratorAgentTool:
                     tool_counts=combined_tool_counts,
                     steps=result.all_steps,
                     required_researchers=self.required_researchers,
+                    require_knowledge_search=knowledge_can_read(run_config.knowledge_mode),
                 )
             async_deadline_failures = _harvest_async_jobs()
             tool_counts = result.tool_counts.copy()
@@ -5813,6 +6205,8 @@ class ResearcherAdministratorAgentTool:
             combined_responses.extend(_researcher_responses_from_async_jobs(_owned_async_job_ids()))
             combined_responses.extend(_researcher_responses_from_async_output_files(master_dir))
             combined_failures = _researcher_failures_from_async_jobs(_owned_async_job_ids())
+            combined_failures.extend(_researcher_failures_from_async_ledgers(master_dir))
+            combined_failures.extend(_researcher_failures_from_async_output_files(master_dir))
             combined_failures.extend(async_deadline_failures)
             return finalize_researcher_administrator_output(
                 output,
@@ -5823,6 +6217,7 @@ class ResearcherAdministratorAgentTool:
                 tool_counts=tool_counts,
                 steps=result.all_steps,
                 required_researchers=self.required_researchers,
+                require_knowledge_search=knowledge_can_read(run_config.knowledge_mode),
             )
         finally:
             _CURRENT_RESEARCH_DEADLINE.reset(research_deadline_token)
@@ -5842,13 +6237,21 @@ class ResearcherAdministratorAgentTool:
             else:
                 os.environ["CHACK_RESEARCH_MASTER_DIR"] = prev_master
 
-    def run(self, prompt: str | list[str], save_artifacts: bool = False) -> str:
+    def run(
+        self,
+        prompt: str | list[str],
+        save_artifacts: bool = False,
+        knowledge_mode: str = "",
+        knowledge_base: str = "",
+    ) -> str:
         # A single administrator owns one master evidence folder, so it only
         # accepts a single research request per call.
         prompts, error = normalize_subagent_prompts(prompt, min_chars=500, max_prompts=1)
         if error:
             return error
-        ctx = current_log_context()
+        ctx = dict(current_log_context())
+        ctx["knowledge_mode"] = normalize_knowledge_mode(knowledge_mode, self.config.knowledge_mode)
+        ctx["knowledge_base"] = normalize_knowledge_base(knowledge_base or self.config.knowledge_base)
         return self._run_single(prompts[0], ctx, save_artifacts=save_artifacts)
 
 
@@ -5859,7 +6262,12 @@ def get_researcher_administrator_tool(
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
     @function_tool(name_override="researcher_administrator")
-    def researcher_administrator(prompt: str, save_artifacts: bool = False) -> str:
+    def researcher_administrator(
+        prompt: str,
+        save_artifacts: bool = False,
+        knowledge_mode: str = "",
+        knowledge_base: str = "",
+    ) -> str:
         """Run a research administrator that orchestrates every specialized researcher for you.
 
         Use this tool to delegate a whole research problem to an administrator sub-agent instead of
@@ -5876,6 +6284,8 @@ def get_researcher_administrator_tool(
                 scope, entities, timeframes, sources to prioritize, expected output, and caveats.
             save_artifacts: If true, preserve the master evidence folder after the run and return its
                 path in the JSON result. If false, artifacts are deleted after the run.
+            knowledge_mode: off, read, write, or read_write. Empty uses the MCP profile default.
+            knowledge_base: Allowed logical knowledge base to query/update. Empty uses the profile default.
 
         Output: Returns compact administrator JSON with worked status and conclusions. Runtime code
         appends researcher_responses, researcher_tool_call_counts, researcher_call_counts, and the
@@ -5884,8 +6294,18 @@ def get_researcher_administrator_tool(
         try:
             return run_with_tool_logging(
                 "researcher_administrator",
-                {"prompt": prompt, "save_artifacts": save_artifacts},
-                lambda: helper.run(prompt=prompt, save_artifacts=save_artifacts),
+                {
+                    "prompt": prompt,
+                    "save_artifacts": save_artifacts,
+                    "knowledge_mode": knowledge_mode,
+                    "knowledge_base": knowledge_base,
+                },
+                lambda: helper.run(
+                    prompt=prompt,
+                    save_artifacts=save_artifacts,
+                    knowledge_mode=knowledge_mode,
+                    knowledge_base=knowledge_base,
+                ),
             )
         except Exception as exc:
             return f"ERROR: researcher_administrator failed ({exc})"

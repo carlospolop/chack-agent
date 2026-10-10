@@ -198,6 +198,8 @@ class _ModePage:
         return _EmptyLocator()
 
     def locator(self, selector):
+        if "data-composer-transition-slot='trailing'" in selector:
+            return _ModeLocator(self, "button", re.compile(r".*"))
         if "role='slider'" in selector:
             return _SliderLocator(self)
         if "composer-model-picker-slider-simple-view" in selector or "[role='menu']" in selector:
@@ -225,6 +227,48 @@ def test_current_power_picker_selects_distinct_pro_and_xhigh_levels(mode, starti
     assert selected["selected_effort"] == expected
     assert selected["selected_power"] == expected_power
     assert page.clicks[0] == f"open:{starting}"
+
+
+def test_reasoning_mode_selector_retries_transient_hydration_failures(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode="pro")
+    calls = []
+
+    def select(_page):
+        calls.append("select")
+        if len(calls) < 3:
+            raise ChatGPTWebResearchError("selector not hydrated")
+        return {"selected_effort": "Pro", "selected_power": "5/5"}
+
+    class Keyboard:
+        def press(self, key):
+            assert key == "Escape"
+
+    class Page:
+        keyboard = Keyboard()
+
+        def __init__(self):
+            self.reloads = 0
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+        def reload(self, **kwargs):
+            assert kwargs == {"wait_until": "domcontentloaded", "timeout": 60000}
+            self.reloads += 1
+
+        def wait_for_selector(self, selector, **kwargs):
+            assert "#prompt-textarea" in selector
+            assert kwargs == {"state": "visible", "timeout": 30000}
+
+    page = Page()
+    monkeypatch.setattr(helper, "_select_reasoning_mode", select)
+
+    selected = helper._select_reasoning_mode_with_retry(page)
+
+    assert selected["selected_effort"] == "Pro"
+    assert selected["selector_attempts"] == 3
+    assert page.reloads == 2
+    assert len(calls) == 3
 
 
 def test_chatgpt_research_tool_accepts_and_runs_five_prompts_in_parallel(monkeypatch):
@@ -316,16 +360,51 @@ def test_chatgpt_aliases_are_accepted_by_administrator():
 
 
 def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
-    helper = ChatGPTWebResearchAgentTool(ToolsConfig(chatgpt_execution_backend="local"), mode="pro")
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(
+            chatgpt_execution_backend="local",
+            knowledge_enabled=True,
+            knowledge_mode="read_write",
+            knowledge_base="lipedema",
+        ),
+        mode="pro",
+    )
     evidence = tmp_path / "evidence"
     monkeypatch.setattr(
         "chack_tools.chatgpt_research_agents.create_subagent_evidence_dir",
         lambda *_args, **_kwargs: str(evidence),
     )
+    search_call = {}
+
+    def fake_search(_store, query, knowledge_base, **kwargs):
+        search_call.update(query=query, knowledge_base=knowledge_base, **kwargs)
+        return {
+            "knowledge_base": knowledge_base,
+            "query": query,
+            "vector_requested": kwargs["vector_limit"],
+            "exact_requested": kwargs["exact_limit"],
+            "max_returned_text_chars": kwargs["max_chars"],
+            "results": [{
+                "source_path": "researches/source.md",
+                "source_url": "https://example.test/primary",
+                "content_hash": "abc123",
+                "chunk_index": 2,
+                "vector_rank": 1,
+                "exact_rank": None,
+                "text": "Prior sourced finding that must be verified against the primary source.",
+            }],
+        }
+
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.KnowledgeStore.search",
+        fake_search,
+    )
+    submitted_prompts = []
     monkeypatch.setattr(
         helper,
         "_browser_research",
-        lambda _prompt, **_kwargs: (
+        lambda submitted_prompt, **_kwargs: (
+            submitted_prompts.append(submitted_prompt) or
             "A" * 2500,
             "https://chatgpt.com/c/test-conversation",
             {"mode": "pro", "terminal_state": "extracted", "answer_chars": 2500},
@@ -334,6 +413,8 @@ def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
 
     payload = json.loads(helper._run_single("P" * 500, save_artifacts=True))
     assert payload["research_worked"] is True
+    assert payload["tool_call_counts"] == {"knowledge_search": 1, "chatgpt_web": 1}
+    assert payload["total_tool_calls"] == 2
     run_dir = Path(payload["evidence_data_path"])
     assert run_dir.parent == evidence
     assert run_dir.name.startswith("run-")
@@ -345,8 +426,161 @@ def test_successful_chatgpt_run_uses_researcher_contract(monkeypatch, tmp_path):
         "chatgpt-pro-response.md",
         "chatgpt-request.md",
         "chatgpt-run.json",
+        "knowledge-retrieval.json",
     }
+    assert [(row["filename"], row["disposition"]) for row in payload["knowledge_candidates"]] == [
+        ("chatgpt-pro-response.md", "ingest_candidate"),
+        ("chatgpt-request.md", "archive_only"),
+        ("chatgpt-run.json", "archive_only"),
+        ("knowledge-retrieval.json", "archive_only"),
+    ]
     assert (run_dir / "chatgpt-pro-response.md").read_text() == "A" * 2500
+    assert len(submitted_prompts) == 1
+    assert "CURATED LOCAL KNOWLEDGE PREFETCH" in submitted_prompts[0]
+    assert '"knowledge_base":"lipedema"' in submitted_prompts[0]
+    assert "Prior sourced finding" in submitted_prompts[0]
+    assert submitted_prompts[0].endswith("P" * 500)
+    receipt = json.loads((run_dir / "knowledge-retrieval.json").read_text())
+    assert receipt["knowledge_base"] == "lipedema"
+    assert receipt["result_count"] == 1
+    assert receipt["sources"][0]["source_path"] == "researches/source.md"
+    assert search_call["vector_limit"] == 6
+    assert search_call["exact_limit"] == 4
+    assert search_call["max_chars"] == 6000
+
+
+def test_browser_knowledge_prefetch_limits_are_operator_configurable(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(
+            knowledge_enabled=True,
+            knowledge_mode="read",
+            knowledge_base="lipedema",
+            knowledge_max_return_chars=5000,
+            knowledge_browser_vector_results=3,
+            knowledge_browser_exact_results=2,
+            knowledge_browser_max_return_chars=9000,
+        ),
+        mode="deep",
+    )
+    seen = {}
+
+    def fake_search(_store, query, knowledge_base, **kwargs):
+        seen.update(kwargs)
+        return {
+            "knowledge_base": knowledge_base,
+            "query": query,
+            "vector_requested": kwargs["vector_limit"],
+            "exact_requested": kwargs["exact_limit"],
+            "max_returned_text_chars": kwargs["max_chars"],
+            "results": [{"source_path": "known.md", "text": "Known evidence."}],
+        }
+
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.KnowledgeStore.search",
+        fake_search,
+    )
+    _prompt, receipt = helper._prefetch_knowledge("A focused research request")
+
+    assert seen == {"vector_limit": 3, "exact_limit": 2, "max_chars": 5000}
+    assert receipt["vector_requested"] == 3
+    assert receipt["exact_requested"] == 2
+    assert receipt["max_returned_text_chars"] == 5000
+
+
+def test_chatgpt_browser_knowledge_prefetch_fails_closed(monkeypatch, tmp_path):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(
+            chatgpt_execution_backend="local",
+            knowledge_enabled=True,
+            knowledge_mode="read",
+            knowledge_base="lipedema",
+        ),
+        mode="deep",
+    )
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.create_subagent_evidence_dir",
+        lambda *_args, **_kwargs: str(tmp_path / "evidence"),
+    )
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.KnowledgeStore.search",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("qdrant unavailable")),
+    )
+    browser_called = False
+
+    def browser(*_args, **_kwargs):
+        nonlocal browser_called
+        browser_called = True
+        return "unexpected", "", {}
+
+    monkeypatch.setattr(helper, "_browser_research", browser)
+    payload = json.loads(helper._run_single("Research prompt " * 50, save_artifacts=True))
+
+    assert payload["research_worked"] is False
+    assert "Required read-only knowledge prefetch failed" in payload["failure_reason"]
+    assert payload["tool_call_counts"] == {"knowledge_search": 1}
+    assert payload["total_tool_calls"] == 1
+    assert browser_called is False
+    run_dir = Path(payload["evidence_data_path"])
+    assert (run_dir / "chatgpt-request.md").is_file()
+    assert not (run_dir / "knowledge-retrieval.json").exists()
+
+
+@pytest.mark.parametrize("mode", ["pro", "deep", "xhigh"])
+def test_chatgpt_knowledge_prefetch_recovers_after_transient_qdrant_outage(monkeypatch, mode):
+    from qdrant_client.http.exceptions import ResponseHandlingException
+
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(knowledge_enabled=True, knowledge_mode="read", knowledge_base="lipedema"),
+        mode=mode,
+    )
+    attempts = []
+    sleeps = []
+
+    def intermittent_search(*_args, **_kwargs):
+        attempts.append(True)
+        if len(attempts) <= 2:
+            raise ResponseHandlingException(ConnectionRefusedError("unavailable"))
+        return {
+            "knowledge_base": "lipedema", "query": "prompt", "results": [{"text": "prior study"}],
+            "vector_requested": 6, "exact_requested": 4, "max_returned_text_chars": 6000,
+        }
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.KnowledgeStore.search", intermittent_search)
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.sleep", sleeps.append)
+    prompt, receipt = helper._prefetch_knowledge("Research the clinical evidence on lipedema")
+    assert len(attempts) == 3
+    assert sleeps == [5, 10]
+    assert "prior study" in prompt
+    assert receipt["result_count"] == 1
+
+
+def test_chatgpt_knowledge_prefetch_keeps_required_read_after_retry_exhaustion(monkeypatch, tmp_path):
+    from qdrant_client.http.exceptions import ResponseHandlingException
+
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(knowledge_enabled=True, knowledge_mode="read", knowledge_base="lipedema"),
+        mode="pro",
+    )
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.create_subagent_evidence_dir",
+        lambda *_args, **_kwargs: str(tmp_path / "evidence"),
+    )
+    attempts = []
+    def always_down(*_args, **_kwargs):
+        attempts.append(True)
+        raise ResponseHandlingException(ConnectionRefusedError("unavailable"))
+
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_research_agents.KnowledgeStore.search", always_down,
+    )
+    sleeps = []
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.sleep", sleeps.append)
+    monkeypatch.setattr(helper, "_research", lambda *_args, **_kwargs: pytest.fail("browser was contacted"))
+    payload = json.loads(helper._run_single("Research the clinical evidence on lipedema " * 4, save_artifacts=True))
+    assert not payload["research_worked"]
+    assert "Required read-only knowledge prefetch failed" in payload["failure_reason"]
+    assert len(attempts) == 6
+    assert sleeps == [5, 10, 20, 30, 30]
 
 
 def test_five_same_mode_runs_use_distinct_artifact_directories(monkeypatch, tmp_path):

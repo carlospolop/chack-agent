@@ -4,6 +4,8 @@ import threading
 import time
 from typing import Any, cast
 
+import pytest
+
 from chack_tools.chatgpt_remote_worker import ChatGPTRemoteWorker
 from chack_tools.chatgpt_research_agents import _XHIGH_COMPAT_PROMPT_PREFIX
 
@@ -58,6 +60,47 @@ def test_worker_hard_timeout_grace_environment_is_bounded(monkeypatch, tmp_path)
     monkeypatch.setenv("CHACK_CHATGPT_WORKER_HARD_TIMEOUT_GRACE_SECONDS", "0")
     assert ChatGPTRemoteWorker().hard_timeout_grace_seconds == 30
 
+
+def test_cancelled_active_lease_is_terminalized_before_worker_restart(monkeypatch, tmp_path):
+    worker, client = _worker(tmp_path)
+    job_id = "job_00000000-0000-0000-0000-000000000099"
+    job_dir = tmp_path / "jobs" / job_id
+    job_dir.mkdir(parents=True)
+    run_state = job_dir / "chatgpt-run.json"
+    partial = job_dir / "chatgpt-deep-partial.md"
+    run_state.write_text('{"mode":"deep","answer_chars":10}', encoding="utf-8")
+    partial.write_text("partial answer", encoding="utf-8")
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_remote_worker.os._exit",
+        lambda code: (_ for _ in ()).throw(SystemExit(code)),
+    )
+
+    with pytest.raises(SystemExit, match="76"):
+        worker._cancel_active_lease_and_restart(
+            job_id=job_id,
+            lease_id="lease-cancelled",
+            run_state_path=run_state,
+            partial_path=partial,
+        )
+
+    assert client.completions == [
+        (
+            job_id,
+            {
+                "lease_id": "lease-cancelled",
+                "status": "CANCELLED",
+                "partial_result": "partial answer",
+                "metadata": {
+                    "mode": "deep",
+                    "answer_chars": len("partial answer"),
+                    "terminal_state": "cancelled",
+                    "finished_at": pytest.approx(time.time(), abs=2),
+                },
+                "error_code": "CANCEL_REQUESTED",
+                "error_message": "The owning research task cancelled this browser job.",
+            },
+        )
+    ]
 
 def test_worker_hard_deadline_terminalizes_and_requests_restart(monkeypatch, tmp_path):
     worker, client = _worker(tmp_path)
