@@ -1210,6 +1210,56 @@ def test_pro_accepts_a_short_stable_completed_answer(monkeypatch):
     assert clock["now"] == 8.0
 
 
+@pytest.mark.parametrize("mode", ["pro", "xhigh"])
+def test_browser_does_not_finish_on_stable_interim_progress(monkeypatch, mode):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_pro_timeout_seconds=500, chatgpt_xhigh_timeout_seconds=500,
+                    chatgpt_research_poll_seconds=15), mode=mode,
+    )
+    marker = "[CHACK_RESEARCH_COMPLETE_TEST]"
+    clock = {"now": 0.0}
+    interim = "I am still checking the underlying evidence and have not finished yet. " * 5
+    final = "Final answer with references and complete analysis. " * 30
+
+    class Page:
+        url = "https://chatgpt.com/c/interim"
+
+        def wait_for_timeout(self, milliseconds):
+            clock["now"] += milliseconds / 1000.0
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(helper, "_click_provider_retry_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: (
+        interim if clock["now"] < 140 else final + "\n" + marker
+    ))
+    monkeypatch.setattr(helper, "_is_running", lambda _page: False)
+    assert helper._wait_and_extract(Page(), terminal_marker=marker) == final.strip()
+    assert clock["now"] >= 140
+    assert clock["now"] < 240
+
+
+def test_pro_final_without_completion_marker_needs_extended_quiet_window(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_pro_timeout_seconds=400, chatgpt_research_poll_seconds=30), mode="pro",
+    )
+    clock = {"now": 0.0}
+
+    class Page:
+        url = "https://chatgpt.com/c/no-marker"
+
+        def wait_for_timeout(self, milliseconds):
+            clock["now"] += milliseconds / 1000.0
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(helper, "_click_provider_retry_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: "A" * 300)
+    monkeypatch.setattr(helper, "_is_running", lambda _page: False)
+    assert helper._wait_and_extract(Page(), terminal_marker="[missing]") == "A" * 300
+    assert clock["now"] == 240
+
+
 @pytest.mark.parametrize("mode,answer", [("pro", "SMOKE_PRO_OK"), ("xhigh", "SMOKE_XHIGH_OK")])
 def test_browser_accepts_stable_tiny_completed_verdict(monkeypatch, mode, answer):
     helper = ChatGPTWebResearchAgentTool(

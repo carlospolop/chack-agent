@@ -1207,6 +1207,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         *,
         partial_path: Path | None = None,
         run_state_path: Path | None = None,
+        terminal_marker: str = "",
     ) -> str:
         timeout_seconds = self._timeout_seconds()
         started_monotonic = time.monotonic()
@@ -1215,6 +1216,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         force_at = hard_deadline - force_window
         previous = ""
         stable_polls = 0
+        last_answer_change_at = started_monotonic
         last_progress_at = 0.0
         forced_answer = False
         force_baseline = ""
@@ -1284,6 +1286,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             else:
                 stable_polls = 0
                 previous = answer
+                last_answer_change_at = now
                 self._write_partial(partial_path, answer)
             now = time.monotonic()
             if now - last_progress_at >= 60:
@@ -1321,7 +1324,24 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 or (answer != force_baseline and len(answer) >= max(min_chars, len(force_baseline) + 100))
             )
             extractable = len(answer) >= min_chars or short_answer
-            if extractable and changed_after_force and not running and stable_polls >= required_stable_polls:
+            marker_at = answer.rfind(terminal_marker) if terminal_marker else -1
+            marker_complete = bool(
+                terminal_marker
+                and marker_at >= max(0, len(answer) - 1000)
+                and (marker_at == 0 or answer[marker_at - 1] == "\n")
+            )
+            # Pro can temporarily hide its running controls while drafting an
+            # interim progress message. Require an explicit end marker, or a
+            # long quiet fallback when the provider omits the marker.
+            quiet_enough = (
+                not terminal_marker
+                or (now - last_answer_change_at >= 180 and now - started_monotonic >= 240)
+            )
+            if (extractable and changed_after_force and not running
+                    and stable_polls >= required_stable_polls
+                    and (marker_complete or quiet_enough)):
+                if marker_complete:
+                    return (answer[:marker_at] + answer[marker_at + len(terminal_marker):]).strip()
                 return answer
             if now >= hard_deadline:
                 raise ChatGPTWebResearchError(
@@ -1388,7 +1408,19 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 else:
                     selected_mode_metadata = self._select_reasoning_mode_with_retry(page)
                     self._write_json(run_state_path, selected_mode_metadata)
-                self._send(page, prompt)
+                terminal_marker = (
+                    f"[CHACK_RESEARCH_COMPLETE_{uuid.uuid4().hex}]"
+                    if self.mode in {"pro", "xhigh"} else ""
+                )
+                browser_prompt = (
+                    prompt + "\n\nTransport completion check: append the exact line "
+                    + terminal_marker + " only after your complete final answer. "
+                    "Do not mention this check while working; do not stop at an interim progress update."
+                    if terminal_marker else prompt
+                )
+                if run_state_path is not None:
+                    (run_state_path.parent / "chatgpt-request.md").write_text(browser_prompt, encoding="utf-8")
+                self._send(page, browser_prompt)
                 page.wait_for_timeout(1000)
                 try:
                     page.wait_for_url(re.compile(r"https://chatgpt\.com/c/"), timeout=30000)
@@ -1423,6 +1455,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                         page,
                         partial_path=partial_path,
                         run_state_path=run_state_path,
+                        terminal_marker=terminal_marker,
                     )
                     conversation_url = page.url
                 source_url_count = len(set(re.findall(r"https?://[^\s)>]+", answer)))
