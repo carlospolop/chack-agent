@@ -1350,7 +1350,8 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             # long quiet fallback when the provider omits the marker.
             quiet_enough = (
                 not terminal_marker
-                or (now - last_answer_change_at >= 180 and now - started_monotonic >= 240)
+                or (self.mode != "deep" and now - last_answer_change_at >= 180
+                    and now - started_monotonic >= 240)
             )
             if (extractable and changed_after_force and not running
                     and stable_polls >= required_stable_polls
@@ -1412,10 +1413,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 if self.mode != "deep":
                     selected_mode_metadata = self._select_reasoning_mode_with_retry(page)
                     self._write_json(run_state_path, selected_mode_metadata)
-                terminal_marker = (
-                    f"[CHACK_RESEARCH_COMPLETE_{uuid.uuid4().hex}]"
-                    if self.mode in {"pro", "xhigh"} else ""
-                )
+                terminal_marker = f"[CHACK_RESEARCH_COMPLETE_{uuid.uuid4().hex}]"
                 browser_prompt = (
                     prompt + "\n\nTransport completion check: append the exact line "
                     + terminal_marker + " only after your complete final answer. "
@@ -1446,14 +1444,30 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                         target_info = cdp_session.send("Target.getTargetInfo")["targetInfo"]
                     finally:
                         cdp_session.detach()
-                    connector = self._deep_connector_target(str(target_info.get("targetId") or ""))
-                    conversation_url = self._target_url(str(connector.get("parentId") or ""), page.url)
-                    self._write_json(run_state_path, {"conversation_url": conversation_url})
-                    answer = self._wait_and_extract_deep(
-                        connector,
-                        partial_path=partial_path,
-                        run_state_path=run_state_path,
-                    )
+                    try:
+                        connector = self._deep_connector_target(str(target_info.get("targetId") or ""))
+                    except ChatGPTWebResearchError:
+                        # Current ChatGPT renders its Deep report in the parent
+                        # conversation as DIL markup instead of creating the old
+                        # connector OOPIF. It can appear well after the 30s
+                        # connector discovery window; wait for a final answer,
+                        # never treat the missing iframe as a failed request.
+                        self._write_json(run_state_path, {"deep_transport": "inline"})
+                        answer = self._wait_and_extract(
+                            page,
+                            partial_path=partial_path,
+                            run_state_path=run_state_path,
+                            terminal_marker=terminal_marker,
+                        )
+                    else:
+                        conversation_url = self._target_url(str(connector.get("parentId") or ""), page.url)
+                        self._write_json(run_state_path, {"conversation_url": conversation_url, "deep_transport": "connector"})
+                        answer = self._wait_and_extract_deep(
+                            connector,
+                            partial_path=partial_path,
+                            run_state_path=run_state_path,
+                        )
+                        answer = answer.replace(terminal_marker, "").strip()
                 else:
                     answer = self._wait_and_extract(
                         page,
