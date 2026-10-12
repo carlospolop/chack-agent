@@ -6,7 +6,6 @@ import logging
 import os
 import queue
 import re
-import selectors
 import shutil
 import signal
 import subprocess
@@ -168,6 +167,45 @@ def _resolve_codex_exec_timeout(
     return default
 
 
+def _codex_silence_limit_seconds(
+    sub_action: str,
+    *,
+    saw_output: bool,
+    long_tool: bool,
+    runtime_env: Optional[dict[str, str]] = None,
+) -> int:
+    """Bound idle Codex research without shortening live browser jobs.
+
+    The hard process timeout alone is too broad for an ordinary search worker:
+    FactChecker permits up to 100 minutes for slow XHigh browser calls. Give
+    websearch its own active-tool silence cap while preserving that allowance.
+    Zero means no silence watchdog (e.g. a verifier waiting on a research queue).
+    """
+    env = runtime_env or {}
+    role = str(sub_action or "").strip()
+    if role == "researcher_administrator":
+        if long_tool:
+            key, fallback = "CHACK_RESEARCH_ADMIN_LONG_TOOL_SILENCE_SECONDS", 900
+        else:
+            key, fallback = "CHACK_RESEARCH_ADMIN_SILENCE_SECONDS", 300
+    elif role in {"webresearcher", "scientific", "social", "business", "product",
+                  "travel", "legal", "religious", "cli", "subchack"}:
+        if long_tool and role == "webresearcher":
+            key, fallback = "CHACK_WEBSEARCHER_LONG_TOOL_SILENCE_SECONDS", 900
+        elif long_tool:
+            key, fallback = "CHACK_RESEARCHER_LONG_TOOL_SILENCE_SECONDS", 900
+        else:
+            key, fallback = "CHACK_RESEARCHER_SILENCE_SECONDS", 300
+    else:
+        return 0
+    if not saw_output:
+        key, fallback = "CHACK_CODEX_STARTUP_SILENCE_SECONDS", 180
+    try:
+        return max(1, int(env.get(key, os.environ.get(key, str(fallback))) or fallback))
+    except (TypeError, ValueError):
+        return fallback
+
+
 def _resolve_codex_direct_cache_timeout(
     sub_action: str,
     runtime_env: Optional[dict[str, str]] = None,
@@ -241,7 +279,7 @@ def _descendant_pids(pid: int) -> list[int]:
 def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
     stdout = getattr(process, "stdout", None)
     if stdout is not None:
-        _discard_windows_pipe_reader(stdout)
+        _discard_pipe_reader(stdout)
     if os.name == "nt":  # pragma: no cover - exercised on Windows
         try:
             subprocess.run(
@@ -331,51 +369,43 @@ class _BackgroundLineReader:
         return str(value)
 
 
-_WINDOWS_PIPE_READERS: dict[int, tuple[Any, _BackgroundLineReader]] = {}
-_WINDOWS_PIPE_READERS_LOCK = threading.Lock()
+_PIPE_READERS: dict[int, tuple[Any, _BackgroundLineReader]] = {}
+_PIPE_READERS_LOCK = threading.Lock()
 
 
-def _discard_windows_pipe_reader(stream: Any) -> None:
-    with _WINDOWS_PIPE_READERS_LOCK:
-        _WINDOWS_PIPE_READERS.pop(id(stream), None)
+def _discard_pipe_reader(stream: Any) -> None:
+    with _PIPE_READERS_LOCK:
+        entry = _PIPE_READERS.get(id(stream))
+        if entry is not None and entry[0] is stream:
+            _PIPE_READERS.pop(id(stream), None)
 
 
 def _uses_windows_pipe_reader() -> bool:
+    # Also governs Windows-specific Codex prompt/config placement.
     return os.name == "nt"
 
 
 def _readline_when_ready(stream: Any, wait_seconds: float) -> Optional[str]:
-    """Read one subprocess line only when its pipe is ready.
+    """Read a complete line without blocking the caller's deadline loop.
 
-    ``TextIO.readline()`` blocks indefinitely when a child stays alive without
-    producing output. Waiting on the pipe first lets the caller continue
-    enforcing execution deadlines and cancellation while the provider is
-    silent.
+    POSIX selectors report available bytes, not a complete line, and a text
+    wrapper can prefetch multiple lines before the next select. A single daemon
+    reader per pipe handles both cases on every platform without losing events.
     """
-    if _uses_windows_pipe_reader():
-        stream_id = id(stream)
-        with _WINDOWS_PIPE_READERS_LOCK:
-            entry = _WINDOWS_PIPE_READERS.get(stream_id)
-            if entry is None or entry[0] is not stream:
-                entry = (stream, _BackgroundLineReader(stream))
-                _WINDOWS_PIPE_READERS[stream_id] = entry
-        try:
-            line = entry[1].readline(wait_seconds)
-        except BaseException:
-            _discard_windows_pipe_reader(stream)
-            raise
-        if line == "":
-            _discard_windows_pipe_reader(stream)
-        return line
-
-    selector = selectors.DefaultSelector()
+    stream_id = id(stream)
+    with _PIPE_READERS_LOCK:
+        entry = _PIPE_READERS.get(stream_id)
+        if entry is None or entry[0] is not stream:
+            entry = (stream, _BackgroundLineReader(stream))
+            _PIPE_READERS[stream_id] = entry
     try:
-        selector.register(stream, selectors.EVENT_READ)
-        if not selector.select(timeout=max(0.0, float(wait_seconds))):
-            return None
-        return stream.readline()
-    finally:
-        selector.close()
+        line = entry[1].readline(wait_seconds)
+    except BaseException:
+        _discard_pipe_reader(stream)
+        raise
+    if line == "":
+        _discard_pipe_reader(stream)
+    return line
 
 
 def _resolve_codex_exec_cwd(runtime_env: Optional[dict[str, str]] = None) -> str:
@@ -1650,6 +1680,10 @@ class CodexExecutor:
         combined_output_lines: list[str] = []
         error_messages: list[str] = []
         started_at = time.monotonic()
+        last_progress_at = started_at
+        saw_output = False
+        active_tool_ids: set[str] = set()
+        stdout_exhausted = False
         time_to_first_token_seconds: float | None = None
         usage_tailer = _RolloutUsageTailer(self._codex_home or "", self._model_name)
         # A resumed thread is already known, so its rollout can be followed from
@@ -1712,8 +1746,49 @@ class CodexExecutor:
                     steps,
                     _RawResult(raw_responses=[]),
                 )
+            silence_limit = _codex_silence_limit_seconds(
+                self._sub_action,
+                saw_output=saw_output,
+                long_tool=bool(active_tool_ids),
+                runtime_env=self._runtime_env(),
+            )
+            if (silence_limit and process.poll() is None and
+                    time.monotonic() - last_progress_at >= silence_limit):
+                _terminate_process_tree(process)
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+                unregister_process(cancel_registration)
+                self._log_codex_failure(
+                    "codex_cli_silence_watchdog",
+                    command=command,
+                    cwd=exec_cwd,
+                    details=f"No progress output for {silence_limit}s "
+                            f"(role={self._sub_action}, active_tool={bool(active_tool_ids)}).",
+                )
+                _notify_codex_timeout({
+                    "sub_action": str(self._sub_action or ""),
+                    "model": str(self._model_name or ""),
+                    "provider": str(self._model_provider or ""),
+                    "session_id": str(current_session_id() or ""),
+                    "timeout_seconds": int(silence_limit),
+                    "timeout_kind": "silence",
+                })
+                return (
+                    f"ERROR: Codex CLI no progress output for {silence_limit}s "
+                    f"(role={self._sub_action}, active_tool={bool(active_tool_ids)}).",
+                    steps,
+                    _RawResult(raw_responses=[]),
+                )
             if process.stdout is None:
                 break
+            if stdout_exhausted:
+                if process.poll() is not None:
+                    break
+                time.sleep(0.05)
+                continue
             remaining_seconds = max(
                 0.0,
                 timeout_seconds - (time.monotonic() - started_at),
@@ -1724,14 +1799,18 @@ class CodexExecutor:
             )
             if line is None:
                 continue
-            if line == "" and process.poll() is not None:
-                break
-            if not line:
-                time.sleep(0.05)
+            if line == "":
+                if process.poll() is not None:
+                    break
+                # A child may close stdout yet stay alive. Do not spawn a new
+                # reader for that exhausted pipe on every deadline iteration.
+                stdout_exhausted = True
                 continue
 
             raw_line = str(line).rstrip("\n")
             if raw_line:
+                last_progress_at = time.monotonic()
+                saw_output = True
                 combined_output_lines.append(raw_line)
             event = self._parse_event_line(raw_line)
             if not event:
@@ -1763,6 +1842,12 @@ class CodexExecutor:
                 raw_item = event.get("item")
                 item: dict[str, Any] = raw_item if isinstance(raw_item, dict) else {}
                 item_type = str(item.get("type", "") or "")
+                if item_type in {"mcp_tool_call", "function_call", "web_search_call", "command_execution", "exec_command"}:
+                    tool_id = str(item.get("id") or "__anonymous_tool__")
+                    if event_type == "item.started":
+                        active_tool_ids.add(tool_id)
+                    elif event_type == "item.completed":
+                        active_tool_ids.discard(tool_id)
 
                 if item_type == "todo_list":
                     if self._native_task_planning_backend:
