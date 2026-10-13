@@ -1573,6 +1573,8 @@ def test_closed_browser_tab_resumes_same_submitted_conversation(monkeypatch, tmp
 
     def connect(*_args, **_kwargs):
         connections.append(True)
+        if mode == "xhigh" and len(connections) == 1:
+            raise TargetClosedError("Chrome restarted before submission")
         if mode == "pro" and len(connections) == 2:
             raise TargetClosedError("default browser context was closed")
         return Browser()
@@ -1607,12 +1609,13 @@ def test_closed_browser_tab_resumes_same_submitted_conversation(monkeypatch, tmp
     answer, url, metadata = helper._browser_research("research topic", run_state_path=state_path)
     assert len(sends) == 1
     assert len(attempts) == 2
-    assert len(connections) == (3 if mode == "pro" else 2)
+    assert len(connections) == (3 if mode in {"xhigh", "pro"} else 2)
     assert visits == ["https://chatgpt.com/", "https://chatgpt.com/c/abc-123"]
     assert url == "https://chatgpt.com/c/abc-123"
     assert answer.startswith("A" * 1200)
     assert metadata["terminal_state"] == "extracted"
     assert json.loads(state_path.read_text())["browser_recovery_count"] == 1
+    assert json.loads(state_path.read_text()).get("launch_retry_count") == (1 if mode == "xhigh" else None)
 
 
 def test_closed_browser_recovery_does_not_extend_original_output_deadline(monkeypatch):

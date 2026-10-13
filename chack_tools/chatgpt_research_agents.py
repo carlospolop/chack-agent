@@ -1410,24 +1410,45 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             },
         )
         with sync_playwright() as playwright:
-            browser = playwright.chromium.connect_over_cdp(self._cdp_url(), timeout=30000)
-            if not browser.contexts:
-                raise ChatGPTWebResearchError("The Chrome CDP endpoint has no browser context.")
-            page = browser.contexts[0].new_page()
+            page = None
+            # A browser restarted between leasing and first navigation has not
+            # received the prompt. Retrying that launch is safe; never retry
+            # after _send, where delivery may already have happened.
+            for launch_attempt in range(5):
+                try:
+                    browser = playwright.chromium.connect_over_cdp(self._cdp_url(), timeout=15000)
+                    if not browser.contexts:
+                        raise PlaywrightError("The Chrome CDP endpoint has no browser context.")
+                    page = browser.contexts[0].new_page()
+                    page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+                    # React hydrates after domcontentloaded; confirm the real composer.
+                    page.wait_for_selector(
+                        "#prompt-textarea, div.ProseMirror[contenteditable='true']",
+                        state="visible", timeout=30000,
+                    )
+                    page.wait_for_timeout(1500)
+                    if self.mode != "deep":
+                        selected_mode_metadata = self._select_reasoning_mode_with_retry(page)
+                        self._write_json(run_state_path, selected_mode_metadata)
+                    break
+                except PlaywrightError as exc:
+                    if page is not None:
+                        try:
+                            page.close()
+                        except PlaywrightError:
+                            pass
+                        page = None
+                    if type(exc).__name__ not in {"Error", "TargetClosedError"} or launch_attempt >= 4:
+                        raise
+                    self._write_json(run_state_path, {
+                        "terminal_state": "retrying_cdp_launch",
+                        "updated_at": time.time(),
+                        "launch_retry_count": launch_attempt + 1,
+                    })
+                    time.sleep((2, 5, 10, 15)[launch_attempt])
+            if page is None:
+                raise ChatGPTWebResearchError("Chrome CDP launch ended without a browser page")
             try:
-                page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
-                # domcontentloaded fires before the authenticated React app has
-                # hydrated. Wait for the real composer, otherwise concurrent
-                # launches can falsely look signed-out or mode-less.
-                page.wait_for_selector(
-                    "#prompt-textarea, div.ProseMirror[contenteditable='true']",
-                    state="visible",
-                    timeout=30000,
-                )
-                page.wait_for_timeout(1500)
-                if self.mode != "deep":
-                    selected_mode_metadata = self._select_reasoning_mode_with_retry(page)
-                    self._write_json(run_state_path, selected_mode_metadata)
                 terminal_marker = f"[CHACK_RESEARCH_COMPLETE_{uuid.uuid4().hex}]"
                 browser_prompt = (
                     prompt + "\n\nTransport completion check: append the exact line "
@@ -1439,12 +1460,20 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     (run_state_path.parent / "chatgpt-request.md").write_text(browser_prompt, encoding="utf-8")
                 self._send(page, browser_prompt, deep=self.mode == "deep")
                 conversation_url = str(page.url or "")
-                page.wait_for_timeout(1000)
+                try:
+                    page.wait_for_timeout(1000)
+                except PlaywrightError as exc:
+                    if (type(exc).__name__ != "TargetClosedError"
+                            or not re.fullmatch(r"https://chatgpt\.com/c/[a-zA-Z0-9-]+/?", conversation_url)):
+                        raise
                 try:
                     page.wait_for_url(re.compile(r"https://chatgpt\.com/c/"), timeout=30000)
-                except Exception:
+                except PlaywrightError as exc:
+                    if (type(exc).__name__ == "TargetClosedError"
+                            and not re.fullmatch(r"https://chatgpt\.com/c/[a-zA-Z0-9-]+/?", conversation_url)):
+                        raise
                     pass
-                conversation_url = str(page.url or "")
+                conversation_url = str(page.url or conversation_url)
                 self._write_json(
                     run_state_path,
                     {
