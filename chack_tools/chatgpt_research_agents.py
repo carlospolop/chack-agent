@@ -1182,10 +1182,13 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         *,
         partial_path: Path | None = None,
         run_state_path: Path | None = None,
+        deadline_at: float | None = None,
     ) -> str:
         websocket_url = str(connector.get("webSocketDebuggerUrl") or "")
         timeout_seconds = self._timeout_seconds()
         deadline = time.monotonic() + timeout_seconds
+        if deadline_at is not None:
+            deadline = min(deadline, deadline_at)
         previous = ""
         stable_polls = 0
         last_progress_at = 0.0
@@ -1236,10 +1239,13 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         partial_path: Path | None = None,
         run_state_path: Path | None = None,
         terminal_marker: str = "",
+        deadline_at: float | None = None,
     ) -> str:
         timeout_seconds = self._timeout_seconds()
         started_monotonic = time.monotonic()
         hard_deadline = started_monotonic + timeout_seconds
+        if deadline_at is not None:
+            hard_deadline = min(hard_deadline, deadline_at)
         force_window = min(self._force_answer_grace_seconds(), timeout_seconds)
         force_at = hard_deadline - force_window
         previous = ""
@@ -1340,8 +1346,8 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 },
             )
             # Two identical polls plus no running control avoids saving a streaming
-            # partial answer. Even a one-word verdict is valid for Pro/xhigh,
-            # but requires a longer stability window after generation stops.
+            # partial answer. Short Pro/xhigh replies (including a single-word
+            # verdict) are valid, but require a longer stability window.
             # After forcing, require material growth beyond the pre-force
             # acknowledgement before accepting a stable terminal answer.
             min_chars = 1200 if self.mode == "deep" else 200
@@ -1385,7 +1391,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
         partial_path: Path | None = None,
     ) -> tuple[str, str, dict[str, Any]]:
         try:
-            from playwright.sync_api import sync_playwright
+            from playwright.sync_api import Error as PlaywrightError, sync_playwright
         except ImportError as exc:  # pragma: no cover - packaging error
             raise ChatGPTWebResearchError("Playwright is required for ChatGPT Web researchers.") from exc
 
@@ -1432,6 +1438,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 if run_state_path is not None:
                     (run_state_path.parent / "chatgpt-request.md").write_text(browser_prompt, encoding="utf-8")
                 self._send(page, browser_prompt, deep=self.mode == "deep")
+                conversation_url = str(page.url or "")
                 page.wait_for_timeout(1000)
                 try:
                     page.wait_for_url(re.compile(r"https://chatgpt\.com/c/"), timeout=30000)
@@ -1447,44 +1454,86 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     },
                 )
                 self._emit_progress("browser_research_started", running=True)
-                if self.mode == "deep":
-                    cdp_session = page.context.new_cdp_session(page)
+                # Chrome may discard/close a renderer while the server-side
+                # generation continues. Resume the SAME conversation; never
+                # submit the prompt twice, and keep the original deadline.
+                extraction_deadline = time.monotonic() + output_timeout_seconds
+                answer = ""
+                for recovery_count in range(6):
                     try:
-                        target_info = cdp_session.send("Target.getTargetInfo")["targetInfo"]
-                    finally:
-                        cdp_session.detach()
-                    try:
-                        connector = self._deep_connector_target(str(target_info.get("targetId") or ""))
-                    except ChatGPTWebResearchError:
-                        # Current ChatGPT renders its Deep report in the parent
-                        # conversation as DIL markup instead of creating the old
-                        # connector OOPIF. It can appear well after the 30s
-                        # connector discovery window; wait for a final answer,
-                        # never treat the missing iframe as a failed request.
-                        self._write_json(run_state_path, {"deep_transport": "inline"})
-                        answer = self._wait_and_extract(
-                            page,
-                            partial_path=partial_path,
-                            run_state_path=run_state_path,
-                            terminal_marker=terminal_marker,
-                        )
-                    else:
-                        conversation_url = self._target_url(str(connector.get("parentId") or ""), page.url)
-                        self._write_json(run_state_path, {"conversation_url": conversation_url, "deep_transport": "connector"})
-                        answer = self._wait_and_extract_deep(
-                            connector,
-                            partial_path=partial_path,
-                            run_state_path=run_state_path,
-                        )
-                        answer = answer.replace(terminal_marker, "").strip()
-                else:
-                    answer = self._wait_and_extract(
-                        page,
-                        partial_path=partial_path,
-                        run_state_path=run_state_path,
-                        terminal_marker=terminal_marker,
-                    )
-                    conversation_url = page.url
+                        if self.mode == "deep":
+                            cdp_session = page.context.new_cdp_session(page)
+                            try:
+                                target_info = cdp_session.send("Target.getTargetInfo")["targetInfo"]
+                            finally:
+                                cdp_session.detach()
+                            try:
+                                connector = self._deep_connector_target(str(target_info.get("targetId") or ""))
+                            except ChatGPTWebResearchError:
+                                # Deep can render inline instead of in the old OOPIF.
+                                self._write_json(run_state_path, {"deep_transport": "inline"})
+                                answer = self._wait_and_extract(
+                                    page, partial_path=partial_path,
+                                    run_state_path=run_state_path,
+                                    terminal_marker=terminal_marker,
+                                    deadline_at=extraction_deadline,
+                                )
+                            else:
+                                conversation_url = self._target_url(str(connector.get("parentId") or ""), page.url)
+                                self._write_json(run_state_path, {"conversation_url": conversation_url, "deep_transport": "connector"})
+                                answer = self._wait_and_extract_deep(
+                                    connector, partial_path=partial_path,
+                                    run_state_path=run_state_path,
+                                    deadline_at=extraction_deadline,
+                                ).replace(terminal_marker, "").strip()
+                        else:
+                            answer = self._wait_and_extract(
+                                page, partial_path=partial_path,
+                                run_state_path=run_state_path,
+                                terminal_marker=terminal_marker,
+                                deadline_at=extraction_deadline,
+                            )
+                            conversation_url = page.url
+                        break
+                    except PlaywrightError as exc:
+                        if type(exc).__name__ != "TargetClosedError":
+                            raise
+                        if (recovery_count >= 5 or time.monotonic() >= extraction_deadline
+                                or not re.fullmatch(r"https://chatgpt\.com/c/[a-zA-Z0-9-]+/?", conversation_url)):
+                            raise
+                        self._write_json(run_state_path, {
+                            "terminal_state": "recovering_closed_tab",
+                            "updated_at": time.time(),
+                            "browser_recovery_count": recovery_count + 1,
+                        })
+                        self._emit_progress("recovering_closed_browser_tab", running=True)
+                        # A closed renderer is normally recoverable without a
+                        # browser restart. If Chrome itself died, systemd brings
+                        # it back and a new CDP connection resumes the same URL.
+                        for reconnect_attempt in range(3):
+                            if time.monotonic() >= extraction_deadline:
+                                raise
+                            time.sleep((3, 5, 8)[reconnect_attempt])
+                            try:
+                                # The old CDP connection can report connected
+                                # while its default context is already closed.
+                                browser = playwright.chromium.connect_over_cdp(self._cdp_url(), timeout=15000)
+                                if not browser.contexts:
+                                    raise ChatGPTWebResearchError("Chrome has no context after browser recovery")
+                                page = browser.contexts[0].new_page()
+                                page.goto(conversation_url, wait_until="domcontentloaded", timeout=60000)
+                                page.wait_for_selector("main", state="visible", timeout=30000)
+                                break
+                            except PlaywrightError:
+                                try:
+                                    page.close()
+                                except PlaywrightError:
+                                    pass
+                                if time.monotonic() >= extraction_deadline:
+                                    raise
+                                continue
+                        else:
+                            raise
                 source_url_count = len(set(re.findall(r"https?://[^\s)>]+", answer)))
                 metadata = {
                     "mode": self.mode,

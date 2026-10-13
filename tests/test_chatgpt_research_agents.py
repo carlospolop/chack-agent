@@ -1518,3 +1518,119 @@ def test_failed_run_preserves_partial_response_and_conversation_url(monkeypatch,
         "chatgpt-pro-partial.md",
     }
     assert all(row["source_url"] == "https://chatgpt.com/c/recoverable" for row in payload["key_artifacts"])
+
+
+@pytest.mark.parametrize("mode", ["xhigh", "pro", "deep"])
+def test_closed_browser_tab_resumes_same_submitted_conversation(monkeypatch, tmp_path, mode):
+    """A closed CDP target must not fail or duplicate a running research request."""
+    from playwright._impl._errors import TargetClosedError
+    from chack_tools import chatgpt_research_agents as module
+
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode=mode)
+    visits, sends, attempts, connections = [], [], [], []
+
+    class Page:
+        url = ""
+
+        def goto(self, url, **_kwargs):
+            self.url = url
+            visits.append(url)
+
+        def wait_for_selector(self, *_args, **_kwargs):
+            pass
+
+        def wait_for_timeout(self, *_args):
+            pass
+
+        def wait_for_url(self, *_args, **_kwargs):
+            pass
+
+        def close(self):
+            pass
+
+        @property
+        def context(self):
+            return context
+
+    class Session:
+        def send(self, *_args):
+            return {"targetInfo": {"targetId": "target"}}
+
+        def detach(self):
+            pass
+
+    class Context:
+        def new_page(self):
+            return Page()
+
+        def new_cdp_session(self, _page):
+            return Session()
+
+    context = Context()
+
+    class Browser:
+        contexts = [context]
+
+    def connect(*_args, **_kwargs):
+        connections.append(True)
+        if mode == "pro" and len(connections) == 2:
+            raise TargetClosedError("default browser context was closed")
+        return Browser()
+
+    class Playwright:
+        chromium = type("Chromium", (), {"connect_over_cdp": connect})()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", Playwright)
+    monkeypatch.setattr(module.time, "sleep", lambda *_args: None)
+    monkeypatch.setattr(helper, "_send", lambda page, *_args, **_kwargs: (
+        sends.append(page), setattr(page, "url", "https://chatgpt.com/c/abc-123")
+    ))
+    monkeypatch.setattr(helper, "_select_reasoning_mode_with_retry", lambda _page: {})
+    monkeypatch.setattr(helper, "_deep_connector_target", lambda _id: (
+        (_ for _ in ()).throw(ChatGPTWebResearchError("inline report"))
+    ))
+
+    def extract(page, **_kwargs):
+        attempts.append(page)
+        if len(attempts) == 1:
+            raise TargetClosedError("Target page, context or browser has been closed")
+        return "A" * 1200 + " https://example.org/source"
+
+    monkeypatch.setattr(helper, "_wait_and_extract", extract)
+    state_path = tmp_path / "chatgpt-run.json"
+    answer, url, metadata = helper._browser_research("research topic", run_state_path=state_path)
+    assert len(sends) == 1
+    assert len(attempts) == 2
+    assert len(connections) == (3 if mode == "pro" else 2)
+    assert visits == ["https://chatgpt.com/", "https://chatgpt.com/c/abc-123"]
+    assert url == "https://chatgpt.com/c/abc-123"
+    assert answer.startswith("A" * 1200)
+    assert metadata["terminal_state"] == "extracted"
+    assert json.loads(state_path.read_text())["browser_recovery_count"] == 1
+
+
+def test_closed_browser_recovery_does_not_extend_original_output_deadline(monkeypatch):
+    helper = ChatGPTWebResearchAgentTool(
+        ToolsConfig(chatgpt_xhigh_timeout_seconds=120, chatgpt_research_poll_seconds=10),
+        mode="xhigh",
+    )
+    clock = {"now": 50.0}
+
+    class Page:
+        def wait_for_timeout(self, milliseconds):
+            clock["now"] += milliseconds / 1000.0
+
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(helper, "_click_provider_retry_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_click_answer_now_if_present", lambda _page: False)
+    monkeypatch.setattr(helper, "_longest_answer", lambda _page: "")
+    monkeypatch.setattr(helper, "_is_running", lambda _page: True)
+    with pytest.raises(ChatGPTWebResearchError, match="total output deadline"):
+        helper._wait_and_extract(Page(), deadline_at=65.0)
+    assert clock["now"] == 65.0
