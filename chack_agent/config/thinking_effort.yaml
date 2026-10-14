@@ -45,6 +45,7 @@ models:
   gemini-3-7-flash: [low, medium, high]
   gemini-3-8-flash: [low, medium, high]
   gemini-3-flash-preview: [minimal, low, medium, high]
+  gemini-4-argon: [low, medium, high]
   gemini-flash-latest: [low, medium, high]
   gemini-nano-banana-2-1: [minimal, high]
   gemini-pro-latest: [low, medium, high]
