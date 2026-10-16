@@ -3328,6 +3328,56 @@ def test_async_task_health_is_deterministic_and_separates_terminal_from_executio
     ) == "succeeded"
 
 
+def test_async_artifacts_refresh_progress_only_on_new_files(tmp_path):
+    import chack_tools.researcher_administrator_agent as admin_mod
+
+    job_id = "test-news-media-progress"
+    task_id = "news-task"
+    started = time.time() - 900
+    admin_mod._async_job_store(job_id, {
+        "job_id": job_id,
+        "evidence_dir": str(tmp_path),
+        "expected_task_count": 1,
+        "tasks": {task_id: {
+            "task_id": task_id,
+            "researcher": "news_media",
+            "researcher_tool": "news_media_research",
+            "status": "running",
+            "execution_active": True,
+            "started_at": started,
+            "last_progress_at": started,
+            "artifact_count": 0,
+        }},
+    })
+    try:
+        folder = tmp_path / "news_media"
+        folder.mkdir()
+        (folder / "source.json").write_text("{}", encoding="utf-8")
+        admin_mod._async_refresh_artifact_counts(job_id)
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            task = admin_mod._ASYNC_RESEARCH_JOBS[job_id]["tasks"][task_id].copy()
+        assert task["artifact_count"] == 1
+        assert task["last_progress_at"] > started
+        assert admin_mod._async_task_health(task) == "healthy"
+        first_progress = task["last_progress_at"]
+
+        admin_mod._async_refresh_artifact_counts(job_id)
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            unchanged = admin_mod._ASYNC_RESEARCH_JOBS[job_id]["tasks"][task_id]
+            assert unchanged["last_progress_at"] == first_progress
+
+        (folder / "source-2.json").write_text("{}", encoding="utf-8")
+        admin_mod._async_refresh_artifact_counts(job_id)
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            assert admin_mod._ASYNC_RESEARCH_JOBS[job_id]["tasks"][task_id]["artifact_count"] == 2
+        ledger = json.loads((tmp_path / "researcher_jobs" / f"{job_id}.json").read_text())
+        assert ledger["tasks"][0]["artifact_count"] == 2
+        assert ledger["tasks"][0]["last_progress_at"] >= first_progress
+    finally:
+        with admin_mod._ASYNC_RESEARCH_LOCK:
+            admin_mod._ASYNC_RESEARCH_JOBS.pop(job_id, None)
+
+
 def test_async_deadline_is_terminal_immediately_and_late_result_is_rejected(tmp_path):
     import chack_tools.researcher_administrator_agent as admin_mod
     from concurrent.futures import Future
