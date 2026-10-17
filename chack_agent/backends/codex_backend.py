@@ -206,6 +206,47 @@ def _codex_silence_limit_seconds(
         return fallback
 
 
+def _active_async_child_artifact_mtime(master_dir: str) -> tuple[bool, float]:
+    """Observe active children without mistaking a ledger poll for progress.
+
+    MCP researchers run in a separate process, so the Codex event stream can be
+    silent while their artifact manifest grows. Only the current run's async
+    ledger and its running children's manifests may extend the administrator's
+    silence window. A dead/completed child or a rewritten ledger is not work.
+    """
+    root = str(master_dir or "").strip()
+    if not root:
+        return False, 0.0
+    active = False
+    latest_mtime = 0.0
+    for path in glob.iglob(os.path.join(root, "researcher_jobs", "*.json")):
+        try:
+            if os.path.getsize(path) > 1024 * 1024:
+                continue
+            with open(path, encoding="utf-8") as handle:
+                job = json.load(handle)
+            if not isinstance(job, dict) or job.get("kind") != "async":
+                continue
+            for task in job.get("tasks") or []:
+                if not isinstance(task, dict) or not task.get("execution_active"):
+                    continue
+                if task.get("status") not in {"running", "queued"}:
+                    continue
+                active = True
+                researcher = str(task.get("researcher") or "")
+                if not re.fullmatch(r"[a-z][a-z_]*", researcher):
+                    continue
+                manifest = os.path.join(root, researcher, "_artifact_manifest.jsonl")
+                try:
+                    latest_mtime = max(latest_mtime, os.path.getmtime(manifest))
+                except OSError:
+                    continue
+        except (OSError, ValueError, TypeError):
+            # The MCP process atomically replaces ledgers; retry next tick.
+            continue
+    return active, latest_mtime
+
+
 def _resolve_codex_direct_cache_timeout(
     sub_action: str,
     runtime_env: Optional[dict[str, str]] = None,
@@ -276,6 +317,27 @@ def _descendant_pids(pid: int) -> list[int]:
     return found
 
 
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "posix" and os.path.isdir("/proc"):
+        try:
+            with open(f"/proc/{pid}/stat", encoding="ascii") as handle:
+                state = handle.read().rsplit(") ", 1)[1][0]
+            return state not in {"Z", "X"}
+        except FileNotFoundError:
+            return False
+        except (OSError, IndexError):
+            pass
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (OSError, ValueError):
+        return True  # unknown: never claim verified cancellation
+
+
 def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
     stdout = getattr(process, "stdout", None)
     if stdout is not None:
@@ -308,8 +370,75 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
                 except Exception:
                     pass
         time.sleep(1 if sig == signal.SIGTERM else 0)
-        if process.poll() is not None:
+        if sig == signal.SIGKILL:
+            # SIGKILL is asynchronous. Wait briefly before reconciling the
+            # durable ledger or the child can still appear alive at readback.
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and any(_pid_is_running(pid) for pid in pids):
+                time.sleep(0.05)
+        # The root may exit on SIGTERM while an isolated researcher ignores
+        # it. Escalate until every captured descendant is stopped, not merely
+        # until the Codex CLI process exits.
+        if not any(_pid_is_running(pid) for pid in pids):
             break
+
+
+def _reconcile_aborted_admin_children(master_dir: str, reason: str) -> int:
+    """Fail closed only for researchers whose process was actually stopped."""
+    root = str(master_dir or "").strip()
+    if not root:
+        return 0
+    cancelled = 0
+    for path in glob.iglob(os.path.join(root, "researcher_jobs", "*.json")):
+        try:
+            if os.path.getsize(path) > 1024 * 1024:
+                continue
+            with open(path, encoding="utf-8") as handle:
+                ledger = json.load(handle)
+            if not isinstance(ledger, dict) or ledger.get("kind") != "async":
+                continue
+            tasks = ledger.get("tasks")
+            if not isinstance(tasks, list):
+                continue
+            changes = 0
+            for task in tasks:
+                if not isinstance(task, dict) or task.get("status") not in {"queued", "running"}:
+                    continue
+                pid = int(task.get("process_pid") or 0)
+                if pid > 0 and _pid_is_running(pid):
+                    continue
+                if pid <= 0 and (task.get("execution_active") or task.get("status") == "running"):
+                    continue  # cannot prove a launched worker is stopped
+                task.update({
+                    "status": "cancelled",
+                    "execution_active": False,
+                    "finished_at": time.time(),
+                    "failure_reason": str(reason)[:500],
+                    "latest_action": "administrator_aborted; child stopped",
+                    "process_alive_after": False,
+                })
+                changes += 1
+            if not changes:
+                continue
+            ledger["complete"] = bool(tasks) and all(
+                isinstance(task, dict) and task.get("status") in
+                {"done", "error", "cancelled", "deadline_exceeded"}
+                for task in tasks
+            )
+            ledger["updated_at"] = time.time()
+            temporary = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp"
+            try:
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    json.dump(ledger, handle, separators=(",", ":"), ensure_ascii=False)
+                os.replace(temporary, path)
+                cancelled += changes
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        except (OSError, ValueError, TypeError):
+            # Leave an unreadable ledger nonterminal; never invent success.
+            continue
+    return cancelled
 
 
 def _log_timestamp() -> str:
@@ -1680,7 +1809,9 @@ class CodexExecutor:
         combined_output_lines: list[str] = []
         error_messages: list[str] = []
         started_at = time.monotonic()
+        started_wall = time.time()
         last_progress_at = started_at
+        last_child_artifact_mtime = 0.0
         saw_output = False
         active_tool_ids: set[str] = set()
         stdout_exhausted = False
@@ -1710,6 +1841,11 @@ class CodexExecutor:
             if cancellation_requested():
                 _terminate_process_tree(process)
                 unregister_process(cancel_registration)
+                if self._sub_action == "researcher_administrator":
+                    _reconcile_aborted_admin_children(
+                        self._runtime_env_value("CHACK_RESEARCH_MASTER_DIR"),
+                        "Administrator Codex process cancelled; child stopped.",
+                    )
                 self._log_codex_failure(
                     "codex_cli_cancelled",
                     command=command,
@@ -1725,6 +1861,11 @@ class CodexExecutor:
             if (time.monotonic() - started_at) > timeout_seconds:
                 _terminate_process_tree(process)
                 unregister_process(cancel_registration)
+                if self._sub_action == "researcher_administrator":
+                    _reconcile_aborted_admin_children(
+                        self._runtime_env_value("CHACK_RESEARCH_MASTER_DIR"),
+                        "Administrator Codex hard process deadline; child stopped.",
+                    )
                 self._log_codex_failure(
                     "codex_cli_timeout",
                     command=command,
@@ -1746,14 +1887,23 @@ class CodexExecutor:
                     steps,
                     _RawResult(raw_responses=[]),
                 )
+            active_child = False
+            if self._sub_action == "researcher_administrator" and saw_output:
+                active_child, child_mtime = _active_async_child_artifact_mtime(
+                    self._runtime_env_value("CHACK_RESEARCH_MASTER_DIR")
+                )
+                if child_mtime > max(last_child_artifact_mtime, started_wall):
+                    last_child_artifact_mtime = child_mtime
+                    last_progress_at = time.monotonic()
             silence_limit = _codex_silence_limit_seconds(
                 self._sub_action,
                 saw_output=saw_output,
-                long_tool=bool(active_tool_ids),
+                long_tool=bool(active_tool_ids) or active_child,
                 runtime_env=self._runtime_env(),
             )
             if (silence_limit and process.poll() is None and
                     time.monotonic() - last_progress_at >= silence_limit):
+                child_detail = f", active_child={active_child}" if self._sub_action == "researcher_administrator" else ""
                 _terminate_process_tree(process)
                 try:
                     process.wait(timeout=3)
@@ -1761,12 +1911,18 @@ class CodexExecutor:
                     process.kill()
                     process.wait(timeout=3)
                 unregister_process(cancel_registration)
+                if self._sub_action == "researcher_administrator":
+                    _reconcile_aborted_admin_children(
+                        self._runtime_env_value("CHACK_RESEARCH_MASTER_DIR"),
+                        "Administrator Codex silence watchdog; child stopped.",
+                    )
                 self._log_codex_failure(
                     "codex_cli_silence_watchdog",
                     command=command,
                     cwd=exec_cwd,
-                    details=f"No progress output for {silence_limit}s "
-                            f"(role={self._sub_action}, active_tool={bool(active_tool_ids)}).",
+                    details=f"No Codex or child artifact progress for {silence_limit}s "
+                            f"(role={self._sub_action}, active_tool={bool(active_tool_ids)}"
+                            f"{child_detail}).",
                 )
                 _notify_codex_timeout({
                     "sub_action": str(self._sub_action or ""),
@@ -1778,7 +1934,8 @@ class CodexExecutor:
                 })
                 return (
                     f"ERROR: Codex CLI no progress output for {silence_limit}s "
-                    f"(role={self._sub_action}, active_tool={bool(active_tool_ids)}).",
+                    f"(role={self._sub_action}, active_tool={bool(active_tool_ids)}"
+                    f"{child_detail}).",
                     steps,
                     _RawResult(raw_responses=[]),
                 )

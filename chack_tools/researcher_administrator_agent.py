@@ -1122,12 +1122,24 @@ def _async_refresh_artifact_counts(job_id: str) -> None:
         task_id: _researcher_artifact_count(evidence_dir, researcher)
         for task_id, researcher in researchers.items()
     }
+    changed = False
     with _ASYNC_RESEARCH_LOCK:
         job = _ASYNC_RESEARCH_JOBS.get(str(job_id or "").strip())
         for task_id, count in counts.items():
             task = (job or {}).get("tasks", {}).get(task_id)
             if task is not None:
+                previous = int(task.get("artifact_count") or 0)
                 task["artifact_count"] = int(count)
+                if count > previous and str(task.get("status") or "") == "running":
+                    # The isolated child writes evidence without forwarding every
+                    # tool event to this process. New files are real progress even
+                    # when the last tool callback still says "tool_started".
+                    task["last_progress_at"] = max(
+                        float(task.get("last_progress_at") or 0.0), time.time()
+                    )
+                    changed = True
+    if changed:
+        _persist_async_job_ledger(job_id)
 
 
 def _async_wait_for_completion(job_id: str, timeout_seconds: int) -> bool:
