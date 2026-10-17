@@ -4,6 +4,7 @@
 models:
   aion-3-5: [low, high, max]
   aion-3-5-mini: [low, high, max]
+  beam-1-0-501b-a23b: [low, medium, high, xhigh, max]
   claude-fable-5: [low, medium, high, xhigh, max]
   claude-fable-5-1: [low, medium, high, xhigh, max]
   claude-fable-latest: [low, medium, high, xhigh, max]
