@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import threading
 import time
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -198,7 +199,7 @@ class _ModePage:
     def get_by_text(self, _name):
         return _EmptyLocator()
 
-    def locator(self, selector):
+    def locator(self, selector) -> Any:
         if "data-composer-transition-slot='trailing'" in selector:
             return _ModeLocator(self, "button", re.compile(r".*"))
         if "role='slider'" in selector:
@@ -228,6 +229,66 @@ def test_current_power_picker_selects_distinct_pro_and_xhigh_levels(mode, starti
     assert selected["selected_effort"] == expected
     assert selected["selected_power"] == expected_power
     assert page.clicks[0] == f"open:{starting}"
+
+
+class _AccessibleModelButton:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1
+
+    def nth(self, _index):
+        return self
+
+    def is_visible(self):
+        return True
+
+    def click(self, timeout=0):
+        assert timeout == 5000
+        self.page.menu_open = not self.page.menu_open
+        self.page.clicks.append("open:Select ChatGPT model")
+
+
+class _AccessibleModelPage(_ModePage):
+    """Current UI: composer has no trailing slot or accessible effort name."""
+
+    @property
+    def keyboard(self):
+        return self
+
+    def press(self, key):
+        assert key == "Escape"
+        self.menu_open = False
+        self.clicks.append("dismiss:picker")
+
+    def get_by_role(self, role, name=None):
+        if role == "button":
+            return _EmptyLocator()
+        return super().get_by_role(role, name)
+
+    def locator(self, selector):
+        if selector == "button[aria-haspopup='menu'][aria-label='Select ChatGPT model']":
+            return _AccessibleModelButton(self)
+        if "data-composer-transition-slot='trailing'" in selector:
+            return _EmptyLocator()
+        if selector in ("button[data-testid='model-switcher-dropdown-button']", "button[aria-haspopup='menu']"):
+            return _EmptyLocator()  # Sidebar Chat-actions buttons are not the picker.
+        return super().locator(selector)
+
+
+def test_current_accessible_model_button_selects_xhigh_then_pro_without_sidebar_guessing():
+    page = _AccessibleModelPage("Pro")
+    for mode in ("xhigh", "pro"):
+        level, effort = {"xhigh": ("4/5", "Extra High"), "pro": ("5/5", "Pro")}[mode]
+        selected = ChatGPTWebResearchAgentTool(ToolsConfig(), mode=mode)._select_reasoning_mode(page)
+        assert selected["selected_effort"] == effort
+        assert selected["selected_power"] == level
+        assert page.selected == effort
+        assert page.menu_open is False
+    assert page.clicks.count("open:Select ChatGPT model") == 2
+    assert "power:ArrowLeft" in page.clicks
+    assert "power:ArrowRight" in page.clicks
 
 
 def test_reasoning_mode_selector_retries_transient_hydration_failures(monkeypatch):

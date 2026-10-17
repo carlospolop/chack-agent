@@ -578,6 +578,34 @@ class ChatGPTWebResearchAgentTool:
             re.I,
         )
 
+        power_slider = "[role='slider'][aria-valuemin='0'][aria-valuemax='4']"
+
+        def slider_is_visible() -> bool:
+            controls = page.locator(power_slider)
+            return any(controls.nth(i).is_visible() for i in range(controls.count()))
+
+        # The current button is named "Select ChatGPT model" for accessibility,
+        # but visibly reads "Thinking effortExtra High" or "Thinking effortPro".
+        # Open this exact composer control first; scanning every sidebar menu
+        # can miss it or select an unrelated "Chat actions" button instead.
+        opened = slider_is_visible()
+        if not opened:
+            model_controls = page.locator(
+                "button[aria-haspopup='menu'][aria-label='Select ChatGPT model']"
+            )
+            for index in reversed(range(model_controls.count())):
+                try:
+                    control = model_controls.nth(index)
+                    if not control.is_visible():
+                        continue
+                    control.click(timeout=5000)
+                    page.wait_for_timeout(250)
+                    opened = slider_is_visible()
+                    if opened:
+                        break
+                except Exception:
+                    continue
+
         # Current ChatGPT exposes the selected power as a compact button.  Keep
         # the selector narrow so conversation-option buttons in the sidebar are
         # never mistaken for the composer picker.  In the September 2026 UI the
@@ -588,8 +616,7 @@ class ChatGPTWebResearchAgentTool:
         composer_mode_button = page.locator(
             "[data-composer-transition-slot='trailing'] button[aria-haspopup='menu']"
         )
-        opened = False
-        for index in reversed(range(composer_mode_button.count())):
+        for index in reversed(range(composer_mode_button.count() if not opened else 0)):
             try:
                 button = composer_mode_button.nth(index)
                 if button.is_visible():
@@ -656,7 +683,7 @@ class ChatGPTWebResearchAgentTool:
         # New UI: Power is a five-position slider, represented as 0..4 and
         # announced to the user as 1..5.  Use the semantic value, not CSS classes
         # or the visible label, because the label changed between UI revisions.
-        slider = page.locator("[role='slider'][aria-valuemin='0'][aria-valuemax='4']")
+        slider = page.locator(power_slider)
         for index in reversed(range(slider.count())):
             try:
                 control = slider.nth(index)
@@ -696,6 +723,10 @@ class ChatGPTWebResearchAgentTool:
                         f"ChatGPT did not confirm {target_label} ({target_power}/5) after moving the Power slider; "
                         f"observed level={confirmed_raw!r}, announcement={announcement[:180]!r}."
                     )
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
                 return {
                     "selected_effort": target_label,
                     "selected_power": f"{target_power}/5",
