@@ -23,6 +23,7 @@ models:
   deepseek-flash-latest: [none, low, high, max]
   deepseek-pro-latest: [none, low, high, max]
   deepseek-v4-1-flash: [none, low, high, max]
+  deepseek-v4-1-flash-1017: [none, low, high, max]
   deepseek-v4-flash: [none, high, xhigh]
   deepseek-v4-flash-0731: [none, low, high, max]
   deepseek-v4-flash-latest: [none, low, high, max]
