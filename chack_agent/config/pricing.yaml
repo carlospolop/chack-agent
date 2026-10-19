@@ -294,29 +294,29 @@ models:
     cache_read: 0.0182
     output: 0.182
   deepseek/deepseek-v4-flash-0731:
-    input: 0.1
-    cache_read: 0.03
-    output: 0.3
+    input: 0.15
+    cache_read: 0.042
+    output: 0.15
   deepseek/deepseek-v4-flash-vision-exp:
     input: 0.2156
     cache_read: 0.00686
     output: 0.6468
   deepseek/deepseek-v4-pro:
-    input: 0.2088
-    cache_read: 0.0174
-    output: 0.4176
+    input: 0.95526
+    cache_read: 0.079605
+    output: 1.91052
   deepseek/deepseek-v4-pro-0813:
     input: 0.66
     cache_read: 0.022
     output: 1.98
   deepseek/deepseek-v4.1-flash:
-    input: 0.0648
+    input: 0.0472
     cache_read: 0.0016
-    output: 0.144
+    output: 0.12
   deepseek/deepseek-v4.1-flash-1017:
-    input: 0.15
-    cache_read: 0.003
-    output: 0.6
+    input: 0.3
+    cache_read: 0.006
+    output: 1.2
   deepseek/deepseek-v4.1-flash:batch:
     input: 0.05
     cache_read: 0.004
@@ -600,9 +600,9 @@ models:
     cache_read: 0.027
     output: 0.201
   meta-llama/llama-3.2-3b-instruct:
-    input: 0.05
-    cache_read: 0.05
-    output: 0.33
+    input: 0.0509
+    cache_read: 0.0509
+    output: 0.335
   meta-llama/llama-3.3-70b-instruct:
     input: 0.1
     cache_read: 0.1
@@ -828,7 +828,7 @@ models:
     cache_read: 0.18
     output: 3.35
   moonshotai/kimi-k3:
-    input: 0.304
+    input: 0.249
     cache_read: 0.21
     output: 11.936
   moonshotai/kimi-k3:batch:
@@ -1518,9 +1518,9 @@ models:
     cache_read: 0.26
     output: 2.08
   qwen/qwen3.5-27b:
-    input: 0.26
-    cache_read: 0.26
-    output: 2.6
+    input: 0.195
+    cache_read: 0.195
+    output: 1.56
   qwen/qwen3.5-35b-a3b:
     input: 0.15
     cache_read: 0.05
@@ -1866,7 +1866,7 @@ models:
   z-ai/glm-5.3:
     input: 0.079
     cache_read: 0.078
-    output: 4.8
+    output: 1.4
   z-ai/glm-5.3-flash:
     input: 0.048
     cache_read: 0.006
@@ -1912,17 +1912,17 @@ models:
     cache_write: 2.5
     output: 10
   ~deepseek/deepseek-flash-latest:
-    input: 0.08
+    input: 0.05
     cache_read: 0.008
-    output: 0.5
+    output: 0.6
   ~deepseek/deepseek-pro-latest:
-    input: 0.12
-    cache_read: 0.12
+    input: 0.225
+    cache_read: 0.23
     output: 8
   ~deepseek/deepseek-v4-flash-latest:
-    input: 0.0086
-    cache_read: 0.0086
-    output: 1.28
+    input: 0.00688
+    cache_read: 0.00224
+    output: 0.12
   ~google/gemini-flash-latest:
     input: 0.75
     cache_read: 0.075
@@ -1934,9 +1934,9 @@ models:
     cache_write: 0.1875
     output: 10
   ~moonshotai/kimi-latest:
-    input: 0.27
-    cache_read: 0.27
-    output: 14
+    input: 0.249
+    cache_read: 0.21
+    output: 11.936
   ~openai/gpt-astra-latest:
     input: 10
     cache_read: 1
@@ -1974,6 +1974,6 @@ models:
     cache_read: 0.006
     output: 0.2
   ~z-ai/glm-latest:
-    input: 0.0632
-    cache_read: 0.0588
-    output: 4.4
+    input: 0.079
+    cache_read: 0.078
+    output: 1.4
