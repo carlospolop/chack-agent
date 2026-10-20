@@ -1588,10 +1588,14 @@ def test_closed_browser_tab_resumes_same_submitted_conversation(monkeypatch, tmp
     from chack_tools import chatgpt_research_agents as module
 
     helper = ChatGPTWebResearchAgentTool(ToolsConfig(), mode=mode)
-    visits, sends, attempts, connections = [], [], [], []
+    visits, sends, attempts, connections, pages = [], [], [], [], []
 
     class Page:
         url = ""
+
+        def __init__(self):
+            self.target_id = f"chack-owned-{len(pages) + 1}"
+            self.closed = False
 
         def goto(self, url, **_kwargs):
             self.url = url
@@ -1607,25 +1611,30 @@ def test_closed_browser_tab_resumes_same_submitted_conversation(monkeypatch, tmp
             pass
 
         def close(self):
-            pass
+            self.closed = True
 
         @property
         def context(self):
             return context
 
     class Session:
+        def __init__(self, page):
+            self.page = page
+
         def send(self, *_args):
-            return {"targetInfo": {"targetId": "target"}}
+            return {"targetInfo": {"targetId": self.page.target_id}}
 
         def detach(self):
             pass
 
     class Context:
         def new_page(self):
-            return Page()
+            page = Page()
+            pages.append(page)
+            return page
 
-        def new_cdp_session(self, _page):
-            return Session()
+        def new_cdp_session(self, page):
+            return Session(page)
 
     context = Context()
 
@@ -1675,6 +1684,10 @@ def test_closed_browser_tab_resumes_same_submitted_conversation(monkeypatch, tmp
     assert url == "https://chatgpt.com/c/abc-123"
     assert answer.startswith("A" * 1200)
     assert metadata["terminal_state"] == "extracted"
+    assert [page.closed for page in pages] == [True, True]
+    assert json.loads(state_path.read_text())["browser_target_ids"] == [
+        "chack-owned-1", "chack-owned-2"
+    ]
     assert json.loads(state_path.read_text())["browser_recovery_count"] == 1
     assert json.loads(state_path.read_text()).get("launch_retry_count") == (1 if mode == "xhigh" else None)
 
@@ -1698,3 +1711,62 @@ def test_closed_browser_recovery_does_not_extend_original_output_deadline(monkey
     with pytest.raises(ChatGPTWebResearchError, match="total output deadline"):
         helper._wait_and_extract(Page(), deadline_at=65.0)
     assert clock["now"] == 65.0
+
+
+def test_launch_error_closes_owned_tab_and_caps_browser_deadline(monkeypatch, tmp_path):
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(chatgpt_xhigh_timeout_seconds=10800), mode="xhigh")
+    pages = []
+
+    class Page:
+        url = ""
+        closed = False
+
+        @property
+        def context(self):
+            return context
+
+        def goto(self, *_args, **_kwargs):
+            pass
+
+        def wait_for_selector(self, *_args, **_kwargs):
+            raise ChatGPTWebResearchError("composer could not hydrate")
+
+        def close(self):
+            self.closed = True
+
+    class Session:
+        def send(self, *_args):
+            return {"targetInfo": {"targetId": "owned-target-on-launch"}}
+
+        def detach(self):
+            pass
+
+    class Context:
+        def new_page(self):
+            page = Page()
+            pages.append(page)
+            return page
+
+        def new_cdp_session(self, _page):
+            return Session()
+
+    context = Context()
+    browser = type("Browser", (), {"contexts": [context]})()
+
+    class Playwright:
+        chromium = type("Chromium", (), {"connect_over_cdp": lambda self, *_args, **_kwargs: browser})()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", Playwright)
+    state_path = tmp_path / "chatgpt-run.json"
+    with pytest.raises(ChatGPTWebResearchError, match="composer could not hydrate"):
+        helper._browser_research("safe prompt", run_state_path=state_path)
+    assert len(pages) == 1 and pages[0].closed
+    state = json.loads(state_path.read_text())
+    assert state["output_timeout_seconds"] == 7200
+    assert state["browser_target_ids"] == ["owned-target-on-launch"]

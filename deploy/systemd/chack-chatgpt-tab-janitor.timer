@@ -1,0 +1,12 @@
+[Unit]
+Description=Reap completed and orphaned Chack-owned ChatGPT tabs
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=false
+Unit=chack-chatgpt-tab-janitor.service
+
+[Install]
+WantedBy=timers.target

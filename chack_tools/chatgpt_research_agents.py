@@ -1427,8 +1427,31 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
             raise ChatGPTWebResearchError("Playwright is required for ChatGPT Web researchers.") from exc
 
         started_at = time.time()
-        output_timeout_seconds = self._timeout_seconds()
+        # A tab must never outlive two hours, even if a broker supplied a
+        # longer per-job output deadline. The independent janitor also covers
+        # a worker killed before Playwright's normal page.close() can run.
+        output_timeout_seconds = min(self._timeout_seconds(), 2 * 60 * 60)
         selected_mode_metadata: dict[str, Any] = {}
+        owned_target_ids: list[str] = []
+
+        def record_owned_page(page) -> None:
+            if run_state_path is None:
+                return
+            session = page.context.new_cdp_session(page)
+            try:
+                target_id = str(session.send("Target.getTargetInfo")["targetInfo"]["targetId"])
+            finally:
+                session.detach()
+            if not target_id:
+                raise ChatGPTWebResearchError("Could not identify the owned ChatGPT browser tab")
+            owned_target_ids.append(target_id)
+            self._write_json(run_state_path, {"browser_target_ids": owned_target_ids})
+            # Tracking is a safety requirement, not optional telemetry: close
+            # this page if the janitor cannot find its durable ownership record.
+            recorded = json.loads(run_state_path.read_text(encoding="utf-8"))
+            if target_id not in recorded.get("browser_target_ids", []):
+                raise ChatGPTWebResearchError("Could not persist ChatGPT browser tab ownership")
+
         self._write_json(
             run_state_path,
             {
@@ -1451,6 +1474,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     if not browser.contexts:
                         raise PlaywrightError("The Chrome CDP endpoint has no browser context.")
                     page = browser.contexts[0].new_page()
+                    record_owned_page(page)
                     page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
                     # React hydrates after domcontentloaded; confirm the real composer.
                     page.wait_for_selector(
@@ -1477,6 +1501,13 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                         "launch_retry_count": launch_attempt + 1,
                     })
                     time.sleep((2, 5, 10, 15)[launch_attempt])
+                except Exception:
+                    if page is not None:
+                        try:
+                            page.close()
+                        except Exception:
+                            pass
+                    raise
             if page is None:
                 raise ChatGPTWebResearchError("Chrome CDP launch ended without a browser page")
             try:
@@ -1517,7 +1548,9 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                 # Chrome may discard/close a renderer while the server-side
                 # generation continues. Resume the SAME conversation; never
                 # submit the prompt twice, and keep the original deadline.
-                extraction_deadline = time.monotonic() + output_timeout_seconds
+                extraction_deadline = time.monotonic() + max(
+                    0.0, output_timeout_seconds - (time.time() - started_at)
+                )
                 answer = ""
                 for recovery_count in range(6):
                     try:
@@ -1558,6 +1591,10 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                     except PlaywrightError as exc:
                         if type(exc).__name__ != "TargetClosedError":
                             raise
+                        try:
+                            page.close()
+                        except PlaywrightError:
+                            pass
                         if (recovery_count >= 5 or time.monotonic() >= extraction_deadline
                                 or not re.fullmatch(r"https://chatgpt\.com/c/[a-zA-Z0-9-]+/?", conversation_url)):
                             raise
@@ -1581,6 +1618,7 @@ return{text,textLen:text.length,buttons:labels,links,hasStop,completed,planning,
                                 if not browser.contexts:
                                     raise ChatGPTWebResearchError("Chrome has no context after browser recovery")
                                 page = browser.contexts[0].new_page()
+                                record_owned_page(page)
                                 page.goto(conversation_url, wait_until="domcontentloaded", timeout=60000)
                                 page.wait_for_selector("main", state="visible", timeout=30000)
                                 break

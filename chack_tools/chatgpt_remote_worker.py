@@ -422,7 +422,9 @@ class ChatGPTRemoteWorker:
             name=f"chatgpt-heartbeat-{job_id}",
             daemon=True,
         )
-        hard_timeout_seconds = output_timeout + self.hard_timeout_grace_seconds
+        # The watchdog must not leave an owned browser tab alive beyond two
+        # hours even if a broker lease requested a longer output deadline.
+        hard_timeout_seconds = min(output_timeout + self.hard_timeout_grace_seconds, 2 * 60 * 60)
         hard_deadline = threading.Thread(
             target=self._hard_deadline_loop,
             kwargs={

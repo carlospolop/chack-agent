@@ -242,6 +242,25 @@ def test_worker_accepts_xhigh_and_uses_its_mode_specific_timeout(monkeypatch, tm
     assert completion["metadata"]["mode"] == "xhigh"
 
 
+def test_worker_hard_deadline_is_capped_at_two_hours_even_for_long_leases(monkeypatch, tmp_path):
+    worker, client = _worker(tmp_path)
+    limits = []
+    monkeypatch.setattr(worker, "_hard_deadline_loop", lambda **kwargs: limits.append(kwargs["timeout_seconds"]))
+    monkeypatch.setattr(
+        "chack_tools.chatgpt_remote_worker.ChatGPTWebResearchAgentTool._browser_research",
+        lambda _self, _prompt, **_kwargs: ("finished", "", {"mode": "deep", "terminal_state": "extracted"}),
+    )
+    worker.process({
+        "job_id": "job_00000000-0000-0000-0000-000000000097",
+        "lease_id": "lease-long",
+        "mode": "deep",
+        "prompt": "P" * 200,
+        "output_timeout_seconds": 10800,
+    })
+    assert limits == [7200]
+    assert client.completions[0][1]["status"] == "SUCCEEDED"
+
+
 def test_worker_restores_xhigh_from_stale_broker_compatibility_envelope(monkeypatch, tmp_path):
     worker, client = _worker(tmp_path)
     original_prompt = "Compatibility prompt " + ("X" * 200)

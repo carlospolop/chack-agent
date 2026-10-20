@@ -1,0 +1,15 @@
+[Unit]
+Description=Close completed or two-hour-old Chack-owned ChatGPT tabs
+After=hermes-lipedema-chrome.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/tester/git/chack-agent
+ExecStart=/home/tester/git/chack-agent/.venv/bin/python -m chack_tools.chatgpt_tab_janitor
+TimeoutStartSec=45
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/tester/.local/state/chack-chatgpt-worker
+RestrictAddressFamilies=AF_UNIX AF_INET
+LockPersonality=true
