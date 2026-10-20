@@ -114,6 +114,8 @@ models:
   kimi-latest: [none, low, high, max]
   mercury-2: [none, low, medium, high]
   mercury-2-5: [none, low, medium, high]
+  mercury-3: [none, low, medium, high]
+  minimax-m3-1-flash: [low, medium, high, xhigh, max]
   mistral-large-4-0: [none, high]
   mistral-medium-3-5: [none, high]
   mistral-small-2603: [none, high]
