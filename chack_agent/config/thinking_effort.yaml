@@ -111,6 +111,7 @@ models:
   inkling: [none, minimal, low, medium, high, max]
   inkling-small: [none, minimal, low, medium, high, max]
   kimi-k3: [none, low, high, max]
+  kimi-k3-1-pro: [none, low, high, max]
   kimi-latest: [none, low, high, max]
   mercury-2: [none, low, medium, high]
   mercury-2-5: [none, low, medium, high]
