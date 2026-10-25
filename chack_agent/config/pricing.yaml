@@ -290,17 +290,17 @@ models:
     cache_read: 0.0182
     output: 0.182
   deepseek/deepseek-v4-flash-0731:
-    input: 0.04444
-    cache_read: 0.001414
-    output: 0.13332
+    input: 0.0422
+    cache_read: 0.028
+    output: 0.1694
   deepseek/deepseek-v4-flash-vision-exp:
     input: 0.2156
     cache_read: 0.00686
     output: 0.6468
   deepseek/deepseek-v4-pro:
-    input: 0.621702
-    cache_read: 0.0518085
-    output: 1.243404
+    input: 0.2088
+    cache_read: 0.0174
+    output: 0.4176
   deepseek/deepseek-v4-pro-0813:
     input: 0.66
     cache_read: 0.022
@@ -559,6 +559,10 @@ models:
     input: 0.03
     cache_read: 0.03
     output: 0.15
+  liquid/lfm-2.5-2.6b:
+    input: 0.35
+    cache_read: 0.04
+    output: 0.5
   liquid/lfm-2.5-2.6b:free:
     input: 0
     cache_read: 0
@@ -588,9 +592,9 @@ models:
     cache_read: 0.027
     output: 0.201
   meta-llama/llama-3.2-3b-instruct:
-    input: 0.0509
-    cache_read: 0.0509
-    output: 0.335
+    input: 0.05
+    cache_read: 0.05
+    output: 0.33
   meta-llama/llama-3.3-70b-instruct:
     input: 0.1
     cache_read: 0.1
@@ -664,9 +668,9 @@ models:
     cache_read: 0.03
     output: 1.2
   minimax/minimax-m2.5:
-    input: 0.27
+    input: 0.3
     cache_read: 0.03
-    output: 0.95
+    output: 1.2
   minimax/minimax-m2.7:
     input: 0.3
     cache_read: 0.06
@@ -907,10 +911,6 @@ models:
     input: -1000000
     cache_read: -1000000
     output: -1000000
-  openai/gpt-3.5-turbo:
-    input: 0.5
-    cache_read: 0.5
-    output: 1.5
   openai/gpt-3.5-turbo-0613:
     input: 1
     cache_read: 1
@@ -919,14 +919,6 @@ models:
     input: 3
     cache_read: 3
     output: 4
-  openai/gpt-3.5-turbo-instruct:
-    input: 1.5
-    cache_read: 1.5
-    output: 2
-  openai/gpt-3.5-turbo:batch:
-    input: 0.25
-    cache_read: 0.25
-    output: 0.75
   openai/gpt-4:
     input: 30
     cache_read: 30
@@ -1926,9 +1918,9 @@ models:
     cache_write: 0.1875
     output: 10
   ~moonshotai/kimi-latest:
-    input: 0.238
-    cache_read: 0.228
-    output: 16
+    input: 0.19
+    cache_read: 0.19
+    output: 8.94
   ~openai/gpt-astra-latest:
     input: 10
     cache_read: 1
@@ -1962,10 +1954,10 @@ models:
     cache_read: 0.5
     output: 6
   ~z-ai/glm-flash-latest:
-    input: 0.0304
-    cache_read: 0.03
-    output: 0.0852
+    input: 0.0287
+    cache_read: 0.0287
+    output: 0.0914
   ~z-ai/glm-latest:
-    input: 0.079
-    cache_read: 0.078
-    output: 1.4
+    input: 0.0703
+    cache_read: 0.0703
+    output: 4.3843
