@@ -378,5 +378,30 @@ class ClaudeContextBetaTests(unittest.TestCase):
         self.assertNotIn("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", env)
 
 
+class CodexNativeWebSearchTests(unittest.TestCase):
+    """Codex's built-in web search follows the config, not the SerpAPI key."""
+
+    def _executor(self, serpapi_enabled: bool):
+        config = _make_config("codex", 250_000)
+        config.tools.serpapi_google_web_enabled = serpapi_enabled
+        with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(
+            "chack_agent.model_aliases._get_backend_aliases", return_value={}
+        ), patch.dict(os.environ, {"SERPAPI_API_KEY": "", "CHACK_DISABLE_CODEX_NATIVE_WEB": ""}):
+            return build_codex_executor(
+                resolve_config_aliases(config),
+                system_prompt="system",
+                max_turns=2,
+                memory_max_messages=10,
+                memory_reset_to_messages=5,
+                tools_override=[],
+            )
+
+    def test_enabled_when_config_asks_for_web_search_without_a_key(self) -> None:
+        self.assertFalse(self._executor(True)._disable_native_web_search)
+
+    def test_disabled_when_config_has_no_web_search(self) -> None:
+        self.assertTrue(self._executor(False)._disable_native_web_search)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3375,7 +3375,11 @@ def build_executor(
     if allowed_tool_names is not None:
         allowed_set = set(allowed_tool_names)
         disable_native_shell = True
-        disable_native_web_search = "search_google_web" not in allowed_set
+        # The SerpAPI tools are only built when a key exists; Codex's own web search must not depend on that key.
+        disable_native_web_search = "search_google_web" not in allowed_set and not (
+            bool(getattr(config.tools, "serpapi_google_web_enabled", False))
+            or bool(getattr(config.tools, "serpapi_bing_web_enabled", False))
+        )
     if str(os.environ.get("CHACK_DISABLE_CODEX_NATIVE_WEB", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
         disable_native_web_search = True
 
