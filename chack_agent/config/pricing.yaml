@@ -197,10 +197,6 @@ models:
     cache_read: 0.1
     cache_write: 1.25
     output: 5
-  arcee-ai/trinity-large-thinking:
-    input: 0.25
-    cache_read: 0.06
-    output: 0.8
   bytedance-seed/seed-1.6:
     input: 0.25
     cache_read: 0.25
@@ -286,13 +282,13 @@ models:
     cache_read: 0.27
     output: 0.41
   deepseek/deepseek-v4-flash:
-    input: 0.091
-    cache_read: 0.0182
-    output: 0.182
+    input: 0.14
+    cache_read: 0.028
+    output: 0.28
   deepseek/deepseek-v4-flash-0731:
-    input: 0.44
-    cache_read: 0.014
-    output: 1.32
+    input: 0.119
+    cache_read: 0.0238
+    output: 0.238
   deepseek/deepseek-v4-flash-vision-exp:
     input: 0.2156
     cache_read: 0.00686
@@ -306,9 +302,9 @@ models:
     cache_read: 0.044
     output: 3.96
   deepseek/deepseek-v4.1-flash:
-    input: 0.02
-    cache_read: 0.015
-    output: 1
+    input: 0.14
+    cache_read: 0.0042
+    output: 0.42
   deepseek/deepseek-v4.1-flash-1017:
     input: 0.3
     cache_read: 0.006
@@ -492,17 +488,17 @@ models:
     cache_read: 0.02
     output: 0.05
   google/gemma-4-26b-a4b-it:
-    input: 0.0675
-    cache_read: 0.0375
-    output: 0.225
+    input: 0.0765
+    cache_read: 0.0425
+    output: 0.255
   google/gemma-4-26b-a4b-it:free:
     input: 0
     cache_read: 0
     output: 0
   google/gemma-4-31b-it:
-    input: 0.1
-    cache_read: 0.1
-    output: 0.34
+    input: 0.2
+    cache_read: 0.2
+    output: 0.4
   google/gemma-4-31b-it:free:
     input: 0
     cache_read: 0
@@ -519,10 +515,6 @@ models:
     input: 0.08
     cache_read: 0.08
     output: 0.11
-  ibm-granite/granite-4.0-h-micro:
-    input: 0.017
-    cache_read: 0.017
-    output: 0.112
   ibm-granite/granite-4.2-8b:
     input: 0.06
     cache_read: 0.015
@@ -687,10 +679,6 @@ models:
     input: 0.3
     cache_read: 0.03
     output: 0.9
-  mistralai/codestral-2508:batch:
-    input: 0.15
-    cache_read: 0.015
-    output: 0.45
   mistralai/devstral-2512:
     input: 0.4
     cache_read: 0.04
@@ -707,10 +695,6 @@ models:
     input: 0.15
     cache_read: 0.015
     output: 0.15
-  mistralai/ministral-8b-2512:batch:
-    input: 0.075
-    cache_read: 0.0075
-    output: 0.075
   mistralai/mistral-large:
     input: 2
     cache_read: 0.2
@@ -723,10 +707,6 @@ models:
     input: 0.5
     cache_read: 0.05
     output: 1.5
-  mistralai/mistral-large-2512:batch:
-    input: 0.25
-    cache_read: 0.025
-    output: 0.75
   mistralai/mistral-large-4-0:
     input: 1.36
     cache_read: 0.14
@@ -747,10 +727,6 @@ models:
     input: 0.4
     cache_read: 0.04
     output: 2
-  mistralai/mistral-medium-3.1:batch:
-    input: 0.2
-    cache_read: 0.02
-    output: 1
   mistralai/mistral-nemo:
     input: 0.029
     cache_read: 0.029
@@ -767,10 +743,6 @@ models:
     input: 0.15
     cache_read: 0.015
     output: 0.6
-  mistralai/mistral-small-2603:batch:
-    input: 0.075
-    cache_read: 0.0075
-    output: 0.3
   mistralai/mistral-small-3.1-24b-instruct:
     input: 0.351
     cache_read: 0.351
@@ -816,12 +788,12 @@ models:
     cache_read: 0.15
     output: 3.41
   moonshotai/kimi-k2.7-code:
-    input: 0.6712
+    input: 0.56
     cache_read: 0.15
-    output: 3.35
+    output: 3.1
   moonshotai/kimi-k3:
-    input: 0.214
-    cache_read: 0.204
+    input: 0.2
+    cache_read: 0.19
     output: 20
   moonshotai/kimi-k3.1-pro:
     input: 2
@@ -1263,6 +1235,26 @@ models:
     cache_read: 0.05
     cache_write: 1.25
     output: 5
+  openai/gpt-6.1-terra:
+    input: 1
+    cache_read: 0.05
+    cache_write: 1.25
+    output: 5
+  openai/gpt-6.1-terra-pro:
+    input: 1
+    cache_read: 0.05
+    cache_write: 1.25
+    output: 5
+  openai/gpt-6.1-terra-pro:batch:
+    input: 0.5
+    cache_read: 0.025
+    cache_write: 0.625
+    output: 2.5
+  openai/gpt-6.1-terra:batch:
+    input: 0.5
+    cache_read: 0.025
+    cache_write: 0.625
+    output: 2.5
   openai/gpt-audio:
     input: 2.5
     cache_read: 2.5
@@ -1449,8 +1441,8 @@ models:
     cache_read: 0.12
     output: 0.5
   qwen/qwen3-30b-a3b-instruct-2507:
-    input: 0.09
-    cache_read: 0.09
+    input: 0.1
+    cache_read: 0.1
     output: 0.3
   qwen/qwen3-32b:
     input: 0.08
@@ -1502,9 +1494,9 @@ models:
     cache_read: 0.26
     output: 2.08
   qwen/qwen3.5-27b:
-    input: 0.27
-    cache_read: 0.27
-    output: 2.16
+    input: 0.26
+    cache_read: 0.26
+    output: 2.6
   qwen/qwen3.5-35b-a3b:
     input: 0.14
     cache_read: 0.05
@@ -1780,13 +1772,13 @@ models:
     cache_read: 0.2
     output: 2
   xiaomi/mimo-v2.5:
-    input: 0.119
-    cache_read: 0.00255
-    output: 0.238
+    input: 0.4
+    cache_read: 0.08
+    output: 2
   xiaomi/mimo-v2.5-pro:
-    input: 0.3045
-    cache_read: 0.0028
-    output: 0.609
+    input: 0.48
+    cache_read: 0.096
+    output: 1.8
   xiaomi/mimo-v2.6-flash:
     input: 0.14
     cache_read: 0.0028
@@ -1840,15 +1832,15 @@ models:
     cache_read: 0.24
     output: 4
   z-ai/glm-5.1:
-    input: 1.4
-    cache_read: 0.26
-    output: 4.4
+    input: 0.966
+    cache_read: 0.1794
+    output: 3.036
   z-ai/glm-5.2:
     input: 0.0341
     cache_read: 0.033
     output: 7
   z-ai/glm-5.3:
-    input: 0.0699
+    input: 0.0769
     cache_read: 0.0689
     output: 1.4
   z-ai/glm-5.3-flash:
@@ -1897,11 +1889,11 @@ models:
     output: 10
   ~deepseek/deepseek-flash-latest:
     input: 0.02
-    cache_read: 0.015
-    output: 1
+    cache_read: 0.011018
+    output: 0.028561
   ~deepseek/deepseek-pro-latest:
-    input: 0.2565
-    cache_read: 0.26
+    input: 0.2381
+    cache_read: 0.24
     output: 8
   ~deepseek/deepseek-v4-flash-latest:
     input: 0.0475
@@ -1918,9 +1910,9 @@ models:
     cache_write: 0.1875
     output: 10
   ~moonshotai/kimi-latest:
-    input: 0.1529
-    cache_read: 0.15
-    output: 9.75
+    input: 0.19
+    cache_read: 0.19
+    output: 8.94
   ~openai/gpt-astra-latest:
     input: 10
     cache_read: 1
@@ -1941,10 +1933,10 @@ models:
     cache_write: 2.5
     output: 10
   ~openai/gpt-terra-latest:
-    input: 2
-    cache_read: 0.2
-    cache_write: 2.5
-    output: 12
+    input: 1
+    cache_read: 0.05
+    cache_write: 1.25
+    output: 5
   ~unbiased/pareto-latest:
     input: 0.8
     cache_read: 0.03
@@ -1958,6 +1950,6 @@ models:
     cache_read: 0.03
     output: 0.0758
   ~z-ai/glm-latest:
-    input: 0.0699
-    cache_read: 0.0689
-    output: 1.4
+    input: 0.0703
+    cache_read: 0.0703
+    output: 4.3843
