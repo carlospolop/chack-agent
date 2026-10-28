@@ -133,19 +133,39 @@ def _cleanup_isolated_codex_home(codex_home: str, home_base: str) -> bool:
 # Per-run codex process timeout, selected by the agent's sub_action so different roles
 # (verifiers vs research administrators vs sub-researchers) get different wall-clock caps.
 # CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION is a JSON map {sub_action: seconds, "default": n};
-# falls back to the global CHACK_CODEX_EXEC_TIMEOUT_SECONDS, then 900.
+# falls back to the global CHACK_CODEX_EXEC_TIMEOUT_SECONDS, then to the agent's own
+# max_runtime_minutes (exported as CHACK_BUDGET_MAX_RUNTIME_SECONDS) plus a grace period,
+# and only then to 900 for agents without a runtime budget.
+CODEX_RUNTIME_GRACE_SECONDS = 300
+
+
+def _runtime_budget_timeout(runtime_env: dict[str, str]) -> Optional[int]:
+    raw = runtime_env.get(
+        "CHACK_BUDGET_MAX_RUNTIME_SECONDS",
+        os.environ.get("CHACK_BUDGET_MAX_RUNTIME_SECONDS", ""),
+    )
+    try:
+        budget = float(raw or 0)
+    except (TypeError, ValueError):
+        return None
+    if budget <= 0:
+        return None
+    return int(budget) + CODEX_RUNTIME_GRACE_SECONDS
+
+
 def _resolve_codex_exec_timeout(
     sub_action: str,
     runtime_env: Optional[dict[str, str]] = None,
 ) -> int:
     runtime_env = runtime_env or {}
-    default = int(
-        runtime_env.get(
-            "CHACK_CODEX_EXEC_TIMEOUT_SECONDS",
-            os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "900"),
-        )
-        or "900"
+    explicit = runtime_env.get(
+        "CHACK_CODEX_EXEC_TIMEOUT_SECONDS",
+        os.environ.get("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", ""),
     )
+    if explicit:
+        default = int(explicit)
+    else:
+        default = _runtime_budget_timeout(runtime_env) or 900
     raw = str(
         runtime_env.get(
             "CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION",
