@@ -537,6 +537,21 @@ def _readline_when_ready(stream: Any, wait_seconds: float) -> Optional[str]:
     return line
 
 
+# Linux rejects any single argv/env string longer than MAX_ARG_STRLEN
+# (32 pages = 131072 bytes, terminating NUL included) with E2BIG.
+_MAX_ARGUMENT_BYTES = 131072 - 1
+
+
+def _developer_instructions_argument(prompt: str) -> str:
+    # json.dumps emits a TOML-compatible quoted string while safely preserving
+    # newlines and quotes in large context blocks.
+    return "developer_instructions=" + json.dumps(prompt, ensure_ascii=False)
+
+
+def _fits_in_argument(prompt: str) -> bool:
+    return len(_developer_instructions_argument(prompt).encode("utf-8")) <= _MAX_ARGUMENT_BYTES
+
+
 def _resolve_codex_exec_cwd(runtime_env: Optional[dict[str, str]] = None) -> str:
     runtime_env = runtime_env or {}
     candidate = str(
@@ -1210,6 +1225,17 @@ class CodexExecutor:
             # use its independent cache boundary.
             user_input = cache_parts.stable_prefix
             cache_parts = split_prompt_cache_breakpoint(user_input)
+        if cache_parts.has_breakpoint and not _fits_in_argument(
+            "\n".join(part for part in (base, policy_block, cache_parts.stable_prefix) if part.strip())
+        ):
+            # The developer prefix travels as one `--config` argument, and Linux
+            # refuses any single argument above MAX_ARG_STRLEN (128 KiB) with
+            # E2BIG. Send the task's stable context on stdin instead.
+            _LOGGER.info(
+                "Codex developer prefix exceeds one command-line argument; sending task context on stdin"
+            )
+            user_input = cache_parts.prompt_without_marker
+            cache_parts = split_prompt_cache_breakpoint(user_input)
         if cache_parts.has_breakpoint:
             developer_parts = [
                 part
@@ -1239,6 +1265,14 @@ class CodexExecutor:
             if part.strip()
         ]
         self._cacheable_developer_prompt = "\n".join(developer_parts)
+        if not _fits_in_argument(self._cacheable_developer_prompt):
+            _LOGGER.info(
+                "Codex system prefix exceeds one command-line argument; sending it on stdin"
+            )
+            user_input = "\n\n".join(
+                part for part in (self._cacheable_developer_prompt, str(user_input or "")) if part.strip()
+            )
+            self._cacheable_developer_prompt = ""
         self._prompt_cache_prefix_key = (
             prompt_cache_key(self._cacheable_developer_prompt)
             if self._cacheable_developer_prompt
@@ -2325,8 +2359,7 @@ class CodexExecutor:
             # preserving newlines and quotes in large context blocks.
             stable_prompt_args = [
                 "--config",
-                "developer_instructions="
-                + json.dumps(self._cacheable_developer_prompt, ensure_ascii=False),
+                _developer_instructions_argument(self._cacheable_developer_prompt),
             ]
         if self._thread_id:
             output_schema_args: list[str] = []
