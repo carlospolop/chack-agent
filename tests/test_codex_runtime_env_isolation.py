@@ -72,3 +72,17 @@ def test_silent_codex_process_cannot_bypass_execution_timeout(tmp_path):
     assert steps == []
     assert raw_result.raw_responses == []
     assert elapsed < 5
+
+
+def test_exec_timeout_follows_the_agent_runtime_budget(monkeypatch):
+    monkeypatch.delenv("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("CHACK_CODEX_EXEC_TIMEOUT_BY_SUBACTION", raising=False)
+    monkeypatch.setenv("CHACK_BUDGET_MAX_RUNTIME_SECONDS", "5400.0")
+    assert _resolve_codex_exec_timeout("logic", {}) == 5400 + 300
+
+    monkeypatch.setenv("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "1200")
+    assert _resolve_codex_exec_timeout("logic", {}) == 1200
+
+    monkeypatch.delenv("CHACK_CODEX_EXEC_TIMEOUT_SECONDS")
+    monkeypatch.setenv("CHACK_BUDGET_MAX_RUNTIME_SECONDS", "0")
+    assert _resolve_codex_exec_timeout("logic", {}) == 900
