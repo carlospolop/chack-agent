@@ -38,6 +38,7 @@ from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
 from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
+from . import codex_daybreak
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
@@ -876,6 +877,10 @@ class CodexExecutor:
     _serialized_tools_append_names_json: str = ""
     _cacheable_developer_prompt: str = ""
     _prompt_cache_prefix_key: str = ""
+    # Daybreak program enabled for the current launch ("" = off). Resolved per
+    # launch from a cached account-capability probe; see codex_daybreak.
+    _daybreak_program: str = ""
+    _daybreak_fingerprint: str = ""
 
     def _runtime_env(self) -> dict[str, str]:
         try:
@@ -919,6 +924,11 @@ class CodexExecutor:
                 ]
             )
         return args
+
+    def _daybreak_args(self) -> list[str]:
+        if not self._daybreak_program:
+            return []
+        return codex_daybreak.daybreak_cli_args()
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
@@ -1330,9 +1340,92 @@ class CodexExecutor:
             if self._codex_home:
                 self._write_codex_auth(self._codex_home)
 
+    def _daybreak_probe_env(self) -> dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if v is not None}
+        env.update(self._runtime_env())
+        if self._use_codex_access_token or self._use_existing_codex_auth_file:
+            env.pop("OPENAI_API_KEY", None)
+            env.pop("CODEX_API_KEY", None)
+            env.pop("CODEX_ACCESS_TOKEN", None)
+        elif self._openai_api_key:
+            env["OPENAI_API_KEY"] = self._openai_api_key
+            env["CODEX_API_KEY"] = self._openai_api_key
+        return env
+
+    def _resolve_daybreak(self) -> None:
+        """Enable Daybreak for this launch only if the account may select it.
+
+        The account's model catalog is probed once per credential identity,
+        model and Codex version (cached on disk by hash, never the secret).
+        Anything undecided leaves Daybreak off.
+        """
+        self._daybreak_program = ""
+        self._daybreak_fingerprint = ""
+        if self._uses_openrouter_route:
+            return
+        mode = codex_daybreak.daybreak_mode(
+            self._runtime_env_value(codex_daybreak.DAYBREAK_MODE_ENV, "auto")
+        )
+        if mode == "off":
+            return
+        try:
+            auth_mode, credential, account_id = self._direct_cache_credentials()
+        except Exception:
+            return
+        fingerprint = codex_daybreak.credential_fingerprint(
+            auth_mode,
+            credential,
+            account_id,
+        )
+        auth_file = (
+            os.path.join(self._codex_home, "auth.json") if self._codex_home else ""
+        )
+        try:
+            program = codex_daybreak.resolve_program(
+                codex_path=self._codex_path,
+                model=self._model_name,
+                fingerprint=fingerprint,
+                env=self._daybreak_probe_env(),
+                env_value=self._runtime_env_value,
+                auth_file=auth_file,
+                chatgpt_bearer=credential if auth_mode == "chatgpt" else "",
+                chatgpt_account_id=account_id if auth_mode == "chatgpt" else "",
+            )
+        except Exception as exc:
+            _LOGGER.warning(
+                "Codex Daybreak probe failed; continuing without it: %s",
+                type(exc).__name__,
+            )
+            program = ""
+        self._daybreak_fingerprint = fingerprint
+        self._daybreak_program = program
+
+    def _disable_daybreak_after_rejection(self, details: str) -> bool:
+        """Turn Daybreak off and remember it when a run was refused because of it."""
+        if not self._daybreak_program:
+            return False
+        if not codex_daybreak.looks_like_daybreak_rejection(details):
+            return False
+        _LOGGER.warning(
+            "Codex refused Daybreak for model=%s; retrying without it and "
+            "remembering this account as unavailable: %s",
+            self._model_name,
+            _preview_text(details, max_chars=300),
+        )
+        codex_daybreak.mark_unavailable(
+            codex_path=self._codex_path,
+            model=self._model_name,
+            fingerprint=self._daybreak_fingerprint,
+            reason=_preview_text(details, max_chars=300),
+            env_value=self._runtime_env_value,
+        )
+        self._daybreak_program = ""
+        return True
+
     def _run_codex(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._refresh_provider_credentials()
         self._ensure_codex_home_and_config()
+        self._resolve_daybreak()
         if self._should_use_direct_prompt_cache():
             try:
                 max_attempts = max(
@@ -1362,6 +1455,11 @@ class CodexExecutor:
                     "ERROR: Codex direct cached request"
                 ):
                     return direct_result
+                if (
+                    self._disable_daybreak_after_rejection(direct_error)
+                    and attempt < max_attempts
+                ):
+                    continue
                 if (
                     attempt >= max_attempts
                     or not self._direct_cache_error_is_retryable(direct_error)
@@ -1589,6 +1687,9 @@ class CodexExecutor:
                     "name": "chack_output_schema",
                 }
             }
+        if self._daybreak_program:
+            # Same wire field Codex sends when Daybreak is on for a turn.
+            request_body["access_programs"] = {"cyber": self._daybreak_program}
 
         if auth_mode == "chatgpt":
             headers["ChatGPT-Account-ID"] = account_id
@@ -2181,6 +2282,11 @@ class CodexExecutor:
                 details=details,
                 return_code=return_code,
             )
+            if self._disable_daybreak_after_rejection(details):
+                return self._run_codex_once(
+                    prompt,
+                    allow_api_key_fallback=allow_api_key_fallback,
+                )
             result = (
                 f"ERROR: Codex exec failed (exit={return_code}).\n{details}",
                 steps,
@@ -2230,6 +2336,11 @@ class CodexExecutor:
                 details=details,
                 return_code=return_code,
             )
+            if self._disable_daybreak_after_rejection(details):
+                return self._run_codex_once(
+                    prompt,
+                    allow_api_key_fallback=allow_api_key_fallback,
+                )
             result = (
                 f"ERROR: Codex exec produced no usable response.\n{details}",
                 steps,
@@ -2394,6 +2505,7 @@ class CodexExecutor:
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
             args.extend(self._disabled_native_tool_args())
+            args.extend(self._daybreak_args())
             args.extend(effort_args)
             args.extend(stable_prompt_args)
             if output_schema_args:
@@ -2420,6 +2532,7 @@ class CodexExecutor:
             exec_cwd,
         ]
         args.extend(self._disabled_native_tool_args())
+        args.extend(self._daybreak_args())
         args.extend(effort_args)
         args.extend(stable_prompt_args)
         args.extend(

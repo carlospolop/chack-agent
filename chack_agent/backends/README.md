@@ -24,6 +24,8 @@ Chack keeps immutable runtime instructions and the output contract in the provid
 
 The Codex direct transport is limited to eligible no-tool GPT-5.6+ runs. Public OpenAI-key calls use explicit cache fields; subscription-token calls retain the first-party transport shape accepted by that endpoint. Failures retry within bounds and then fall back to the Codex CLI. Set `CHACK_CODEX_DIRECT_CACHE_TRANSPORT=off` only when diagnosing that route.
 
+Codex launches opt into Daybreak, OpenAI's trusted-access program for cyber work, only when the credential's model catalog offers a Daybreak program for the agent's model. [`codex_daybreak.py`](codex_daybreak.py) asks `codex app-server` (`model/list`, no inference) once per credential identity, model, and Codex version, caches the answer under a SHA-256 fingerprint, and then adds `--enable cli_daybreak -c daybreak=true` (or `access_programs` on the direct transport). A run refused because of Daybreak is retried without it and the credential is remembered as unavailable. `CHACK_CODEX_DAYBREAK=off` disables it, `on` skips the probe; Codex 0.162 or newer is required.
+
 `run(..., compact_before_resume=True)` compacts the live conversation before the new top-level instruction. The backend methods are OpenAI Responses compaction, Codex `thread/compact/start`, Claude `/compact`, Gemini `/compress`, Copilot `/compact`, and summary plus thread rotation for OpenRouter and LangGraph. Failure is recorded but does not cancel the continuation.
 
 ## Memory and schemas
