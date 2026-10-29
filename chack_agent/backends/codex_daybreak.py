@@ -185,7 +185,11 @@ def codex_version(codex_path: str) -> Optional[tuple[int, int, int]]:
 def looks_like_daybreak_rejection(text: str) -> bool:
     """Whether a failed Codex run was refused because of the Daybreak selection."""
     normalized = str(text or "").lower()
-    if "access_program" in normalized or "access program" in normalized:
+    # A content flag names access_programs.cyber and says Daybreak is on, but it refuses this request, not
+    # the program: turning Daybreak off for the account would only get later requests flagged more often.
+    if "flagged for possible cybersecurity risk" in normalized:
+        return False
+    if "invalid_access_program" in normalized:
         return True
     if "daybreak" not in normalized:
         return False
