@@ -136,7 +136,16 @@ def test_rejection_signals_are_recognized(text):
 
 @pytest.mark.parametrize(
     "text",
-    ["stream disconnected before completion", "401 Unauthorized", "Daybreak enabled"],
+    [
+        "stream disconnected before completion",
+        "401 Unauthorized",
+        "Daybreak enabled",
+        # Verbatim content flag captured 2026-10-29 from a prod run with daybreak_blue selected.
+        '{"type":"turn.failed","error":{"message":"This content was flagged for possible cybersecurity risk. '
+        "If this seems wrong, try rephrasing your request. Otherwise, confirm that the access_programs.cyber "
+        "parameter is set to the appropriate tier, and note that some cybersecurity requests are still limited, "
+        'even when Daybreak is on."}}',
+    ],
 )
 def test_unrelated_failures_are_not_daybreak_rejections(text):
     assert not codex_daybreak.looks_like_daybreak_rejection(text)
