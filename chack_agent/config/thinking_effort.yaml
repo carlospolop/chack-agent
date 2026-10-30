@@ -142,7 +142,6 @@ models:
   seed-2-0-lite: [none, minimal, low, medium, high]
   seed-2-0-mini: [none, minimal, low, medium, high]
   solar-mini4: [none, minimal, low, medium, high, xhigh, max]
-  solar-pro-3: [none, minimal, low, medium, high]
   solar-pro4: [none, minimal, low, medium, high, xhigh, max]
   step-3-7-flash: [low, medium, high]
   step-5-preview: [low, medium, high]
