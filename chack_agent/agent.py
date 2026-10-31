@@ -1595,6 +1595,10 @@ class Chack:
         executor configuration for a session/cache key remains authoritative
         until that session is reset.
         """
+        # Callers may set an alias such as OPENAI_BEST_QUALITY on the config
+        # after construction (provider profiles, failover); resolve it now so
+        # every run uses the alias's current model and a valid effort.
+        self.config = resolve_config_aliases(self.config)
         log_token = set_log_context(
             main_action=str(self.config.agent.main_action or ""),
             sub_action=str(self.config.agent.sub_action or ""),

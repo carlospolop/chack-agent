@@ -8,17 +8,19 @@ from typing import Any, Dict, Optional
 import requests
 
 # Local fallback only. Runtime resolution prefers the central model-alias Lambda.
-OPENAI_BEST_QUALITY = "gpt-5.6-sol"
-CODEX_BEST_QUALITY = "gpt-5.6-sol"
-CODEX_BEST_CHEAPEST = "gpt-5.6-luna"
-OPENAI_CHEAP_BUT_QUALITY = "gpt-5.4-mini"
-OPENAI_BEST_CHEAPEST = "gpt-5.4-nano"
-ANTHROPIC_BEST_QUALITY = "claude-opus-4-6"
-ANTHROPIC_CHEAP_BUT_QUALITY = "claude-sonnet-4-6"
-ANTHROPIC_BEST_CHEAPEST = "claude-haiku-4-5"
+OPENAI_BEST_QUALITY = "gpt-6-sol"
+OPENAI_CHEAP_BUT_QUALITY = "gpt-6-sol"
+OPENAI_BEST_CHEAPEST = "gpt-6-luna"
+# Deprecated: Codex runs the OpenAI tiers. Kept only so configs that still
+# name these aliases get the same models.
+CODEX_BEST_QUALITY = OPENAI_BEST_QUALITY
+CODEX_BEST_CHEAPEST = OPENAI_BEST_CHEAPEST
+ANTHROPIC_BEST_QUALITY = "claude-opus-5-5"
+ANTHROPIC_CHEAP_BUT_QUALITY = "claude-sonnet-5-5"
+ANTHROPIC_BEST_CHEAPEST = "claude-haiku-5-5"
 OPENROUTER_BEST_QUALITY = f"openrouter/openai/{OPENAI_BEST_QUALITY}"
-OPENROUTER_CHEAP_BUT_QUALITY = f"openrouter/google/gemini-3-flash-preview"
-OPENROUTER_BEST_CHEAPEST = f"openrouter/xiaomi/mimo-v2-flash"
+OPENROUTER_CHEAP_BUT_QUALITY = "openrouter/google/gemini-3.8-flash"
+OPENROUTER_BEST_CHEAPEST = "openrouter/deepseek/deepseek-v4.1-flash"
 COPILOT_BEST_QUALITY = "claude-sonnet-4.6"
 COPILOT_CHEAP_BUT_QUALITY = "gpt-5.4-mini"
 COPILOT_BEST_CHEAPEST = "gpt-5-mini"
@@ -34,9 +36,9 @@ _ALIAS_EQUIVALENTS_BY_PROVIDER: Dict[str, Dict[str, str]] = {
         "BEST_CHEAPEST": "OPENAI_BEST_CHEAPEST",
     },
     "codex": {
-        "BEST_QUALITY": "CODEX_BEST_QUALITY",
+        "BEST_QUALITY": "OPENAI_BEST_QUALITY",
         "CHEAP_BUT_QUALITY": "OPENAI_CHEAP_BUT_QUALITY",
-        "BEST_CHEAPEST": "CODEX_BEST_CHEAPEST",
+        "BEST_CHEAPEST": "OPENAI_BEST_CHEAPEST",
     },
     "claude": {
         "BEST_QUALITY": "ANTHROPIC_BEST_QUALITY",
@@ -147,18 +149,18 @@ BACKEND_ALIASES: Dict[str, str] = {
 THINKING_EFFORTS: Dict[str, str] = {
     "OPENAI_BEST_QUALITY": "high",
     "OPENAI_CHEAP_BUT_QUALITY": "medium",
-    "OPENAI_BEST_CHEAPEST": "low",
+    "OPENAI_BEST_CHEAPEST": "high",
     "CODEX_BEST_QUALITY": "high",
-    "CODEX_BEST_CHEAPEST": "low",
+    "CODEX_BEST_CHEAPEST": "high",
     "ANTHROPIC_BEST_QUALITY": "high",
     "ANTHROPIC_CHEAP_BUT_QUALITY": "medium",
-    "ANTHROPIC_BEST_CHEAPEST": "low",
+    "ANTHROPIC_BEST_CHEAPEST": "high",
     "OPENROUTER_BEST_QUALITY": "high",
     "OPENROUTER_CHEAP_BUT_QUALITY": "medium",
-    "OPENROUTER_BEST_CHEAPEST": "low",
+    "OPENROUTER_BEST_CHEAPEST": "high",
     "COPILOT_BEST_QUALITY": "high",
     "COPILOT_CHEAP_BUT_QUALITY": "medium",
-    "COPILOT_BEST_CHEAPEST": "low",
+    "COPILOT_BEST_CHEAPEST": "high",
 }
 
 
@@ -278,10 +280,19 @@ def _get_thinking_efforts() -> Dict[str, str]:
     return merged
 
 
+# Codex runs the OpenAI tiers, so the deprecated Codex aliases are read as the
+# OpenAI ones whatever an alias server still publishes under the old names.
+_DEPRECATED_ALIASES: Dict[str, str] = {
+    "CODEX_BEST_QUALITY": "OPENAI_BEST_QUALITY",
+    "CODEX_BEST_CHEAPEST": "OPENAI_BEST_CHEAPEST",
+}
+
+
 def _adapt_alias_for_runtime(name: str, *, provider: str = "") -> str:
     key = str(name or "").strip()
     if not key:
         return name
+    key = _DEPRECATED_ALIASES.get(key, key)
     model_provider = str(provider or "").strip().lower()
     provider_aliases = _ALIAS_EQUIVALENTS_BY_PROVIDER.get(model_provider)
     if provider_aliases:

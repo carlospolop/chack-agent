@@ -72,7 +72,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         config = load_config(path)
 
         self.assertEqual(config.model.provider, "codex")
-        self.assertEqual(config.model.primary, "gpt-5.4-mini")
+        self.assertEqual(config.model.primary, "gpt-6-sol")
         self.assertEqual(config.agent.self_critique_rounds, 2)
         self.assertEqual(config.credentials.codex_access_token, "codex-access-token")
 
@@ -115,11 +115,11 @@ class ModelAliasResolutionTests(unittest.TestCase):
     def test_resolve_model_alias_uses_provider_specific_defaults(self) -> None:
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", provider="codex"),
-            "gpt-5.4-mini",
+            "gpt-6-sol",
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", provider="claude"),
-            "claude-sonnet-4-6",
+            "claude-sonnet-5-5",
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", provider="openrouter"),
@@ -129,11 +129,11 @@ class ModelAliasResolutionTests(unittest.TestCase):
     def test_resolve_model_alias_uses_api_key_priority_when_provider_is_unspecified(self) -> None:
         self.assertEqual(
             resolve_model_alias("BEST_QUALITY", openai_api_key="oa-test"),
-            "gpt-5.6-sol",
+            "gpt-6-sol",
         )
         self.assertEqual(
             resolve_model_alias("CHEAP_BUT_QUALITY", anthropic_api_key="anth-test"),
-            "claude-sonnet-4-6",
+            "claude-sonnet-5-5",
         )
         self.assertEqual(
             resolve_model_alias("BEST_CHEAPEST", openrouter_api_key="or-test"),
@@ -145,7 +145,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             resolve_model_alias("BEST_QUALITY", openai_api_key="oa-test", anthropic_api_key="anth-test", openrouter_api_key="or-test"),
-            "gpt-5.6-sol",
+            "gpt-6-sol",
         )
 
     def test_central_lambda_alias_overrides_local_fallback(self) -> None:
@@ -158,30 +158,17 @@ class ModelAliasResolutionTests(unittest.TestCase):
                 "gpt-central-assignment",
             )
 
-    def test_codex_best_quality_stays_compatible_when_openai_alias_moves(self) -> None:
+    def test_codex_runs_the_openai_tiers(self) -> None:
         with patch("chack_agent.model_aliases._refresh_remote_alias_caches"), patch(
             "chack_agent.model_aliases._REMOTE_MODEL_CACHE",
-            {"OPENAI_BEST_QUALITY": "gpt-6-sol", "CODEX_BEST_QUALITY": "gpt-5.6-sol"},
+            {"OPENAI_BEST_QUALITY": "gpt-6-sol", "OPENAI_BEST_CHEAPEST": "gpt-6-luna",
+             # Stale values an older alias server may still publish.
+             "CODEX_BEST_QUALITY": "gpt-5.6-sol", "CODEX_BEST_CHEAPEST": "gpt-5.6-luna"},
         ):
-            self.assertEqual(resolve_model_alias("BEST_QUALITY", provider="openai"), "gpt-6-sol")
-            self.assertEqual(resolve_model_alias("BEST_QUALITY", provider="codex"), "gpt-5.6-sol")
-        # Older alias servers may not publish CODEX_BEST_QUALITY yet.
-        with patch("chack_agent.model_aliases._refresh_remote_alias_caches"), patch(
-            "chack_agent.model_aliases._REMOTE_MODEL_CACHE", {"OPENAI_BEST_QUALITY": "gpt-6-sol"}
-        ):
-            self.assertEqual(resolve_model_alias("BEST_QUALITY", provider="codex"), "gpt-5.6-sol")
-
-    def test_codex_best_cheapest_stays_compatible_when_openai_alias_moves(self) -> None:
-        with patch("chack_agent.model_aliases._refresh_remote_alias_caches"), patch(
-            "chack_agent.model_aliases._REMOTE_MODEL_CACHE",
-            {"OPENAI_BEST_CHEAPEST": "gpt-6-luna", "CODEX_BEST_CHEAPEST": "gpt-5.6-luna"},
-        ):
-            self.assertEqual(resolve_model_alias("BEST_CHEAPEST", provider="openai"), "gpt-6-luna")
-            self.assertEqual(resolve_model_alias("BEST_CHEAPEST", provider="codex"), "gpt-5.6-luna")
-        with patch("chack_agent.model_aliases._refresh_remote_alias_caches"), patch(
-            "chack_agent.model_aliases._REMOTE_MODEL_CACHE", {"OPENAI_BEST_CHEAPEST": "gpt-6-luna"}
-        ):
-            self.assertEqual(resolve_model_alias("BEST_CHEAPEST", provider="codex"), "gpt-5.6-luna")
+            self.assertEqual(resolve_model_alias("BEST_QUALITY", provider="codex"), "gpt-6-sol")
+            self.assertEqual(resolve_model_alias("BEST_CHEAPEST", provider="codex"), "gpt-6-luna")
+            self.assertEqual(resolve_model_alias("CODEX_BEST_QUALITY", provider="codex"), "gpt-6-sol")
+            self.assertEqual(resolve_model_alias("CODEX_BEST_CHEAPEST", provider="codex"), "gpt-6-luna")
 
     def test_resolve_model_alias_does_not_treat_codex_access_token_as_generic_model_priority(self) -> None:
         with patch.dict("os.environ", {"CODEX_ACCESS_TOKEN": "codex-access-token"}, clear=False):
@@ -259,7 +246,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         config = load_config(path)
 
         self.assertEqual(config.model.provider, "claude")
-        self.assertEqual(config.model.primary, "claude-sonnet-4-6")
+        self.assertEqual(config.model.primary, "claude-sonnet-5-5")
 
     def test_chack_resolves_aliases_when_initialized_with_config_object(self) -> None:
         config_yaml = textwrap.dedent(
@@ -284,7 +271,7 @@ class ModelAliasResolutionTests(unittest.TestCase):
         ), patch("chack_agent.agent.export_env"):
             chack = Chack(config, config_path=path)
 
-        self.assertEqual(chack.config.model.primary, "gpt-5.4-mini")
+        self.assertEqual(chack.config.model.primary, "gpt-6-sol")
 
     def test_resolve_api_key_type_prefers_codex_token_for_codex_provider(self) -> None:
         config_yaml = textwrap.dedent(
@@ -358,15 +345,13 @@ class ModelAliasResolutionTests(unittest.TestCase):
 
         logger_mock.return_value.info.assert_any_call(
             "Agent instantiated: model=%s backend=%s api_key_type=%s",
-            "openrouter/openai/gpt-5.6-sol",
+            "openrouter/openai/gpt-6-sol",
             "openrouter",
             "openrouter",
         )
 
     def test_default_model_aliases_do_not_publish_generic_best_aliases(self) -> None:
         aliases = get_default_model_aliases()
-        self.assertEqual(aliases["CODEX_BEST_QUALITY"], "gpt-5.6-sol")
-        self.assertEqual(aliases["CODEX_BEST_CHEAPEST"], "gpt-5.6-luna")
         self.assertNotIn("BEST_QUALITY", aliases)
         self.assertNotIn("CHEAP_BUT_QUALITY", aliases)
         self.assertNotIn("BEST_CHEAPEST", aliases)

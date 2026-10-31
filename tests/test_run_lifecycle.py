@@ -8,6 +8,7 @@ import sys
 import time
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -586,6 +587,31 @@ def _fallback_config() -> ChackConfig:
         system_prompt="test system",
         env={},
     )
+
+
+class _ModelRecordingChack(Chack):
+    seen_models: list[str] = []
+
+    def _get_executor(self, *args, **kwargs):
+        del args, kwargs
+        type(self).seen_models.append(self.config.model.primary)
+        return _ObservableExecutor()
+
+
+def test_alias_set_after_construction_runs_its_current_model(isolated_run_state):
+    agent = _ModelRecordingChack(_fallback_config())
+    agent.config.model.primary = "OPENAI_BEST_QUALITY"
+    with patch("chack_agent.model_aliases._refresh_remote_alias_caches"), patch(
+        "chack_agent.model_aliases._REMOTE_MODEL_CACHE", {"OPENAI_BEST_QUALITY": "gpt-6-sol"}
+    ):
+        agent.run(
+            "alias-after-init",
+            "do work",
+            enable_self_critique=False,
+            require_task_steps_manager_init_first=False,
+        )
+
+    assert _ModelRecordingChack.seen_models == ["gpt-6-sol"]
 
 
 def test_completed_task_result_survives_late_cost_timeout(isolated_run_state):

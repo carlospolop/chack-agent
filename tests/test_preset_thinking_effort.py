@@ -32,7 +32,6 @@ class PresetThinkingEffortTests(unittest.TestCase):
             patch("chack_agent.model_aliases._REMOTE_EFFORT_CACHE", {
                 "OPENAI_BEST_QUALITY": "xhigh",
                 "OPENAI_CHEAP_BUT_QUALITY": "medium",
-                "CODEX_BEST_QUALITY": "max",
             }),
         ]
         for patcher in patchers:
@@ -42,10 +41,10 @@ class PresetThinkingEffortTests(unittest.TestCase):
     def test_alias_effort_comes_from_the_lambda(self) -> None:
         self.assertEqual(resolve_thinking_effort_alias("OPENAI_BEST_QUALITY", provider="codex"), "xhigh")
         # Generic tiers follow the provider's own alias, like the model does.
-        self.assertEqual(resolve_thinking_effort_alias("BEST_QUALITY", provider="codex"), "max")
+        self.assertEqual(resolve_thinking_effort_alias("BEST_QUALITY", provider="codex"), "xhigh")
         self.assertEqual(resolve_thinking_effort_alias("CHEAP_BUT_QUALITY", provider="codex"), "medium")
         # Tiers the Lambda does not publish fall back to the local table.
-        self.assertEqual(resolve_thinking_effort_alias("OPENAI_BEST_CHEAPEST", provider="codex"), "low")
+        self.assertEqual(resolve_thinking_effort_alias("OPENAI_BEST_CHEAPEST", provider="codex"), "high")
         self.assertEqual(resolve_thinking_effort_alias("gpt-6-sol", provider="codex"), "")
 
     def test_unknown_published_level_is_ignored(self) -> None:
