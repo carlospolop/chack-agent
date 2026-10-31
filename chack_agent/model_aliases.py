@@ -142,6 +142,26 @@ BACKEND_ALIASES: Dict[str, str] = {
 }
 
 
+# How hard each tier alias thinks. Offline fallback only: the central Lambda's
+# ``thinking_efforts`` block wins, so a tier's effort changes without a rebuild.
+THINKING_EFFORTS: Dict[str, str] = {
+    "OPENAI_BEST_QUALITY": "high",
+    "OPENAI_CHEAP_BUT_QUALITY": "medium",
+    "OPENAI_BEST_CHEAPEST": "low",
+    "CODEX_BEST_QUALITY": "high",
+    "CODEX_BEST_CHEAPEST": "low",
+    "ANTHROPIC_BEST_QUALITY": "high",
+    "ANTHROPIC_CHEAP_BUT_QUALITY": "medium",
+    "ANTHROPIC_BEST_CHEAPEST": "low",
+    "OPENROUTER_BEST_QUALITY": "high",
+    "OPENROUTER_CHEAP_BUT_QUALITY": "medium",
+    "OPENROUTER_BEST_CHEAPEST": "low",
+    "COPILOT_BEST_QUALITY": "high",
+    "COPILOT_CHEAP_BUT_QUALITY": "medium",
+    "COPILOT_BEST_CHEAPEST": "low",
+}
+
+
 def get_default_model_aliases() -> Dict[str, str]:
     return dict(MODEL_ALIASES)
 
@@ -169,6 +189,7 @@ if not _REMOTE_URL:
     _REMOTE_URL = _DEFAULT_REMOTE_URL
 _REMOTE_MODEL_CACHE: Optional[Dict[str, str]] = None
 _REMOTE_BACKEND_CACHE: Optional[Dict[str, str]] = None
+_REMOTE_EFFORT_CACHE: Optional[Dict[str, str]] = None
 _REMOTE_CACHE_LOADED_AT: float = 0.0
 _GENERIC_MODEL_ALIASES = frozenset({"BEST_QUALITY", "CHEAP_BUT_QUALITY", "BEST_CHEAPEST"})
 
@@ -205,14 +226,16 @@ def _load_remote_aliases() -> Optional[dict[str, Dict[str, str]]]:
 
     model_aliases = _normalize_alias_block(payload.get("model_aliases", payload))
     backend_aliases = _normalize_alias_block(payload.get("backend_aliases", {}))
+    thinking_efforts = _normalize_alias_block(payload.get("thinking_efforts", {}))
     return {
         "model_aliases": model_aliases,
         "backend_aliases": backend_aliases,
+        "thinking_efforts": thinking_efforts,
     }
 
 
 def _refresh_remote_alias_caches() -> None:
-    global _REMOTE_MODEL_CACHE, _REMOTE_BACKEND_CACHE, _REMOTE_CACHE_LOADED_AT
+    global _REMOTE_MODEL_CACHE, _REMOTE_BACKEND_CACHE, _REMOTE_EFFORT_CACHE, _REMOTE_CACHE_LOADED_AT
     if not _REMOTE_URL:
         return
     now = time.time()
@@ -221,6 +244,7 @@ def _refresh_remote_alias_caches() -> None:
         if remote:
             _REMOTE_MODEL_CACHE = remote.get("model_aliases") or None
             _REMOTE_BACKEND_CACHE = remote.get("backend_aliases") or None
+            _REMOTE_EFFORT_CACHE = remote.get("thinking_efforts") or None
             _REMOTE_CACHE_LOADED_AT = now
         else:
             _REMOTE_CACHE_LOADED_AT = now
@@ -244,6 +268,13 @@ def _get_backend_aliases() -> Dict[str, str]:
     _refresh_remote_alias_caches()
     merged = dict(BACKEND_ALIASES)
     merged.update(_REMOTE_BACKEND_CACHE or {})
+    return merged
+
+
+def _get_thinking_efforts() -> Dict[str, str]:
+    _refresh_remote_alias_caches()
+    merged = dict(THINKING_EFFORTS)
+    merged.update(_REMOTE_EFFORT_CACHE or {})
     return merged
 
 
@@ -488,3 +519,44 @@ def resolve_model_alias(
                 )
             return resolved_name
     return name
+
+
+def resolve_thinking_effort_alias(
+    name: str,
+    *,
+    provider: str = "",
+    openai_api_key: str = "",
+    anthropic_api_key: str = "",
+    openrouter_api_key: str = "",
+    credentials: Any = None,
+) -> str:
+    """Thinking effort the central Lambda assigns to model alias ``name``.
+
+    ``name`` is looked up exactly like ``resolve_model_alias`` looks up the
+    model, so the generic ``BEST_QUALITY`` follows the provider's own tier.
+    Returns "" when ``name`` is a concrete model or a tier without an effort,
+    or when the published value is not a known level.
+    """
+    from .thinking_effort import normalize_thinking_effort
+
+    raw_name = str(name or "").strip()
+    if not raw_name:
+        return ""
+    normalized_provider = str(provider or "").strip().lower()
+    key = _adapt_alias_for_runtime(raw_name, provider=normalized_provider)
+    if not normalized_provider:
+        key_type = _select_api_key_type(
+            openai_api_key=openai_api_key,
+            anthropic_api_key=anthropic_api_key,
+            openrouter_api_key=openrouter_api_key,
+            credentials=credentials,
+        )
+        key = _adapt_alias_for_key_type(key, key_type=key_type)
+    for effort in (_get_thinking_efforts().get(key, ""), THINKING_EFFORTS.get(key, "")):
+        if not effort:
+            continue
+        try:
+            return normalize_thinking_effort(effort)
+        except ValueError:
+            _LOGGER.warning("Ignoring unknown thinking effort %r published for %s", effort, key)
+    return ""

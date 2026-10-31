@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from .model_aliases import resolve_backend_alias, resolve_model_alias
+from .model_aliases import resolve_backend_alias, resolve_model_alias, resolve_thinking_effort_alias
 from .thinking_effort import normalize_thinking_effort, validate_thinking_effort
 
 from chack_tools.config import ToolsConfig as BaseToolsConfig
@@ -339,17 +339,71 @@ def _role_model_name(model_cfg: ModelConfig, role: str, provider: str, credentia
     return resolved or str(model_cfg.primary or "")
 
 
+# ``thinking_effort: preset`` takes the effort the central Lambda assigns to the
+# model alias the agent runs on, so changing a tier's effort there reaches every
+# agent configured this way without editing its yaml.
+PRESET_THINKING_EFFORT = "preset"
+
+
+def _is_preset_effort(value: Any) -> bool:
+    return str(value or "").strip().lower() == PRESET_THINKING_EFFORT
+
+
+def _preset_thinking_effort(model: str, provider: str, credentials: Any, setting: str) -> str:
+    effort = resolve_thinking_effort_alias(model, provider=provider, credentials=credentials)
+    if effort:
+        return effort
+    raise ValueError(
+        f"{setting}={PRESET_THINKING_EFFORT!r} needs a model alias with a published "
+        f"thinking effort (for example OPENAI_BEST_QUALITY), but the model is {model!r}"
+    )
+
+
+# Roles that run on CHEAP_BUT_QUALITY, not the primary model, when left empty.
+_CHEAP_DEFAULT_ROLES = frozenset({"social_network", "scientific", "websearcher", "cli"})
+
+
+def _role_model_alias(model_cfg: ModelConfig, role: str) -> str:
+    """The alias a role is configured with, before it is resolved to a model."""
+    configured = str(getattr(model_cfg, role, "") or "").strip()
+    if configured:
+        return configured
+    return "CHEAP_BUT_QUALITY" if role in _CHEAP_DEFAULT_ROLES else str(model_cfg.primary or "")
+
+
 def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
     credentials = getattr(config, "credentials", CredentialsConfig())
     model_cfg = config.model
+    provider = resolve_backend_alias(
+        model_cfg.provider,
+        credentials=credentials,
+    ).strip().lower()
+    if not provider:
+        raise ValueError("agent.provider could not be resolved from config")
+    model_cfg.provider = provider
+
+    if _is_preset_effort(getattr(config.agent, "thinking_effort", "")):
+        config.agent.thinking_effort = _preset_thinking_effort(
+            model_cfg.primary, provider, credentials, "agent.thinking_effort"
+        )
     config.agent.thinking_effort = normalize_thinking_effort(
         getattr(config.agent, "thinking_effort", "high")
     )
     for role, tools_field in ROLE_AGENT_FIELDS.items():
         effort_field = f"{role}_thinking_effort"
-        effort = normalize_thinking_effort(getattr(model_cfg, effort_field, "high"))
+        role_alias = _role_model_alias(model_cfg, role)
+        effort = getattr(model_cfg, effort_field, "high")
+        if _is_preset_effort(effort):
+            effort = _preset_thinking_effort(
+                role_alias, provider, credentials, f"agent.{effort_field}"
+            )
+        effort = normalize_thinking_effort(effort)
         setattr(model_cfg, effort_field, effort)
         role_settings = dict(getattr(config.tools, tools_field, {}) or {})
+        if _is_preset_effort(role_settings.get("thinking_effort")):
+            role_settings["thinking_effort"] = _preset_thinking_effort(
+                role_alias, provider, credentials, f"tools.{tools_field}.thinking_effort"
+            )
         if role_settings.get("thinking_effort"):
             role_settings["thinking_effort"] = normalize_thinking_effort(
                 role_settings["thinking_effort"]
@@ -358,13 +412,6 @@ def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
             role_settings["thinking_effort"] = effort
         setattr(config.tools, tools_field, role_settings)
 
-    provider = resolve_backend_alias(
-        model_cfg.provider,
-        credentials=credentials,
-    ).strip().lower()
-    if not provider:
-        raise ValueError("agent.provider could not be resolved from config")
-    model_cfg.provider = provider
     # Enforce the minimum context window for the Codex / Claude Code backends.
     # Only bump an explicitly configured (non-zero) value that sits below the
     # floor; leaving 0 unchanged preserves "use the model's native window".

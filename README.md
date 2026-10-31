@@ -54,6 +54,8 @@ logging:
   level: INFO
 ```
 
+Model aliases such as `OPENAI_BEST_QUALITY` resolve through the central model aliases Lambda, which also publishes each tier's thinking effort. Set `thinking_effort: preset` (also accepted for `<role>_thinking_effort` and per-tool `thinking_effort`) to use the effort the Lambda assigns to that agent's model alias; `resolve_thinking_effort_alias()` returns it for other callers. `preset` with a concrete model name is rejected.
+
 Environment placeholders use `${NAME}`. A prompt may contain `$$TOOLS$$`; Chack replaces it with `tools_prompt_file`, which defaults to `TOOLS.md`, `TOOLS_TELEGRAM.md`, or `TOOLS_DISCORD.md` according to the integration configured by the caller.
 
 Run the configured agent with a stable logical session ID:
