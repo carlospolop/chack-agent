@@ -16,7 +16,6 @@ except ImportError:
 
 import requests
 
-from .api_response_cache import ApiResponseCache
 from .config import ToolsConfig
 from .research_artifacts import record_research_artifact, record_research_json_artifact, research_artifacts_root
 from .telemetry import log_tool_started, log_tool_executed, log_tool_error
@@ -32,7 +31,6 @@ SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS = 45
 SERPAPI_WEB_TIMEOUT_MIN_SECONDS = 45
 SERPAPI_WEB_TIMEOUT_MAX_SECONDS = 120
 SERPAPI_WEB_REQUEST_ATTEMPTS = 2
-SERPAPI_SEARCH_URL = "https://serpapi.com/search"
 
 
 def _clamp(value: int, minimum: int, maximum: int) -> int:
@@ -66,14 +64,6 @@ def _is_no_results_error(error_text: str) -> bool:
     return "returned any results" in text or "no results" in text
 
 
-def _is_complete_serpapi_payload(payload) -> bool:
-    """A finished search: SerpAPI marks it Success and reports no error."""
-    if not isinstance(payload, dict) or payload.get("error"):
-        return False
-    metadata = payload.get("search_metadata")
-    return isinstance(metadata, dict) and str(metadata.get("status") or "").strip().lower() == "success"
-
-
 def _safe_filename(value: str, fallback: str = "serpapi-web") -> str:
     text = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "")).strip("._")
     return text[:120] or fallback
@@ -105,9 +95,6 @@ def _write_text_artifact(kind: str, label: str, text: str) -> str:
 class SerpApiWebSearchTool:
     def __init__(self, config: ToolsConfig):
         self.config = config
-        # Read the cache settings now: the tool may later run where the
-        # environment no longer carries them.
-        self._cache = ApiResponseCache.from_env()
 
     def _api_key(self) -> str:
         keys = usable_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
@@ -120,20 +107,6 @@ class SerpApiWebSearchTool:
         return _clamp(_coerce_int(requested, default_max), 1, 10)
 
     def _request_payload(self, params: dict, timeout_seconds: int = SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS):
-        configured_keys = str(os.environ.get("SERPAPI_API_KEY", "") or "").strip()
-        cache_key = ""
-        cache = getattr(self, "_cache", None)
-        if cache is not None and configured_keys:
-            cache_key = cache.object_key("serpapi", "GET", SERPAPI_SEARCH_URL, params, configured_keys)
-            cached = cache.get(cache_key)
-            if _is_complete_serpapi_payload(cached):
-                return cached
-        payload = self._live_request_payload(params, timeout_seconds=timeout_seconds)
-        if cache_key and _is_complete_serpapi_payload(payload):
-            cache.put(cache_key, payload)
-        return payload
-
-    def _live_request_payload(self, params: dict, timeout_seconds: int = SERPAPI_WEB_TIMEOUT_DEFAULT_SECONDS):
         api_keys = usable_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
         if not api_keys:
             return "ERROR: No usable SerpAPI key (not configured or all keys exhausted)."
@@ -147,7 +120,7 @@ class SerpApiWebSearchTool:
             for attempt in range(SERPAPI_WEB_REQUEST_ATTEMPTS):
                 try:
                     response = requests.get(
-                        SERPAPI_SEARCH_URL,
+                        "https://serpapi.com/search",
                         params=req_params,
                         timeout=timeout_seconds,
                     )
