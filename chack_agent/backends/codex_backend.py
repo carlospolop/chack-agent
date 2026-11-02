@@ -2824,6 +2824,11 @@ class CodexExecutor:
             "GEMINI_API_KEY",
             "BRAVE_API_KEY",
             "SERPAPI_API_KEY",
+            # Paid search tools cache their responses in S3 when these are set.
+            "CHACK_API_CACHE_BUCKET",
+            "CHACK_API_CACHE_PREFIX",
+            "CHACK_API_CACHE_MAX_AGE",
+            "CHACK_API_CACHE_REGION",
             "FORUMSCOUT_API_KEY",
             "FORUMSCOUT_BASE_URL",
             "BOOKING_API_TOKEN",

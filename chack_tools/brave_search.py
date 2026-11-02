@@ -12,12 +12,14 @@ except ImportError:
 
 import requests
 
+from .api_response_cache import ApiResponseCache
 from .config import ToolsConfig
 from .telemetry import log_tool_started, log_tool_executed, log_tool_error
 import traceback
 
 
 
+BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 _FRESHNESS_PATTERN = re.compile(r"^\\d{4}-\\d{2}-\\d{2}to\\d{4}-\\d{2}-\\d{2}$")
 
 
@@ -32,9 +34,16 @@ def _normalize_freshness(value: str) -> Optional[str]:
     return None
 
 
+def _is_complete_brave_payload(payload) -> bool:
+    return isinstance(payload, dict) and payload.get("type") == "search"
+
+
 class BraveSearchTool:
     def __init__(self, config: ToolsConfig):
         self.config = config
+        # Read the cache settings now: the tool may later run where the
+        # environment no longer carries them.
+        self._cache = ApiResponseCache.from_env()
 
     def search(
         self,
@@ -99,23 +108,29 @@ class BraveSearchTool:
             params["ui_lang"] = ui_lang
         if normalized_freshness:
             params["freshness"] = normalized_freshness
-        response = requests.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            headers=headers,
-            params=params,
-            timeout=timeout_seconds,
-        )
-        if response.status_code == 429:
-            #Sleep random time from 0 to 10s and retry once
-            time.sleep(random.uniform(0, 10))
+        cache = getattr(self, "_cache", None)
+        cache_key = cache.object_key("brave", "GET", BRAVE_SEARCH_URL, params, api_key) if cache else ""
+        payload = cache.get(cache_key) if cache_key else None
+        if not _is_complete_brave_payload(payload):
             response = requests.get(
-                "https://api.search.brave.com/res/v1/web/search",
+                BRAVE_SEARCH_URL,
                 headers=headers,
                 params=params,
                 timeout=timeout_seconds,
             )
-        response.raise_for_status()
-        payload = response.json()
+            if response.status_code == 429:
+                #Sleep random time from 0 to 10s and retry once
+                time.sleep(random.uniform(0, 10))
+                response = requests.get(
+                    BRAVE_SEARCH_URL,
+                    headers=headers,
+                    params=params,
+                    timeout=timeout_seconds,
+                )
+            response.raise_for_status()
+            payload = response.json()
+            if cache_key and response.status_code == 200 and _is_complete_brave_payload(payload):
+                cache.put(cache_key, payload)
         web_results = payload.get("web", {}).get("results", [])
         results = []
         for entry in web_results[: self.config.brave_max_results]:
