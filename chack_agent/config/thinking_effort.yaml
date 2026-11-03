@@ -55,6 +55,7 @@ models:
   glm-5-3: [low, high, max]
   glm-5-3-flash: [low, high, max]
   glm-5-3-flashx: [low, high, max]
+  glm-5-3-flashx-legal: [low, high, max]
   glm-5-3-prime: [low, high, max]
   glm-flash-latest: [low, high, max]
   glm-latest: [low, high, max]
