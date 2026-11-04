@@ -20,6 +20,7 @@ models:
   claude-sonnet-5: [none, low, medium, high, xhigh, max]
   claude-sonnet-5-5: [low, medium, high, xhigh, max]
   claude-sonnet-latest: [low, medium, high, xhigh, max]
+  crouton-alpha: [minimal, low, medium, high, xhigh, max]
   deepseek-flash-latest: [none, low, high, max]
   deepseek-pro-latest: [none, low, high, max]
   deepseek-v4-1-flash: [none, low, high, max]
