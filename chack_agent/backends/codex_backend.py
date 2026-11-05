@@ -2750,6 +2750,13 @@ class CodexExecutor:
             # Dynamic-AIgent uses these variables to route PoC package installs
             # into a disposable virtualenv instead of this scanner runtime.
             "PATH",
+            # Discovery tools run inside this MCP subprocess, not in the
+            # model CLI process. Preserve its capture proxy and trusted CA.
+            "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+            "NO_PROXY", "no_proxy", "NAXUS_DISCOVERY_PROXY",
+            "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS", "PROXY_STRATEGY", "PROXY_PROTOCOL",
+            "PROXY_HOST", "PROXY_PORT",
             "VIRTUAL_ENV",
             "PIP_REQUIRE_VIRTUALENV",
             "PIP_DISABLE_PIP_VERSION_CHECK",
