@@ -40,6 +40,34 @@ def is_non_counted_tool_name(tool_name: str) -> bool:
     return not name or name in _NON_COUNTED_TOOL_NAMES
 
 
+# Tools that record an agent's results (a verdict, a finding) must work after the tool budget is spent: rejecting them
+# discards work the agent already finished. A tool opts in with ``budget_exempt(tool)``.
+BUDGET_EXEMPT_ATTRIBUTE = "chack_budget_exempt"
+_BUDGET_EXEMPT_TOOL_NAMES: set[str] = set()
+_BUDGET_EXEMPT_LOCK = threading.Lock()
+
+
+def budget_exempt(tool):
+    """Mark a tool as exempt from the tool budget; returns the tool so it can wrap a definition."""
+    setattr(tool, BUDGET_EXEMPT_ATTRIBUTE, True)
+    return tool
+
+
+def register_budget_exempt_tools(tools) -> None:
+    """Remember the names of the marked tools among those an agent is given."""
+    names = {canonical_tool_name(getattr(tool, "name", "") or getattr(tool, "__name__", ""))
+             for tool in tools or [] if getattr(tool, BUDGET_EXEMPT_ATTRIBUTE, False)}
+    names.discard("")
+    if names:
+        with _BUDGET_EXEMPT_LOCK:
+            _BUDGET_EXEMPT_TOOL_NAMES.update(names)
+
+
+def is_budget_exempt_tool_name(tool_name: str) -> bool:
+    """Whether calls to the tool neither count against nor are blocked by the tool budget."""
+    return is_non_counted_tool_name(tool_name) or canonical_tool_name(tool_name) in _BUDGET_EXEMPT_TOOL_NAMES
+
+
 class ToolUsageStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -152,7 +180,7 @@ def effective_max_tools_used(configured: int) -> int:
 def non_task_tool_count(counter: Counter[str]) -> int:
     total = 0
     for tool_name, count in counter.items():
-        if is_non_counted_tool_name(tool_name):
+        if is_budget_exempt_tool_name(tool_name):
             continue
         total += max(0, int(count or 0))
     return total

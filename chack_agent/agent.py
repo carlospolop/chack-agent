@@ -42,6 +42,7 @@ from chack_tools.tool_usage_state import (
     set_active_max_tools_used,
     set_active_usage_session,
     is_non_counted_tool_name,
+    register_budget_exempt_tools,
 )
 from chack_tools.telemetry import (
     log_event,
@@ -1365,6 +1366,7 @@ class Chack:
                 executor_tool_kwargs["tools_override"] = tools_override
             if tools_append is not None:
                 executor_tool_kwargs["tools_append"] = tools_append
+            register_budget_exempt_tools([*(tools_override or []), *(tools_append or [])])
             executor = build_executor(
                 config,
                 system_prompt=system_prompt,
