@@ -301,6 +301,23 @@ def test_cli_mcp_env_allowlists_preserve_poc_python_isolation():
         assert "DYNAMIC_POC_HOST_PATH" not in values, f"host PATH leaked into {path.name}"
 
 
+def test_cli_mcp_env_allowlists_pass_discovery_capture_proxy():
+    configurations = (
+        (MODULE_PATH, "CodexExecutor", "_write_codex_config", "env_vars"),
+        (CLAUDE_MODULE_PATH, "ClaudeCodeExecutor", "_mcp_env_map", "env_keys"),
+        (GEMINI_MODULE_PATH, "GeminiCliExecutor", "_gemini_mcp_env_map", "env_keys"),
+        (COPILOT_MODULE_PATH, "CopilotCliExecutor", "_copilot_mcp_env_map", "env_keys"),
+    )
+    required = {"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                "NO_PROXY", "no_proxy", "NAXUS_DISCOVERY_PROXY",
+                "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE",
+                "NODE_EXTRA_CA_CERTS", "PROXY_STRATEGY", "PROXY_PROTOCOL",
+                "PROXY_HOST", "PROXY_PORT"}
+    for path, class_name, function_name, target_name in configurations:
+        values = _load_list_literal(path, class_name, function_name, target_name)
+        assert required <= set(values), f"missing capture proxy environment in {path.name}"
+
+
 def test_codex_backend_logs_codex_cli_failure_event():
     module_ast = ast.parse(MODULE_PATH.read_text())
     found = False
