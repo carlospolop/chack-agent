@@ -19,7 +19,7 @@ from agents.usage import Usage
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
 from chack_tools.task_steps_manager_state import STORE, set_active_context
-from chack_tools.tool_usage_state import is_non_counted_tool_name
+from chack_tools.tool_usage_state import is_budget_exempt_tool_name, register_budget_exempt_tools
 from chack_tools.run_lifecycle import (
     ToolBudgetClaim,
     claim_non_task_tool_slot,
@@ -550,6 +550,7 @@ def _load_toolset() -> list[Any]:
         if allowed_tools is not None and name not in allowed_tools:
             continue
         filtered_tools.append(tool)
+    register_budget_exempt_tools(filtered_tools)
     return filtered_tools
 
 
@@ -625,7 +626,7 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                     used=state.non_task_tool_calls,
                     max_tools=state.max_non_task_tools,
                 )
-                if not is_non_counted_tool_name(_name):
+                if not is_budget_exempt_tool_name(_name):
                     if state.max_non_task_tools > 0:
                         try:
                             warning_ratio = float(
