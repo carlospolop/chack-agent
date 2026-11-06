@@ -251,7 +251,20 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
 _CLAUDE_DEFAULT_CONTEXT_WINDOW = 200_000
 _CLAUDE_1M_CONTEXT_BETA = "context-1m-2025-08-07"
 # Claude Code tools that only work against Anthropic's own API.
-_GATEWAY_UNAVAILABLE_NATIVE_TOOLS = ("WebSearch",)
+# Built-in tools a Chack run keeps; Bash, WebSearch and the planning tools are
+# added when the run's configuration allows them.
+_CLAUDE_BUILTIN_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep", "WebFetch")
+_CLAUDE_PLANNING_TOOLS = ("TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet")
+# Prompt parts a headless run never uses: the auto-memory instructions, the git
+# status snapshot and the commit/PR attribution reminder.
+_CLAUDE_HEADLESS_SETTINGS = json.dumps(
+    {
+        "autoMemoryEnabled": False,
+        "includeGitInstructions": False,
+        "attribution": {"commit": "", "pr": ""},
+    },
+    separators=(",", ":"),
+)
 # Model-family defaults Claude Code falls back to for subagents and background
 # work. On a gateway they must name models the gateway serves.
 _CLAUDE_GATEWAY_MODEL_ENV = (
@@ -1497,6 +1510,7 @@ PYEOF
             tools_cfg = json.loads(self._tools_config_json or "{}")
             _exec_enabled = bool(tools_cfg.get("exec_enabled", False))
         except Exception:
+            tools_cfg = {}
             _exec_enabled = False
 
         args: list[str] = [
@@ -1528,20 +1542,24 @@ PYEOF
                     "--strict-mcp-config",
                 ]
             )
-        # ``--tools Bash`` is a built-in-tool allowlist in Claude Code. Passing
-        # it hides every configured MCP tool, which made models attempt MCP
-        # names as shell commands. Leave the normal tool registry intact when
-        # execution is enabled; when it is disabled, deny only native Bash so
-        # MCP tools remain discoverable and callable.
-        disallowed_tools: list[str] = []
-        if not resume_compaction and has_cli_tools and not _exec_enabled:
-            disallowed_tools.append("Bash")
-        if not resume_compaction and has_cli_tools and self._uses_gateway_route:
-            # WebSearch is executed by Anthropic's API, which gateways do not
-            # provide; the model would spend turns on a tool that always fails.
-            disallowed_tools.extend(_GATEWAY_UNAVAILABLE_NATIVE_TOOLS)
-        if disallowed_tools:
-            args.extend(["--disallowedTools", *disallowed_tools])
+        if not resume_compaction and has_cli_tools:
+            # Claude Code otherwise sends every built-in tool (subagents,
+            # workflows, cron, worktrees, monitors, ...) on each request: ~60k
+            # chars a headless run never uses. ``--tools`` limits only the
+            # built-in set; MCP tools stay available. Names a CLI version does
+            # not have are ignored.
+            builtin_tools = list(_CLAUDE_BUILTIN_TOOLS)
+            if _exec_enabled:
+                builtin_tools.append("Bash")
+            if tools_cfg.get("native_web_search_enabled", True) and not self._uses_gateway_route:
+                # WebSearch is executed by Anthropic's API, which gateways do not
+                # provide; the model would spend turns on a tool that always fails.
+                builtin_tools.append("WebSearch")
+            if self._native_task_planning_backend:
+                builtin_tools.extend(_CLAUDE_PLANNING_TOOLS)
+            args.extend(["--tools", ",".join(builtin_tools)])
+        if not resume_compaction:
+            args.extend(["--settings", _CLAUDE_HEADLESS_SETTINGS])
 
         if resume_compaction:
             args.extend(["--max-turns", "1"])
