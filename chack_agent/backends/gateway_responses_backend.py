@@ -65,6 +65,18 @@ def _build_mcp_servers(config: ChackConfig) -> list[Any]:
     return []
 
 
+def _drop_provider_run_items(output: Any) -> None:
+    """Remove output items of tools the provider ran itself, in place.
+
+    The OpenAI client has no type for items such as ``openrouter:web_search``
+    and parses them as assistant messages without content, which the Agents
+    SDK then reads as the turn's message and fails on. Their results already
+    shaped the model's answer, so they are not kept.
+    """
+    if isinstance(output, list):
+        output[:] = [item for item in output if ":" not in str(getattr(item, "type", "") or "")]
+
+
 class _GatewayResponsesModel(OpenAIResponsesModel):
     def __init__(self, *args: Any, server_tools: tuple[dict, ...] = (), **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -308,6 +320,7 @@ class _GatewayResponsesModel(OpenAIResponsesModel):
                 conversation_id=conversation_id,
                 prompt=prompt,
             )
+        _drop_provider_run_items(response.output)
         tool_names = {getattr(tool, "name", "") for tool in tools if getattr(tool, "name", "")}
         if tool_names:
             self._normalize_output_tools(response.output, tool_names)
@@ -339,6 +352,8 @@ class _GatewayResponsesModel(OpenAIResponsesModel):
             conversation_id=conversation_id,
             prompt=prompt,
         ):
+            if getattr(event, "type", "") == "response.completed":
+                _drop_provider_run_items(getattr(getattr(event, "response", None), "output", None))
             if tool_names and getattr(event, "type", "") == "response.completed":
                 response = getattr(event, "response", None)
                 if response is not None and getattr(response, "output", None):
