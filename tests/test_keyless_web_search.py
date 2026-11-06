@@ -281,6 +281,29 @@ def test_openrouter_models_without_native_search_search_keylessly(model_server, 
     assert "web_fetch" not in _sent_function_names(sent)
 
 
+def test_openrouter_runs_with_an_output_schema_search_keylessly(model_server):
+    base_url, seen, replies = model_server
+    # OpenRouter drops the JSON schema format when a server tool is sent, so
+    # these runs must only send function tools for the web.
+    replies.append([
+        {"type": "message", "id": "m1", "role": "assistant", "status": "completed",
+         "content": [{"type": "output_text", "text": '{"decision": "comment"}', "annotations": []}]},
+    ])
+    config = _config("openrouter", "openai/gpt-5-mini", openrouter_base_url=base_url)
+    config.agent.output_schema_json = {
+        "type": "object", "additionalProperties": False,
+        "properties": {"decision": {"type": "string"}}, "required": ["decision"],
+    }
+
+    result = _executor(gateway_responses_backend, config).invoke({"input": "decide"})
+
+    assert json.loads(result["output"]) == {"decision": "comment"}
+    sent = seen[0]
+    assert sent["body"]["text"]["format"]["type"] == "json_schema"
+    assert not [t for t in _sent_tool_types(sent) if str(t).startswith("openrouter:")]
+    assert _sent_function_names(sent) >= WEB
+
+
 def _gateway_config(base_url: str, tools: dict | None = None) -> ChackConfig:
     return _config(
         "gateway", "corp/claude-haiku", tools,

@@ -114,11 +114,16 @@ def keyless_web_plan(config: Any) -> WebToolPlan:
     return WebToolPlan(keyless_tools=frozenset({"web_search", "web_fetch"}))
 
 
-def plan_web_tools(config: Any, *, route: GatewayRoute | None, responses_api: bool) -> WebToolPlan:
+def plan_web_tools(
+    config: Any, *, route: GatewayRoute | None, responses_api: bool, structured_output: bool = False
+) -> WebToolPlan:
     """The web tools for a run on ``route`` (``None``: OpenAI's own API).
 
     ``responses_api`` is false for chat-completions runs, which cannot carry
-    OpenAI's hosted ``web_search`` tool.
+    OpenAI's hosted ``web_search`` tool. ``structured_output`` is true when the
+    request carries a JSON schema text format: OpenRouter ignores that format
+    whenever one of its server tools is in the request, so such runs search
+    keylessly instead.
     """
     if not web_search_enabled(config):
         return WebToolPlan()
@@ -126,6 +131,8 @@ def plan_web_tools(config: Any, *, route: GatewayRoute | None, responses_api: bo
     if route is None:
         # OpenAI's web_search also opens and reads pages.
         return WebToolPlan(hosted_web_search=True)
+    if route.is_openrouter and structured_output:
+        return keyless_web_plan(config)
     if route.is_openrouter:
         server_tools = [_OPENROUTER_FETCH_TOOL]
         keyless.discard("web_fetch")
