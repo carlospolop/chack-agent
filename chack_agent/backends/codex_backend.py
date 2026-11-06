@@ -115,6 +115,8 @@ _CODEX_UNUSED_PROMPT_PARTS_OFF = (
     "include_collaboration_mode_instructions = false",
     "tools.experimental_request_user_input.enabled = false",
     "features.sleep_tool = false",
+    # Offers to install plugins, which nobody can approve in a headless run.
+    "features.tool_suggest = false",
 )
 
 _CODEX_CATALOGS: dict[str, Optional[list]] = {}
@@ -145,7 +147,9 @@ def _codex_catalog_models(codex_path: str, codex_home: str) -> Optional[list]:
         return models
 
 
-def _codex_single_agent_catalog(codex_path: str, codex_home: str, model: str) -> Optional[dict]:
+def _codex_single_agent_catalog(
+    codex_path: str, codex_home: str, model: str, *, file_tools: bool = True
+) -> Optional[dict]:
     models = _codex_catalog_models(codex_path, codex_home) if codex_path else None
     if not models:
         return None
@@ -154,9 +158,13 @@ def _codex_single_agent_catalog(codex_path: str, codex_home: str, model: str) ->
     names = {str(model or ""), str(model or "").rsplit("/", 1)[-1]}
     if not any(isinstance(entry, dict) and entry.get("slug") in names for entry in models):
         return None
+    overrides: dict[str, Any] = {"multi_agent_version": None}
+    if not file_tools:
+        # The catalog is the only switch for Codex's file-editing tool.
+        overrides["apply_patch_tool_type"] = None
     return {
         "models": [
-            {**entry, "multi_agent_version": None} if isinstance(entry, dict) else entry
+            {**entry, **overrides} if isinstance(entry, dict) else entry
             for entry in models
         ]
     }
@@ -916,6 +924,7 @@ class CodexExecutor:
     _thread_id: Optional[str] = None
     _codex_home: Optional[str] = None
     _disable_native_shell: bool = False
+    _disable_native_file_tools: bool = False
     _disable_native_web_search: bool = False
     # Exa's hosted MCP server, for runs whose Codex web search cannot run.
     _fallback_web_mcp_url: str = ""
@@ -970,6 +979,8 @@ class CodexExecutor:
                     "unified_exec",
                 ]
             )
+        if self._disable_native_file_tools:
+            args.extend(["--disable", "view_image"])
         if self._disable_native_web_search:
             args.extend(
                 [
@@ -3103,7 +3114,10 @@ class CodexExecutor:
         if os.path.isfile(path):
             return path
         catalog = _codex_single_agent_catalog(
-            getattr(self, "_codex_path", ""), codex_home, self._model_name
+            getattr(self, "_codex_path", ""),
+            codex_home,
+            self._model_name,
+            file_tools=not self._disable_native_file_tools,
         )
         if catalog is None:
             return ""
@@ -3748,13 +3762,13 @@ def build_executor(
         getattr(config.agent, "require_task_steps_manager_init_first", True)
         and has_task_steps_manager_tool
     )
-    disable_native_shell = False
+    # chack's ``exec`` tool is the run's only shell, whether or not the
+    # config enables it.
+    disable_native_shell = True
     # Codex's own web search is on unless the config turns it off.
     disable_native_web_search = not bool(
         getattr(config.tools, "native_web_search_enabled", True)
     )
-    if allowed_tool_names is not None:
-        disable_native_shell = True
     if str(os.environ.get("CHACK_DISABLE_CODEX_NATIVE_WEB", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
         disable_native_web_search = True
 
@@ -3886,6 +3900,8 @@ def build_executor(
             else ""
         ),
         _disable_native_shell=disable_native_shell,
+        # A run without chack's exec gets no host file access either.
+        _disable_native_file_tools="exec" not in allowed_tool_names,
         _disable_native_web_search=disable_native_web_search,
         _fallback_web_mcp_url=(
             fallback_web_mcp_url() if web_search_wanted and disable_native_web_search else ""

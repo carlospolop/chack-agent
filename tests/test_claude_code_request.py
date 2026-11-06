@@ -60,7 +60,7 @@ def _capture_first_request(tmp_path, monkeypatch, **tools) -> dict:
             model=ModelConfig(primary="claude-haiku-5-5", provider="claude"),
             agent=AgentConfig(main_action="test", sub_action="test"),
             session=SessionConfig(max_turns=2),
-            tools=ToolsConfig(exec_enabled=True, task_steps_manager_enabled=False, **tools),
+            tools=ToolsConfig(**{"exec_enabled": True, "task_steps_manager_enabled": False, **tools}),
             credentials=CredentialsConfig(anthropic_api_key="sk-ant-test"),
             logging=LoggingConfig(),
             system_prompt="system",
@@ -118,3 +118,11 @@ def test_web_search_can_be_turned_off(tmp_path, monkeypatch):
     tools = {tool["name"] for tool in request.get("tools") or []}
     assert not tools & {"WebSearch", "WebFetch"}
     assert "mcp__chack_tools__exec" in tools
+
+
+def test_a_run_without_exec_gets_no_shell_or_host_file_tools(tmp_path, monkeypatch):
+    request = _capture_first_request(tmp_path, monkeypatch, exec_enabled=False, scientific_enabled=True)
+
+    tools = {tool["name"] for tool in request.get("tools") or []}
+    assert not tools & {"Bash", "Read", "Edit", "Write", "Glob", "Grep", "mcp__chack_tools__exec"}
+    assert "Run printf alpha" in json.dumps(request)

@@ -1513,10 +1513,8 @@ PYEOF
     ) -> list[str]:
         try:
             tools_cfg = json.loads(self._tools_config_json or "{}")
-            _exec_enabled = bool(tools_cfg.get("exec_enabled", False))
         except Exception:
             tools_cfg = {}
-            _exec_enabled = False
 
         args: list[str] = [
             self._claude_cli_path,
@@ -1553,10 +1551,11 @@ PYEOF
             # chars a headless run never uses. ``--tools`` limits only the
             # built-in set; MCP tools stay available. Names a CLI version does
             # not have are ignored.
-            builtin_tools = list(_CLAUDE_BUILTIN_TOOLS)
-            # Chack's own exec tool, when offered, is already the run's shell.
-            if _exec_enabled and "exec" not in self._offered_tool_names():
-                builtin_tools.append("Bash")
+            # Never Bash: Chack's exec tool is the run's only shell, and a run
+            # without it gets no host file access either.
+            builtin_tools = (
+                list(_CLAUDE_BUILTIN_TOOLS) if "exec" in self._offered_tool_names() else ["ToolSearch"]
+            )
             if tools_cfg.get("native_web_search_enabled", True):
                 builtin_tools.append("WebFetch")
                 if self._native_web_search:
