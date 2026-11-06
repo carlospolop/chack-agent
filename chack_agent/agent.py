@@ -2825,11 +2825,21 @@ class Chack:
                 cached_prompt_tokens=cached_prompt_tokens,
                 cache_write_tokens=cache_write_prompt_tokens,
             )
-            nested_cost, _missing_nested_models = estimate_costs_by_model(
+            nested_cost, missing_nested_models = estimate_costs_by_model(
                 self._pricing,
                 nested_usage_by_model,
                 cache_write_rate_multiplier=self._cache_write_rate_multiplier(),
             )
+            unpriced_models = sorted(
+                set(missing_nested_models)
+                | ({model_name} if main_cost is None and (prompt_tokens or completion_tokens) else set())
+            )
+            if unpriced_models:
+                self.logger.warning(
+                    "No price for model(s) %s: their usage is left out of the run cost%s.",
+                    ", ".join(unpriced_models),
+                    " and max_cost_usd cannot stop them" if max_cost_usd > 0 else "",
+                )
             if main_cost is None and nested_cost == 0:
                 total_cost = None
             else:
@@ -2929,7 +2939,7 @@ class Chack:
                     "main_cost": main_cost,
                     "nested_cost": nested_cost,
                     "pricing_model": model_name,
-                    "missing_pricing_models": _missing_nested_models,
+                    "missing_pricing_models": unpriced_models,
                     "cost_source": "pricing_table",
                     "rounds_used": rounds_used,
                     "tools_used": tools_used,

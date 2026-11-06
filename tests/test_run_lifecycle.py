@@ -899,3 +899,35 @@ def test_tool_limit_event_is_terminal_when_denied_step_is_omitted(isolated_run_s
     assert result.limit_reached == "tools_after_completion"
     assert result.completion_preserved_after_limit is True
     assert executor.calls == 1
+
+
+class _UsageExecutor(_ObservableExecutor):
+    def invoke(self, payload, context=None):
+        result = super().invoke(payload, context)
+        usage = SimpleNamespace(
+            input_tokens=1200,
+            output_tokens=80,
+            input_tokens_details=SimpleNamespace(cached_tokens=0),
+        )
+        result["raw_result"].raw_responses = [SimpleNamespace(usage=usage)]
+        return result
+
+
+def test_unpriced_model_usage_is_reported_instead_of_silently_uncapped(isolated_run_state, caplog):
+    config = replace(_fallback_config(), logging=LoggingConfig(level="WARNING"))
+    agent = _InjectedExecutorChack(config)
+    agent.executor = _UsageExecutor()
+
+    with caplog.at_level("WARNING"):
+        result = agent.run(
+            "unpriced-run",
+            "do work",
+            enable_self_critique=False,
+            require_task_steps_manager_init_first=False,
+        )
+
+    assert result.prompt_tokens == 1200
+    assert result.total_cost is None
+    warnings = [record.getMessage() for record in caplog.records if "No price for model" in record.getMessage()]
+    assert warnings and "test-model" in warnings[0]
+    assert "max_cost_usd cannot stop them" in warnings[0]

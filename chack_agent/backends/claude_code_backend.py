@@ -886,6 +886,9 @@ class ClaudeCodeExecutor:
 
         cancel_registration = register_process(process, _terminate_process_tree)
         output_parts: list[str] = []
+        # The closing ``result`` event repeats the final assistant text; when it
+        # is present it is the answer, and the streamed text is only a fallback.
+        result_parts: list[str] = []
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
         raw_responses: list[Any] = []
@@ -978,16 +981,17 @@ class ClaudeCodeExecutor:
                 if event_type == "user":
                     msg = event.get("message")
                     if isinstance(msg, dict):
-                        self._extract_message_content(msg, output_parts, tool_calls, steps)
+                        # User turns carry tool results and the prompt, never answer text.
+                        self._extract_message_content(msg, [], tool_calls, steps)
                     continue
 
                 if event_type == "result":
                     result_text = str(event.get("result") or "").strip()
                     if result_text:
-                        output_parts.append(result_text)
+                        result_parts.append(result_text)
                     structured_output = event.get("structured_output")
                     if structured_output is not None:
-                        self._append_structured_output(output_parts, structured_output)
+                        self._append_structured_output(result_parts, structured_output)
                     return_seen = True
 
                     usage: dict[str, Any] = {}
@@ -1106,7 +1110,7 @@ class ClaudeCodeExecutor:
                 _RawResult(raw_responses=raw_responses),
             )
 
-        response = "".join(output_parts).strip()
+        response = "".join(result_parts or output_parts).strip()
         if not response and raw_lines:
             response = "\n".join(raw_lines).strip()
             if response:
