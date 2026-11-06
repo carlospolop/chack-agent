@@ -117,6 +117,8 @@ def test_fetch_bounds_what_it_asks_for(exa_server):
 def model_server(monkeypatch):
     """An OpenAI-compatible model API that answers "done" and records each request."""
     requests_seen: list[dict] = []
+    # Responses API output lists to answer with, in order; then "done".
+    queued_outputs: list[list[dict]] = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802 - http.server API
@@ -133,8 +135,10 @@ def model_server(monkeypatch):
                 reply = {
                     "id": "r1", "object": "response", "created_at": 0, "model": body["model"],
                     "status": "completed", "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
-                    "output": [{"type": "message", "id": "m1", "role": "assistant", "status": "completed",
-                                "content": [{"type": "output_text", "text": "done", "annotations": []}]}],
+                    "output": queued_outputs.pop(0) if queued_outputs else [
+                        {"type": "message", "id": "m1", "role": "assistant", "status": "completed",
+                         "content": [{"type": "output_text", "text": "done", "annotations": []}]}
+                    ],
                     "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2,
                               "input_tokens_details": {"cached_tokens": 0},
                               "output_tokens_details": {"reasoning_tokens": 0}},
@@ -157,7 +161,7 @@ def model_server(monkeypatch):
         if name.startswith("LLM_GATEWAY_"):
             monkeypatch.delenv(name, raising=False)
     hosted_web_search._probe_cache.clear()
-    yield f"http://127.0.0.1:{server.server_address[1]}/v1", requests_seen
+    yield f"http://127.0.0.1:{server.server_address[1]}/v1", requests_seen, queued_outputs
     hosted_web_search._probe_cache.clear()
     server.shutdown()
 
@@ -225,7 +229,7 @@ def test_openai_compatible_endpoints_get_the_keyless_tools(monkeypatch):
 
 @pytest.mark.parametrize("backend, provider", [(gateway_responses_backend, "openrouter"), (langgraph_backend, "langgraph")])
 def test_openrouter_models_with_native_search_use_openrouters_web_tools(model_server, backend, provider):
-    base_url, seen = model_server
+    base_url, seen, _replies = model_server
     executor = _executor(backend, _config(provider, "openai/gpt-5-mini", openrouter_base_url=base_url))
 
     assert executor.invoke({"input": "hi"})["output"] == "done"
@@ -239,9 +243,32 @@ def test_openrouter_models_with_native_search_use_openrouters_web_tools(model_se
     assert fetch["parameters"]["max_content_tokens"] > 0
 
 
+def test_a_run_continues_after_openrouter_searched_and_called_a_tool(model_server, tmp_path):
+    base_url, seen, replies = model_server
+    # OpenRouter reports its own search as an output item of a type the
+    # OpenAI client does not know, next to the model's function call.
+    replies.append([
+        {"type": "openrouter:web_search", "id": "st_1", "status": "completed",
+         "action": {"type": "search", "query": "requests latest release"}},
+        {"type": "function_call", "id": "fc_1", "call_id": "call_1", "status": "completed",
+         "name": "exec", "arguments": json.dumps({"command": "echo hi"})},
+    ])
+    config = _config(
+        "openrouter", "openai/gpt-5-mini", {"exec_enabled": True, "exec_cwd": str(tmp_path)},
+        openrouter_base_url=base_url,
+    )
+
+    result = _executor(gateway_responses_backend, config).invoke({"input": "search, then run echo hi"})
+
+    assert result["output"] == "done"
+    follow_up = json.dumps(seen[1]["body"]["input"])
+    assert "call_1" in follow_up
+    assert "openrouter:web_search" not in follow_up
+
+
 @pytest.mark.parametrize("backend, provider", [(gateway_responses_backend, "openrouter"), (langgraph_backend, "langgraph")])
 def test_openrouter_models_without_native_search_search_keylessly(model_server, backend, provider):
-    base_url, seen = model_server
+    base_url, seen, _replies = model_server
     executor = _executor(backend, _config(provider, "z-ai/glm-4.6", openrouter_base_url=base_url))
 
     executor.invoke({"input": "hi"})
@@ -332,7 +359,7 @@ def test_the_gateway_check_can_be_skipped(monkeypatch, forced, hosted):
     ],
 )
 def test_turning_web_off_removes_every_web_tool(model_server, backend, provider, primary):
-    base_url, seen = model_server
+    base_url, seen, _replies = model_server
     executor = _executor(
         backend, _config(provider, primary, {"native_web_search_enabled": False}, openrouter_base_url=base_url)
     )
@@ -345,7 +372,7 @@ def test_turning_web_off_removes_every_web_tool(model_server, backend, provider,
 
 
 def test_turning_keyless_search_off_keeps_only_the_providers_tools(model_server):
-    base_url, seen = model_server
+    base_url, seen, _replies = model_server
     executor = _executor(
         gateway_responses_backend,
         _config("openrouter", "z-ai/glm-4.6", {"keyless_web_search_enabled": False}, openrouter_base_url=base_url),
