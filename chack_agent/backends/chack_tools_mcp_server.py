@@ -21,7 +21,7 @@ from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
 from chack_tools.telemetry.otel import end_tool_span, flush_in_background, start_tool_span
 from chack_tools.task_steps_manager_state import STORE, set_active_context
-from chack_tools.tool_call_policy import ToolCallPolicy
+from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
 from chack_tools.tool_usage_state import is_budget_exempt_tool_name, register_budget_exempt_tools
 from chack_tools.run_lifecycle import (
     ToolBudgetClaim,
@@ -244,14 +244,19 @@ def _as_int(raw: str, default: int = 0) -> int:
         return default
 
 
-def _tool_call_policy(tools_cfg_data: dict[str, Any]) -> ToolCallPolicy:
-    """Reuse/spill policy for this server; CLI agents can always read files."""
+def _tool_call_policy(tools_cfg_data: dict[str, Any], tools: list[Any] | None = None) -> ToolCallPolicy:
+    """Reuse/spill policy for this server.
+
+    A run reads a spilled output file only through chack's ``exec`` tool (the
+    CLIs' own file tools are off without it), so without exec it gets the
+    preview instead of a path it cannot open.
+    """
     allowed = set(getattr(ToolsConfig, "__dataclass_fields__", {}).keys())
     try:
         tools_cfg = ToolsConfig(**{k: v for k, v in tools_cfg_data.items() if k in allowed})
     except TypeError:
         tools_cfg = ToolsConfig()
-    policy = ToolCallPolicy(tools_cfg, outputs_readable=True)
+    policy = ToolCallPolicy(tools_cfg, outputs_readable=has_exec_tool(tools or []))
     # ``CHACK_MCP_TOOL_MAX_TOKENS`` predates ``tool_output_max_chars`` and still
     # lowers the limit when a caller sets it.
     max_tokens = _as_int(os.environ.get("CHACK_MCP_TOOL_MAX_TOKENS", "0"), 0)
@@ -784,7 +789,7 @@ def main() -> None:
             ),
             max_non_task_tools=max(0, _as_int(os.environ.get("CHACK_MAX_TOOLS_USED", "0"), 0)),
             session_id=session_id,
-            call_policy=_tool_call_policy(_read_tools_config_data()),
+            call_policy=_tool_call_policy(_read_tools_config_data(), tools),
         )
         _register_tools(mcp, tools, state)
         _advertise_tools_only(mcp)

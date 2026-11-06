@@ -488,7 +488,7 @@ def test_tool_server_is_configured_and_its_startup_failure_is_an_error(fake_open
     assert failed["output"].startswith("ERROR: Required opencode MCP server failed to start")
 
 
-def test_the_native_shell_is_offered_only_when_exec_is_on_without_chack_exec(fake_opencode):
+def test_the_native_shell_is_never_offered_and_file_tools_need_chack_exec(fake_opencode):
     _build(_gateway_config("gpt-6-sol")).invoke({"input": "hi"})
     with_exec = _build(
         _gateway_config("gpt-6-sol", tools=ToolsConfig(task_steps_manager_enabled=False, exec_enabled=True))
@@ -496,16 +496,21 @@ def test_the_native_shell_is_offered_only_when_exec_is_on_without_chack_exec(fak
     with_exec.invoke({"input": "hi"})
 
     without_exec, with_chack_exec = (call["config"]["permission"] for call in fake_opencode.calls)
-    assert without_exec["bash"] == "deny"
-    # chack's exec tool is already the run's shell.
+    file_tools = {"read", "edit", "write", "glob", "grep", "list"}
+    # Chack's exec tool is the run's only shell.
     assert "exec" in with_exec._allowed_tool_names()
-    assert with_chack_exec["bash"] == "deny"
+    assert without_exec["bash"] == with_chack_exec["bash"] == "deny"
+    # Host file tools come only with Chack's exec.
+    assert all(without_exec[tool] == "deny" for tool in file_tools)
+    assert not file_tools & {tool for tool, rule in with_chack_exec.items() if rule == "deny"}
     # Nobody can answer an interactive question in a Chack run.
     assert with_chack_exec["question"] == "deny"
 
+    # Exec enabled but left out of the allowed tools: still no shell or files.
     with_exec._allowed_tools_json = '["read_context"]'
     permission = with_exec.build_opencode_config()["permission"]
-    assert permission.get("bash", permission["*"]) == "allow"
+    assert permission["bash"] == "deny"
+    assert all(permission[tool] == "deny" for tool in file_tools)
 
 
 def test_web_search_is_on_by_default_and_off_when_configured(fake_opencode):

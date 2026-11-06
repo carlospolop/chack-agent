@@ -97,7 +97,12 @@ _INHERITED_OPENCODE_OVERRIDES = (
 # Native tools that make no sense in a non-interactive Chack run: nobody can
 # answer ``question``; ``task`` subagents and ``skill`` run outside Chack's
 # accounting; Chack plans with task_steps_manager instead of ``todowrite``.
-_DENIED_NATIVE_TOOLS = ("question", "task", "skill", "todowrite", "todoread")
+# Chack's ``exec`` tool is the run's only shell, so the native ``bash`` is
+# always off: exec-disabled runs get no shell at all, and the rest keep the
+# exec limits (timeout, output cap, tool-call budget) the prompts rely on.
+_DENIED_NATIVE_TOOLS = ("question", "task", "skill", "todowrite", "todoread", "bash")
+# Host file access, only for runs that also have Chack's ``exec``.
+_NATIVE_FILE_TOOLS = ("read", "edit", "write", "patch", "apply_patch", "glob", "grep", "list", "lsp", "codesearch")
 _OPENAI_FAMILY_RE = re.compile(r"^(?:gpt|o\d|codex|chatgpt)")
 
 _ROLE_MODEL_FIELDS = (
@@ -511,12 +516,6 @@ class OpencodeCliExecutor:
     def _mcp_startup_status_path(self) -> str:
         return os.path.join(self._ensure_home(), "mcp_startup_status.json")
 
-    def _exec_enabled(self) -> bool:
-        try:
-            return bool(json.loads(self._tools_config_json or "{}").get("exec_enabled", False))
-        except Exception:
-            return False
-
     def _web_search_enabled(self) -> bool:
         try:
             cfg = json.loads(self._tools_config_json or "{}")
@@ -571,9 +570,9 @@ class OpencodeCliExecutor:
         permission: dict[str, Any] = {"*": "allow"}
         for tool in _DENIED_NATIVE_TOOLS:
             permission[tool] = "deny"
-        # Chack's own exec tool, when offered, is already the run's shell.
-        if not self._exec_enabled() or "exec" in self._allowed_tool_names():
-            permission["bash"] = "deny"
+        if "exec" not in self._allowed_tool_names():
+            for tool in _NATIVE_FILE_TOOLS:
+                permission[tool] = "deny"
         if not self._web_search_enabled():
             permission["websearch"] = "deny"
         agent: dict[str, Any] = {

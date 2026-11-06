@@ -39,6 +39,14 @@ from .tool_payloads import (
 
 _LOGGER = logging.getLogger("chack.copilot_cli_backend")
 
+# chack's ``exec`` tool is the run's only shell; Copilot's own shells stay off.
+_COPILOT_SHELL_TOOLS = (
+    "bash", "write_bash", "read_bash", "stop_bash", "list_bash",
+    "powershell", "write_powershell", "read_powershell", "stop_powershell", "list_powershell",
+)
+# Host file access, only for runs that also have chack's ``exec``.
+_COPILOT_FILE_TOOLS = ("view", "edit", "create", "str_replace_editor", "apply_patch", "glob", "grep", "rg")
+
 
 # Environment switches that make prompt mode load the working directory's
 # hooks, MCP servers and extensions. The working directory is usually a
@@ -625,12 +633,22 @@ class CopilotCliExecutor:
     #  Command / environment building
     # ------------------------------------------------------------------
 
+    def _offers_chack_exec(self) -> bool:
+        try:
+            offered = json.loads(self._allowed_tools_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(offered, list) and "exec" in offered
+
     def _build_command(self, prompt: str) -> list[str]:
         args: list[str] = [
             self._copilot_cli_path,
             "-p",
             prompt,
             "--allow-all-tools",
+            "--excluded-tools",
+            *_COPILOT_SHELL_TOOLS,
+            *(() if self._offers_chack_exec() else _COPILOT_FILE_TOOLS),
             "--output-format",
             "json",
             # The working directory is usually a repository under audit: its

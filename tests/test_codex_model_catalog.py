@@ -60,14 +60,14 @@ def _fake_codex(tmp_path, monkeypatch, *, exit_code=0, catalog=_CATALOG):
     return calls
 
 
-def _executor(model: str, session: str = "s1", monkeypatch=None):
+def _executor(model: str, session: str = "s1", monkeypatch=None, tools: ToolsConfig | None = None):
     if monkeypatch is not None:
         monkeypatch.setattr(codex_backend, "current_session_id", lambda: session, raising=False)
     config = ChackConfig(
         model=ModelConfig(primary=model, provider="codex"),
         agent=AgentConfig(main_action="test", sub_action="test"),
         session=SessionConfig(max_turns=2),
-        tools=ToolsConfig(),
+        tools=tools or ToolsConfig(),
         credentials=CredentialsConfig(openai_api_key="sk-test"),
         logging=LoggingConfig(),
         system_prompt="system",
@@ -78,6 +78,32 @@ def _executor(model: str, session: str = "s1", monkeypatch=None):
     )
     executor._ensure_codex_home_and_config()
     return executor
+
+
+@pytest.mark.parametrize("exec_enabled", [True, False])
+def test_codex_never_offers_its_own_shell(tmp_path, monkeypatch, exec_enabled):
+    _fake_codex(tmp_path, monkeypatch)
+    executor = _executor("gpt-6-sol", tools=ToolsConfig(exec_enabled=exec_enabled))
+
+    command = executor._build_command()
+
+    # chack's exec tool is the only shell.
+    disabled = {command[i + 1] for i, arg in enumerate(command) if arg == "--disable"}
+    assert {"shell_tool", "unified_exec"} <= disabled
+
+
+@pytest.mark.parametrize("exec_enabled", [True, False])
+def test_codex_file_tools_come_only_with_chack_exec(tmp_path, monkeypatch, exec_enabled):
+    _fake_codex(tmp_path, monkeypatch, catalog={"models": [{"slug": "gpt-6-sol", "apply_patch_tool_type": "freeform"}]})
+    executor = _executor("gpt-6-sol", tools=ToolsConfig(exec_enabled=exec_enabled))
+
+    with open(_config(executor)["model_catalog_json"], encoding="utf-8") as handle:
+        [model] = json.load(handle)["models"]
+    command = executor._build_command()
+    disabled = {command[i + 1] for i, arg in enumerate(command) if arg == "--disable"}
+
+    assert (model["apply_patch_tool_type"] == "freeform") is exec_enabled
+    assert ("view_image" in disabled) is not exec_enabled
 
 
 def _config(executor) -> dict:
@@ -207,5 +233,37 @@ def test_the_real_cli_sends_no_interactive_only_prompt_parts(tmp_path, monkeypat
     assert "<skills_instructions>" not in text
     assert "<permissions instructions>" not in text
     assert "<collaboration_mode>" not in text
+    assert "request_plugin_install" not in text
     # The task itself is still sent.
     assert "hello" in text
+
+
+@pytest.mark.skipif(shutil.which("codex") is None, reason="Codex CLI not installed")
+def test_the_real_cli_gives_a_run_without_exec_no_file_tools(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_PATH", shutil.which("codex"))
+    listed = codex_backend._codex_catalog_models(shutil.which("codex"), str(tmp_path))
+    if not listed:
+        pytest.skip("this Codex CLI lists no models")
+    executor = _executor(listed[0]["slug"], tools=ToolsConfig(exec_enabled=False))
+    command = executor._build_command()
+    flags = [
+        arg
+        for i, flag in enumerate(command)
+        if flag in {"--disable", "-c"}
+        for arg in (flag, command[i + 1])
+    ]
+
+    done = subprocess.run(
+        [shutil.which("codex"), *flags, "debug", "prompt-input", "hello"],
+        env={**os.environ, "CODEX_HOME": executor._codex_home},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+
+    text = done.stdout
+    assert "hello" in text
+    for tool in ("apply_patch", "view_image", "exec_command", "shell"):
+        assert f"### `{tool}`" not in text and f'"name": "{tool}"' not in text

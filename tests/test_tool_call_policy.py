@@ -282,6 +282,24 @@ def test_mcp_token_limit_env_still_lowers_the_output_limit(monkeypatch) -> None:
     assert len(policy.fit("y" * 1000)) < 1000
 
 
+@pytest.mark.parametrize("with_exec", [True, False])
+def test_mcp_server_points_to_a_spilled_file_only_when_exec_can_read_it(tmp_path, with_exec) -> None:
+    big = "z" * 10000
+    tool, _ = _counting_tool("fetch_page", output=lambda _q: big)
+    tools = [tool] + ([_counting_tool("exec")[0]] if with_exec else [])
+    policy = _tool_call_policy(
+        {"tool_output_max_chars": 1000, "tool_output_preview_chars": 300, "tool_output_dir": str(tmp_path)},
+        tools,
+    )
+    server = _server(tools, policy=policy)
+
+    shown = _call(server, "fetch_page", {"query": "x"})
+
+    assert len(shown) < 1000
+    assert ("saved at" in shown) is with_exec
+    assert len(os.listdir(tmp_path)) == (1 if with_exec else 0)
+
+
 def test_api_agent_without_shell_gets_a_preview_and_no_file_path(tmp_path) -> None:
     big = "z" * 10000
     tool, _ = _counting_tool("fetch_page", output=lambda _q: big)

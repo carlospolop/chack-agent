@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import unittest
+
+import pytest
 from unittest.mock import patch, MagicMock
 
 from chack_agent.backends.tool_payloads import serialize_tools_payload, deserialize_tools_payload
@@ -182,6 +184,75 @@ class TestCopilotBackendToolEnvSetup(unittest.TestCase):
 
         env = executor._build_env()
         self.assertNotIn("COPILOT_GITHUB_TOKEN", env)
+
+
+
+def _copilot_executor(tools_config_json: str, allowed_tools_json: str = "[]"):
+    from chack_agent.backends.copilot_cli_backend import CopilotCliExecutor
+
+    roles = ("social_network", "scientific", "websearcher", "business", "product", "cli", "subchack")
+    return CopilotCliExecutor(
+        conversation=[],
+        memory_max_messages=100,
+        memory_reset_to_messages=10,
+        base_system_prompt="test",
+        model_name="gpt-5.4",
+        max_turns=10,
+        copilot_cli_path="/usr/bin/true",
+        copilot_github_token="",
+        tools_config_json=tools_config_json,
+        allowed_tools_json=allowed_tools_json,
+        serialized_tools_override_b64="",
+        serialized_tools_append_b64="",
+        model_provider="copilot",
+        default_model="gpt-5.4",
+        min_tools_used=0,
+        max_tools_used=0,
+        require_task_steps_manager_init_first=False,
+        output_schema_json="",
+        **{f"{role}_model": "" for role in roles},
+        **{f"{role}_max_turns": 10 for role in roles},
+    )
+
+
+def _option_values(command: list[str], option: str) -> list[str]:
+    """The values a variadic CLI option receives: every token up to the next option."""
+    values = []
+    for token in command[command.index(option) + 1:]:
+        if token.startswith("-"):
+            break
+        values.append(token)
+    return values
+
+
+@pytest.mark.parametrize("tools_config_json", ['{"exec_enabled": true}', '{"exec_enabled": false}'])
+def test_copilot_never_offers_its_own_shells(tools_config_json):
+    command = _copilot_executor(tools_config_json)._build_command("run printf alpha")
+
+    # chack's exec tool is the only shell, whether or not exec is enabled.
+    assert set(_option_values(command, "--excluded-tools")) >= {
+        "bash", "write_bash", "read_bash", "stop_bash", "list_bash",
+        "powershell", "write_powershell", "read_powershell", "stop_powershell", "list_powershell",
+    }
+    # The excluded list does not swallow the options after it.
+    assert _option_values(command, "-p") == ["run printf alpha"]
+    assert _option_values(command, "--output-format") == ["json"]
+    assert _option_values(command, "--model") == ["gpt-5.4"]
+
+
+
+_COPILOT_FILE_TOOLS = {"view", "edit", "create", "str_replace_editor", "apply_patch", "glob", "grep", "rg"}
+
+
+def test_copilot_file_tools_come_only_with_chack_exec():
+    with_exec = _copilot_executor('{"exec_enabled": true}', '["exec", "read_context"]')
+    without_exec = _copilot_executor('{"exec_enabled": false}', '["read_context"]')
+
+    excluded_with_exec = set(_option_values(with_exec._build_command("hi"), "--excluded-tools"))
+    excluded_without_exec = set(_option_values(without_exec._build_command("hi"), "--excluded-tools"))
+
+    assert not excluded_with_exec & _COPILOT_FILE_TOOLS
+    assert excluded_without_exec >= _COPILOT_FILE_TOOLS
 
 
 if __name__ == "__main__":

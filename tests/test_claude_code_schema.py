@@ -3,6 +3,8 @@ import io
 import os
 import pathlib
 import tempfile
+
+import pytest
 from datetime import datetime, timezone
 
 from chack_agent.backends.claude_code_backend import (
@@ -181,31 +183,41 @@ def _builtin_tools(command: list[str]) -> set[str]:
 def test_claude_offers_only_the_builtin_tools_a_run_uses() -> None:
     executor = _build_executor("")
     executor._tools_config_json = '{"exec_enabled": true}'
-    executor._allowed_tools_json = '["read_context"]'
+    executor._allowed_tools_json = '["exec", "read_context"]'
 
     tools = _builtin_tools(executor._build_command("use tools"))
 
-    assert {"Bash", "Read", "Edit", "Write", "ToolSearch", "WebFetch", "WebSearch"} <= tools
+    assert {"Read", "Edit", "Write", "ToolSearch", "WebFetch", "WebSearch"} <= tools
     assert not tools & {"Agent", "Task", "Workflow", "Monitor", "CronCreate", "EnterWorktree", "SendMessage"}
 
 
-def test_claude_drops_the_native_shell_when_chack_exec_is_offered() -> None:
+@pytest.mark.parametrize(
+    ("tools_config", "allowed_tools"),
+    [
+        ('{"exec_enabled": true}', '["exec", "read_context"]'),
+        ('{"exec_enabled": true}', '["read_context"]'),
+        ('{"exec_enabled": false}', '["read_context"]'),
+    ],
+)
+def test_claude_never_offers_its_own_shell(tools_config, allowed_tools) -> None:
     executor = _build_executor("")
-    executor._tools_config_json = '{"exec_enabled": true}'
-    executor._allowed_tools_json = '["exec", "read_context"]'
+    executor._tools_config_json = tools_config
+    executor._allowed_tools_json = allowed_tools
 
     assert "Bash" not in _builtin_tools(executor._build_command("use tools"))
 
 
-def test_claude_exec_disabled_offers_no_shell() -> None:
+@pytest.mark.parametrize("tools_config", ['{"exec_enabled": true}', '{"exec_enabled": false}'])
+def test_claude_without_chack_exec_gets_no_host_file_tools(tools_config) -> None:
     executor = _build_executor("")
-    executor._tools_config_json = '{"exec_enabled": false}'
+    executor._tools_config_json = tools_config
     executor._allowed_tools_json = '["read_context"]'
 
     tools = _builtin_tools(executor._build_command("use tools"))
 
-    assert "Bash" not in tools
-    assert "Read" in tools
+    assert not tools & {"Bash", "Read", "Edit", "Write", "Glob", "Grep"}
+    # Chack's own tools stay reachable.
+    assert "ToolSearch" in tools
 
 
 def test_claude_web_search_follows_the_config() -> None:
