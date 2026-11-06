@@ -59,7 +59,6 @@ _GEMINI_CLI_DENYLIST_TOOLS = {
     "ask_user",
     "enter_plan_mode",
     "exit_plan_mode",
-    "exec",
 }
 
 
@@ -629,8 +628,12 @@ class GeminiCliExecutor:
                     }
                 ]
             },
+            # Gemini CLI's own tools are off: they would work in its empty
+            # launch directory, and headless runs drop every tool that needs
+            # approval. The model gets Chack's tools (a trusted server, so they
+            # run without approval) and, unless turned off, its web search.
             "tools": {
-                "core": [],
+                "core": self._gemini_core_tools(),
                 "shell": {
                     "inactivityTimeout": int(
                         os.environ.get("CHACK_GEMINI_SHELL_INACTIVITY_TIMEOUT", "300")
@@ -642,12 +645,20 @@ class GeminiCliExecutor:
                     "command": sys.executable,
                     "args": ["-m", "chack_agent.backends.chack_tools_mcp_server"],
                     "env": self._gemini_mcp_env_map(),
+                    "trust": True,
                     "timeout": int(
                         os.environ.get("CHACK_GEMINI_MCP_TOOL_TIMEOUT_MS", "300000")
                     ),
                 }
             },
         }
+        # Headless Gemini CLI exits when no auth type is selected.
+        settings_payload["security"] = {
+            "auth": {"selectedType": "gemini-api-key" if self._gemini_api_key else "vertex-ai"}
+        }
+        # Prompt sections for features a Chack run never uses.
+        settings_payload["skills"] = {"enabled": False}
+        settings_payload["general"] = {"topicUpdateNarration": False}
         if tools_cwd:
             settings_payload["mcpServers"]["chack_tools"]["cwd"] = tools_cwd
         if self._playwright_mcp_enabled():
@@ -659,6 +670,20 @@ class GeminiCliExecutor:
         with open(settings_path, "w", encoding="utf-8") as handle:
             json.dump(settings_payload, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+
+    def _gemini_core_tools(self) -> list[str]:
+        try:
+            cfg = json.loads(self._tools_config_json or "{}")
+        except Exception:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        tools = ["mcp_chack_tools_*"]
+        if self._playwright_mcp_enabled():
+            tools.append("mcp_playwright_*")
+        if cfg.get("native_web_search_enabled", True):
+            tools.append("google_web_search")
+        return tools
 
     def _playwright_mcp_enabled(self) -> bool:
         try:
