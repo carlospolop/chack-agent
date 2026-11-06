@@ -38,6 +38,7 @@ from .business_search import (
     get_yelp_place_tool,
     get_yelp_reviews_tool,
 )
+from .exa_web_search import get_web_search_tools
 from .exec_tool import ExecTool, get_exec_tool
 from .forumscout_search import (
     ForumScoutTool,
@@ -329,6 +330,9 @@ class AgentsToolset:
         researcher_administrator_max_turns: int = 100,
         self_critique_enabled: bool = False,
         self_critique_rounds: int = 0,
+        # Keyless ``web_search``/``web_fetch``, for backends whose model has
+        # no hosted web search of its own.
+        keyless_web_search: bool = False,
         # Backward-compatibility shim for older integrations that still pass a
         # `tool_profile` kwarg (e.g. CLI smoke tests).
         tool_profile: str = "",
@@ -411,6 +415,7 @@ class AgentsToolset:
         self.researcher_administrator_max_turns = researcher_administrator_max_turns
         self.self_critique_rounds = max(0, int(self_critique_rounds or 0))
         self.self_critique_enabled = bool(self_critique_enabled or self.self_critique_rounds > 0)
+        self.keyless_web_search = bool(keyless_web_search)
         self.tools = self._build_tools()
 
     def _resolve_alias(self, value: str, *, fallback: str) -> str:
@@ -461,6 +466,9 @@ class AgentsToolset:
         ):
             task_helper = TaskStepsManagerTool(self.config)
             tools.append(get_task_steps_manager_tool(task_helper))
+
+        if self.keyless_web_search:
+            tools.extend(get_web_search_tools())
 
         if self.config.brave_enabled:
             brave_helper = BraveSearchTool(self.config)

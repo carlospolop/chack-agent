@@ -255,5 +255,16 @@ def test_copilot_file_tools_come_only_with_chack_exec():
     assert excluded_without_exec >= _COPILOT_FILE_TOOLS
 
 
+_COPILOT_WEB_TOOLS = {"web_fetch", "web_search", "github-mcp-server-web_search"}
+
+
+def test_copilot_web_tools_follow_the_web_search_switch():
+    default = _copilot_executor('{"exec_enabled": true}', '["exec"]')
+    web_off = _copilot_executor('{"exec_enabled": true, "native_web_search_enabled": false}', '["exec"]')
+
+    assert not set(_option_values(default._build_command("hi"), "--excluded-tools")) & _COPILOT_WEB_TOOLS
+    assert set(_option_values(web_off._build_command("hi"), "--excluded-tools")) >= _COPILOT_WEB_TOOLS
+
+
 if __name__ == "__main__":
     unittest.main()

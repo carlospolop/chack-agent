@@ -46,6 +46,8 @@ _COPILOT_SHELL_TOOLS = (
 )
 # Host file access, only for runs that also have chack's ``exec``.
 _COPILOT_FILE_TOOLS = ("view", "edit", "create", "str_replace_editor", "apply_patch", "glob", "grep", "rg")
+# Copilot's own web access, off when ``tools.native_web_search_enabled`` is false.
+_COPILOT_WEB_TOOLS = ("web_fetch", "web_search", "github-mcp-server-web_search")
 
 
 # Environment switches that make prompt mode load the working directory's
@@ -640,6 +642,13 @@ class CopilotCliExecutor:
             return False
         return isinstance(offered, list) and "exec" in offered
 
+    def _web_search_enabled(self) -> bool:
+        try:
+            cfg = json.loads(self._tools_config_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            cfg = {}
+        return bool(cfg.get("native_web_search_enabled", True)) if isinstance(cfg, dict) else True
+
     def _build_command(self, prompt: str) -> list[str]:
         args: list[str] = [
             self._copilot_cli_path,
@@ -649,6 +658,7 @@ class CopilotCliExecutor:
             "--excluded-tools",
             *_COPILOT_SHELL_TOOLS,
             *(() if self._offers_chack_exec() else _COPILOT_FILE_TOOLS),
+            *(() if self._web_search_enabled() else _COPILOT_WEB_TOOLS),
             "--output-format",
             "json",
             # The working directory is usually a repository under audit: its

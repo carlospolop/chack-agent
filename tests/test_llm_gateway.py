@@ -742,3 +742,31 @@ def test_claude_with_web_search_turned_off_has_none(catalog_requests):
 
     assert "WebSearch" not in _claude_builtins(executor._build_command("prompt"))
     assert "web_search" not in _claude_settings(executor)["mcpServers"]
+
+
+def test_turning_off_keyless_search_sends_nothing_to_exa(catalog_requests):
+    codex = _config("codex", "gpt-6-sol", api_key_type="gateway")
+    codex.tools.exec_enabled = True
+    codex.tools.keyless_web_search_enabled = False
+    claude = _config("claude", "claude-opus-5-5", api_key_type="gateway")
+    claude.tools.exec_enabled = True
+    claude.tools.keyless_web_search_enabled = False
+
+    codex_servers = _codex_config_toml(_build(build_codex_executor, codex)).get("mcp_servers", {})
+    claude_executor = _build(build_claude_executor, claude)
+
+    assert "web_search" not in codex_servers
+    assert "web_search" not in _claude_settings(claude_executor)["mcpServers"]
+    assert "WebSearch" not in _claude_builtins(claude_executor._build_command("prompt"))
+    # Reading a known page is not a search and stays available.
+    assert "WebFetch" in _claude_builtins(claude_executor._build_command("prompt"))
+
+
+def test_turning_off_keyless_search_keeps_the_models_own_search():
+    config = _config(
+        "claude", "anthropic/claude-haiku-5.5", api_key_type="openrouter", openrouter_api_key="or-key"
+    )
+    config.tools.exec_enabled = True
+    config.tools.keyless_web_search_enabled = False
+
+    assert "WebSearch" in _claude_builtins(_build(build_claude_executor, config)._build_command("prompt"))
