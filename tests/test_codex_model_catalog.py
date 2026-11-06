@@ -161,3 +161,51 @@ def test_the_real_cli_sends_no_agent_management_tools(tmp_path, monkeypatch):
     assert tool_groups, "the prompt lists no tools at all"
     assert "collaboration" not in tool_groups
     assert "spawn_agent" not in developer_text
+
+
+def _rendered_prompt(codex_home: str) -> list:
+    done = subprocess.run(
+        [shutil.which("codex"), "debug", "prompt-input", "hello"],
+        env={**os.environ, "CODEX_HOME": codex_home},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    return json.loads(done.stdout)
+
+
+@pytest.mark.skipif(shutil.which("codex") is None, reason="Codex CLI not installed")
+def test_the_real_cli_sends_no_interactive_only_prompt_parts(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_PATH", shutil.which("codex"))
+    # A skill the run must not be told about.
+    skill = tmp_path / "home" / ".agents" / "skills" / "canary-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: canary-skill\ndescription: canary skill description\n---\nbody\n"
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    listed = codex_backend._codex_catalog_models(shutil.which("codex"), str(tmp_path))
+    if not listed:
+        pytest.skip("this Codex CLI lists no models")
+    executor = _executor(listed[0]["slug"])
+
+    items = _rendered_prompt(executor._codex_home)
+
+    tools = {
+        tool.get("name")
+        for item in items
+        if item.get("type") == "additional_tools"
+        for group in item["tools"]
+        for tool in (group.get("tools") or [group])
+    }
+    text = json.dumps(items)
+    assert tools, "the prompt lists no tools at all"
+    assert not tools & {"request_user_input", "request_user_input_async", "sleep"}
+    assert "canary-skill" not in text
+    assert "<skills_instructions>" not in text
+    assert "<permissions instructions>" not in text
+    assert "<collaboration_mode>" not in text
+    # The task itself is still sent.
+    assert "hello" in text

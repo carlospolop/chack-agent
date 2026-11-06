@@ -107,6 +107,15 @@ def _codex_tool_instructions(
     )
 
 
+_CODEX_UNUSED_PROMPT_PARTS_OFF = (
+    "skills.include_instructions = false",
+    "skills.bundled.enabled = false",
+    "include_permissions_instructions = false",
+    "include_collaboration_mode_instructions = false",
+    "tools.experimental_request_user_input.enabled = false",
+    "features.sleep_tool = false",
+)
+
 _CODEX_CATALOGS: dict[str, Optional[list]] = {}
 _CODEX_CATALOGS_LOCK = threading.Lock()
 
@@ -2977,6 +2986,11 @@ class CodexExecutor:
             has_configured_tools=self._has_configured_tools(),
         )
         config_lines.append(f"instructions = {_toml_string(instructions_text)}")
+        # Codex adds these to every request, yet a headless run never uses them:
+        # no one answers user-input requests, there are no skills or approval
+        # prompts, and no collaboration modes. Dropping them saves ~2.5k tokens
+        # per model request. Dotted keys, so they stay ahead of the first table.
+        config_lines.extend(_CODEX_UNUSED_PROMPT_PARTS_OFF)
         chack_mcp_startup_timeout = int(
             self._runtime_env_value("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "120")
             or "120"
