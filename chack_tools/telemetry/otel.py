@@ -288,6 +288,17 @@ def _context_attributes(log_context: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def annotate_run_span(fields: Mapping[str, Any]) -> None:
+    """Record log-context fields set during a run on that run's AGENT span."""
+    if trace is None:
+        return
+    span = trace.get_current_span()
+    attributes = getattr(span, "attributes", None) or {}
+    if not span.is_recording() or attributes.get(_SPAN_KIND) != "AGENT":
+        return
+    _set_attributes(span, _context_attributes(fields), _value_max_chars())
+
+
 # ---------------------------------------------------------------------------
 # Spans
 # ---------------------------------------------------------------------------

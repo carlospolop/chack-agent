@@ -1,6 +1,8 @@
 import contextvars
 from typing import Any, Dict
 
+from .otel import annotate_run_span
+
 _LOG_CONTEXT: contextvars.ContextVar[Dict[str, Any]] = contextvars.ContextVar(
     "chack_log_context",
     default={},
@@ -13,6 +15,7 @@ def set_log_context(**kwargs):
         if value is None:
             continue
         current[str(key)] = value
+    annotate_run_span(kwargs)
     return _LOG_CONTEXT.set(current)
 
 
@@ -22,6 +25,7 @@ def update_log_context(**kwargs) -> None:
         if value is None:
             continue
         current[str(key)] = value
+    annotate_run_span(kwargs)
     _LOG_CONTEXT.set(current)
 
 

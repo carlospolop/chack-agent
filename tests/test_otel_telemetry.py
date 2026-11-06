@@ -137,6 +137,10 @@ def test_a_run_is_one_agent_span_with_its_tools_inside():
     assert run.attributes["llm.token_count.completion"] == 50
     assert run.attributes["llm.token_count.total"] == 1050
     assert run.attributes["llm.token_count.prompt_details.cache_read"] == 400
+    # Context set while the run is already going is on the span too.
+    assert run.attributes["chack.context.model"] == "test-model"
+    assert run.attributes["chack.context.task_session_id"]
+    assert run.attributes["chack.context.max_turns"] > 0
     assert tool.parent.span_id == run.context.span_id
     assert tool.attributes["openinference.span.kind"] == "TOOL"
     assert tool.attributes["output.value"] == "found it"
