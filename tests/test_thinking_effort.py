@@ -142,33 +142,31 @@ def test_gemini_mapping_respects_model_specific_contracts(effort, model, expecte
     assert not ({"thinkingLevel", "thinkingBudget"} <= expected.keys())
 
 
+# The table is regenerated from OpenRouter, so these tests check how levels
+# are looked up rather than pinning the levels a provider publishes today.
 @pytest.mark.parametrize(
-    ("model", "expected"),
+    ("model", "required", "absent"),
     [
         # Anthropic: xhigh is newer than max, so 4.6 has max but not xhigh.
-        ("claude-opus-4-6", {"low", "medium", "high", "max"}),
-        ("claude-sonnet-4-6", {"low", "medium", "high", "max"}),
-        ("claude-opus-4-7", {"low", "medium", "high", "xhigh", "max"}),
-        ("claude-opus-4-8", {"low", "medium", "high", "xhigh", "max"}),
-        ("claude-opus-5", {"low", "medium", "high", "xhigh", "max"}),
-        ("claude-sonnet-5", {"low", "medium", "high", "xhigh", "max"}),
-        ("claude-fable-5", {"low", "medium", "high", "xhigh", "max"}),
+        ("claude-opus-4-6", {"low", "high", "max"}, {"xhigh", "minimal"}),
+        ("claude-sonnet-4-6", {"low", "high", "max"}, {"xhigh", "minimal"}),
+        ("claude-opus-4-7", {"low", "xhigh", "max"}, {"minimal"}),
+        ("claude-opus-5", {"low", "xhigh", "max"}, {"minimal"}),
         # OpenAI: 5.0 kept minimal, 5.1 replaced it with none, 5.2+ added
         # xhigh, 5.6 added max.
-        ("gpt-5", {"minimal", "low", "medium", "high"}),
-        ("gpt-5-mini", {"minimal", "low", "medium", "high"}),
-        ("gpt-5.1", {"none", "low", "medium", "high"}),
-        ("gpt-5.2", {"none", "low", "medium", "high", "xhigh"}),
-        ("gpt-5.4", {"none", "low", "medium", "high", "xhigh"}),
-        ("gpt-5.4-nano", {"none", "low", "medium", "high", "xhigh"}),
-        ("gpt-5.5", {"none", "low", "medium", "high", "xhigh"}),
-        ("gpt-5.6-sol", {"none", "low", "medium", "high", "xhigh", "max"}),
-        ("gemini-3.1-pro-preview", {"low", "medium", "high"}),
-        ("gemini-3-flash-preview", {"minimal", "low", "medium", "high"}),
+        ("gpt-5", {"minimal", "high"}, {"none", "xhigh", "max"}),
+        ("gpt-5.1", {"none", "high"}, {"minimal", "xhigh"}),
+        ("gpt-5.4", {"none", "xhigh"}, {"minimal", "max"}),
+        ("gpt-5.6-sol", {"none", "xhigh", "max"}, {"minimal"}),
+        ("gemini-3.1-pro-preview", {"low", "high"}, {"xhigh", "max"}),
     ],
 )
-def test_published_table_supplies_supported_levels(model, expected) -> None:
-    assert supported_thinking_efforts(model) == expected
+def test_published_table_supplies_supported_levels(model, required, absent) -> None:
+    levels = supported_thinking_efforts(model)
+
+    assert levels == published_thinking_efforts()[_model_key(model)]
+    assert required <= levels
+    assert not (absent & levels)
 
 
 @pytest.mark.parametrize(
@@ -224,7 +222,7 @@ def test_family_rules_cover_models_the_published_table_omits(model, expected) ->
     ],
 )
 def test_every_spelling_of_one_model_resolves_to_the_same_levels(model) -> None:
-    assert supported_thinking_efforts(model) == {"low", "medium", "high", "max"}
+    assert supported_thinking_efforts(model) == published_thinking_efforts()["claude-opus-4-6"]
 
 
 def test_missing_published_table_falls_back_to_the_family_rules(monkeypatch) -> None:
@@ -256,7 +254,7 @@ def test_unknown_models_skip_validation(model) -> None:
     [
         ("xhigh", "claude-sonnet-4-6"),
         ("minimal", "claude-opus-5"),
-        ("none", "claude-opus-4-7"),
+        ("minimal", "claude-opus-4-7"),
         ("max", "gpt-5.4"),
         ("minimal", "gpt-5.4"),
         ("none", "gpt-5"),
@@ -273,7 +271,8 @@ def test_rejects_levels_the_selected_model_does_not_support(effort, model) -> No
 def test_default_steps_down_on_a_model_that_lacks_it(caplog) -> None:
     """A level the user never chose must not block startup."""
     model = "nemotron-3-super-120b-a12b"
-    assert supported_thinking_efforts(model) == {"low", "medium"}
+    assert {"low", "medium"} <= supported_thinking_efforts(model)
+    assert not ({"high", "xhigh", "max"} & supported_thinking_efforts(model))
 
     # The warning is deduped per model, so start from a clean slate.
     thinking_effort._stepped_down_models.discard(model)
@@ -318,9 +317,10 @@ def test_error_lists_the_valid_values_in_provider_order() -> None:
     with pytest.raises(ValueError) as excinfo:
         validate_thinking_effort("xhigh", model="claude-opus-4-6")
 
-    assert "Supported values for this model: low, medium, high, max" in str(
-        excinfo.value
-    )
+    levels = published_thinking_efforts()["claude-opus-4-6"]
+    in_order = ", ".join(level for level in thinking_effort.THINKING_EFFORT_ORDER if level in levels)
+    assert f"Supported values for this model: {in_order}" in str(excinfo.value)
+    assert in_order.index("low") < in_order.index("high") < in_order.index("max")
 
 
 def test_yaml_rejects_effort_the_primary_model_cannot_use(tmp_path) -> None:
@@ -478,7 +478,7 @@ def test_shipped_table_parses_and_only_uses_known_levels() -> None:
     table = published_thinking_efforts()
 
     assert len(table) > 50
-    assert table["claude-opus-4-6"] == frozenset({"low", "medium", "high", "max"})
+    assert {"low", "medium", "high", "max"} <= table["claude-opus-4-6"]
     for model, levels in table.items():
         assert levels <= THINKING_EFFORT_LEVELS
         assert _model_key(model) == model

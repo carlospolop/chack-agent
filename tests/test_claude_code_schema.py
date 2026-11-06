@@ -653,3 +653,64 @@ def test_claude_oauth_does_not_wait_past_configured_bound(monkeypatch) -> None:
 
     assert output.startswith("ERROR:")
     assert len(calls) == 1
+
+
+def _run_claude_stream(monkeypatch, tmp_path, events: list[dict]) -> str:
+    stream = "\n".join(json.dumps(event) for event in events) + "\n"
+
+    class _FakeProcess:
+        pid = 999999
+
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(stream)
+
+        def poll(self):
+            return 0 if self.stdout.tell() >= len(stream) else None
+
+        def wait(self):
+            return 0
+
+    executor = _build_executor("")
+    executor._claude_home = str(tmp_path)
+    monkeypatch.setattr(
+        "chack_agent.backends.claude_code_backend.subprocess.Popen",
+        lambda *args, **kwargs: _FakeProcess(),
+    )
+    output, _steps, _raw = executor._run_claude_once("prompt")
+    return output
+
+
+_INIT_EVENT = {"type": "system", "subtype": "init", "session_id": "session-id", "mcp_servers": []}
+
+
+def test_claude_final_answer_is_not_repeated_from_the_result_event(monkeypatch, tmp_path) -> None:
+    output = _run_claude_stream(
+        monkeypatch,
+        tmp_path,
+        [
+            _INIT_EVENT,
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Running it now."}]}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "echo 42"}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "42"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "42"}]}},
+            {"type": "result", "subtype": "success", "result": "42"},
+        ],
+    )
+
+    assert output == "42"
+
+
+def test_claude_streamed_text_is_the_answer_when_the_result_event_is_empty(monkeypatch, tmp_path) -> None:
+    output = _run_claude_stream(
+        monkeypatch,
+        tmp_path,
+        [
+            _INIT_EVENT,
+            {"type": "user", "message": {"content": "replayed prompt"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "final answer"}]}},
+            {"type": "result", "subtype": "success", "result": ""},
+        ],
+    )
+
+    assert output == "final answer"

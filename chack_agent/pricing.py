@@ -172,6 +172,12 @@ def _resolve_model_lookup(pricing: PricingTable, model: str) -> Optional[str]:
         return None
     if lookup in pricing.models:
         return lookup
+    # "openrouter/<vendor>/<model>" is a routing name; OpenRouter bills the
+    # vendor model's rate, which the table stores as "<vendor>/<model>".
+    if lookup.startswith("openrouter/"):
+        lookup = lookup[len("openrouter/") :]
+        if lookup in pricing.models:
+            return lookup
 
     bare_lookup = _strip_provider_prefix(lookup)
     stripped_matches = [
