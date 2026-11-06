@@ -263,7 +263,7 @@ class CodexContextWindowConfigTests(unittest.TestCase):
 
 def _build_claude_executor(
     max_context_tokens: int = 0,
-    uses_openrouter_route: bool = False,
+    uses_gateway_route: bool = False,
     claude_access_token: str = "",
 ) -> ClaudeCodeExecutor:
     return ClaudeCodeExecutor(
@@ -311,7 +311,7 @@ def _build_claude_executor(
         _require_task_steps_manager_init_first=False,
         _output_schema_json="",
         _max_context_tokens=max_context_tokens,
-        _uses_openrouter_route=uses_openrouter_route,
+        _uses_gateway_route=uses_gateway_route,
         _claude_access_token=claude_access_token,
     )
 
@@ -335,9 +335,9 @@ class ClaudeContextBetaTests(unittest.TestCase):
                 command = executor._build_command("prompt")
                 self.assertNotIn("--betas", command)
 
-    def test_no_beta_on_openrouter_route(self) -> None:
+    def test_no_beta_on_gateway_route(self) -> None:
         executor = _build_claude_executor(
-            max_context_tokens=250_000, uses_openrouter_route=True
+            max_context_tokens=250_000, uses_gateway_route=True
         )
         command = executor._build_command("prompt")
         self.assertNotIn("--betas", command)

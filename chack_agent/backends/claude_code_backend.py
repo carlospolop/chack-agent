@@ -29,7 +29,14 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..resume_compaction import ResumeCompactionResult
-from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
+from ..llm_gateway import (
+    GatewayRoute,
+    clone_config_for_gateway,
+    gateway_model_name,
+    gateway_subprocess_env,
+    get_gateway_route,
+)
+from ..model_aliases import ANTHROPIC_BEST_CHEAPEST
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
 from ..environment_credential_pool import rotate_environment_credentials
@@ -241,6 +248,51 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
 # So whenever a larger context budget is configured we opt into that beta.
 _CLAUDE_DEFAULT_CONTEXT_WINDOW = 200_000
 _CLAUDE_1M_CONTEXT_BETA = "context-1m-2025-08-07"
+# Claude Code tools that only work against Anthropic's own API.
+_GATEWAY_UNAVAILABLE_NATIVE_TOOLS = ("WebSearch",)
+# Model-family defaults Claude Code falls back to for subagents and background
+# work. On a gateway they must name models the gateway serves.
+_CLAUDE_GATEWAY_MODEL_ENV = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+
+
+def _claude_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, str]:
+    """Claude Code environment for a gateway serving the Anthropic Messages API."""
+
+    env = gateway_subprocess_env(config, route)
+    env.update(
+        {
+            "ANTHROPIC_BASE_URL": route.anthropic_base_url,
+            # A bearer token, not an Anthropic key; the key variable stays
+            # empty so Claude Code does not prefer it over the gateway token.
+            "ANTHROPIC_AUTH_TOKEN": route.api_key,
+            "ANTHROPIC_API_KEY": "",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
+    )
+    # Betas such as deferred tool loading save tens of thousands of tokens per
+    # call, so they stay on unless the model is served by Bedrock, which rejects
+    # Anthropic beta headers it does not know.
+    if route.upstream.lower().startswith("bedrock"):
+        env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
+    if route.headers:
+        env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(
+            f"{name}: {value}" for name, value in sorted(route.headers.items())
+        )
+    # Every model family resolves to the selected model unless the gateway also
+    # serves a cheaper model for background work.
+    background_model = gateway_model_name(config, ANTHROPIC_BEST_CHEAPEST) or route.model_name
+    for name in _CLAUDE_GATEWAY_MODEL_ENV:
+        env[name] = route.model_name
+    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = background_model
+    env["ANTHROPIC_SMALL_FAST_MODEL"] = background_model
+    return env
 
 
 @lru_cache(maxsize=8)
@@ -342,12 +394,13 @@ class ClaudeCodeExecutor:
     _output_schema_strict: bool = True
     _max_context_tokens: int = 0
     _compaction_threshold_ratio: float = 0.50
-    _uses_openrouter_route: bool = False
+    _uses_gateway_route: bool = False
     _anthropic_api_key: str = ""
     _claude_access_token: str = ""
-    _anthropic_base_url: str = ""
-    _openrouter_http_referer: str = ""
-    _openrouter_app_name: str = ""
+    # Environment that points the Claude Code CLI (and the Chack MCP server it
+    # starts) at the gateway; empty when Claude talks to Anthropic directly.
+    _gateway_env_json: str = ""
+    _gateway_context_window: int = 0
     _claude_home: str | None = None
     _claude_session_id: str | None = None
     _output_schema: str | None = None
@@ -765,7 +818,7 @@ class ClaudeCodeExecutor:
         return self._run_claude_once(prompt)
 
     def _looks_like_credential_failure(self, output: str) -> bool:
-        if self._uses_openrouter_route or not self._claude_access_token:
+        if self._uses_gateway_route or not self._claude_access_token:
             return False
         text = str(output or "").strip().lower()
         if not text.startswith("error:"):
@@ -791,7 +844,7 @@ class ClaudeCodeExecutor:
         )
 
     def _should_retry_with_anthropic_api_key(self, output: str) -> bool:
-        if self._uses_openrouter_route:
+        if self._uses_gateway_route:
             return False
         if not self._claude_access_token or not self._anthropic_api_key:
             return False
@@ -1512,8 +1565,15 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         # names as shell commands. Leave the normal tool registry intact when
         # execution is enabled; when it is disabled, deny only native Bash so
         # MCP tools remain discoverable and callable.
+        disallowed_tools: list[str] = []
         if not resume_compaction and has_cli_tools and not _exec_enabled:
-            args.extend(["--disallowedTools", "Bash"])
+            disallowed_tools.append("Bash")
+        if not resume_compaction and has_cli_tools and self._uses_gateway_route:
+            # WebSearch is executed by Anthropic's API, which gateways do not
+            # provide; the model would spend turns on a tool that always fails.
+            disallowed_tools.extend(_GATEWAY_UNAVAILABLE_NATIVE_TOOLS)
+        if disallowed_tools:
+            args.extend(["--disallowedTools", *disallowed_tools])
 
         if resume_compaction:
             args.extend(["--max-turns", "1"])
@@ -1532,11 +1592,11 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         # the default 200k window. This only raises the model's window so the
         # auto-compaction trigger (CLAUDE_CODE_AUTO_COMPACT_WINDOW, set in the
         # env) can be placed above 200k; the compaction threshold itself keeps
-        # the session alive rather than killing it. Skipped on the OpenRouter
-        # route: the Anthropic beta header does not apply and betas are disabled.
+        # the session alive rather than killing it. Skipped on gateway routes:
+        # the Anthropic beta header does not apply and betas are disabled.
         if (
             self._max_context_tokens > _CLAUDE_DEFAULT_CONTEXT_WINDOW
-            and not self._uses_openrouter_route
+            and not self._uses_gateway_route
             and not self._claude_access_token
         ):
             args.extend(["--betas", _CLAUDE_1M_CONTEXT_BETA])
@@ -1654,17 +1714,15 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
 
-        if self._uses_openrouter_route:
-            env["ANTHROPIC_API_KEY"] = self._anthropic_api_key
-            env["CLAUDE_API_KEY"] = self._anthropic_api_key
-            env["ANTHROPIC_AUTH_TOKEN"] = self._anthropic_api_key
-            env["ANTHROPIC_BASE_URL"] = self._anthropic_base_url
-            env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
-            env["OPENROUTER_API_KEY"] = self._anthropic_api_key
-            if self._openrouter_http_referer:
-                env["OPENROUTER_HTTP_REFERER"] = self._openrouter_http_referer
-            if self._openrouter_app_name:
-                env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
+        if self._uses_gateway_route:
+            for name in (
+                "CLAUDE_ACCESS_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_API_KEY",
+                *_CLAUDE_GATEWAY_MODEL_ENV,
+            ):
+                env.pop(name, None)
+            env.update(json.loads(self._gateway_env_json or "{}"))
         else:
             env.pop("CLAUDE_ACCESS_TOKEN", None)
             if self._claude_access_token:
@@ -1693,8 +1751,10 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         # with the 1M-context beta above when the budget exceeds 200k.
         if self._max_context_tokens > 0:
             compact_window = int(self._max_context_tokens)
-            if self._claude_access_token and not self._uses_openrouter_route:
+            if self._claude_access_token and not self._uses_gateway_route:
                 compact_window = min(compact_window, _CLAUDE_DEFAULT_CONTEXT_WINDOW)
+            if self._uses_gateway_route and self._gateway_context_window > 0:
+                compact_window = min(compact_window, self._gateway_context_window)
             env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(compact_window)
             # The window alone uses Claude Code's later default trigger. Honor
             # Chack's configured fraction inside the running CLI conversation.
@@ -1940,10 +2000,18 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "CLAUDE_CODE_OAUTH_TOKEN",
             "CLAUDE_ACCESS_TOKEN",
             "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_CUSTOM_HEADERS",
             "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
             "OPENROUTER_API_KEY",
+            "OPENROUTER_BASE_URL",
             "OPENROUTER_HTTP_REFERER",
             "OPENROUTER_APP_NAME",
+            "LLM_GATEWAY_TYPE",
+            "LLM_GATEWAY_BASE_URL",
+            "LLM_GATEWAY_ANTHROPIC_BASE_URL",
+            "LLM_GATEWAY_API_KEY",
+            "LLM_GATEWAY_HEADERS",
+            "LLM_GATEWAY_MODEL_MAP",
             "PYTHONPATH",
         ]
 
@@ -2030,11 +2098,12 @@ def build_executor(
     tools_override: list[Any] | None = None,
     tools_append: list[Any] | None = None,
 ) -> ClaudeCodeExecutor:
-    if get_openrouter_route(config) is not None:
-        from .openrouter_openai_backend import build_executor as build_openrouter_executor
+    gateway_route = get_gateway_route(config)
+    if gateway_route is not None and gateway_route.is_openrouter:
+        from .gateway_responses_backend import build_executor as build_gateway_responses_executor
 
-        return build_openrouter_executor(
-            clone_config_for_openrouter(config),
+        return build_gateway_responses_executor(
+            clone_config_for_gateway(config, gateway_route),
             system_prompt=system_prompt,
             max_turns=max_turns,
             memory_max_messages=memory_max_messages,
@@ -2185,7 +2254,7 @@ def build_executor(
         _LOGGER.info("Using MCP name-based reconstruction for researcher administrator tools: %s", type(exc).__name__)
     serialized_tools_append_b64 = serialize_tools_payload(tools_append)
 
-    route = get_openrouter_route(config)
+    route = gateway_route
 
     return ClaudeCodeExecutor(
         _conversation=[],
@@ -2251,9 +2320,9 @@ def build_executor(
             getattr(config.agent, "compaction_threshold_ratio", 0.50) or 0.50
         ),
         _thinking_effort=normalize_thinking_effort(config.agent.thinking_effort),
-        _uses_openrouter_route=route is not None,
+        _uses_gateway_route=route is not None,
         _anthropic_api_key=str(
-            route.api_key
+            ""
             if route is not None
             else (
                 os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("CLAUDE_API_KEY", "")
@@ -2267,7 +2336,10 @@ def build_executor(
                 or os.environ.get("CLAUDE_ACCESS_TOKEN", "")
             )
         ),
-        _anthropic_base_url=str(route.anthropic_base_url if route is not None else ""),
-        _openrouter_http_referer=str((route.headers.get("HTTP-Referer", "") if route else "")),
-        _openrouter_app_name=str((route.headers.get("X-Title", "") if route else "")),
+        _gateway_env_json=(
+            json.dumps(_claude_gateway_env(config, route), sort_keys=True)
+            if route is not None
+            else ""
+        ),
+        _gateway_context_window=int(route.context_window if route is not None else 0),
     )

@@ -270,7 +270,7 @@ def test_undecided_probe_leaves_daybreak_off_without_persisting(tmp_path, monkey
 def _executor() -> CodexExecutor:
     executor = object.__new__(CodexExecutor)
     executor._runtime_env_json = "{}"
-    executor._uses_openrouter_route = False
+    executor._uses_gateway_route = False
     executor._model_name = "gpt-6-sol"
     executor._model_provider = "codex"
     executor._codex_path = "codex"
@@ -331,7 +331,7 @@ def test_executor_skips_daybreak_when_switched_off_or_routed_elsewhere(monkeypat
     assert executor._daybreak_program == ""
 
     routed = _executor()
-    routed._uses_openrouter_route = True
+    routed._uses_gateway_route = True
     routed._resolve_daybreak()
     assert routed._daybreak_program == ""
 

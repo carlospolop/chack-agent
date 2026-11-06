@@ -33,7 +33,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
 from ..live_cost_state import LiveCostLimitExceeded, report_live_usage
-from ..openrouter_routing import get_openrouter_route
+from ..llm_gateway import GatewayRoute, gateway_subprocess_env, get_gateway_route
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
 from ..environment_credential_pool import rotate_environment_credentials
@@ -856,10 +856,11 @@ class CodexExecutor:
     _output_schema_strict: bool = True
     _max_context_tokens: int = 0
     _compaction_threshold_ratio: float = 0.50
-    _uses_openrouter_route: bool = False
-    _openrouter_base_url: str = ""
-    _openrouter_http_referer: str = ""
-    _openrouter_app_name: str = ""
+    _uses_gateway_route: bool = False
+    # Codex model provider block and environment for a gateway route; empty
+    # when Codex talks to OpenAI directly.
+    _gateway_provider_toml: str = ""
+    _gateway_env_json: str = ""
     _output_schema_path: Optional[str] = None
     _thread_id: Optional[str] = None
     _codex_home: Optional[str] = None
@@ -1361,7 +1362,7 @@ class CodexExecutor:
         """
         self._daybreak_program = ""
         self._daybreak_fingerprint = ""
-        if self._uses_openrouter_route:
+        if self._uses_gateway_route:
             return
         mode = codex_daybreak.daybreak_mode(
             self._runtime_env_value(codex_daybreak.DAYBREAK_MODE_ENV, "auto")
@@ -1532,7 +1533,7 @@ class CodexExecutor:
         ).strip().lower()
         if mode in {"0", "false", "no", "off", "disabled"}:
             return False
-        if self._uses_openrouter_route:
+        if self._uses_gateway_route:
             return False
         if not openai_model_requires_explicit_prompt_cache(self._model_name):
             return False
@@ -2552,13 +2553,9 @@ class CodexExecutor:
         # parallel Chack instances cannot overwrite one another's runtime settings.
         env.update(self._runtime_env())
         augment_subprocess_pythonpath(env)
-        if self._uses_openrouter_route:
-            env["OPENROUTER_API_KEY"] = self._openai_api_key
-            env["OPENROUTER_BASE_URL"] = self._openrouter_base_url
-            if self._openrouter_http_referer:
-                env["OPENROUTER_HTTP_REFERER"] = self._openrouter_http_referer
-            if self._openrouter_app_name:
-                env["OPENROUTER_APP_NAME"] = self._openrouter_app_name
+        if self._uses_gateway_route:
+            env.pop("CODEX_ACCESS_TOKEN", None)
+            env.update(json.loads(self._gateway_env_json or "{}"))
         elif self._use_codex_access_token or self._use_existing_codex_auth_file:
             env.pop("OPENAI_API_KEY", None)
             env.pop("CODEX_API_KEY", None)
@@ -2875,6 +2872,12 @@ class CodexExecutor:
             "OPENROUTER_BASE_URL",
             "OPENROUTER_HTTP_REFERER",
             "OPENROUTER_APP_NAME",
+            "LLM_GATEWAY_TYPE",
+            "LLM_GATEWAY_BASE_URL",
+            "LLM_GATEWAY_ANTHROPIC_BASE_URL",
+            "LLM_GATEWAY_API_KEY",
+            "LLM_GATEWAY_HEADERS",
+            "LLM_GATEWAY_MODEL_MAP",
         ]
         # Retain the exact allowlist so the finalized per-run values can also
         # be written explicitly below. Some containerized Codex builds do not
@@ -2931,28 +2934,8 @@ class CodexExecutor:
             )
             or str(chack_mcp_startup_timeout)
         )
-        if self._uses_openrouter_route:
-            config_lines.extend(
-                [
-                    'model_provider = "openrouter"',
-                    "",
-                    "[model_providers.openrouter]",
-                    'name = "OpenRouter"',
-                    f'base_url = {_toml_string(self._openrouter_base_url)}',
-                    'env_key = "OPENROUTER_API_KEY"',
-                    'wire_api = "responses"',
-                    "requires_openai_auth = false",
-                    "supports_websockets = false",
-                ]
-            )
-            header_entries: list[str] = []
-            if self._openrouter_http_referer:
-                header_entries.append('"HTTP-Referer" = "OPENROUTER_HTTP_REFERER"')
-            if self._openrouter_app_name:
-                header_entries.append('"X-Title" = "OPENROUTER_APP_NAME"')
-            if header_entries:
-                config_lines.extend(["[model_providers.openrouter.env_http_headers]"])
-                config_lines.extend(header_entries)
+        if self._uses_gateway_route and self._gateway_provider_toml:
+            config_lines.append(self._gateway_provider_toml)
         chack_mcp_tool_timeout = int(
             self._runtime_env_value("CHACK_MCP_TOOL_TIMEOUT_SECONDS", "3600") or "3600"
         )
@@ -3063,7 +3046,7 @@ class CodexExecutor:
             except OSError:
                 pass
             return
-        if self._uses_openrouter_route or not self._use_codex_access_token:
+        if self._uses_gateway_route or not self._use_codex_access_token:
             self._remove_codex_auth_file()
             return
         auth_path = os.path.join(codex_home, "auth.json")
@@ -3397,6 +3380,63 @@ class CodexExecutor:
             pass
 
 
+def _codex_gateway_provider_id(route: GatewayRoute) -> str:
+    return "openrouter" if route.is_openrouter else "chack_gateway"
+
+
+def _codex_gateway_header_env(route: GatewayRoute) -> dict[str, str]:
+    """Header name -> environment variable holding its value (kept out of config.toml)."""
+
+    if route.is_openrouter:
+        known = {"HTTP-Referer": "OPENROUTER_HTTP_REFERER", "X-Title": "OPENROUTER_APP_NAME"}
+        return {name: env for name, env in known.items() if route.headers.get(name)}
+    return {
+        name: f"LLM_GATEWAY_HEADER_{index}"
+        for index, name in enumerate(sorted(route.headers))
+    }
+
+
+def _codex_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, str]:
+    env = gateway_subprocess_env(config, route)
+    for name, env_name in _codex_gateway_header_env(route).items():
+        env[env_name] = route.headers[name]
+    return env
+
+
+def _codex_gateway_provider_toml(route: GatewayRoute) -> str:
+    def _toml_string(value: str) -> str:
+        return json.dumps(str(value))
+
+    provider_id = _codex_gateway_provider_id(route)
+    lines = [
+        f"model_provider = {_toml_string(provider_id)}",
+    ]
+    if route.context_window > 0:
+        # Codex has no metadata for gateway model names; without the window
+        # it assumes a default and compacts at the wrong point.
+        lines.append(f"model_context_window = {int(route.context_window)}")
+    lines.extend(
+        [
+            "",
+            f"[model_providers.{provider_id}]",
+            f"name = {_toml_string(route.display_name)}",
+            f"base_url = {_toml_string(route.base_url)}",
+            f"env_key = {_toml_string(route.api_key_env)}",
+            'wire_api = "responses"',
+            "requires_openai_auth = false",
+            "supports_websockets = false",
+        ]
+    )
+    header_env = _codex_gateway_header_env(route)
+    if header_env:
+        lines.append(f"[model_providers.{provider_id}.env_http_headers]")
+        lines.extend(
+            f"{_toml_string(name)} = {_toml_string(env_name)}"
+            for name, env_name in header_env.items()
+        )
+    return "\n".join(lines)
+
+
 def build_executor(
     config: ChackConfig,
     *,
@@ -3556,8 +3596,12 @@ def build_executor(
     if str(os.environ.get("CHACK_DISABLE_CODEX_NATIVE_WEB", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
         disable_native_web_search = True
 
-    route = get_openrouter_route(config)
-    uses_openrouter_route = route is not None
+    route = get_gateway_route(config)
+    uses_gateway_route = route is not None
+    if uses_gateway_route:
+        # Codex's web_search is a tool hosted by OpenAI's API; gateways reject
+        # or silently drop it, so the model must not be offered it.
+        disable_native_web_search = True
     explicit_api_key_type = str(
         getattr(config.model, "api_key_type", "") or ""
     ).strip().lower()
@@ -3577,14 +3621,14 @@ def build_executor(
         # A selected account token is authoritative. Do not silently bill a
         # different OpenAI API credential if that token fails.
         fallback_openai_api_key = ""
-    existing_codex_auth_file = "" if uses_openrouter_route else _existing_codex_auth_file()
+    existing_codex_auth_file = "" if uses_gateway_route else _existing_codex_auth_file()
     if explicitly_use_openai_api:
         existing_codex_auth_file = ""
     codex_api_key = route.api_key if route is not None else (codex_access_token or fallback_openai_api_key)
     if not codex_api_key and not existing_codex_auth_file:
         raise ValueError(
-            "OPENROUTER_API_KEY is required for OpenRouter-routed Codex models"
-            if uses_openrouter_route
+            f"{route.api_key_env} is required for gateway-routed Codex models"
+            if route is not None
             else "CODEX_ACCESS_TOKEN, OPENAI_API_KEY, or Codex auth.json is required when model.provider=codex"
         )
 
@@ -3603,8 +3647,8 @@ def build_executor(
         _openai_api_key=codex_api_key,
         _fallback_openai_api_key=fallback_openai_api_key,
         _codex_access_token=codex_access_token,
-        _use_codex_access_token=bool(codex_access_token) and not uses_openrouter_route,
-        _use_existing_codex_auth_file=bool(existing_codex_auth_file) and not codex_access_token and not uses_openrouter_route,
+        _use_codex_access_token=bool(codex_access_token) and not uses_gateway_route,
+        _use_existing_codex_auth_file=bool(existing_codex_auth_file) and not codex_access_token and not uses_gateway_route,
         _existing_codex_auth_file=existing_codex_auth_file,
         _tools_config_json=json.dumps(getattr(config.tools, "__dict__", {}), ensure_ascii=False),
         _allowed_tools_json=json.dumps(allowed_tool_names, ensure_ascii=False)
@@ -3666,10 +3710,13 @@ def build_executor(
         _compaction_threshold_ratio=float(
             getattr(config.agent, "compaction_threshold_ratio", 0.50) or 0.50
         ),
-        _uses_openrouter_route=uses_openrouter_route,
-        _openrouter_base_url=str(route.base_url if route is not None else ""),
-        _openrouter_http_referer=str((route.headers.get("HTTP-Referer", "") if route else "")),
-        _openrouter_app_name=str((route.headers.get("X-Title", "") if route else "")),
+        _uses_gateway_route=uses_gateway_route,
+        _gateway_provider_toml=_codex_gateway_provider_toml(route) if route is not None else "",
+        _gateway_env_json=(
+            json.dumps(_codex_gateway_env(config, route), sort_keys=True)
+            if route is not None
+            else ""
+        ),
         _disable_native_shell=disable_native_shell,
         _disable_native_web_search=disable_native_web_search,
         _runtime_env_json=json.dumps(

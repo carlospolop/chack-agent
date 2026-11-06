@@ -108,7 +108,7 @@ def test_claude_auth_failure_retries_with_next_pool_token(monkeypatch):
     executor = object.__new__(ClaudeCodeExecutor)
     executor._claude_access_token = "claude-a"
     executor._claude_session_id = "old-session"
-    executor._uses_openrouter_route = False
+    executor._uses_gateway_route = False
     executor._anthropic_api_key = ""
     executor._refresh_provider_credentials = lambda: None
     calls = []

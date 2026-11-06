@@ -1,20 +1,23 @@
 # Chack backends
 
-`build_executor()` in [`__init__.py`](__init__.py) resolves `agent.provider` and constructs one of seven runtime routes. The common loop in [`../agent.py`](../agent.py) owns run limits, required-tool retries, self-critique, usage aggregation, and final `RunResult` construction.
+`build_executor()` in [`__init__.py`](__init__.py) resolves `agent.provider` and constructs one of eight runtime routes. The common loop in [`../agent.py`](../agent.py) owns run limits, required-tool retries, self-critique, usage aggregation, and final `RunResult` construction.
 
 ## Runtime matrix
 
 | Provider | Implementation | Transport and continuity | Tools |
 | --- | --- | --- | --- |
 | `openai` | `openai_compaction_backend.py` | OpenAI Responses through `openai-agents`; server response/conversation IDs | In-process and MCP tools with SDK guardrails |
-| `openrouter` | `openrouter_openai_backend.py` | OpenRouter Responses through an `openai-agents` model adapter; response IDs with local fallback | In-process and MCP tools with SDK guardrails |
+| `openrouter` | `gateway_responses_backend.py` | OpenRouter Responses through an `openai-agents` model adapter; response IDs with local fallback | In-process and MCP tools with SDK guardrails |
+| `gateway` | `gateway_responses_backend.py` | Responses API of a custom LLM gateway; the full local transcript is resent each run because gateways rebuild chained responses lossily | In-process and MCP tools with SDK guardrails |
 | `codex` | `codex_backend.py` | Codex CLI thread resume; eligible no-tool GPT-5.6+ runs may use direct Responses transport and fall back to the CLI | Codex native tools plus non-duplicate Chack tools over MCP |
 | `claude` | `claude_code_backend.py` | Claude Code CLI session resume | Claude native tools plus non-duplicate Chack tools over MCP |
 | `gemini` | `gemini_cli_backend.py` | Gemini CLI session resume | Chack tools over MCP; the generated settings turn Gemini's native built-ins off |
 | `copilot` | `copilot_cli_backend.py` | GitHub Copilot CLI session resume | Copilot native tools plus Chack tools over MCP |
-| `langgraph` | `langgraph_backend.py` | LangGraph checkpoint thread using OpenRouter `ChatOpenAI` | Chack tools in a ReAct graph |
+| `langgraph` | `langgraph_backend.py` | LangGraph checkpoint thread using OpenRouter or gateway `ChatOpenAI` | Chack tools in a ReAct graph |
 
 Provider aliases and credentials are resolved before this router runs. A configured OpenRouter route can redirect an otherwise CLI-oriented model through an API transport.
+
+[`../llm_gateway.py`](../llm_gateway.py) resolves OpenRouter and custom gateway routes. On a custom gateway route, Codex gets a `responses` model provider in its generated `config.toml` (key and headers passed by environment, native web search and Daybreak off) and Claude Code gets `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` with every model family mapped to gateway names and `WebSearch` disallowed. Gemini, Copilot, and OpenAI routes move to the `gateway` Responses runtime. The key's model list is read once per hour; unavailable explicit models fail early, while built-in role aliases the key cannot use fall back to the primary model.
 
 ## Shared contracts
 

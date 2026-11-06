@@ -24,7 +24,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..resume_compaction import ResumeCompactionResult
-from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
+from ..llm_gateway import clone_config_for_gateway, get_gateway_route
 from ..thinking_effort import gemini_thinking_config, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -833,11 +833,12 @@ def build_executor(
     tools_override: list[Any] | None = None,
     tools_append: list[Any] | None = None,
 ) -> GeminiCliExecutor:
-    if get_openrouter_route(config) is not None:
-        from .openrouter_openai_backend import build_executor as build_openrouter_executor
+    gateway_route = get_gateway_route(config)
+    if gateway_route is not None:
+        from .gateway_responses_backend import build_executor as build_gateway_responses_executor
 
-        return build_openrouter_executor(
-            clone_config_for_openrouter(config),
+        return build_gateway_responses_executor(
+            clone_config_for_gateway(config, gateway_route),
             system_prompt=system_prompt,
             max_turns=max_turns,
             memory_max_messages=memory_max_messages,

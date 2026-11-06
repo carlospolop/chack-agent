@@ -88,11 +88,18 @@ Set `agent.provider` to one of these values:
 | `claude` | Claude Code CLI | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` |
 | `gemini` | Gemini CLI | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or an OpenRouter route |
 | `copilot` | GitHub Copilot CLI | `COPILOT_GITHUB_TOKEN` or existing CLI authentication |
-| `langgraph` | LangGraph with an OpenRouter `ChatOpenAI` transport | `OPENROUTER_API_KEY` |
+| `langgraph` | LangGraph with an OpenRouter or gateway `ChatOpenAI` transport | `OPENROUTER_API_KEY` or `LLM_GATEWAY_API_KEY` |
+| `gateway` | Responses API of a custom LLM gateway through `openai-agents` | `LLM_GATEWAY_API_KEY` |
 
 Aliases are normalized when configuration loads. Unsupported providers and unsupported thinking-effort values for known models fail early. The accepted common effort vocabulary is `none`, `minimal`, `low`, `medium`, `high`, `xhigh`/`extra_high`, and `max`; each backend maps supported values to its native control.
 
 See [the backend guide](chack_agent/backends/README.md) for transport, memory, compaction, and guardrail differences.
+
+### Custom LLM gateways
+
+A gateway is any service that serves vendor models behind one key through the OpenAI Responses API and, for Claude Code, the Anthropic Messages API: LiteLLM, Portkey, Kong, Cloudflare AI Gateway, or a company proxy. Set `LLM_GATEWAY_BASE_URL` (the OpenAI root, usually ending in `/v1`) and `LLM_GATEWAY_API_KEY`, then select the gateway with `provider: gateway`, `api_key_type: gateway`, or a `gateway/<model>` name. `codex` and `claude` keep running their CLIs against the gateway (OpenAI- and Anthropic-hosted web search are turned off because gateways cannot serve them); `gemini`, `copilot`, and `openai` move to the `gateway` Responses runtime.
+
+Chack reads the models the key may use from the gateway (`/models`, or `/model/info` with `LLM_GATEWAY_TYPE=litellm`). Vendor IDs such as `claude-opus-5-5` are mapped to the gateway's own names, and a model the key cannot use fails before the run with the allowed list. `list_gateway_models()` returns that list for model pickers. With `litellm`, the gateway also supplies context windows and the prices used for cost accounting. `LLM_GATEWAY_MODEL_MAP` overrides the mapping.
 
 ## Tools
 
