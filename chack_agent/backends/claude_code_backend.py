@@ -33,9 +33,10 @@ from ..resume_compaction import ResumeCompactionResult
 from ..llm_gateway import (
     GatewayRoute,
     clone_config_for_gateway,
-    gateway_model_name,
     gateway_subprocess_env,
     get_gateway_route,
+    openrouter_selected_by_api_key_type,
+    route_model_name,
 )
 from ..model_aliases import ANTHROPIC_BEST_CHEAPEST
 from ..output_schema import JsonSchemaOutput
@@ -288,7 +289,7 @@ def _claude_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, s
         )
     # Every model family resolves to the selected model unless the gateway also
     # serves a cheaper model for background work.
-    background_model = gateway_model_name(config, ANTHROPIC_BEST_CHEAPEST) or route.model_name
+    background_model = route_model_name(config, route, ANTHROPIC_BEST_CHEAPEST) or route.model_name
     for name in _CLAUDE_GATEWAY_MODEL_ENV:
         env[name] = route.model_name
     env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = background_model
@@ -765,6 +766,10 @@ class ClaudeCodeExecutor:
         return str(user_input or "")
 
     def _refresh_provider_credentials(self) -> None:
+        if getattr(self, "_uses_gateway_route", False):
+            # Gateway and OpenRouter runs authenticate with the gateway key;
+            # a Claude subscription token from the hook must not replace it.
+            return
         credentials = run_provider_pre_launch_hook("claude")
         if credentials.get("clear_access_token", "").lower() == "true":
             self._claude_access_token = ""
@@ -2105,7 +2110,14 @@ def build_executor(
     tools_append: list[Any] | None = None,
 ) -> ClaudeCodeExecutor:
     gateway_route = get_gateway_route(config)
-    if gateway_route is not None and gateway_route.is_openrouter:
+    if (
+        gateway_route is not None
+        and gateway_route.is_openrouter
+        and not openrouter_selected_by_api_key_type(config)
+    ):
+        # ``openrouter/`` model names select the Responses API backend; the
+        # ``openrouter`` API key type keeps Claude Code on OpenRouter's
+        # Anthropic-compatible endpoint.
         from .gateway_responses_backend import build_executor as build_gateway_responses_executor
 
         return build_gateway_responses_executor(

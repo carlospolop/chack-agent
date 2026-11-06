@@ -4,8 +4,11 @@ A gateway is any endpoint that speaks the vendor wire formats with its own key
 and model names: OpenRouter, a LiteLLM proxy, Portkey, a company AI gateway...
 Two kinds are configured here:
 
-* ``openrouter`` -- selected by ``model.provider: openrouter`` or an
-  ``openrouter/`` model prefix; credentials in ``OPENROUTER_*``.
+* ``openrouter`` -- selected by ``model.provider: openrouter``,
+  ``model.api_key_type: openrouter`` or an ``openrouter/`` model prefix;
+  credentials in ``OPENROUTER_*``. Vendor model IDs such as ``gpt-6-sol`` or
+  ``claude-sonnet-5-5`` are sent as OpenRouter IDs (``openai/gpt-6-sol``,
+  ``anthropic/claude-sonnet-5.5``).
 * ``gateway`` -- any other OpenAI/Anthropic-compatible gateway, selected by
   ``model.provider: gateway``, ``model.api_key_type: gateway`` or a
   ``gateway/`` model prefix; credentials in ``LLM_GATEWAY_*`` (or the matching
@@ -13,9 +16,10 @@ Two kinds are configured here:
   LiteLLM extras: the ``/model/info`` catalog maps vendor model IDs (for
   example ``claude-opus-5-5``) to the gateway's own names and supplies prices.
 
-Routing only decides where requests go. The Codex and Claude Code backends
-keep running their CLIs against the gateway; the other backends switch to the
-Responses API backend.
+Routing only decides where requests go. The Codex, Claude Code and opencode
+backends keep running their CLIs against the gateway (for OpenRouter, Codex and
+Claude Code do so when it is selected with ``api_key_type: openrouter``); the
+other backends switch to the Responses API backend.
 """
 
 from __future__ import annotations
@@ -49,6 +53,23 @@ GATEWAY_KIND_CUSTOM = "custom"
 GATEWAY_KIND_LITELLM = "litellm"
 _GATEWAY_TYPES = {GATEWAY_KIND_CUSTOM, GATEWAY_KIND_LITELLM}
 _GATEWAY_API_KEY_TYPES = {"gateway", "llm_gateway", "litellm"}
+_OPENROUTER_API_KEY_TYPES = {"openrouter", "openrouter_api"}
+# Vendor prefix OpenRouter uses for a model family that the pricing table
+# does not list yet.
+_OPENROUTER_FAMILY_VENDORS = (
+    ("claude", "anthropic"),
+    ("gpt", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("o4", "openai"),
+    ("codex", "openai"),
+    ("gemini", "google"),
+    ("gemma", "google"),
+    ("grok", "x-ai"),
+    ("mistral", "mistralai"),
+    ("deepseek", "deepseek"),
+    ("qwen", "qwen"),
+)
 
 # Environment names the CLI subprocesses (and the Chack MCP tool server they
 # start) read the active gateway from.
@@ -159,10 +180,63 @@ def strip_gateway_prefix(model_name: str) -> str:
     return _strip_prefix(model_name, GATEWAY_MODEL_PREFIX)
 
 
-def uses_openrouter_route(*, provider: str, model_name: str) -> bool:
+def uses_openrouter_route(*, provider: str, model_name: str, api_key_type: str = "") -> bool:
     if _clean(provider).lower() == "openrouter":
         return True
+    if _clean(api_key_type).lower() in _OPENROUTER_API_KEY_TYPES:
+        return True
     return _clean(model_name).lower().startswith(OPENROUTER_MODEL_PREFIX)
+
+
+def openrouter_selected_by_api_key_type(config: ChackConfig) -> bool:
+    """True when OpenRouter is the key of a CLI backend, not a model prefix.
+
+    ``api_key_type: openrouter`` keeps the Codex and Claude Code CLIs and points
+    them at OpenRouter; the ``openrouter/`` model prefix keeps selecting the
+    Responses API backend.
+    """
+
+    api_key_type = _clean(getattr(config.model, "api_key_type", "")).lower()
+    return api_key_type in _OPENROUTER_API_KEY_TYPES
+
+
+def _openrouter_pricing_ids() -> list[str]:
+    try:
+        from .pricing import load_pricing, resolve_pricing_path
+
+        table = load_pricing(resolve_pricing_path(refresh=False))
+    except Exception as exc:  # pragma: no cover - packaged table is always present
+        _LOGGER.debug("Pricing table unavailable for OpenRouter model IDs: %s", exc)
+        return []
+    return [name for name in table.models if "/" in name and ":" not in name]
+
+
+def openrouter_model_id(model_name: str) -> str:
+    """OpenRouter ID for a model: ``claude-sonnet-5-5`` -> ``anthropic/claude-sonnet-5.5``.
+
+    Names that already carry a vendor (``openai/gpt-6-sol``) are kept. Bare
+    vendor IDs are looked up in the pricing table, which lists OpenRouter's
+    catalog; unknown ones get the vendor prefix of their family.
+    """
+
+    name = strip_openrouter_prefix(model_name)
+    if not name or "/" in name:
+        return name
+    wanted = normalize_model_id(name)
+    matches = sorted(
+        (candidate for candidate in _openrouter_pricing_ids() if normalize_model_id(candidate) == wanted),
+        key=lambda candidate: (len(candidate), candidate),
+    )
+    if matches:
+        return matches[0]
+    lowered = name.lower()
+    for family, vendor in _OPENROUTER_FAMILY_VENDORS:
+        if lowered.startswith(family):
+            if vendor == "anthropic":
+                # Anthropic IDs use a dotted version on OpenRouter.
+                lowered = re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", lowered)
+            return f"{vendor}/{lowered}"
+    return name
 
 
 def uses_custom_gateway_route(*, provider: str, model_name: str, api_key_type: str = "") -> bool:
@@ -225,7 +299,7 @@ def _openrouter_route(config: ChackConfig, raw_model: str) -> GatewayRoute:
     )
     return GatewayRoute(
         kind=GATEWAY_KIND_OPENROUTER,
-        model_name=strip_openrouter_prefix(raw_model),
+        model_name=openrouter_model_id(raw_model),
         api_key=api_key,
         base_url=base_url,
         anthropic_base_url=_anthropic_root(base_url),
@@ -488,12 +562,13 @@ def get_gateway_route(config: ChackConfig, *, model_name: str | None = None) -> 
 
     raw_model = _clean(model_name or config.model.primary)
     provider = _clean(getattr(config.model, "provider", ""))
-    if uses_openrouter_route(provider=provider, model_name=raw_model):
+    api_key_type = _clean(getattr(config.model, "api_key_type", ""))
+    if uses_openrouter_route(provider=provider, model_name=raw_model, api_key_type=api_key_type):
         return _openrouter_route(config, raw_model)
     if uses_custom_gateway_route(
         provider=provider,
         model_name=raw_model,
-        api_key_type=_clean(getattr(config.model, "api_key_type", "")),
+        api_key_type=api_key_type,
     ):
         return _custom_gateway_route(config, raw_model)
     return None
@@ -504,7 +579,7 @@ def clone_config_for_gateway(config: ChackConfig, route: GatewayRoute) -> ChackC
 
     model = config.model
     if route.is_openrouter:
-        rewritten = {name: strip_openrouter_prefix(getattr(model, name)) for name in _MODEL_NAME_FIELDS}
+        rewritten = {name: openrouter_model_id(getattr(model, name)) for name in _MODEL_NAME_FIELDS}
         return replace(config, model=replace(model, provider="openrouter", **rewritten))
     settings = _gateway_settings(config)
     catalog = _settings_catalog(settings)
@@ -528,6 +603,14 @@ def clone_config_for_gateway(config: ChackConfig, route: GatewayRoute) -> ChackC
             )
             rewritten[name] = primary
     return replace(config, model=replace(model, provider="gateway", **rewritten))
+
+
+def route_model_name(config: ChackConfig, route: GatewayRoute, model_name: str) -> str:
+    """Name ``route`` uses for vendor model ``model_name``, or "" if it is not served."""
+
+    if route.is_openrouter:
+        return openrouter_model_id(model_name)
+    return gateway_model_name(config, model_name)
 
 
 def gateway_model_name(config: ChackConfig, model_name: str) -> str:

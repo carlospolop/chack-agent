@@ -2,7 +2,7 @@ name: "chack-agent"
 description: "Run the chack agent with a prompt and parameters."
 inputs:
   provider:
-    description: "Model provider/backend: DEFAULT_BACKEND, openai, openrouter, codex, gemini, claude, or langgraph"
+    description: "Model provider/backend: DEFAULT_BACKEND, openai, openrouter, codex, gemini, claude, opencode, or langgraph"
     required: false
     default: "DEFAULT_BACKEND"
   model_primary:

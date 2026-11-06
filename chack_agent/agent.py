@@ -303,6 +303,13 @@ _BACKEND_FAILURE_OUTPUT_PREFIXES = (
     "error: failed to launch copilot cli",
     "error: copilot cli executable was not found",
     "error: copilot execution timed out",
+    "error: opencode exec failed",
+    "error: failed to launch opencode cli",
+    "error: opencode cli executable was not found",
+    "error: opencode execution timed out",
+    "error: opencode execution cancelled",
+    "error: opencode result error",
+    "error: required opencode mcp server failed to start",
 )
 
 

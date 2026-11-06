@@ -1,6 +1,6 @@
 # Chack backends
 
-`build_executor()` in [`__init__.py`](__init__.py) resolves `agent.provider` and constructs one of eight runtime routes. The common loop in [`../agent.py`](../agent.py) owns run limits, required-tool retries, self-critique, usage aggregation, and final `RunResult` construction.
+`build_executor()` in [`__init__.py`](__init__.py) resolves `agent.provider` and constructs one of nine runtime routes. The common loop in [`../agent.py`](../agent.py) owns run limits, required-tool retries, self-critique, usage aggregation, and final `RunResult` construction.
 
 ## Runtime matrix
 
@@ -13,6 +13,7 @@
 | `claude` | `claude_code_backend.py` | Claude Code CLI session resume | Claude native tools plus non-duplicate Chack tools over MCP |
 | `gemini` | `gemini_cli_backend.py` | Gemini CLI session resume | Chack tools over MCP; the generated settings turn Gemini's native built-ins off |
 | `copilot` | `copilot_cli_backend.py` | GitHub Copilot CLI session resume | Copilot native tools plus Chack tools over MCP |
+| `opencode` | `opencode_cli_backend.py` | opencode CLI session resume; a per-session config defines one provider (OpenAI Responses, Anthropic Messages, OpenRouter, or a gateway) and one agent carrying the system prompt and `steps` | opencode file, search and edit tools (shell only with `exec_enabled`) plus Chack tools over MCP |
 | `langgraph` | `langgraph_backend.py` | LangGraph checkpoint thread using OpenRouter or gateway `ChatOpenAI` | Chack tools in a ReAct graph |
 
 Provider aliases and credentials are resolved before this router runs. A configured OpenRouter route can redirect an otherwise CLI-oriented model through an API transport.

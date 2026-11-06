@@ -11,7 +11,8 @@ from .gateway_responses_backend import build_executor as build_gateway_responses
 from .gemini_cli_backend import build_executor as build_gemini_executor
 from .claude_code_backend import build_executor as build_claude_executor
 from .copilot_cli_backend import build_executor as build_copilot_executor
-from ..llm_gateway import get_gateway_route
+from .opencode_cli_backend import build_executor as build_opencode_executor
+from ..llm_gateway import get_gateway_route, openrouter_selected_by_api_key_type
 
 
 def _call_executor_with_supported_kwargs(builder: Any, config: ChackConfig, **kwargs: Any):
@@ -36,11 +37,16 @@ def build_executor(config: ChackConfig, **kwargs: Any):
     backend_type = resolve_backend_type(config)
     if backend_type == "codex":
         route = get_gateway_route(config)
-        if route is not None and route.is_openrouter:
+        if (
+            route is not None
+            and route.is_openrouter
+            and not openrouter_selected_by_api_key_type(config)
+        ):
             return _call_executor_with_supported_kwargs(
                 build_openai_compaction_executor, config, **kwargs
             )
-        # Other gateways run the Codex CLI against the gateway's Responses API.
+        # Other gateways, and OpenRouter selected as the API key type, run the
+        # Codex CLI against the gateway's Responses API.
         return _call_executor_with_supported_kwargs(build_codex_executor, config, **kwargs)
     if backend_type == "langgraph":
         return _call_executor_with_supported_kwargs(build_langgraph_executor, config, **kwargs)
@@ -58,6 +64,8 @@ def build_executor(config: ChackConfig, **kwargs: Any):
         return _call_executor_with_supported_kwargs(build_claude_executor, config, **kwargs)
     if backend_type == "copilot":
         return _call_executor_with_supported_kwargs(build_copilot_executor, config, **kwargs)
+    if backend_type == "opencode":
+        return _call_executor_with_supported_kwargs(build_opencode_executor, config, **kwargs)
     raise ValueError(f"Unsupported backend resolved from model.provider: {backend_type}")
 
 __all__ = ["build_executor"]

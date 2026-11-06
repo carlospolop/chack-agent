@@ -1319,6 +1319,10 @@ class CodexExecutor:
         return str(user_input or "")
 
     def _refresh_provider_credentials(self) -> None:
+        if getattr(self, "_uses_gateway_route", False):
+            # Gateway and OpenRouter runs authenticate with the gateway key;
+            # a ChatGPT login from the hook must not replace it.
+            return
         credentials = run_provider_pre_launch_hook("codex")
         if credentials.get("clear_access_token", "").lower() == "true":
             self._codex_access_token = ""
