@@ -29,7 +29,7 @@ from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
 from ..resume_compaction import ResumeCompactionResult
-from ..openrouter_routing import clone_config_for_openrouter, get_openrouter_route
+from ..llm_gateway import clone_config_for_gateway, get_gateway_route
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import openai_thinking_effort
 from chack_tools.agents_toolset import AgentsToolset
@@ -836,11 +836,12 @@ def build_executor(
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> AgentsExecutor:
-    if get_openrouter_route(config) is not None:
-        from .openrouter_openai_backend import build_executor as build_openrouter_executor
+    gateway_route = get_gateway_route(config)
+    if gateway_route is not None:
+        from .gateway_responses_backend import build_executor as build_gateway_responses_executor
 
-        return build_openrouter_executor(
-            clone_config_for_openrouter(config),
+        return build_gateway_responses_executor(
+            clone_config_for_gateway(config, gateway_route),
             system_prompt=system_prompt,
             max_turns=max_turns,
             memory_max_messages=memory_max_messages,

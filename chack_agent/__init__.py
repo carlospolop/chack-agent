@@ -9,6 +9,7 @@ from .config import (
     ToolsConfig,
     load_config,
 )
+from .llm_gateway import GatewayModel, list_gateway_models
 from .pricing import refresh_pricing_from_github_if_newer
 from .runtime_capabilities import (
     BACKENDS_BY_API_KEY_TYPE,
@@ -26,6 +27,7 @@ __all__ = [
     "Chack",
     "ChackConfig",
     "CredentialsConfig",
+    "GatewayModel",
     "LoggingConfig",
     "ModelConfig",
     "BACKENDS_BY_API_KEY_TYPE",
@@ -34,5 +36,6 @@ __all__ = [
     "SUPPORTED_API_KEY_TYPES",
     "SUPPORTED_API_KEY_TYPE_ORDER",
     "ToolsConfig",
+    "list_gateway_models",
     "load_config",
 ]

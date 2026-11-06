@@ -9,7 +9,7 @@ from chack_agent.backends.codex_backend import CodexExecutor, _RawResult
 def _executor() -> CodexExecutor:
     executor = object.__new__(CodexExecutor)
     executor._runtime_env_json = "{}"
-    executor._uses_openrouter_route = False
+    executor._uses_gateway_route = False
     executor._model_name = "gpt-5.6-sol"
     executor._cacheable_developer_prompt = "stable context " * 1000
     executor._prompt_cache_prefix_key = "chack-stable-prefix"

@@ -8,7 +8,7 @@ from chack_agent.backends.langgraph_backend import LangGraphExecutor
 from chack_agent.backends.openai_compaction_backend import (
     AgentsExecutor as OpenAIExecutor,
 )
-from chack_agent.backends.openrouter_openai_backend import (
+from chack_agent.backends.gateway_responses_backend import (
     AgentsExecutor as OpenRouterExecutor,
 )
 

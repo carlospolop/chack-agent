@@ -168,6 +168,15 @@ class CredentialsConfig:
     openrouter_http_referer: str = ""
     openrouter_app_name: str = ""
     openrouter_base_url: str = ""
+    # Any OpenAI/Anthropic-compatible LLM gateway (LiteLLM, Portkey, a company
+    # proxy, ...). Selected with a "gateway/" model prefix, model.provider
+    # "gateway", or model.api_key_type "gateway". See llm_gateway.py.
+    llm_gateway_type: str = ""
+    llm_gateway_base_url: str = ""
+    llm_gateway_anthropic_base_url: str = ""
+    llm_gateway_api_key: str = ""
+    llm_gateway_headers: Dict[str, str] = field(default_factory=dict)
+    llm_gateway_model_map: Dict[str, str] = field(default_factory=dict)
     gemini_api_key: str = ""
     aws_profile: str = ""
     aws_credentials_file: str = ""
@@ -209,6 +218,9 @@ def resolve_api_key_type(config: ChackConfig) -> str:
         "claude_token": "anthropic",
         "openrouter": "openrouter",
         "openrouter_api": "openrouter",
+        "gateway": "gateway",
+        "llm_gateway": "gateway",
+        "litellm": "gateway",
         "gemini": "gemini",
         "gemini_api": "gemini",
     }
@@ -262,6 +274,8 @@ def resolve_api_key_type(config: ChackConfig) -> str:
     if provider in {"openrouter", "langgraph"}:
         if openrouter_api_key:
             return "openrouter"
+    if provider == "gateway":
+        return "gateway"
 
     if codex_access_token:
         return "codex_token"
@@ -284,6 +298,8 @@ def resolve_backend_type(config: ChackConfig) -> str:
         return "langgraph"
     if provider == "openrouter":
         return "openrouter"
+    if provider == "gateway":
+        return "gateway"
     if provider == "codex":
         return "codex"
     if provider == "openai":

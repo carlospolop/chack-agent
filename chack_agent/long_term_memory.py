@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 from chack_tools.telemetry import log_event
 
 from .config import ChackConfig, resolve_backend_type
-from .openrouter_routing import get_openrouter_route
+from .llm_gateway import get_gateway_route
 
 
 _LOGGER = logging.getLogger("chack.long_term_memory")
@@ -119,9 +119,7 @@ def build_long_term_memory(
     model: str | OpenAIResponsesModel = model_name
 
     backend_type = resolve_backend_type(config)
-    route = get_openrouter_route(config, model_name=model_name)
-    if backend_type == "langgraph" and route is None:
-        route = get_openrouter_route(config)
+    route = get_gateway_route(config, model_name=model_name)
     if route is not None:
         client = AsyncOpenAI(
             base_url=route.base_url,

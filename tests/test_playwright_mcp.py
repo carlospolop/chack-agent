@@ -7,7 +7,7 @@ from chack_agent.backends.playwright_mcp import playwright_mcp_server_instance
 from chack_agent.backends.claude_code_backend import ClaudeCodeExecutor
 from chack_agent.backends.langgraph_backend import _load_playwright_mcp_tools
 from chack_agent.backends.openai_compaction_backend import _build_mcp_servers as build_openai_mcp_servers
-from chack_agent.backends.openrouter_openai_backend import _build_mcp_servers as build_openrouter_mcp_servers
+from chack_agent.backends.gateway_responses_backend import _build_mcp_servers as build_openrouter_mcp_servers
 from chack_agent.config import AgentConfig, ChackConfig, CredentialsConfig, LoggingConfig, ModelConfig, SessionConfig, ToolsConfig
 
 
@@ -181,7 +181,7 @@ def test_openai_backend_includes_playwright_mcp_when_enabled(monkeypatch):
 
 def test_openrouter_backend_includes_playwright_mcp_when_enabled(monkeypatch):
     monkeypatch.setattr(
-        "chack_agent.backends.openrouter_openai_backend.playwright_mcp_is_available",
+        "chack_agent.backends.gateway_responses_backend.playwright_mcp_is_available",
         lambda: True,
     )
     servers = build_openrouter_mcp_servers(_build_config(provider="openrouter", playwright_enabled=True))

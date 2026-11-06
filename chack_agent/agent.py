@@ -82,6 +82,7 @@ from .budget_warning_state import (
     set_budget_context,
     update_spent_usd,
 )
+from .llm_gateway import gateway_model_pricing
 from .pricing import (
     estimate_cost,
     estimate_costs_by_model,
@@ -321,6 +322,7 @@ class Chack:
         self._last_activity_at: Dict[str, float] = {}
         self._session_started_at: Dict[str, float] = {}
         self._pricing = load_pricing(resolve_pricing_path())
+        self._merge_gateway_pricing()
         try:
             backend = resolve_backend_type(self.config)
         except Exception:
@@ -957,6 +959,18 @@ class Chack:
                     cache_write_delta,
                 )
         return delta
+
+    def _merge_gateway_pricing(self) -> None:
+        """Price gateway model names with the rates the gateway itself bills."""
+
+        try:
+            gateway_prices = gateway_model_pricing(self.config)
+        except Exception as exc:
+            self.logger.warning("Gateway pricing unavailable: %s", exc)
+            return
+        models = getattr(self._pricing, "models", None)
+        if gateway_prices and isinstance(models, dict):
+            models.update(gateway_prices)
 
     def _estimate_model_cost(
         self,

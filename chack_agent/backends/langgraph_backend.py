@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Annotated, Any, Optional
 from typing_extensions import TypedDict
 
@@ -24,6 +24,7 @@ from chack_tools.telemetry import log_event
 from chack_tools.tool_usage_state import current_max_tools_used, is_budget_exempt_tool_name
 
 from ..config import ChackConfig
+from ..llm_gateway import get_gateway_route
 from ..thinking_effort import normalize_thinking_effort
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
@@ -779,12 +780,13 @@ def build_executor(
             "langgraph backend requires langchain-openai and langgraph packages installed"
         ) from exc
 
-    openrouter_api_key = (
-        str(config.credentials.openrouter_api_key or "").strip()
-        or os.environ.get("OPENROUTER_API_KEY", "").strip()
+    # LangGraph talks to an OpenAI-compatible Chat Completions endpoint:
+    # the configured gateway when one is selected, otherwise OpenRouter.
+    route = get_gateway_route(config) or get_gateway_route(
+        replace(config, model=replace(config.model, provider="openrouter"))
     )
-    if not openrouter_api_key:
-        raise ValueError("OPENROUTER_API_KEY is required when model.provider=langgraph")
+    if route is None:
+        raise ValueError("model.provider=langgraph requires OPENROUTER_API_KEY or an LLM gateway")
 
     if tools_override is None:
         toolset = AgentsToolset(
@@ -844,33 +846,15 @@ def build_executor(
         mcp_tools[name] = tool
         tool_schemas.append(_tool_to_openai_schema(tool))
 
-    base_url = (
-        str(config.credentials.openrouter_base_url or "").strip()
-        or os.environ.get("OPENROUTER_BASE_URL", "").strip()
-        or "https://openrouter.ai/api/v1"
-    )
-    http_referer = (
-        str(config.credentials.openrouter_http_referer or "").strip()
-        or os.environ.get("OPENROUTER_HTTP_REFERER", "").strip()
-    )
-    app_name = (
-        str(config.credentials.openrouter_app_name or "").strip()
-        or os.environ.get("OPENROUTER_APP_NAME", "").strip()
-    )
-    default_headers: dict[str, str] = {}
-    if http_referer:
-        default_headers["HTTP-Referer"] = http_referer
-    if app_name:
-        default_headers["X-Title"] = app_name
     timeout = _to_int(os.environ.get("CHACK_LANGGRAPH_MODEL_TIMEOUT_SECONDS", "120"), 120)
-    model_name = str(config.model.primary or "gpt-5")
+    model_name = str(route.model_name or "gpt-5")
 
     model = ChatOpenAI(
         model=model_name,
-        api_key=openrouter_api_key,
-        base_url=base_url,
+        api_key=route.api_key,
+        base_url=route.base_url,
         timeout=timeout,
-        default_headers=default_headers or None,
+        default_headers=dict(route.headers) or None,
         reasoning_effort=normalize_thinking_effort(config.agent.thinking_effort),
     )
     model_with_tools = model.bind_tools(tool_schemas) if tool_schemas else model
