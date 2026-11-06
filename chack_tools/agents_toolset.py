@@ -1,4 +1,5 @@
 import os
+from collections.abc import Iterable
 from dataclasses import replace
 
 from .config import ToolsConfig
@@ -330,9 +331,9 @@ class AgentsToolset:
         researcher_administrator_max_turns: int = 100,
         self_critique_enabled: bool = False,
         self_critique_rounds: int = 0,
-        # Keyless ``web_search``/``web_fetch``, for backends whose model has
-        # no hosted web search of its own.
-        keyless_web_search: bool = False,
+        # Keyless ``web_search``/``web_fetch`` tools to add, for what the
+        # model's provider cannot search or read itself.
+        keyless_web_tools: Iterable[str] = (),
         # Backward-compatibility shim for older integrations that still pass a
         # `tool_profile` kwarg (e.g. CLI smoke tests).
         tool_profile: str = "",
@@ -415,7 +416,7 @@ class AgentsToolset:
         self.researcher_administrator_max_turns = researcher_administrator_max_turns
         self.self_critique_rounds = max(0, int(self_critique_rounds or 0))
         self.self_critique_enabled = bool(self_critique_enabled or self.self_critique_rounds > 0)
-        self.keyless_web_search = bool(keyless_web_search)
+        self.keyless_web_tools = frozenset(keyless_web_tools or ())
         self.tools = self._build_tools()
 
     def _resolve_alias(self, value: str, *, fallback: str) -> str:
@@ -467,8 +468,10 @@ class AgentsToolset:
             task_helper = TaskStepsManagerTool(self.config)
             tools.append(get_task_steps_manager_tool(task_helper))
 
-        if self.keyless_web_search:
-            tools.extend(get_web_search_tools())
+        if self.keyless_web_tools:
+            tools.extend(
+                tool for tool in get_web_search_tools() if self._tool_name(tool) in self.keyless_web_tools
+            )
 
         if self.config.brave_enabled:
             brave_helper = BraveSearchTool(self.config)

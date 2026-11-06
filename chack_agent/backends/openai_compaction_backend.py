@@ -19,6 +19,7 @@ from agents import (
     ToolGuardrailFunctionOutput,
     tool_input_guardrail,
     set_default_openai_client,
+    WebSearchTool,
 )
 from agents.items import ToolCallItem
 from agents.exceptions import ModelBehaviorError
@@ -44,7 +45,7 @@ from chack_tools.tool_usage_state import (
     non_task_tool_count,
 )
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_instance
-from .web_search_fallback import keyless_web_search_enabled
+from .hosted_web_search import WebToolPlan, keyless_web_plan, plan_web_tools
 
 
 _FIRST_TOOL_LOCK = threading.Lock()
@@ -101,6 +102,14 @@ def _configure_openai_client(config: ChackConfig) -> tuple[str, Optional[AsyncOp
         )
         set_default_openai_client(client)
     return provider, client
+
+
+def _web_tool_plan(config: ChackConfig) -> WebToolPlan:
+    base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    if base_url and "api.openai.com" not in base_url:
+        # Another OpenAI-compatible server may not run OpenAI's hosted tools.
+        return keyless_web_plan(config)
+    return plan_web_tools(config, route=None, responses_api=True)
 
 
 def _run_scope_key() -> str:
@@ -839,6 +848,7 @@ def build_executor(
     _configure_openai_client(config)
     model_name = config.model.primary
 
+    web_plan = _web_tool_plan(config) if tools_override is None else WebToolPlan()
     if tools_override is None:
         init_params = inspect.signature(AgentsToolset.__init__).parameters
         toolset_kwargs = {
@@ -886,8 +896,8 @@ def build_executor(
             toolset_kwargs["self_critique_rounds"] = int(
                 getattr(config.agent, "self_critique_rounds", 0) or 0
             )
-        if "keyless_web_search" in init_params:
-            toolset_kwargs["keyless_web_search"] = keyless_web_search_enabled(config)
+        if "keyless_web_tools" in init_params:
+            toolset_kwargs["keyless_web_tools"] = web_plan.keyless_tools
         toolset = AgentsToolset(config.tools, **toolset_kwargs)
         tools = toolset.tools
         if tools_append:
@@ -911,6 +921,8 @@ def build_executor(
     )
     tools = _apply_budget_injection(tools)
     tools = ToolCallPolicy(config.tools, outputs_readable=has_exec_tool(tools)).wrap(tools)
+    if tools_override is None and web_plan.hosted_web_search:
+        tools.append(WebSearchTool())
     model: Any = model_name
     # For OpenAI compaction backend use native OpenAI Responses model.
 
