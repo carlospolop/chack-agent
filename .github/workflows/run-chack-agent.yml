@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       provider:
-        description: "Model provider: openai, openrouter, codex, gemini or langgraph"
+        description: "Model provider: openai, openrouter, codex, gemini, opencode or langgraph"
         required: true
         default: "openai"
       model_primary:

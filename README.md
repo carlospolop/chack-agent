@@ -12,7 +12,7 @@ pip install chack-agent
 
 Python 3.10 or newer is required.
 
-CLI backends also require their provider command on `PATH`: `codex`, `claude`, `gemini`, or `copilot`. The Python package includes Playwright, but browser-backed tools require an installed Chromium binary:
+CLI backends also require their provider command on `PATH`: `codex`, `claude`, `gemini`, `copilot`, or `opencode` (`npm i -g opencode-ai@1.19.5`; set `OPENCODE_CLI_PATH` when it is not on `PATH`). The Python package includes Playwright, but browser-backed tools require an installed Chromium binary:
 
 ```bash
 python -m playwright install chromium
@@ -88,10 +88,15 @@ Set `agent.provider` to one of these values:
 | `claude` | Claude Code CLI | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` |
 | `gemini` | Gemini CLI | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or an OpenRouter route |
 | `copilot` | GitHub Copilot CLI | `COPILOT_GITHUB_TOKEN` or existing CLI authentication |
+| `opencode` | opencode CLI (`opencode run`) with the model from any key type | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, or `LLM_GATEWAY_API_KEY` |
 | `langgraph` | LangGraph with an OpenRouter or gateway `ChatOpenAI` transport | `OPENROUTER_API_KEY` or `LLM_GATEWAY_API_KEY` |
 | `gateway` | Responses API of a custom LLM gateway through `openai-agents` | `LLM_GATEWAY_API_KEY` |
 
 Aliases are normalized when configuration loads. Unsupported providers and unsupported thinking-effort values for known models fail early. The accepted common effort vocabulary is `none`, `minimal`, `low`, `medium`, `high`, `xhigh`/`extra_high`, and `max`; each backend maps supported values to its native control.
+
+`api_key_type` picks the key a backend uses. With `api_key_type: openrouter`, `codex` and `claude` still run their CLIs, against OpenRouter with `OPENROUTER_API_KEY`: Codex through a Responses model provider, Claude Code through `ANTHROPIC_BASE_URL=https://openrouter.ai/api`. Model names are mapped to OpenRouter IDs (`claude-sonnet-5-5` becomes `anthropic/claude-sonnet-5.5`) and priced from the OpenRouter table.
+
+`opencode` runs the opencode CLI with a private config per session: OpenAI keys use the Responses API, Anthropic keys the Messages API, OpenRouter its own provider, and a gateway the Messages API for Claude models, the Responses API for OpenAI models and Chat Completions for the rest. `agent.thinking_effort` becomes the model's reasoning effort or adaptive thinking. Chack tools run over MCP next to opencode's file, search, edit and (with `exec_enabled`) shell tools; opencode's question, sub-agent, skill and todo tools are denied. opencode cannot use Codex or Claude Code subscription tokens.
 
 See [the backend guide](chack_agent/backends/README.md) for transport, memory, compaction, and guardrail differences.
 

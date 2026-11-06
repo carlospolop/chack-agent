@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -13,13 +14,25 @@ from chack_tools.config import ToolsConfig as BaseToolsConfig
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
-# Codex and Claude Code run as CLI backends that manage their own context
-# window. When they are used we guarantee a minimum context budget of 250k
-# tokens: if the yaml configures a smaller (non-zero) window, bump it up.
+# Codex, Claude Code and opencode run as CLI backends that manage their own
+# context window. When they are used we guarantee a minimum context budget of
+# 250k tokens: if the yaml configures a smaller (non-zero) window, bump it up.
 CLI_BACKEND_MIN_CONTEXT_TOKENS = 250_000
+OPENCODE_PROVIDERS = frozenset({"opencode", "opencode-cli", "opencode_cli"})
 _MIN_CONTEXT_TOKEN_PROVIDERS = frozenset(
-    {"codex", "claude", "claude-code", "claude_code", "anthropic"}
+    {"codex", "claude", "claude-code", "claude_code", "anthropic", *OPENCODE_PROVIDERS}
 )
+# credentials.llm_gateway_* field -> environment variable that fills it when
+# the YAML leaves it empty.
+_LLM_GATEWAY_CREDENTIAL_ENV = (
+    ("llm_gateway_type", "LLM_GATEWAY_TYPE"),
+    ("llm_gateway_base_url", "LLM_GATEWAY_BASE_URL"),
+    ("llm_gateway_anthropic_base_url", "LLM_GATEWAY_ANTHROPIC_BASE_URL"),
+    ("llm_gateway_api_key", "LLM_GATEWAY_API_KEY"),
+    ("llm_gateway_headers", "LLM_GATEWAY_HEADERS"),
+    ("llm_gateway_model_map", "LLM_GATEWAY_MODEL_MAP"),
+)
+_LLM_GATEWAY_MAPPING_FIELDS = frozenset({"llm_gateway_headers", "llm_gateway_model_map"})
 
 
 def _interpolate_env(value: Any) -> Any:
@@ -279,6 +292,21 @@ def resolve_api_key_type(config: ChackConfig) -> str:
             return "openrouter"
     if provider == "gateway":
         return "gateway"
+    if provider in OPENCODE_PROVIDERS:
+        # opencode needs an API key; it cannot use a Codex or Claude
+        # subscription token.
+        if openai_api_key:
+            return "openai"
+        if anthropic_api_key:
+            return "anthropic"
+        if openrouter_api_key:
+            return "openrouter"
+        if (
+            str(getattr(credentials, "llm_gateway_api_key", "") or "").strip()
+            or os.environ.get("LLM_GATEWAY_API_KEY", "").strip()
+        ):
+            return "gateway"
+        return "openai"
 
     if codex_access_token:
         return "codex_token"
@@ -313,7 +341,40 @@ def resolve_backend_type(config: ChackConfig) -> str:
         return "claude"
     if provider in {"copilot", "copilot-cli", "copilot_cli", "gh-copilot", "gh_copilot"}:
         return "copilot"
+    if provider in OPENCODE_PROVIDERS:
+        return "opencode"
     raise ValueError(f"Unsupported model.provider value: {provider!r}")
+
+
+def _fill_llm_gateway_credentials(credentials: CredentialsConfig) -> None:
+    """Fill empty ``credentials.llm_gateway_*`` fields from ``LLM_GATEWAY_*``."""
+
+    for field_name, env_name in _LLM_GATEWAY_CREDENTIAL_ENV:
+        value: Any = getattr(credentials, field_name, None)
+        if not value:
+            value = os.environ.get(env_name, "")
+        if field_name not in _LLM_GATEWAY_MAPPING_FIELDS:
+            setattr(credentials, field_name, str(value or "").strip())
+            continue
+        if isinstance(value, str):
+            if not value.strip():
+                value = {}
+            else:
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"{env_name} must be a JSON object of strings") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"{env_name} must be a JSON object of strings")
+        setattr(
+            credentials,
+            field_name,
+            {
+                str(key).strip(): str(item).strip()
+                for key, item in value.items()
+                if str(key or "").strip() and str(item or "").strip()
+            },
+        )
 
 
 def _load_section(data: Dict[str, Any], key: str, cls):
@@ -585,6 +646,7 @@ def load_config(path: str) -> ChackConfig:
         credentials.openai_org_ids = [
             item.strip() for item in credentials.openai_org_ids.split(",") if item.strip()
         ]
+    _fill_llm_gateway_credentials(credentials)
 
     model_payload = {k: v for k, v in agent_raw.items() if k in model_fields}
     session_payload = {k: v for k, v in agent_raw.items() if k in session_fields}
