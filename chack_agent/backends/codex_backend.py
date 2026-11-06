@@ -97,11 +97,6 @@ def _codex_tool_instructions(
         )
     if has_configured_tools:
         return (
-            "CRITICAL: You do NOT have a tool called `report_intent`. "
-            "It does not exist. Never attempt to call it. "
-            "To report or save a vulnerability finding you MUST call the MCP tool "
-            "`chack_tools-save_discovered_vulnerability`. "
-            "Any call to `report_intent` will silently discard your finding. "
             "Do not call MCP resource browser helpers such as `list_mcp_resources`, "
             "`list_mcp_resource_templates`, or `read_mcp_resource`; use only the "
             "explicit task tools listed in the prompt."
@@ -110,6 +105,51 @@ def _codex_tool_instructions(
         "This is a no-tools task. Do not call or request tools; complete it "
         "solely from the context embedded in the prompt."
     )
+
+
+_CODEX_CATALOGS: dict[str, Optional[list]] = {}
+_CODEX_CATALOGS_LOCK = threading.Lock()
+
+
+def _codex_catalog_models(codex_path: str, codex_home: str) -> Optional[list]:
+    """The model entries ``codex debug models`` lists, read once per binary."""
+    with _CODEX_CATALOGS_LOCK:
+        if codex_path in _CODEX_CATALOGS:
+            return _CODEX_CATALOGS[codex_path]
+        models = None
+        try:
+            done = subprocess.run(
+                [codex_path, "debug", "models"],
+                env={**os.environ, "CODEX_HOME": codex_home},
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            listed = json.loads(done.stdout).get("models") if done.returncode == 0 else None
+            if isinstance(listed, list):
+                models = listed
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
+            _LOGGER.info("Codex model catalog unavailable: %s", exc)
+        _CODEX_CATALOGS[codex_path] = models
+        return models
+
+
+def _codex_single_agent_catalog(codex_path: str, codex_home: str, model: str) -> Optional[dict]:
+    models = _codex_catalog_models(codex_path, codex_home) if codex_path else None
+    if not models:
+        return None
+    # Gateway routes prefix the model (``provider/model``); Codex matches the
+    # catalog entry by its bare name.
+    names = {str(model or ""), str(model or "").rsplit("/", 1)[-1]}
+    if not any(isinstance(entry, dict) and entry.get("slug") in names for entry in models):
+        return None
+    return {
+        "models": [
+            {**entry, "multi_agent_version": None} if isinstance(entry, dict) else entry
+            for entry in models
+        ]
+    }
 
 
 
@@ -3002,10 +3042,40 @@ class CodexExecutor:
                     "tool_timeout_sec = 180",
                 ]
             )
+        catalog_path = self._write_single_agent_model_catalog(codex_home)
+        if catalog_path:
+            # A top-level key: it must precede the first table.
+            config_lines.insert(1, f"model_catalog_json = {_toml_string(catalog_path)}")
         config_body = "\n".join(config_lines)
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(config_body + "\n")
         os.chmod(config_path, 0o600)
+
+    def _write_single_agent_model_catalog(self, codex_home: str) -> str:
+        """Write the CLI's model catalog with multi-agent mode off; return its path.
+
+        Chack runs are single non-interactive agents, but the catalog puts
+        current models in multi-agent mode, which adds agent-management tools
+        and instructions to every request; the ``multi_agent`` feature flags
+        do not turn it off. Returns "" (catalog untouched) when the CLI cannot
+        list its catalog or the model is not in it, so no model loses its
+        real settings.
+        """
+        path = os.path.join(codex_home, "model_catalog.json")
+        if os.path.isfile(path):
+            return path
+        catalog = _codex_single_agent_catalog(
+            getattr(self, "_codex_path", ""), codex_home, self._model_name
+        )
+        if catalog is None:
+            return ""
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(catalog, handle)
+        except OSError as exc:
+            _LOGGER.warning("Could not write the Codex model catalog: %s", exc)
+            return ""
+        return path
 
     def _write_codex_explicit_mcp_env(self, env: dict[str, str]) -> None:
         """Persist the isolated stdio MCP child's finalized environment.
