@@ -26,6 +26,8 @@ from agents.models.openai_responses import OpenAIResponsesModel
 from agents.items import ToolCallItem
 from agents.exceptions import ModelBehaviorError
 
+from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
+
 from ..config import ChackConfig
 from ..llm_gateway import GatewayRoute, get_gateway_route
 from ..budget_warning_state import inject_budget_warning
@@ -621,6 +623,10 @@ class AgentsExecutor:
         self.agent.instructions = self._system_prompt()
         result = self._invoke_runner_with_recovery(user_input=user_input, context=context)
         output = result.final_output or ""
+        # JsonSchemaOutput returns a parsed object. Chack's public result is
+        # text, so serialize it before budget notices and callers handle it.
+        if isinstance(output, (dict, list)):
+            output = json.dumps(output, ensure_ascii=False)
         updated_transcript = result.to_input_list()
         if isinstance(updated_transcript, list) and updated_transcript:
             # Keep the full transcript (tool calls + outputs + messages) so a
@@ -1271,6 +1277,7 @@ def build_executor(
         require_task_steps_manager_init_first=require_task_steps_manager_init_first,
     )
     tools = _apply_budget_injection(tools)
+    tools = ToolCallPolicy(config.tools, outputs_readable=has_exec_tool(tools)).wrap(tools)
     model: Any = _GatewayResponsesModel(model=model_name, openai_client=client)
 
     output_schema = None

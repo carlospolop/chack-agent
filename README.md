@@ -109,7 +109,9 @@ The defaults matter:
 
 - `task_steps_manager_enabled` defaults to `true`; set it to `false` for agents that should reason about workflow without maintaining a runtime plan.
 - Other functional tool families default to disabled.
-- `min_tools_used` defaults to `10`; set it explicitly when a workflow should allow fewer calls.
+- `min_tools_used` defaults to `0`; set it when a workflow must gather evidence before answering. A run that finishes below it is resumed and asked for more calls, so a high minimum spends tokens on filler calls.
+- An identical call to a read-only tool made within `tool_result_reuse_seconds` (default 60) returns the earlier result instead of running again. Shell/script tools, tools that act on a live target (`request`, `probe`, `browser`, `verify`, ...), tools whose names change or report changing state (`create`, `delete`, `start`, `poll`, ...), and results longer than `tool_result_reuse_max_chars` are never reused; a state-changing call clears the reused results. A tool can opt in or out with `reuse_tool_results(tool, enabled)`.
+- A tool result longer than `tool_output_max_chars` (default 40000) is saved to a file under `tool_output_dir` (default: the system temp directory), and the agent receives `tool_output_preview_chars` of its start and end plus the file path. This applies whenever the agent can read files (CLI backends, or API backends with `exec_enabled`); otherwise the result is cut to the same preview.
 - `max_tools_used: 0` means unlimited.
 - `required_tool_names` can require persistence or reporting tools before a run is accepted.
 

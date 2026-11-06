@@ -99,6 +99,9 @@ class AgentConfig:
     self_critique_rounds: int = 0
     max_runtime_minutes: int = 0
     max_cost_usd: float = 0.0
+    # Price models missing from the pricing table at the most expensive rate of
+    # their family, so their usage counts toward the cost and max_cost_usd.
+    price_unknown_models: bool = True
     require_task_steps_manager_init_first: bool = True
     # Trigger compaction when active input reaches this fraction of the context
     # window. This is never a post-compaction retention ratio: compaction

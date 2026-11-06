@@ -14,7 +14,7 @@ import socket
 import subprocess
 from datetime import datetime, timezone
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Optional, Sequence
 
 try:
@@ -86,6 +86,8 @@ from .llm_gateway import gateway_model_pricing
 from .pricing import (
     estimate_cost,
     estimate_costs_by_model,
+    fallback_model_pricing,
+    is_priced,
     load_pricing,
     resolve_pricing_path,
 )
@@ -224,6 +226,21 @@ class RunResult:
     error: str = ""
     limit_reached: str = ""
     completion_preserved_after_limit: bool = False
+    # Share of prompt tokens served from the provider's prompt cache, over
+    # every model the run used; ``None`` when no prompt tokens were reported.
+    cache_hit_rate: Optional[float] = None
+    # Where the cost went: ``by_model`` (tokens and USD per model, main and
+    # nested) and ``by_attempt`` (each model call of the main loop, in order,
+    # so retries and reminders show up as their own rows).
+    cost_breakdown: Dict[str, Any] = field(default_factory=dict)
+
+
+def _cache_hit_rate(usages: Sequence[Sequence[int]]) -> Optional[float]:
+    prompt = sum(int(usage[0] or 0) for usage in usages)
+    cached = sum(int(usage[2] or 0) for usage in usages)
+    if prompt <= 0:
+        return None
+    return round(min(1.0, cached / prompt), 4)
 
 
 TaskStepsSnapshotCallback = Callable[[Dict[str, Any]], None]
@@ -989,7 +1006,67 @@ class Chack:
             cached_prompt_tokens=cached_prompt_tokens,
             cache_write_tokens=cache_write_tokens,
             cache_write_rate_multiplier=self._cache_write_rate_multiplier(),
+            fallback=self._price_unknown_models(),
         )
+
+    def _usage_row(self, model_name: str, usage: Sequence[int]) -> dict[str, Any]:
+        prompt, completion, cached, cache_write = (list(usage) + [0, 0, 0, 0])[:4]
+        return {
+            "prompt_tokens": int(prompt or 0),
+            "completion_tokens": int(completion or 0),
+            "cached_prompt_tokens": int(cached or 0),
+            "cache_write_tokens": int(cache_write or 0),
+            "cost_usd": self._estimate_model_cost(
+                self._pricing,
+                model_name,
+                prompt_tokens=int(prompt or 0),
+                completion_tokens=int(completion or 0),
+                cached_prompt_tokens=int(cached or 0),
+                cache_write_tokens=int(cache_write or 0),
+            ),
+        }
+
+    def _cost_by_model(
+        self,
+        main_model: str,
+        main_usage: Sequence[int],
+        nested_usage: Dict[str, Sequence[int]],
+    ) -> dict[str, dict[str, Any]]:
+        rows: dict[str, dict[str, Any]] = {}
+        if any(main_usage):
+            rows[main_model] = {"role": "main", **self._usage_row(main_model, main_usage)}
+        for name, usage in sorted(nested_usage.items()):
+            row = self._usage_row(name, usage)
+            if name in rows:
+                # The same model ran nested work too; keep one row per model.
+                main_row = rows[name]
+                for key in ("prompt_tokens", "completion_tokens", "cached_prompt_tokens", "cache_write_tokens"):
+                    main_row[key] += row[key]
+                if main_row["cost_usd"] is not None or row["cost_usd"] is not None:
+                    main_row["cost_usd"] = (main_row["cost_usd"] or 0.0) + (row["cost_usd"] or 0.0)
+                main_row["role"] = "main+nested"
+            else:
+                rows[name] = {"role": "nested", **row}
+        return rows
+
+    def _attempt_cost_row(
+        self,
+        run_label: str,
+        attempt: int,
+        main_usage: Sequence[int],
+        nested_usage: Dict[str, Sequence[int]],
+    ) -> dict[str, Any]:
+        row = {"run": run_label, "attempt": int(attempt), **self._usage_row(
+            str(self.config.model.primary or ""), main_usage
+        )}
+        nested_cost = 0.0
+        for name, usage in nested_usage.items():
+            nested_cost += self._usage_row(name, usage)["cost_usd"] or 0.0
+        row["nested_cost_usd"] = nested_cost
+        return row
+
+    def _price_unknown_models(self) -> bool:
+        return bool(getattr(self.config.agent, "price_unknown_models", True))
 
     def _cache_write_rate_multiplier(self) -> float:
         """Account for Claude Code's one-hour cache-write pricing."""
@@ -1996,6 +2073,8 @@ class Chack:
                 except Exception:
                     return False
 
+            attempt_costs: list[dict[str, Any]] = []
+
             def _invoke_with_min_tools(
                 prompt_text: str,
                 run_label: str,
@@ -2399,6 +2478,18 @@ class Chack:
                         attempt_cached,
                         attempt_cache_write,
                     ) = self._usage_from_raw_result(result.get("raw_result"))
+                    attempt_nested_usage = self._token_usage_delta(
+                        attempt_token_usage_before,
+                        TOOL_USAGE_STORE.tokens_snapshot(task_session_id),
+                    )
+                    attempt_costs.append(
+                        self._attempt_cost_row(
+                            run_label,
+                            attempt,
+                            (attempt_prompt, attempt_completion, attempt_cached, attempt_cache_write),
+                            attempt_nested_usage,
+                        )
+                    )
                     raw_time_to_first_token = getattr(
                         result.get("raw_result"),
                         "time_to_first_token_seconds",
@@ -2843,17 +2934,46 @@ class Chack:
                 self._pricing,
                 nested_usage_by_model,
                 cache_write_rate_multiplier=self._cache_write_rate_multiplier(),
+                fallback=self._price_unknown_models(),
             )
             unpriced_models = sorted(
                 set(missing_nested_models)
                 | ({model_name} if main_cost is None and (prompt_tokens or completion_tokens) else set())
             )
+            used_models = set(nested_usage_by_model) | (
+                {model_name} if prompt_tokens or completion_tokens else set()
+            )
+            fallback_priced_models = {
+                name: fallback[0]
+                for name in sorted(used_models - set(unpriced_models))
+                if not is_priced(self._pricing, name)
+                and (fallback := fallback_model_pricing(self._pricing, name))
+            }
+            if fallback_priced_models:
+                self.logger.warning(
+                    "No price for model(s) %s: costed at the rate of %s, the most expensive of their family.",
+                    ", ".join(fallback_priced_models),
+                    ", ".join(sorted(set(fallback_priced_models.values()))),
+                )
             if unpriced_models:
                 self.logger.warning(
                     "No price for model(s) %s: their usage is left out of the run cost%s.",
                     ", ".join(unpriced_models),
                     " and max_cost_usd cannot stop them" if max_cost_usd > 0 else "",
                 )
+            main_usage = (
+                prompt_tokens,
+                completion_tokens,
+                cached_prompt_tokens,
+                cache_write_prompt_tokens,
+            )
+            cache_hit_rate = _cache_hit_rate(
+                [main_usage, *nested_usage_by_model.values()]
+            )
+            cost_breakdown = {
+                "by_model": self._cost_by_model(model_name, main_usage, nested_usage_by_model),
+                "by_attempt": attempt_costs,
+            }
             if main_cost is None and nested_cost == 0:
                 total_cost = None
             else:
@@ -2954,6 +3074,9 @@ class Chack:
                     "nested_cost": nested_cost,
                     "pricing_model": model_name,
                     "missing_pricing_models": unpriced_models,
+                    "fallback_priced_models": fallback_priced_models,
+                    "cache_hit_rate": cache_hit_rate,
+                    "cost_breakdown": cost_breakdown,
                     "cost_source": "pricing_table",
                     "rounds_used": rounds_used,
                     "tools_used": tools_used,
@@ -3018,6 +3141,8 @@ class Chack:
                     result.get("completion_preserved_after_limit")
                 ),
                 error=str(result.get("error") or ""),
+                cache_hit_rate=cache_hit_rate,
+                cost_breakdown=cost_breakdown,
             )
         except Exception as exc:
             limit_text = str(exc or "").lower()

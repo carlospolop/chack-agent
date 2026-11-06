@@ -24,6 +24,8 @@ from agents import (
 from agents.items import ToolCallItem
 from agents.exceptions import ModelBehaviorError
 
+from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
+
 from ..config import ChackConfig
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
@@ -931,6 +933,7 @@ def build_executor(
         require_task_steps_manager_init_first=require_task_steps_manager_init_first,
     )
     tools = _apply_budget_injection(tools)
+    tools = ToolCallPolicy(config.tools, outputs_readable=has_exec_tool(tools)).wrap(tools)
     model: Any = model_name
     # For OpenAI compaction backend use native OpenAI Responses model.
 

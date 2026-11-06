@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
 from chack_tools.telemetry import log_event
+from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
 from chack_tools.tool_usage_state import current_max_tools_used, is_budget_exempt_tool_name
 
 from ..config import ChackConfig
@@ -819,6 +820,8 @@ def build_executor(
             tools.extend(list(tools_append))
     else:
         tools = list(tools_override)
+
+    tools = ToolCallPolicy(config.tools, outputs_readable=has_exec_tool(tools)).wrap(tools)
 
     has_task_steps_manager_tool = any(
         str(getattr(tool, "name", "") or getattr(tool, "__name__", "") or "").strip()

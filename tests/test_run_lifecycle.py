@@ -18,6 +18,7 @@ from chack_agent.agent import _task_snapshot_is_complete
 from chack_agent.budget_warning_state import inject_budget_warning_from_env
 from chack_agent.live_cost_state import report_live_usage
 from chack_agent.limit_event_state import emit_limit_reached
+from chack_agent.pricing import ModelPricing, PricingTable
 from chack_agent.resume_compaction import ResumeCompactionResult
 import chack_tools.run_lifecycle as run_lifecycle_module
 from chack_agent.config import (
@@ -907,14 +908,28 @@ class _UsageExecutor(_ObservableExecutor):
         usage = SimpleNamespace(
             input_tokens=1200,
             output_tokens=80,
-            input_tokens_details=SimpleNamespace(cached_tokens=0),
+            input_tokens_details=SimpleNamespace(cached_tokens=300),
         )
         result["raw_result"].raw_responses = [SimpleNamespace(usage=usage)]
         return result
 
 
+class _ToolCountingExecutor(_UsageExecutor):
+    """Reports one ``search`` call per model call."""
+
+    def invoke(self, payload, context=None):
+        result = super().invoke(payload, context)
+        result["intermediate_steps"] = [(SimpleNamespace(tool="search", tool_input={}), "ok")]
+        return result
+
+
+def _priced_table(**models):
+    return PricingTable(models={name: ModelPricing(*rates) for name, rates in models.items()})
+
+
 def test_unpriced_model_usage_is_reported_instead_of_silently_uncapped(isolated_run_state, caplog):
     config = replace(_fallback_config(), logging=LoggingConfig(level="WARNING"))
+    config.agent.price_unknown_models = False
     agent = _InjectedExecutorChack(config)
     agent.executor = _UsageExecutor()
 
@@ -931,3 +946,71 @@ def test_unpriced_model_usage_is_reported_instead_of_silently_uncapped(isolated_
     warnings = [record.getMessage() for record in caplog.records if "No price for model" in record.getMessage()]
     assert warnings and "test-model" in warnings[0]
     assert "max_cost_usd cannot stop them" in warnings[0]
+
+
+def test_unknown_model_is_costed_at_its_family_top_rate(isolated_run_state, caplog):
+    config = replace(_fallback_config(), logging=LoggingConfig(level="WARNING"))
+    config.model.primary = "claude-future-9"
+    agent = _InjectedExecutorChack(config)
+    agent._pricing = _priced_table(
+        **{"claude-cheap-1": (1.0, 0.1, 5.0), "claude-top-1": (10.0, 1.0, 50.0), "gpt-x": (100.0, 10.0, 500.0)}
+    )
+    agent.executor = _UsageExecutor()
+
+    with caplog.at_level("WARNING"):
+        result = agent.run(
+            "fallback-run",
+            "do work",
+            enable_self_critique=False,
+            require_task_steps_manager_init_first=False,
+        )
+
+    # 900 uncached + 300 cached input, 80 output at claude-top-1 rates.
+    expected = (900 * 10.0 + 300 * 1.0 + 80 * 50.0) / 1_000_000
+    assert result.total_cost == pytest.approx(expected)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("claude-future-9" in m and "claude-top-1" in m for m in messages)
+    assert not any("left out of the run cost" in m for m in messages)
+
+
+def test_run_reports_cache_hit_rate_and_cost_per_model_and_attempt(isolated_run_state):
+    config = _fallback_config()
+    config.tools.min_tools_used = 2
+    agent = _InjectedExecutorChack(config)
+    agent._pricing = _priced_table(**{"test-model": (2.0, 0.2, 8.0)})
+    agent.executor = _ToolCountingExecutor()
+
+    result = agent.run(
+        "breakdown-run",
+        "do work",
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    attempts = result.cost_breakdown["by_attempt"]
+    # The first call used one tool, so a reminder ran a second model call.
+    assert [row["attempt"] for row in attempts] == [1, 2]
+    per_call = (900 * 2.0 + 300 * 0.2 + 80 * 8.0) / 1_000_000
+    assert all(row["cost_usd"] == pytest.approx(per_call) for row in attempts)
+    by_model = result.cost_breakdown["by_model"]
+    assert by_model["test-model"]["role"] == "main"
+    assert by_model["test-model"]["prompt_tokens"] == 2400
+    assert by_model["test-model"]["cost_usd"] == pytest.approx(result.total_cost)
+    assert result.cache_hit_rate == pytest.approx(0.25)
+
+
+def test_default_run_does_not_ask_for_more_tool_calls(isolated_run_state):
+    config = _fallback_config()
+    config.tools = ToolsConfig()
+    agent = _InjectedExecutorChack(config)
+    agent.executor = _UsageExecutor()
+
+    result = agent.run(
+        "no-minimum-run",
+        "answer directly",
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert len(result.cost_breakdown["by_attempt"]) == 1
+    assert result.cache_hit_rate == pytest.approx(0.25)
