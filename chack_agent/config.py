@@ -154,6 +154,8 @@ class SessionConfig:
 
 @dataclass
 class ToolsConfig(BaseToolsConfig):
+    # The model CLI's own hosted web search tool.
+    native_web_search_enabled: bool = True
     missing_tools_reminders_max: int = 3
     required_tool_names: List[str] = field(default_factory=list)
     required_tool_call_attempts: int = 3

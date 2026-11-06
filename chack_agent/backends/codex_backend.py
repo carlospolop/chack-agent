@@ -3736,15 +3736,12 @@ def build_executor(
         and has_task_steps_manager_tool
     )
     disable_native_shell = False
-    disable_native_web_search = False
+    # Codex's own web search is on unless the config turns it off.
+    disable_native_web_search = not bool(
+        getattr(config.tools, "native_web_search_enabled", True)
+    )
     if allowed_tool_names is not None:
-        allowed_set = set(allowed_tool_names)
         disable_native_shell = True
-        # The SerpAPI tools are only built when a key exists; Codex's own web search must not depend on that key.
-        disable_native_web_search = "search_google_web" not in allowed_set and not (
-            bool(getattr(config.tools, "serpapi_google_web_enabled", False))
-            or bool(getattr(config.tools, "serpapi_bing_web_enabled", False))
-        )
     if str(os.environ.get("CHACK_DISABLE_CODEX_NATIVE_WEB", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
         disable_native_web_search = True
 
@@ -3776,6 +3773,9 @@ def build_executor(
     existing_codex_auth_file = "" if uses_gateway_route else _existing_codex_auth_file()
     if explicitly_use_openai_api:
         existing_codex_auth_file = ""
+    if not codex_access_token and not existing_codex_auth_file:
+        # Without a Codex (ChatGPT) login the hosted web search tool fails.
+        disable_native_web_search = True
     codex_api_key = route.api_key if route is not None else (codex_access_token or fallback_openai_api_key)
     if not codex_api_key and not existing_codex_auth_file:
         raise ValueError(
