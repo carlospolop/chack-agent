@@ -41,6 +41,7 @@ from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
 from . import codex_daybreak
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
+from .web_search_fallback import FALLBACK_WEB_MCP_SERVER, fallback_web_mcp_url, web_search_enabled
 from .tool_payloads import (
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_TOOLS_APPEND_B64_ENV,
@@ -916,6 +917,8 @@ class CodexExecutor:
     _codex_home: Optional[str] = None
     _disable_native_shell: bool = False
     _disable_native_web_search: bool = False
+    # Exa's hosted MCP server, for runs whose Codex web search cannot run.
+    _fallback_web_mcp_url: str = ""
     _researcher_administrator_model: str = ""
     _sub_action: str = ""
     _researcher_administrator_max_turns: int = 100
@@ -3050,6 +3053,18 @@ class CodexExecutor:
             _LOGGER.info(
                 "Skipping Codex chack_tools MCP server because this agent has no tools."
             )
+        if self._fallback_web_mcp_url and (
+            chack_shared_mcp_url or self._has_configured_tools()
+        ):
+            config_lines.extend(
+                [
+                    "",
+                    f"[mcp_servers.{FALLBACK_WEB_MCP_SERVER}]",
+                    f"url = {_toml_string(self._fallback_web_mcp_url)}",
+                    f"startup_timeout_sec = {chack_mcp_startup_timeout}",
+                    "tool_timeout_sec = 120",
+                ]
+            )
         if self._playwright_mcp_enabled():
             playwright_server = playwright_mcp_server_config()
             playwright_args_toml = "[" + ", ".join(
@@ -3784,6 +3799,9 @@ def build_executor(
 
     configured_codex_path = os.environ.get("CODEX_PATH", "").strip() or "codex"
     codex_path = shutil.which(configured_codex_path) or configured_codex_path
+    web_search_wanted = web_search_enabled(config) and str(
+        os.environ.get("CHACK_DISABLE_CODEX_NATIVE_WEB", "") or ""
+    ).strip().lower() not in {"1", "true", "yes", "on"}
 
 
     return CodexExecutor(
@@ -3869,6 +3887,9 @@ def build_executor(
         ),
         _disable_native_shell=disable_native_shell,
         _disable_native_web_search=disable_native_web_search,
+        _fallback_web_mcp_url=(
+            fallback_web_mcp_url() if web_search_wanted and disable_native_web_search else ""
+        ),
         _runtime_env_json=json.dumps(
             {
                 "CHACK_EXEC_TIMEOUT": str(config.tools.exec_timeout_seconds),

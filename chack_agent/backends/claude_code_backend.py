@@ -44,6 +44,7 @@ from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
 from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
+from .web_search_fallback import FALLBACK_WEB_MCP_SERVER, fallback_web_mcp_url, web_search_enabled
 from .tool_payloads import (
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_INLINE_ENV_VALUE_MAX_CHARS,
@@ -410,6 +411,10 @@ class ClaudeCodeExecutor:
     _max_context_tokens: int = 0
     _compaction_threshold_ratio: float = 0.50
     _uses_gateway_route: bool = False
+    # Whether Claude Code's own WebSearch tool works on this route.
+    _native_web_search: bool = True
+    # Exa's hosted MCP server, for routes where WebSearch cannot run.
+    _fallback_web_mcp_url: str = ""
     _anthropic_api_key: str = ""
     _claude_access_token: str = ""
     # Environment that points the Claude Code CLI (and the Chack MCP server it
@@ -1554,9 +1559,10 @@ PYEOF
                 builtin_tools.append("Bash")
             if tools_cfg.get("native_web_search_enabled", True):
                 builtin_tools.append("WebFetch")
-                if not self._uses_gateway_route:
-                    # WebSearch is executed by Anthropic's API, which gateways
-                    # do not provide; it would always fail there.
+                if self._native_web_search:
+                    # WebSearch runs on Anthropic's API (OpenRouter serves it
+                    # too); elsewhere the run searches through the fallback
+                    # MCP server.
                     builtin_tools.append("WebSearch")
             if self._native_task_planning_backend:
                 builtin_tools.extend(_CLAUDE_PLANNING_TOOLS)
@@ -1858,6 +1864,11 @@ PYEOF
         }
         if self._playwright_mcp_enabled():
             settings_payload["mcpServers"]["playwright"] = playwright_mcp_server_config()
+        if self._fallback_web_mcp_url:
+            settings_payload["mcpServers"][FALLBACK_WEB_MCP_SERVER] = {
+                "type": "http",
+                "url": self._fallback_web_mcp_url,
+            }
 
         self._output_schema = None
         if self._output_schema_json:
@@ -2262,6 +2273,7 @@ def build_executor(
     serialized_tools_append_b64 = serialize_tools_payload(tools_append)
 
     route = gateway_route
+    native_web_search = web_search_enabled(config) and (route is None or route.is_openrouter)
 
     return ClaudeCodeExecutor(
         _conversation=[],
@@ -2328,6 +2340,12 @@ def build_executor(
         ),
         _thinking_effort=normalize_thinking_effort(config.agent.thinking_effort),
         _uses_gateway_route=route is not None,
+        _native_web_search=native_web_search,
+        _fallback_web_mcp_url=(
+            fallback_web_mcp_url()
+            if web_search_enabled(config) and not native_web_search
+            else ""
+        ),
         _anthropic_api_key=str(
             ""
             if route is not None
