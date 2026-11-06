@@ -564,7 +564,8 @@ class OpencodeCliExecutor:
         permission: dict[str, Any] = {"*": "allow"}
         for tool in _DENIED_NATIVE_TOOLS:
             permission[tool] = "deny"
-        if not self._exec_enabled():
+        # Chack's own exec tool, when offered, is already the run's shell.
+        if not self._exec_enabled() or "exec" in self._allowed_tool_names():
             permission["bash"] = "deny"
         agent: dict[str, Any] = {
             "mode": "primary",

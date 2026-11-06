@@ -100,7 +100,9 @@ def test_a_run_sends_its_tools_and_no_unused_builtin_ones(tmp_path, monkeypatch)
 
     tools = {tool["name"] for tool in request.get("tools") or []}
     assert "mcp__chack_tools__exec" in tools
-    assert {"Bash", "Read", "Edit", "Write"} <= tools
+    assert {"Read", "Edit", "Write"} <= tools
+    # Chack's exec tool is the run's only shell.
+    assert "Bash" not in tools
     assert not tools & {"Agent", "Task", "Workflow", "Monitor", "CronCreate", "EnterWorktree", "SendMessage"}
 
     text = json.dumps(request)
@@ -114,5 +116,5 @@ def test_web_search_can_be_turned_off(tmp_path, monkeypatch):
     request = _capture_first_request(tmp_path, monkeypatch, native_web_search_enabled=False)
 
     tools = {tool["name"] for tool in request.get("tools") or []}
-    assert "WebSearch" not in tools
+    assert not tools & {"WebSearch", "WebFetch"}
     assert "mcp__chack_tools__exec" in tools

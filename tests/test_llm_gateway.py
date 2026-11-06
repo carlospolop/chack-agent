@@ -493,7 +493,7 @@ def test_claude_on_a_gateway_cannot_call_anthropic_hosted_web_search(catalog_req
 
     builtin_tools = command[command.index("--tools") + 1].split(",")
     assert "WebSearch" not in builtin_tools
-    assert "Bash" in builtin_tools
+    assert "WebFetch" in builtin_tools
     assert "--betas" not in command
 
 

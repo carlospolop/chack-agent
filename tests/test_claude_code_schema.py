@@ -185,8 +185,16 @@ def test_claude_offers_only_the_builtin_tools_a_run_uses() -> None:
 
     tools = _builtin_tools(executor._build_command("use tools"))
 
-    assert {"Bash", "Read", "Edit", "Write", "WebFetch", "WebSearch"} <= tools
+    assert {"Bash", "Read", "Edit", "Write", "ToolSearch", "WebFetch", "WebSearch"} <= tools
     assert not tools & {"Agent", "Task", "Workflow", "Monitor", "CronCreate", "EnterWorktree", "SendMessage"}
+
+
+def test_claude_drops_the_native_shell_when_chack_exec_is_offered() -> None:
+    executor = _build_executor("")
+    executor._tools_config_json = '{"exec_enabled": true}'
+    executor._allowed_tools_json = '["exec", "read_context"]'
+
+    assert "Bash" not in _builtin_tools(executor._build_command("use tools"))
 
 
 def test_claude_exec_disabled_offers_no_shell() -> None:
@@ -205,7 +213,7 @@ def test_claude_web_search_follows_the_config() -> None:
     executor._tools_config_json = '{"exec_enabled": true, "native_web_search_enabled": false}'
     executor._allowed_tools_json = '["read_context"]'
 
-    assert "WebSearch" not in _builtin_tools(executor._build_command("use tools"))
+    assert not _builtin_tools(executor._build_command("use tools")) & {"WebSearch", "WebFetch"}
 
 
 def test_claude_planning_tools_only_with_native_planning() -> None:

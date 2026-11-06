@@ -250,10 +250,10 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
 # So whenever a larger context budget is configured we opt into that beta.
 _CLAUDE_DEFAULT_CONTEXT_WINDOW = 200_000
 _CLAUDE_1M_CONTEXT_BETA = "context-1m-2025-08-07"
-# Claude Code tools that only work against Anthropic's own API.
-# Built-in tools a Chack run keeps; Bash, WebSearch and the planning tools are
-# added when the run's configuration allows them.
-_CLAUDE_BUILTIN_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep", "WebFetch")
+# Built-in tools a Chack run keeps; the shell, web and planning tools are added
+# when the run's configuration allows them. ToolSearch loads deferred MCP tool
+# schemas, so Chack's own tools stay reachable when there are many.
+_CLAUDE_BUILTIN_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep", "ToolSearch")
 _CLAUDE_PLANNING_TOOLS = ("TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet")
 # Prompt parts a headless run never uses: the auto-memory instructions, the git
 # status snapshot and the commit/PR attribution reminder.
@@ -1549,12 +1549,15 @@ PYEOF
             # built-in set; MCP tools stay available. Names a CLI version does
             # not have are ignored.
             builtin_tools = list(_CLAUDE_BUILTIN_TOOLS)
-            if _exec_enabled:
+            # Chack's own exec tool, when offered, is already the run's shell.
+            if _exec_enabled and "exec" not in self._offered_tool_names():
                 builtin_tools.append("Bash")
-            if tools_cfg.get("native_web_search_enabled", True) and not self._uses_gateway_route:
-                # WebSearch is executed by Anthropic's API, which gateways do not
-                # provide; the model would spend turns on a tool that always fails.
-                builtin_tools.append("WebSearch")
+            if tools_cfg.get("native_web_search_enabled", True):
+                builtin_tools.append("WebFetch")
+                if not self._uses_gateway_route:
+                    # WebSearch is executed by Anthropic's API, which gateways
+                    # do not provide; it would always fail there.
+                    builtin_tools.append("WebSearch")
             if self._native_task_planning_backend:
                 builtin_tools.extend(_CLAUDE_PLANNING_TOOLS)
             args.extend(["--tools", ",".join(builtin_tools)])
@@ -1612,10 +1615,20 @@ PYEOF
 
         return args
 
+    def _offered_tool_names(self) -> list[str]:
+        try:
+            names = json.loads(self._allowed_tools_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return [str(name) for name in names] if isinstance(names, list) else []
+
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
         env["PYTHONUNBUFFERED"] = "1"
         augment_subprocess_pythonpath(env)
+        # A run's instructions come from Chack only, never from CLAUDE.md files
+        # on the host or in the working directory.
+        env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
 
         # Claude Code defers MCP schemas through ToolSearch by default, but
         # Haiku does not support the tool_reference blocks that ToolSearch
