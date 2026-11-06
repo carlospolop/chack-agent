@@ -818,7 +818,7 @@ def test_openai_backend_compacts_during_runner_turns() -> None:
 
 
 def test_openrouter_backend_passes_effort_to_model_settings() -> None:
-    from chack_agent.backends.openrouter_openai_backend import build_executor
+    from chack_agent.backends.gateway_responses_backend import build_executor
 
     executor = build_executor(
         _config("openrouter", "medium"),
@@ -971,7 +971,7 @@ def test_configured_effort_reaches_openai_style_backends_unchanged(effort) -> No
     from chack_agent.backends.openai_compaction_backend import (
         build_executor as openai_executor,
     )
-    from chack_agent.backends.openrouter_openai_backend import (
+    from chack_agent.backends.gateway_responses_backend import (
         build_executor as openrouter_executor,
     )
 

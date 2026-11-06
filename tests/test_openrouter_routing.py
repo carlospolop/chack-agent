@@ -102,7 +102,7 @@ class OpenRouterRoutingTests(unittest.TestCase):
                     memory_max_messages=10,
                     memory_reset_to_messages=5,
                 )
-                self.assertTrue(executor._uses_openrouter_route)
+                self.assertTrue(executor._uses_gateway_route)
                 self.assertEqual(executor._model_name, "openai/gpt-4.1-mini")
                 env = executor._build_env()
                 self.assertEqual(env["OPENROUTER_API_KEY"], "or-test-key")
@@ -353,7 +353,7 @@ class OpenRouterRoutingTests(unittest.TestCase):
 
         self.assertEqual(
             executor.__class__.__module__,
-            "chack_agent.backends.openrouter_openai_backend",
+            "chack_agent.backends.gateway_responses_backend",
         )
 
     def test_claude_backend_prefers_oauth_token_when_anthropic_api_key_is_also_present(self) -> None:
@@ -397,7 +397,7 @@ class OpenRouterRoutingTests(unittest.TestCase):
 
         self.assertEqual(
             executor.__class__.__module__,
-            "chack_agent.backends.openrouter_openai_backend",
+            "chack_agent.backends.gateway_responses_backend",
         )
 
     def test_openai_backend_delegates_to_openrouter_backend_for_routed_models(self) -> None:
@@ -413,7 +413,7 @@ class OpenRouterRoutingTests(unittest.TestCase):
 
         self.assertEqual(
             executor.__class__.__module__,
-            "chack_agent.backends.openrouter_openai_backend",
+            "chack_agent.backends.gateway_responses_backend",
         )
 
 

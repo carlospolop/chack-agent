@@ -27,6 +27,7 @@ from agents.items import ToolCallItem
 from agents.exceptions import ModelBehaviorError
 
 from ..config import ChackConfig
+from ..llm_gateway import GatewayRoute, get_gateway_route
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
@@ -49,9 +50,10 @@ from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_i
 _FIRST_TOOL_LOCK = threading.Lock()
 _FIRST_TOOL_INIT_DONE: dict[str, bool] = {}
 _FIRST_TOOL_STATE_MAX = 5000
-_LOGGER = logging.getLogger("chack.openrouter_openai_backend")
+_LOGGER = logging.getLogger("chack.gateway_responses_backend")
 
-_OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+_GATEWAY_PROVIDERS = {"openrouter", "gateway"}
+_BACKEND_NAME = "gateway_responses"
 
 
 def _build_mcp_servers(config: ChackConfig) -> list[Any]:
@@ -60,7 +62,7 @@ def _build_mcp_servers(config: ChackConfig) -> list[Any]:
     return []
 
 
-class _OpenRouterResponsesModel(OpenAIResponsesModel):
+class _GatewayResponsesModel(OpenAIResponsesModel):
     @staticmethod
     def _prepare_input_items(
         items: Any,
@@ -68,7 +70,9 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
     ) -> Any:
         if not isinstance(items, list):
             return items
-        prepared = _sanitize_input_items(list(items))
+        # A chained request carries only the new items; the outputs it sends
+        # answer calls stored with the previous response, so they are not orphans.
+        prepared = list(items) if previous_response_id else _sanitize_input_items(list(items))
         # Keep structured tool context even when previous_response_id is missing.
         # `_sanitize_input_items` already removes orphan function_call_output items.
         # Dropping to message-only here can make the model lose tool state and
@@ -115,7 +119,7 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
                 if attempt >= max_attempts:
                     raise
                 _LOGGER.warning(
-                    "OpenRouter rate limited (attempt %s/%s). Retrying in %ss.",
+                    "Gateway rate limited (attempt %s/%s). Retrying in %ss.",
                     attempt,
                     max_attempts,
                     delay_seconds,
@@ -250,7 +254,7 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
             if not should_retry:
                 raise
             _LOGGER.warning(
-                "OpenRouter rejected response chain with previous_response_id; retrying without it."
+                "Gateway rejected response chain with previous_response_id; retrying without it."
             )
             fallback_input = self._prepare_input_items(input, None)
             response = await self._get_response_with_retries(
@@ -326,60 +330,42 @@ class _OpenRouterResponsesModel(OpenAIResponsesModel):
             yield event
 
 
-def _select_provider(config: ChackConfig) -> str:
-    provider = str(getattr(config.model, "provider", "") or "openai").strip().lower()
-    if provider != "openrouter":
+def _select_route(config: ChackConfig) -> GatewayRoute:
+    provider = str(getattr(config.model, "provider", "") or "").strip().lower()
+    if provider not in _GATEWAY_PROVIDERS:
         raise ValueError(
-            f"openrouter_openai_backend requires model.provider='openrouter' (got {provider!r})"
+            "gateway_responses_backend requires model.provider in "
+            f"{sorted(_GATEWAY_PROVIDERS)} (got {provider!r})"
         )
-    return provider
+    route = get_gateway_route(config)
+    if route is None:
+        raise ValueError(f"No gateway route configured for model.provider={provider!r}")
+    return route
 
 
-def _configure_openai_client(config: ChackConfig) -> tuple[str, Optional[AsyncOpenAI]]:
-    provider = _select_provider(config)
-    api_key = (
-        str(config.credentials.openrouter_api_key or "").strip()
-        or os.environ.get("OPENROUTER_API_KEY", "").strip()
-    )
-    if not api_key:
-        raise ValueError("OPENROUTER_API_KEY is required when model.provider=openrouter")
-    base_url = (
-        str(config.credentials.openrouter_base_url or "").strip()
-        or os.environ.get("OPENROUTER_BASE_URL", "").strip()
-        or _OPENROUTER_DEFAULT_BASE_URL
-    )
-    headers: dict[str, str] = {}
-    referer = (
-        str(config.credentials.openrouter_http_referer or "").strip()
-        or os.environ.get("OPENROUTER_HTTP_REFERER", "").strip()
-    )
-    title = (
-        str(config.credentials.openrouter_app_name or "").strip()
-        or os.environ.get("OPENROUTER_APP_NAME", "").strip()
-    )
-    if not title:
-        main_action = str(config.agent.main_action or "").strip()
-        sub_action = str(config.agent.sub_action or "").strip()
-        if main_action and sub_action:
-            title = f"{main_action}-{sub_action}"
-        elif main_action:
-            title = main_action
-        elif sub_action:
-            title = sub_action
-    if referer:
-        headers["HTTP-Referer"] = referer
-    if title:
-        headers["X-Title"] = title
+def _default_openrouter_title(config: ChackConfig) -> str:
+    main_action = str(config.agent.main_action or "").strip()
+    sub_action = str(config.agent.sub_action or "").strip()
+    return "-".join(part for part in (main_action, sub_action) if part)
+
+
+def _configure_openai_client(config: ChackConfig) -> tuple[GatewayRoute, AsyncOpenAI]:
+    route = _select_route(config)
+    headers = dict(route.headers)
+    if route.is_openrouter and "X-Title" not in headers:
+        title = _default_openrouter_title(config)
+        if title:
+            headers["X-Title"] = title
 
     client = AsyncOpenAI(
-        base_url=base_url,
-        api_key=api_key,
+        base_url=route.base_url,
+        api_key=route.api_key,
         default_headers=headers or None,
     )
     set_default_openai_client(client, use_for_tracing=False)
-    # OpenRouter doesn't support OpenAI tracing endpoints.
+    # Gateways do not serve OpenAI's tracing endpoints.
     set_tracing_disabled(True)
-    return provider, client
+    return route, client
 
 
 def _run_scope_key() -> str:
@@ -596,7 +582,7 @@ def _respect_max_tools_used(data) -> ToolGuardrailFunctionOutput:
     return ToolGuardrailFunctionOutput.allow()
 
 
-OpenRouterResponsesModel = _OpenRouterResponsesModel
+GatewayResponsesModel = _GatewayResponsesModel
 
 
 @dataclass
@@ -623,6 +609,11 @@ class AgentsExecutor:
     _summary_max_chars: int
     _compaction_threshold_ratio: float
     _max_context_tokens: int
+    # Server-side chains (previous_response_id) are only reliable where the
+    # provider stores responses natively. Gateways that translate the Responses
+    # API to another vendor rebuild earlier turns lossily, so they get the full
+    # local transcript on every run instead.
+    _chain_responses: bool = True
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         user_input = payload.get("input", "")
@@ -654,7 +645,7 @@ class AgentsExecutor:
             after_len = len(self._conversation)
             trimmed = max(0, before_len - after_len)
             _LOGGER.info(
-                "OpenRouter memory trim applied: before=%s after=%s trimmed=%s memory_limit=%s memory_reset_to=%s ts=%s",
+                "Gateway memory trim applied: before=%s after=%s trimmed=%s memory_limit=%s memory_reset_to=%s ts=%s",
                 before_len,
                 after_len,
                 trimmed,
@@ -665,8 +656,8 @@ class AgentsExecutor:
             log_event(
                 "agent_memory_trimmed",
                 payload={
-                    "backend": "openrouter_openai",
-                    "provider": "openrouter",
+                    "backend": _BACKEND_NAME,
+                    "provider": str(self._config.model.provider or ""),
                     "before_messages": int(before_len),
                     "after_messages": int(after_len),
                     "trimmed_messages": int(trimmed),
@@ -676,11 +667,12 @@ class AgentsExecutor:
                 task_session_id=current_session_id() or "",
                 run_label=current_run_label() or "",
             )
-        if result.last_response_id:
-            self._previous_response_id = result.last_response_id
-        conversation_id = getattr(result, "_conversation_id", None)
-        if isinstance(conversation_id, str) and conversation_id.strip():
-            self._conversation_id = conversation_id.strip()
+        if self._chain_responses:
+            if result.last_response_id:
+                self._previous_response_id = result.last_response_id
+            conversation_id = getattr(result, "_conversation_id", None)
+            if isinstance(conversation_id, str) and conversation_id.strip():
+                self._conversation_id = conversation_id.strip()
         raw_responses = getattr(result, "raw_responses", None) or []
         for response in raw_responses:
             usage = getattr(response, "usage", None)
@@ -813,7 +805,7 @@ class AgentsExecutor:
             did_truncate = True
 
         _LOGGER.info(
-            "OpenRouter summary compaction performed: messages_before=%s messages_summarized=%s messages_after_keep=%s trigger_input_tokens=%s threshold_tokens=%s source_chars=%s prev_summary_chars=%s new_summary_chars=%s truncated=%s keep_messages=%s trigger_messages=%s by_messages=%s by_tokens=%s ts=%s",
+            "Gateway summary compaction performed: messages_before=%s messages_summarized=%s messages_after_keep=%s trigger_input_tokens=%s threshold_tokens=%s source_chars=%s prev_summary_chars=%s new_summary_chars=%s truncated=%s keep_messages=%s trigger_messages=%s by_messages=%s by_tokens=%s ts=%s",
             messages_before,
             source_messages_count,
             messages_after_keep,
@@ -832,8 +824,8 @@ class AgentsExecutor:
         log_event(
             "agent_summary_compaction",
             payload={
-                "backend": "openrouter_openai",
-                "provider": "openrouter",
+                "backend": _BACKEND_NAME,
+                "provider": str(self._config.model.provider or ""),
                 "messages_summarized": int(source_messages_count),
                 "source_chars": int(source_chars),
                 "previous_summary_chars": int(previous_summary_chars),
@@ -891,7 +883,7 @@ class AgentsExecutor:
         )
         if not summary:
             _LOGGER.warning(
-                "OpenRouter automatic compaction returned no summary; preserving the active response chain."
+                "Gateway automatic compaction returned no summary; preserving the active response chain."
             )
             return
         self._summary = summary
@@ -966,7 +958,7 @@ class AgentsExecutor:
         self, focus_instructions: str = ""
     ) -> ResumeCompactionResult:
         result = ResumeCompactionResult(
-            backend="openrouter_openai",
+            backend=_BACKEND_NAME,
             method="summary_chain_rotation",
         )
         if not self._conversation:
@@ -1207,8 +1199,8 @@ def build_executor(
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> AgentsExecutor:
-    _, client = _configure_openai_client(config)
-    model_name = config.model.primary
+    route, client = _configure_openai_client(config)
+    model_name = route.model_name
 
     if tools_override is None:
         init_params = inspect.signature(AgentsToolset.__init__).parameters
@@ -1279,7 +1271,7 @@ def build_executor(
         require_task_steps_manager_init_first=require_task_steps_manager_init_first,
     )
     tools = _apply_budget_injection(tools)
-    model: Any = _OpenRouterResponsesModel(model=model_name, openai_client=client)
+    model: Any = _GatewayResponsesModel(model=model_name, openai_client=client)
 
     output_schema = None
     schema_json = getattr(config.agent, "output_schema_json", None)
@@ -1342,4 +1334,5 @@ def build_executor(
         ),
         _compaction_threshold_ratio=float(getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75),
         _max_context_tokens=int(config.model.max_context_tokens or 0),
+        _chain_responses=route.is_openrouter,
     )
