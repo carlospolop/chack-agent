@@ -122,6 +122,9 @@ _CODEX_UNUSED_PROMPT_PARTS_OFF = (
     "features.sleep_tool = false",
     # Offers to install plugins, which nobody can approve in a headless run.
     "features.tool_suggest = false",
+    # The signed-in account's apps (its web search, Drive, GitHub, ...) would
+    # reach the run past its own tool list and web setting.
+    "features.apps = false",
 )
 
 _CODEX_CATALOGS: dict[str, Optional[list]] = {}

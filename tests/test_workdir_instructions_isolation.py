@@ -215,6 +215,36 @@ def test_the_real_codex_cli_reads_nothing_from_a_trusted_workdir(tmp_path, monke
     assert CANARY not in _codex_prompt_input(codex, executor._codex_home, repo)
 
 
+def _codex_feature_enabled(codex: str, home: str, feature: str) -> bool:
+    done = subprocess.run(
+        [codex, "features", "list"],
+        env={**os.environ, "CODEX_HOME": home},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    for line in done.stdout.splitlines():
+        fields = line.split()
+        if fields and fields[0] == feature:
+            return fields[-1] == "true"
+    raise AssertionError(f"Codex lists no {feature} feature")
+
+
+@pytest.mark.skipif(shutil.which("codex") is None, reason="Codex CLI not installed")
+def test_the_real_codex_cli_offers_no_account_apps(tmp_path, monkeypatch):
+    codex = shutil.which("codex")
+    monkeypatch.setenv("CODEX_PATH", codex)
+    bare_home = tmp_path / "bare-codex-home"
+    bare_home.mkdir()
+    assert _codex_feature_enabled(codex, str(bare_home), "apps")
+
+    executor = _codex_executor("task_steps_manager")
+
+    assert not _codex_feature_enabled(codex, executor._codex_home, "apps")
+
+
 # --- Claude Code -------------------------------------------------------------
 
 
