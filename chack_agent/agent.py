@@ -72,7 +72,15 @@ from chack_tools.run_lifecycle import (
 from .live_cost_state import (
     LiveCostLimitExceeded,
     reset_active_live_cost_callback,
+    reset_active_usage_sink,
     set_active_live_cost_callback,
+    set_active_usage_sink,
+)
+from .usage_observer import (
+    UsageEvent,
+    current_observer as current_usage_observer,
+    reset_usage_observer,
+    set_usage_observer,
 )
 from .limit_event_state import (
     emit_limit_reached,
@@ -1053,6 +1061,33 @@ class Chack:
         if gateway_prices and isinstance(models, dict):
             models.update(gateway_prices)
 
+    def _usage_sink(self, observer):
+        """Price each live usage report and hand it to the caller's observer."""
+        pricing = self._pricing
+
+        def sink(model_name, prompt_tokens, completion_tokens, cached_prompt_tokens, cache_write_tokens):
+            try:
+                cost = self._estimate_model_cost(
+                    pricing,
+                    model_name,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cached_prompt_tokens=cached_prompt_tokens,
+                    cache_write_tokens=cache_write_tokens,
+                )
+                observer(UsageEvent(
+                    model=model_name,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cached_prompt_tokens=cached_prompt_tokens,
+                    cache_write_tokens=cache_write_tokens,
+                    cost_usd=cost,
+                ))
+            except Exception:
+                self.logger.warning("Usage observer failed", exc_info=True)
+
+        return sink
+
     def _estimate_model_cost(
         self,
         pricing,
@@ -1772,6 +1807,8 @@ class Chack:
         metrics_thread: Optional[threading.Thread] = None
         inherited_cancel_event = current_cancellation_event()
         run_cancel_event = inherited_cancel_event or threading.Event()
+        usage_observer = current_usage_observer()
+        usage_sink = self._usage_sink(usage_observer) if usage_observer is not None else None
         executor = None
         try:
             def _coerce_nonnegative_int(value: Any, default: int = 0) -> int:
@@ -2261,6 +2298,10 @@ class Chack:
                         live_cost_token = set_active_live_cost_callback(
                             live_cost_callback_holder.get("callback")
                         )
+                        # The invoke may run on a fresh thread: carry the
+                        # caller's observer there, for nested agents too.
+                        usage_sink_token = set_active_usage_sink(usage_sink)
+                        usage_observer_token = set_usage_observer(usage_observer)
                         limit_event_token = set_active_limit_event_callback(
                             limit_event_callback_holder.get("callback")
                         )
@@ -2305,6 +2346,8 @@ class Chack:
                         finally:
                             reset_budget_context(budget_tokens)
                             reset_active_limit_event_callback(limit_event_token)
+                            reset_usage_observer(usage_observer_token)
+                            reset_active_usage_sink(usage_sink_token)
                             reset_active_live_cost_callback(live_cost_token)
                             reset_active_max_tools_used(max_tools_token)
                             reset_active_usage_session(usage_token)
