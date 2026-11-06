@@ -37,7 +37,7 @@ from chack_tools.task_steps_manager_state import (
     current_run_label,
     current_session_id,
 )
-from chack_tools.telemetry import log_event
+from chack_tools.telemetry import child_process_env, log_event
 from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig, resolve_api_key_type
@@ -721,7 +721,9 @@ class OpencodeCliExecutor:
         )
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
-        env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        # Export settings and the run's trace context, so the Chack MCP
+        # server's tool spans join this run's trace.
+        env.update(child_process_env())
         return env
 
     def _build_command(self) -> list[str]:

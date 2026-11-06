@@ -589,3 +589,30 @@ def test_a_failed_opencode_run_is_a_run_error(fake_opencode):
     )
 
     assert result.error
+
+
+def test_opencode_and_its_tool_server_join_the_runs_trace(fake_opencode, monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+
+    from chack_tools.telemetry.otel import end_tool_span, start_tool_span
+
+    if not isinstance(trace.get_tracer_provider(), TracerProvider):
+        trace.set_tracer_provider(TracerProvider())
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example.test")
+    fake_opencode.script(
+        [{"events": [_text("ok"), _finish(1, 1)]}],
+        env_keys=["TRACEPARENT", "OTEL_EXPORTER_OTLP_ENDPOINT", "CHACK_DISABLE_STDOUT_EVENTS"],
+    )
+    executor = _build(_gateway_config("gpt-6-sol"))
+
+    span = start_tool_span("outer", {})
+    try:
+        executor.invoke({"input": "hi"})
+    finally:
+        end_tool_span(span, result="")
+
+    env = fake_opencode.calls[0]["env"]
+    assert format(span.span.get_span_context().trace_id, "032x") in env["TRACEPARENT"]
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "https://collector.example.test"
+    assert env["CHACK_DISABLE_STDOUT_EVENTS"] is None
