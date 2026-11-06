@@ -174,26 +174,48 @@ def test_claude_command_omits_json_schema_when_unconfigured() -> None:
     assert "--json-schema" not in command
 
 
-def test_claude_exec_enabled_does_not_hide_mcp_tools() -> None:
+def _native_tools(command: list[str]) -> list[str]:
+    return command[command.index("--tools") + 1].split(",")
+
+
+def test_claude_keeps_only_the_native_tools_a_run_uses() -> None:
     executor = _build_executor("")
     executor._tools_config_json = '{"exec_enabled": true}'
     executor._allowed_tools_json = '["read_context"]'
 
     command = executor._build_command("use tools")
 
-    assert "--tools" not in command
-    assert "--disallowedTools" not in command
+    assert sorted(_native_tools(command)) == sorted(
+        ["Read", "Edit", "Write", "ToolSearch", "Bash", "WebFetch", "WebSearch"]
+    )
+    assert "--mcp-config" in command
 
 
-def test_claude_exec_disabled_denies_bash_without_hiding_mcp_tools() -> None:
+def test_claude_drops_the_native_shell_when_chack_exec_is_offered() -> None:
+    executor = _build_executor("")
+    executor._tools_config_json = '{"exec_enabled": true}'
+    executor._allowed_tools_json = '["exec", "read_context"]'
+
+    assert "Bash" not in _native_tools(executor._build_command("use tools"))
+
+
+def test_claude_exec_disabled_has_no_shell() -> None:
     executor = _build_executor("")
     executor._tools_config_json = '{"exec_enabled": false}'
     executor._allowed_tools_json = '["read_context"]'
 
-    command = executor._build_command("use tools")
+    assert "Bash" not in _native_tools(executor._build_command("use tools"))
 
-    assert "--tools" not in command
-    assert command[command.index("--disallowedTools") + 1] == "Bash"
+
+def test_claude_web_tools_follow_the_config() -> None:
+    executor = _build_executor("")
+    executor._tools_config_json = '{"native_web_search_enabled": false}'
+    executor._allowed_tools_json = '["read_context"]'
+
+    tools = _native_tools(executor._build_command("use tools"))
+
+    assert "WebFetch" not in tools and "WebSearch" not in tools
+    assert "Read" in tools
 
 
 def test_claude_skips_all_tool_definitions_when_agent_has_no_tools() -> None:

@@ -250,8 +250,15 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
 # So whenever a larger context budget is configured we opt into that beta.
 _CLAUDE_DEFAULT_CONTEXT_WINDOW = 200_000
 _CLAUDE_1M_CONTEXT_BETA = "context-1m-2025-08-07"
-# Claude Code tools that only work against Anthropic's own API.
-_GATEWAY_UNAVAILABLE_NATIVE_TOOLS = ("WebSearch",)
+# Claude Code built-ins a chack run keeps. Every other built-in (sub-agents,
+# cron, worktrees, skills, notebooks, messaging, ...) is hidden: none of them
+# serves a headless run, and their definitions cost ~50k chars per request.
+# ToolSearch keeps Claude Code's deferred loading of large tool sets working.
+_CLAUDE_KEPT_NATIVE_TOOLS = ("Read", "Edit", "Write", "ToolSearch")
+# Settings that drop prompt parts a headless run never uses.
+_CLAUDE_HEADLESS_SETTINGS = json.dumps(
+    {"attribution": {"commit": "", "pr": ""}}, separators=(",", ":")
+)
 # Model-family defaults Claude Code falls back to for subagents and background
 # work. On a gateway they must name models the gateway serves.
 _CLAUDE_GATEWAY_MODEL_ENV = (
@@ -417,6 +424,22 @@ class ClaudeCodeExecutor:
 
     def suppress_system_prompt_for_next_invocation(self) -> None:
         self._prompt_only_next_invocation = True
+
+    def _native_tools(self, tools_cfg: dict) -> list[str]:
+        names = list(_CLAUDE_KEPT_NATIVE_TOOLS)
+        try:
+            offered = json.loads(self._allowed_tools_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            offered = []
+        # The chack ``exec`` tool already gives the run a shell.
+        if tools_cfg.get("exec_enabled", False) and "exec" not in (offered or []):
+            names.append("Bash")
+        if tools_cfg.get("native_web_search_enabled", True):
+            names.append("WebFetch")
+            # WebSearch runs on Anthropic's API, which gateways do not provide.
+            if not self._uses_gateway_route:
+                names.append("WebSearch")
+        return names
 
     def _has_configured_tools(self) -> bool:
         try:
@@ -1543,9 +1566,10 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
     ) -> list[str]:
         try:
             tools_cfg = json.loads(self._tools_config_json or "{}")
-            _exec_enabled = bool(tools_cfg.get("exec_enabled", False))
         except Exception:
-            _exec_enabled = False
+            tools_cfg = {}
+        if not isinstance(tools_cfg, dict):
+            tools_cfg = {}
 
         args: list[str] = [
             self._claude_cli_path,
@@ -1570,20 +1594,10 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
                     "--strict-mcp-config",
                 ]
             )
-        # ``--tools Bash`` is a built-in-tool allowlist in Claude Code. Passing
-        # it hides every configured MCP tool, which made models attempt MCP
-        # names as shell commands. Leave the normal tool registry intact when
-        # execution is enabled; when it is disabled, deny only native Bash so
-        # MCP tools remain discoverable and callable.
-        disallowed_tools: list[str] = []
-        if not resume_compaction and has_cli_tools and not _exec_enabled:
-            disallowed_tools.append("Bash")
-        if not resume_compaction and has_cli_tools and self._uses_gateway_route:
-            # WebSearch is executed by Anthropic's API, which gateways do not
-            # provide; the model would spend turns on a tool that always fails.
-            disallowed_tools.extend(_GATEWAY_UNAVAILABLE_NATIVE_TOOLS)
-        if disallowed_tools:
-            args.extend(["--disallowedTools", *disallowed_tools])
+        if not resume_compaction and has_cli_tools:
+            # ``--tools`` only limits Claude Code's built-ins; MCP tools stay.
+            args.extend(["--tools", ",".join(self._native_tools(tools_cfg))])
+        args.extend(["--settings", _CLAUDE_HEADLESS_SETTINGS])
 
         if resume_compaction:
             args.extend(["--max-turns", "1"])
@@ -1640,6 +1654,10 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         env = {k: v for k, v in os.environ.items() if v is not None}
         env["PYTHONUNBUFFERED"] = "1"
         augment_subprocess_pythonpath(env)
+        # A run gets its instructions from chack only: no CLAUDE.md files from
+        # the host or the working directory, and no auto-memory section.
+        env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
 
         # Claude Code defers MCP schemas through ToolSearch by default, but
         # Haiku does not support the tool_reference blocks that ToolSearch

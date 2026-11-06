@@ -491,8 +491,9 @@ def test_claude_on_a_gateway_cannot_call_anthropic_hosted_web_search(catalog_req
 
     command = executor._build_command("prompt")
 
-    start = command.index("--disallowedTools")
-    assert "WebSearch" in command[start + 1 :]
+    tools = command[command.index("--tools") + 1].split(",")
+    assert "WebSearch" not in tools
+    assert "WebFetch" in tools
     assert "--betas" not in command
 
 

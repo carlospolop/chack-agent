@@ -488,17 +488,24 @@ def test_tool_server_is_configured_and_its_startup_failure_is_an_error(fake_open
     assert failed["output"].startswith("ERROR: Required opencode MCP server failed to start")
 
 
-def test_shell_is_denied_unless_exec_is_enabled(fake_opencode):
+def test_the_native_shell_is_offered_only_when_exec_is_on_without_chack_exec(fake_opencode):
     _build(_gateway_config("gpt-6-sol")).invoke({"input": "hi"})
-    _build(_gateway_config("gpt-6-sol", tools=ToolsConfig(task_steps_manager_enabled=False, exec_enabled=True))).invoke(
-        {"input": "hi"}
+    with_exec = _build(
+        _gateway_config("gpt-6-sol", tools=ToolsConfig(task_steps_manager_enabled=False, exec_enabled=True))
     )
+    with_exec.invoke({"input": "hi"})
 
-    without_exec, with_exec = (call["config"]["permission"] for call in fake_opencode.calls)
+    without_exec, with_chack_exec = (call["config"]["permission"] for call in fake_opencode.calls)
     assert without_exec["bash"] == "deny"
-    assert with_exec.get("bash", with_exec["*"]) == "allow"
+    # chack's exec tool is already the run's shell.
+    assert "exec" in with_exec._allowed_tool_names()
+    assert with_chack_exec["bash"] == "deny"
     # Nobody can answer an interactive question in a Chack run.
-    assert with_exec["question"] == "deny"
+    assert with_chack_exec["question"] == "deny"
+
+    with_exec._allowed_tools_json = '["read_context"]'
+    permission = with_exec.build_opencode_config()["permission"]
+    assert permission.get("bash", permission["*"]) == "allow"
 
 
 def test_structured_output_is_extracted_and_validated(fake_opencode):
