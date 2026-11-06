@@ -51,6 +51,8 @@ models:
   gemini-4-argon: [low, medium, high]
   gemini-flash-latest: [low, medium, high]
   gemini-nano-banana-2-1: [none, minimal, high]
+  gemini-omni-1-1-flash: [low, high]
+  gemini-omni-1-2-flash: [low, high]
   gemini-pro-latest: [low, medium, high]
   glm-5-2: [none, high, xhigh]
   glm-5-3: [low, high, max]
