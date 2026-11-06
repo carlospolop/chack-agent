@@ -2027,6 +2027,7 @@ PYEOF
             "LLM_GATEWAY_HEADERS",
             "LLM_GATEWAY_MODEL_MAP",
             "PYTHONPATH",
+            "CHACK_CALLER_PYTHONPATH_JSON",
         ]
         env_keys.extend(OTEL_CHILD_ENV_NAMES)
 

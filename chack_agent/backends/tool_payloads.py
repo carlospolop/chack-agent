@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 import tempfile
@@ -16,10 +17,15 @@ CHACK_TOOLS_APPEND_NAMES_JSON_ENV = "CHACK_TOOLS_APPEND_NAMES_JSON"
 CHACK_TOOLS_CONFIG_JSON_PATH_ENV = "CHACK_TOOLS_CONFIG_JSON_PATH"
 CHACK_ALLOWED_TOOLS_JSON_PATH_ENV = "CHACK_ALLOWED_TOOLS_JSON_PATH"
 CHACK_INLINE_ENV_VALUE_MAX_CHARS = 24000
+# The caller's own PYTHONPATH (JSON: a string or null), so the exec tool can
+# give shell commands the caller's environment instead of the import roots
+# added for the MCP server.
+CHACK_CALLER_PYTHONPATH_JSON_ENV = "CHACK_CALLER_PYTHONPATH_JSON"
 
 
 def augment_subprocess_pythonpath(env: dict[str, str]) -> None:
     """Preserve application import roots for MCP subprocess deserialization."""
+    env.setdefault(CHACK_CALLER_PYTHONPATH_JSON_ENV, json.dumps(env.get("PYTHONPATH")))
     candidates: list[str] = []
     candidates.extend(str(env.get("PYTHONPATH", "") or "").split(os.pathsep))
     candidates.extend(str(entry or os.getcwd()) for entry in sys.path)

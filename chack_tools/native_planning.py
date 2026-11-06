@@ -33,17 +33,9 @@ def uses_native_planning(value: Any) -> bool:
 
 def native_planning_prompt(backend: Any, *, required_first: bool) -> str:
     canonical = native_planning_backend(backend)
-    if canonical == "codex":
-        if required_first:
-            return (
-                "- Before any non-planning tool call, use Codex's built-in `update_plan` "
-                "tool to create a concise plan. Keep that native plan updated whenever "
-                "steps start, finish, or change."
-            )
-        return (
-            "- For multi-step work, use Codex's built-in `update_plan` tool and keep "
-            "the native plan current as work progresses."
-        )
+    # ``codex exec`` no longer offers ``update_plan``: naming it only makes the
+    # model look for a missing tool. A plan it does keep still reaches Chack
+    # through ``todo_list`` events.
     if canonical == "claude":
         tools = "Claude Code's built-in planning tools (`TodoWrite` or `TaskCreate`/`TaskUpdate`)"
         if required_first:

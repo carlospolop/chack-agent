@@ -2819,6 +2819,7 @@ class CodexExecutor:
             "CHACK_CHATGPT_ASYNC_API_URL",
             "CHACK_CHATGPT_ASYNC_API_SECRET",
             "PYTHONPATH",
+            "CHACK_CALLER_PYTHONPATH_JSON",
             # Preserve any caller-provided execution sandbox in the MCP server.
             # Dynamic-AIgent uses these variables to route PoC package installs
             # into a disposable virtualenv instead of this scanner runtime.
