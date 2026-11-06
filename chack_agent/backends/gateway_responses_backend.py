@@ -1213,7 +1213,14 @@ def build_executor(
     model_name = route.model_name
 
     web_plan = (
-        plan_web_tools(config, route=route, responses_api=True) if tools_override is None else WebToolPlan()
+        plan_web_tools(
+            config,
+            route=route,
+            responses_api=True,
+            structured_output=bool(getattr(config.agent, "output_schema_json", None)),
+        )
+        if tools_override is None
+        else WebToolPlan()
     )
     if tools_override is None:
         init_params = inspect.signature(AgentsToolset.__init__).parameters
