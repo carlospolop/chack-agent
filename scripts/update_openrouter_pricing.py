@@ -123,6 +123,11 @@ def _build_effort_yaml(models: list[dict[str, Any]]) -> str:
             for effort in efforts
             if str(effort).strip().lower() in THINKING_EFFORT_ORDER
         }
+        if key.startswith("claude"):
+            # OpenRouter's "none" on Claude means "thinking off". Claude's effort
+            # setting starts at low and no chack backend can turn thinking off,
+            # so offering it would only run the model at another level.
+            known.discard("none")
         if known:
             collected.setdefault(key, set()).update(known)
 
