@@ -1028,6 +1028,7 @@ class CodexExecutor:
         env = self._build_env()
         self._write_codex_explicit_mcp_env(env)
         exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
+        self._pin_codex_workdir_untrusted(exec_cwd)
         timeout_seconds = max(
             30,
             int(
@@ -1946,6 +1947,7 @@ class CodexExecutor:
         self._write_codex_explicit_mcp_env(env)
         timeout_seconds = _resolve_codex_exec_timeout(self._sub_action, self._runtime_env())
         exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
+        self._pin_codex_workdir_untrusted(exec_cwd)
         _LOGGER.info(
             "Starting Codex CLI process: model=%s timeout_seconds=%s thread_id=%s cwd=%s ts=%s",
             self._model_name,
@@ -2941,7 +2943,13 @@ class CodexExecutor:
             for v in ["-m", "chack_agent.backends.chack_tools_mcp_server"]
         ) + "]"
 
-        config_lines = [f"model = {_toml_string(self._model_name)}"]
+        config_lines = [
+            f"model = {_toml_string(self._model_name)}",
+            # The working directory is usually a repository under audit: its
+            # AGENTS.md files are untrusted input and cost tokens on every
+            # request, so none of them is read.
+            "project_doc_max_bytes = 0",
+        ]
         if _uses_windows_pipe_reader() and self._cacheable_developer_prompt:
             config_lines.append(
                 "developer_instructions = "
@@ -2982,6 +2990,9 @@ class CodexExecutor:
         )
         if self._uses_gateway_route and self._gateway_provider_toml:
             config_lines.append(self._gateway_provider_toml)
+        # Skills (including the working directory's .agents/skills and
+        # .codex/skills) are not listed in the prompt.
+        config_lines.extend(["", "[skills]", "include_instructions = false"])
         chack_mcp_tool_timeout = int(
             self._runtime_env_value("CHACK_MCP_TOOL_TIMEOUT_SECONDS", "3600") or "3600"
         )
@@ -3108,6 +3119,36 @@ class CodexExecutor:
         temporary_path = f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
         with open(temporary_path, "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n")
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, config_path)
+
+    def _pin_codex_workdir_untrusted(self, exec_cwd: str) -> None:
+        """Mark the launch directory untrusted in the isolated config.toml.
+
+        A ``codex exec --dangerously-bypass-approvals-and-sandbox`` run in a
+        directory with no ``[projects]`` entry records it (or its git root)
+        as ``trust_level = "trusted"``, and from the next launch on Codex
+        loads that project's ``.codex/config.toml`` (instructions, MCP
+        servers, model providers, notify commands) and AGENTS.md. The
+        directory is usually a repository under audit, so it is pinned as
+        untrusted before every launch; the bypass flag still governs
+        approvals and sandboxing. Trust entries left by earlier launches are
+        dropped.
+        """
+        if not self._codex_home or not exec_cwd:
+            return
+        config_path = os.path.join(self._codex_home, "config.toml")
+        try:
+            with open(config_path, "r", encoding="utf-8") as handle:
+                body = handle.read()
+        except FileNotFoundError:
+            return
+        updated = _codex_config_with_untrusted_workdir(body, exec_cwd)
+        if updated == body:
+            return
+        temporary_path = f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            handle.write(updated)
         os.chmod(temporary_path, 0o600)
         os.replace(temporary_path, config_path)
 
@@ -3477,6 +3518,27 @@ def _codex_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, st
     for name, env_name in _codex_gateway_header_env(route).items():
         env[env_name] = route.headers[name]
     return env
+
+
+_CODEX_UNTRUSTED_WORKDIR_MARKER = "# chack: the launch directory is untrusted"
+_CODEX_PROJECT_TABLE_RE = re.compile(
+    r"^\[projects\.[^\n]*\]\n(?:[A-Za-z_][A-Za-z0-9_]*[ \t]*=[^\n]*(?:\n|$))*",
+    re.MULTILINE,
+)
+
+
+def _codex_config_with_untrusted_workdir(body: str, exec_cwd: str) -> str:
+    """Return config.toml text whose only project entry marks exec_cwd untrusted."""
+    body = body.replace(_CODEX_UNTRUSTED_WORKDIR_MARKER + "\n", "")
+    body = _CODEX_PROJECT_TABLE_RE.sub("", body).rstrip()
+    paths: list[str] = []
+    for candidate in (os.path.abspath(exec_cwd), os.path.realpath(exec_cwd)):
+        if candidate not in paths:
+            paths.append(candidate)
+    lines = [body, "", _CODEX_UNTRUSTED_WORKDIR_MARKER]
+    for path in paths:
+        lines.extend([f"[projects.{json.dumps(path)}]", 'trust_level = "untrusted"'])
+    return "\n".join(lines) + "\n"
 
 
 def _codex_gateway_provider_toml(route: GatewayRoute) -> str:

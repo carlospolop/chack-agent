@@ -40,6 +40,65 @@ from .tool_payloads import (
 _LOGGER = logging.getLogger("chack.copilot_cli_backend")
 
 
+# Environment switches that make prompt mode load the working directory's
+# hooks, MCP servers and extensions. The working directory is usually a
+# repository under audit, so none of it may run.
+_COPILOT_WORKSPACE_OPT_IN_ENV = (
+    "GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS",
+    "GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP",
+    "GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS",
+)
+# Project skill folders Copilot CLI discovers from the working directory up to
+# the repository root.
+_COPILOT_PROJECT_SKILL_DIRS = (
+    (".github", "skills"),
+    (".agents", "skills"),
+    (".claude", "skills"),
+)
+_SKILL_NAME_RE = re.compile(r"^name:\s*['\"]?([^'\"\n]+?)['\"]?\s*$", re.MULTILINE)
+
+
+def _copilot_project_skill_names(start_dir: str) -> list[str]:
+    """Names of the skills Copilot CLI would load from the project at start_dir.
+
+    Covers start_dir and its parents up to the enclosing git root (only
+    start_dir when it is not inside a repository). Each skill is listed by
+    its folder name and by the ``name`` in its SKILL.md front matter.
+    """
+    directory = os.path.abspath(start_dir)
+    candidates = [directory]
+    probe = directory
+    while not os.path.exists(os.path.join(probe, ".git")):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            candidates = [directory]
+            break
+        probe = parent
+        candidates.append(probe)
+    names: set[str] = set()
+    for base in candidates:
+        for parts in _COPILOT_PROJECT_SKILL_DIRS:
+            skills_dir = os.path.join(base, *parts)
+            try:
+                entries = os.listdir(skills_dir)
+            except OSError:
+                continue
+            for entry in entries:
+                skill_md = os.path.join(skills_dir, entry, "SKILL.md")
+                if not os.path.isfile(skill_md):
+                    continue
+                names.add(entry)
+                try:
+                    with open(skill_md, "r", encoding="utf-8", errors="replace") as handle:
+                        head = handle.read(4096)
+                except OSError:
+                    continue
+                match = _SKILL_NAME_RE.search(head)
+                if match and match.group(1).strip():
+                    names.add(match.group(1).strip())
+    return sorted(names)
+
+
 def _sanitize_session_id(session_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", str(session_id or "").strip()).strip()
 
@@ -305,6 +364,7 @@ class CopilotCliExecutor:
 
     def _run_copilot(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_copilot_home_and_config()
+        self._disable_project_skills(os.getcwd())
         command = self._build_command(prompt)
         env = self._build_env()
         timeout_seconds = int(
@@ -573,7 +633,15 @@ class CopilotCliExecutor:
             "--allow-all-tools",
             "--output-format",
             "json",
+            # The working directory is usually a repository under audit: its
+            # AGENTS.md, CLAUDE.md, GEMINI.md and .github instruction files
+            # are untrusted input and cost tokens on every request.
+            "--no-custom-instructions",
         ]
+        if str(os.environ.get("COPILOT_ALLOW_ALL", "")).strip().lower() == "true":
+            # The environment switch is dropped (it also trusts the working
+            # directory's hooks and MCP servers); keep the permissions it gave.
+            args.append("--allow-all")
         if self._model_name:
             args.extend(["--model", self._model_name])
         args.extend(
@@ -609,6 +677,9 @@ class CopilotCliExecutor:
 
         if self._copilot_home:
             env["COPILOT_HOME"] = self._copilot_home
+        env.pop("COPILOT_ALLOW_ALL", None)
+        for name in _COPILOT_WORKSPACE_OPT_IN_ENV:
+            env.pop(name, None)
 
         env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
         env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
@@ -667,6 +738,32 @@ class CopilotCliExecutor:
         os.makedirs(base, exist_ok=True)
         self._copilot_home = base
         self._write_copilot_mcp_config(base)
+
+    def _disable_project_skills(self, launch_dir: str) -> None:
+        """List the launch directory's project skills as disabled for this home.
+
+        Copilot CLI has no switch for project skills; ``disabledSkills`` in the
+        isolated home's settings keeps the audited repository's skills out of
+        the prompt.
+        """
+        if not self._copilot_home:
+            return
+        settings_path = os.path.join(self._copilot_home, "settings.json")
+        try:
+            with open(settings_path, "r", encoding="utf-8") as handle:
+                settings = json.load(handle)
+        except (OSError, ValueError):
+            settings = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        names = _copilot_project_skill_names(launch_dir)
+        if names:
+            settings["disabledSkills"] = names
+        else:
+            settings.pop("disabledSkills", None)
+        with open(settings_path, "w", encoding="utf-8") as handle:
+            json.dump(settings, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
 
     def _write_copilot_mcp_config(self, copilot_home: str) -> None:
         mcp_config_path = os.path.join(copilot_home, "mcp-config.json")

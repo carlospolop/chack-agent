@@ -616,3 +616,14 @@ def test_opencode_and_its_tool_server_join_the_runs_trace(fake_opencode, monkeyp
     assert format(span.span.get_span_context().trace_id, "032x") in env["TRACEPARENT"]
     assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "https://collector.example.test"
     assert env["CHACK_DISABLE_STDOUT_EVENTS"] is None
+
+
+def test_opencode_reads_no_instructions_or_config_from_the_working_directory(fake_opencode):
+    flags = ["OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_EXTERNAL_SKILLS", "OPENCODE_DISABLE_PROJECT_CONFIG"]
+    fake_opencode.script([{"events": [_text("ok"), _finish(1, 1)]}], env_keys=flags)
+
+    _build(_gateway_config("gpt-6-sol")).invoke({"input": "hi"})
+
+    # AGENTS.md / CLAUDE.md, project skills and the project's opencode.json,
+    # plugins and agents are all skipped.
+    assert fake_opencode.calls[0]["env"] == {flag: "1" for flag in flags}

@@ -692,6 +692,8 @@ class ClaudeCodeExecutor:
                 "  Never write directly to AISEC_LOCAL_VULN_STORE_PATH or any\n"
                 "  /tmp/aisec_local_vulnerabilities_* directory. Use only the MCP\n"
                 "  save tool or save_vuln.sh in the current repository.\n"
+                "  If the save tool is unavailable, run\n"
+                "    bash save_vuln.sh '<JSON with the same fields>'\n"
                 "  If you do NOT save findings they are LOST."
             )
             policy_lines.append(save_block)
@@ -901,7 +903,7 @@ class ClaudeCodeExecutor:
         if bash_vulns_dir:
             os.makedirs(bash_vulns_dir, exist_ok=True)
             env["CHACK_VULN_FALLBACK_DIR"] = bash_vulns_dir
-        self._write_agents_md(exec_cwd)
+        self._write_save_vuln_script(exec_cwd)
         bash_vuln_snapshot = self._snapshot_bash_saved_vulns(bash_vulns_dir)
         timeout_seconds = int(
             os.environ.get("CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS", "") or "900"
@@ -1354,20 +1356,20 @@ class ClaudeCodeExecutor:
         if str(step.tool).strip() == "task_steps_manager":
             self._sync_task_steps_manager(tool_input, status)
 
-    def _write_agents_md(self, exec_cwd: str | None) -> str | None:
-        """Write AGENTS.md + save_vuln.sh + .vulns/ directory in exec_cwd so the model
-        knows how to save vulnerabilities. Only written when save_discovered_vulnerability
-        is available. Returns path to AGENTS.md or None."""
+    def _write_save_vuln_script(self, exec_cwd: str | None) -> str | None:
+        """Write save_vuln.sh + the .vulns/ directory in exec_cwd.
+
+        The script is the JSON fallback for saving a vulnerability when the
+        MCP save tool cannot be called; the prompt tells the model how to use
+        it. Only written when save_discovered_vulnerability is available.
+        Instruction files (AGENTS.md, .github/copilot-instructions.md) are not
+        written: Claude Code runs with project settings disabled, so it would
+        not read them, and the working directory is usually a repository
+        under audit that must not be modified. Returns the script path or None.
+        """
         if not exec_cwd or not self._has_save_vulnerability_tool():
             return None
-        agents_md_path = os.path.join(exec_cwd, "AGENTS.md")
-        if os.path.exists(agents_md_path):
-            return agents_md_path
-
         try:
-            mcp_prefix = self._mcp_tool_prefix()
-            save_tool_name = f"{mcp_prefix}save_discovered_vulnerability"
-
             # Create .vulns/ directory for bash JSON fallback
             vulns_dir = os.path.join(exec_cwd, ".vulns")
             os.makedirs(vulns_dir, exist_ok=True)
@@ -1408,59 +1410,9 @@ PYEOF
             with open(save_vuln_path, "w", encoding="utf-8") as f:
                 f.write(save_vuln_sh)
             os.chmod(save_vuln_path, 0o755)
-
-            agents_md_content = f"""# Agent Instructions
-
-## MANDATORY: Saving Vulnerability Findings
-
-### Method 1 (PREFERRED): Call `{save_tool_name}` directly
-Parameters:
-  - `name`: vulnerability title (required)
-  - `description`: detailed description (required)
-  - `worst_impact`: what the attacker gains
-  - `cvss_vector`: CVSS:3.0 vector string
-  - `remediation`: how to fix it
-  - `steps`: JSON array of exploitation steps
-  - `is_full_eop`: 1 if full privilege escalation chain, 0 otherwise
-  - `poc`: working PoC script (required for is_full_eop=1)
-  - `category`: vulnerability class (dylib_injection, xpc_abuse, etc.)
-  - `attack_vector`: trigger path
-
-### Method 2 (FALLBACK): Run `bash save_vuln.sh '<JSON>'`
-Example:
-```bash
-bash save_vuln.sh '{{
-  "name": "Vulnerability Title",
-  "description": "Detailed description",
-  "worst_impact": "root code execution",
-  "cvss_vector": "CVSS:3.0/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
-  "remediation": "Fix description",
-  "steps": [],
-  "is_full_eop": 0
-}}'
-```
-
-**If you do NOT save findings they are LOST. You MUST save every real vulnerability.**
-
-Never write directly to `AISEC_LOCAL_VULN_STORE_PATH`, any
-`/tmp/aisec_local_vulnerabilities_*` directory, or another component's internal
-state. Do not create summary/metadata files in a vulnerability directory. Use
-only the MCP save tool or `save_vuln.sh` in the current repository.
-"""
-            with open(agents_md_path, "w", encoding="utf-8") as f:
-                f.write(agents_md_content)
-
-            # Also write to .github/copilot-instructions.md for compatibility
-            gh_dir = os.path.join(exec_cwd, ".github")
-            os.makedirs(gh_dir, exist_ok=True)
-            gh_instructions = os.path.join(gh_dir, "copilot-instructions.md")
-            with open(gh_instructions, "w", encoding="utf-8") as f:
-                f.write(agents_md_content)
-
-            _LOGGER.info("Wrote AGENTS.md to %s", agents_md_path)
-            return agents_md_path
+            return save_vuln_path
         except Exception as exc:
-            _LOGGER.warning("Failed to write AGENTS.md: %s", exc)
+            _LOGGER.warning("Failed to write save_vuln.sh: %s", exc)
             return None
 
     def _bash_vuln_fallback_dir(self, exec_cwd: str | None) -> str:
@@ -1555,6 +1507,12 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "stream-json",
             "--allow-dangerously-skip-permissions",
             "--dangerously-skip-permissions",
+            # Load only user settings (Chack's isolated configuration): the
+            # working directory is often a repository under audit, and its
+            # CLAUDE.md, .claude/ settings, hooks, skills and agents are
+            # untrusted input that would also cost tokens on every request.
+            "--setting-sources",
+            "user",
         ]
         has_cli_tools = self._has_configured_tools() or self._playwright_mcp_enabled()
         if resume_compaction or not has_cli_tools:

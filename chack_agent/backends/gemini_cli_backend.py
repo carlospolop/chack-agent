@@ -323,13 +323,18 @@ class GeminiCliExecutor:
         command = self._build_command(prompt)
         env = self._build_env()
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
+        # The Chack tools work in exec_cwd; Gemini CLI itself (which has no
+        # native tools here) starts in an empty workspace of its own.
+        self._write_gemini_settings(self._gemini_home, tools_cwd=exec_cwd or os.getcwd())
+        launch_cwd = self._gemini_workspace_dir()
         timeout_seconds = int(os.environ.get("CHACK_GEMINI_EXEC_TIMEOUT_SECONDS", "900") or "900")
 
         _LOGGER.info(
-            "Starting Gemini CLI process: model=%s timeout_seconds=%s gemini_session_id=%s cwd=%s",
+            "Starting Gemini CLI process: model=%s timeout_seconds=%s gemini_session_id=%s cwd=%s tools_cwd=%s",
             self._model_name,
             timeout_seconds,
             self._gemini_session_id or "",
+            launch_cwd,
             exec_cwd or "(inherited)",
         )
 
@@ -342,7 +347,7 @@ class GeminiCliExecutor:
                 text=True,
                 bufsize=1,
                 env=env,
-                cwd=exec_cwd,
+                cwd=launch_cwd,
             )
         except FileNotFoundError:
             return (
@@ -530,6 +535,14 @@ class GeminiCliExecutor:
         augment_subprocess_pythonpath(env)
         env["PYTHONUNBUFFERED"] = "1"
         env["GEMINI_CLI_HOME"] = str(self._gemini_home or os.getcwd())
+        # Gemini CLI loads the launch directory's GEMINI.md, .gemini/settings.json
+        # (which can run commands), MCP servers, hooks, skills and agents once
+        # that directory is trusted, and in headless mode it refuses to start
+        # in an untrusted one. It is launched in an empty workspace Chack owns
+        # (see _gemini_workspace_dir), so trusting that directory loads
+        # nothing from the repository under audit.
+        env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
+        env.pop("GEMINI_RESTRICTED_MODE", None)
         if self._gemini_api_key:
             env["GEMINI_API_KEY"] = self._gemini_api_key
 
@@ -584,8 +597,18 @@ class GeminiCliExecutor:
         self._gemini_home = base
         self._write_gemini_settings(base)
 
-    def _write_gemini_settings(self, gemini_home: str) -> None:
-        settings_path = os.path.join(gemini_home, "settings.json")
+    def _gemini_workspace_dir(self) -> str:
+        """Empty directory Gemini CLI is launched in, inside the isolated home."""
+        workspace = os.path.join(str(self._gemini_home or os.getcwd()), "workspace")
+        os.makedirs(workspace, exist_ok=True)
+        return workspace
+
+    def _write_gemini_settings(self, gemini_home: str, *, tools_cwd: str | None = None) -> None:
+        # GEMINI_CLI_HOME replaces the home directory, so the user settings
+        # file is <home>/.gemini/settings.json.
+        settings_dir = os.path.join(gemini_home, ".gemini")
+        os.makedirs(settings_dir, exist_ok=True)
+        settings_path = os.path.join(settings_dir, "settings.json")
         settings_payload = {
             "model": {
                 "name": self._model_name,
@@ -625,6 +648,8 @@ class GeminiCliExecutor:
                 }
             },
         }
+        if tools_cwd:
+            settings_payload["mcpServers"]["chack_tools"]["cwd"] = tools_cwd
         if self._playwright_mcp_enabled():
             pw_cfg = playwright_mcp_server_config()
             pw_cfg["timeout"] = int(
@@ -733,6 +758,7 @@ class GeminiCliExecutor:
             "GOOGLE_CLOUD_PROJECT",
             "GOOGLE_CLOUD_LOCATION",
             "GEMINI_CLI_HOME",
+            "CHACK_EXEC_CWD",
         ]
         env_keys.extend(OTEL_CHILD_ENV_NAMES)
         env_payload: dict[str, str] = {}

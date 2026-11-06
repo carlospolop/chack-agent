@@ -923,7 +923,7 @@ def test_gemini_backend_writes_native_thinking_config(tmp_path, monkeypatch) -> 
     )
     executor._ensure_gemini_home_and_config()
     settings = json.loads(
-        (tmp_path / "default" / "settings.json").read_text()
+        (tmp_path / "default" / ".gemini" / "settings.json").read_text()
     )
     thinking = settings["modelConfigs"]["overrides"][0]["modelConfig"][
         "generateContentConfig"
@@ -956,7 +956,7 @@ def test_gemini_backend_writes_only_family_compatible_control(
         tools_override=[],
     )
     executor._ensure_gemini_home_and_config()
-    settings = json.loads((tmp_path / "default" / "settings.json").read_text())
+    settings = json.loads((tmp_path / "default" / ".gemini" / "settings.json").read_text())
     thinking = settings["modelConfigs"]["overrides"][0]["modelConfig"][
         "generateContentConfig"
     ]["thinkingConfig"]
