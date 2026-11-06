@@ -2987,7 +2987,8 @@ class CodexExecutor:
         )
         config_lines.append(f"instructions = {_toml_string(instructions_text)}")
         # Codex adds these to every request, yet a headless run never uses them:
-        # no one answers user-input requests, there are no skills or approval
+        # no one answers user-input requests, there are no skills (including
+        # the working directory's .agents/skills and .codex/skills) or approval
         # prompts, and no collaboration modes. Dropping them saves ~2.5k tokens
         # per model request. Dotted keys, so they stay ahead of the first table.
         config_lines.extend(_CODEX_UNUSED_PROMPT_PARTS_OFF)
@@ -3004,9 +3005,6 @@ class CodexExecutor:
         )
         if self._uses_gateway_route and self._gateway_provider_toml:
             config_lines.append(self._gateway_provider_toml)
-        # Skills (including the working directory's .agents/skills and
-        # .codex/skills) are not listed in the prompt.
-        config_lines.extend(["", "[skills]", "include_instructions = false"])
         chack_mcp_tool_timeout = int(
             self._runtime_env_value("CHACK_MCP_TOOL_TIMEOUT_SECONDS", "3600") or "3600"
         )
