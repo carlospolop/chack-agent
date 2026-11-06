@@ -12,7 +12,7 @@ pip install chack-agent
 
 Python 3.10 or newer is required.
 
-CLI backends also require their provider command on `PATH`: `codex`, `claude`, `gemini`, or `copilot`. The Python package includes Playwright, but browser-backed tools require an installed Chromium binary:
+CLI backends also require their provider command on `PATH`: `codex`, `claude`, `gemini`, `copilot`, or `opencode` (`npm i -g opencode-ai@1.19.5`; set `OPENCODE_CLI_PATH` when it is not on `PATH`). The Python package includes Playwright, but browser-backed tools require an installed Chromium binary:
 
 ```bash
 python -m playwright install chromium
@@ -88,10 +88,15 @@ Set `agent.provider` to one of these values:
 | `claude` | Claude Code CLI | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` |
 | `gemini` | Gemini CLI | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or an OpenRouter route |
 | `copilot` | GitHub Copilot CLI | `COPILOT_GITHUB_TOKEN` or existing CLI authentication |
+| `opencode` | opencode CLI (`opencode run`) with the model from any key type | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, or `LLM_GATEWAY_API_KEY` |
 | `langgraph` | LangGraph with an OpenRouter or gateway `ChatOpenAI` transport | `OPENROUTER_API_KEY` or `LLM_GATEWAY_API_KEY` |
 | `gateway` | Responses API of a custom LLM gateway through `openai-agents` | `LLM_GATEWAY_API_KEY` |
 
 Aliases are normalized when configuration loads. Unsupported providers and unsupported thinking-effort values for known models fail early. The accepted common effort vocabulary is `none`, `minimal`, `low`, `medium`, `high`, `xhigh`/`extra_high`, and `max`; each backend maps supported values to its native control.
+
+`api_key_type` picks the key a backend uses. With `api_key_type: openrouter`, `codex` and `claude` still run their CLIs, against OpenRouter with `OPENROUTER_API_KEY`: Codex through a Responses model provider, Claude Code through `ANTHROPIC_BASE_URL=https://openrouter.ai/api`. Model names are mapped to OpenRouter IDs (`claude-sonnet-5-5` becomes `anthropic/claude-sonnet-5.5`) and priced from the OpenRouter table.
+
+`opencode` runs the opencode CLI with a private config per session: OpenAI keys use the Responses API, Anthropic keys the Messages API, OpenRouter its own provider, and a gateway the Messages API for Claude models, the Responses API for OpenAI models and Chat Completions for the rest. `agent.thinking_effort` becomes the model's reasoning effort or adaptive thinking. Chack tools run over MCP next to opencode's file, search, edit and (with `exec_enabled`) shell tools; opencode's question, sub-agent, skill and todo tools are denied. opencode cannot use Codex or Claude Code subscription tokens.
 
 See [the backend guide](chack_agent/backends/README.md) for transport, memory, compaction, and guardrail differences.
 
@@ -109,7 +114,9 @@ The defaults matter:
 
 - `task_steps_manager_enabled` defaults to `true`; set it to `false` for agents that should reason about workflow without maintaining a runtime plan.
 - Other functional tool families default to disabled.
-- `min_tools_used` defaults to `10`; set it explicitly when a workflow should allow fewer calls.
+- `min_tools_used` defaults to `0`; set it when a workflow must gather evidence before answering. A run that finishes below it is resumed and asked for more calls, so a high minimum spends tokens on filler calls.
+- An identical call to a read-only tool made within `tool_result_reuse_seconds` (default 60) returns the earlier result instead of running again. Shell/script tools, tools that act on a live target (`request`, `probe`, `browser`, `verify`, ...), tools whose names change or report changing state (`create`, `delete`, `start`, `poll`, ...), and results longer than `tool_result_reuse_max_chars` are never reused; a state-changing call clears the reused results. A tool can opt in or out with `reuse_tool_results(tool, enabled)`.
+- A tool result longer than `tool_output_max_chars` (default 40000) is saved to a file under `tool_output_dir` (default: the system temp directory), and the agent receives `tool_output_preview_chars` of its start and end plus the file path. This applies whenever the agent can read files (CLI backends, or API backends with `exec_enabled`); otherwise the result is cut to the same preview.
 - `max_tools_used: 0` means unlimited.
 - `required_tool_names` can require persistence or reporting tools before a run is accepted.
 
@@ -174,6 +181,33 @@ Compaction is fail-open: its status and error are recorded in `RunResult`, and t
 `RunResult` includes the output, provider steps, tool counts, token counts, rounds, estimated cost, timing, task session ID, compaction status, and any terminal error. A configured JSON schema is sent through the selected backend's structured-output mechanism when available and validated by Chack's CLI adapters where required.
 
 The synchronous `run()` and asynchronous `arun()` APIs support per-run tool limits, required tools, self-critique, callbacks, prompt variables, context, working directory, cancellation, output-schema override, compaction, and executor reuse. See [`Chack.run`](chack_agent/agent.py) for the exact signature and [`chack_agent/config.py`](chack_agent/config.py) for every configuration field.
+
+## Telemetry (OpenTelemetry)
+
+Every `run()` is traced with OpenTelemetry using [OpenInference](https://github.com/Arize-ai/openinference) attributes, so any OTLP backend (Arize Phoenix, Langfuse, Jaeger, Grafana Tempo, an OpenTelemetry Collector...) can show it:
+
+- one `AGENT` span per run, named `main_action.sub_action`, with session ID, model, input, output, token counts (including cache reads/writes), cost, tool counts, rounds, and the terminal error;
+- one `TOOL` child span per tool call with its input, result (truncated) and error status, including tools called by CLI backends (Codex, Claude Code, Copilot, Gemini) through the Chack MCP server;
+- run events (compaction, budget warnings, limits...) as span events.
+
+Nothing is exported unless an endpoint is set. Use the standard OpenTelemetry variables or the matching `logging` fields (variables win):
+
+| Environment | `logging` field | Meaning |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` | `otlp_endpoint` | OTLP/HTTP collector URL; `/v1/traces` is appended to a base URL |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `otlp_headers` | e.g. `authorization=Bearer <key>` |
+| `OTEL_SERVICE_NAME` | `otel_service_name` | defaults to `chack-agent` |
+| `OTEL_RESOURCE_ATTRIBUTES` (`openinference.project.name=...`) | `otel_project` | project the traces are grouped under (Phoenix project) |
+
+```yaml
+logging:
+  otlp_endpoint: https://phoenix.example.com
+  otel_project: my-agents
+```
+
+Keep the API key out of the file: `export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer <key>"`.
+
+If the host application already installed a tracer provider, Chack uses it and exports nothing itself. CLI backends and their tool processes receive the exporter settings and a `TRACEPARENT`, so their spans join the same trace. Set `CHACK_OTEL_LLM_SPANS=1` and install the `otel_llm` extra to also record one `LLM` span per model request on the in-process backends. Recorded values are capped by `CHACK_TELEMETRY_MAX_VALUE_CHARS` (default 16000) and tool results by `CHACK_TELEMETRY_TOOL_RESULT_MAX_BYTES` (default 8192).
 
 ## GitHub Action
 

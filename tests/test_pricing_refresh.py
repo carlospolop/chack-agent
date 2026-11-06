@@ -190,3 +190,22 @@ class PricingRefreshTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_claude_effort_table_never_offers_turning_thinking_off():
+    from scripts.update_openrouter_pricing import _build_effort_yaml
+    from chack_agent.thinking_effort import _load_published_efforts
+
+    models = [
+        {"id": "anthropic/claude-sonnet-5", "reasoning": {"supported_efforts": ["none", "low", "high"]}},
+        {"id": "openai/gpt-5.6", "reasoning": {"supported_efforts": ["none", "low", "high"]}},
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "thinking_effort.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(_build_effort_yaml(models))
+        with patch("chack_agent.thinking_effort._PUBLISHED_EFFORTS_FILE", path):
+            table = _load_published_efforts()
+
+    assert table["claude-sonnet-5"] == {"low", "high"}
+    assert table["gpt-5-6"] == {"none", "low", "high"}

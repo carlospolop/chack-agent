@@ -50,3 +50,27 @@ def test_server_compaction_does_not_repeat_token_compaction_after_run():
     executor._run_compaction = lambda *_args: (_ for _ in ()).throw(AssertionError("redundant compaction"))
 
     executor._maybe_compact(300_000)
+
+
+def test_gateway_schema_object_is_returned_as_json_text():
+    from chack_agent.backends.gateway_responses_backend import AgentsExecutor as GatewayResponsesExecutor
+
+    output = {"capital": "Canberra"}
+    executor = GatewayResponsesExecutor.__new__(GatewayResponsesExecutor)
+    executor.agent = SimpleNamespace(instructions="")
+    executor._system_prompt = lambda: "test"
+    executor._maybe_summarize_for_next_turn = lambda **_kwargs: None
+    executor._conversation = []
+    executor._memory_limit = 0
+    executor._chain_responses = False
+    executor._invoke_runner_with_recovery = lambda **_kwargs: SimpleNamespace(
+        final_output=output,
+        to_input_list=lambda: [],
+        last_response_id=None,
+        new_items=[],
+        raw_responses=[],
+    )
+
+    result = executor.invoke({"input": "capital?"})
+
+    assert json.loads(result["output"]) == output

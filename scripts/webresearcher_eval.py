@@ -97,7 +97,6 @@ def load_env(path: Path) -> None:
                 os.environ[key] = value
     # The checked .env currently has a Codex token that the CLI rejects; let Codex use its auth.json.
     os.environ.pop("CODEX_ACCESS_TOKEN", None)
-    os.environ.setdefault("CHACK_DISABLE_STDOUT_EVENTS", "1")
     os.environ.setdefault("CHACK_DISABLE_CODEX_NATIVE_WEB", "1")
 
 

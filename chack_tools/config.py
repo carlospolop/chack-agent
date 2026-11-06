@@ -342,8 +342,18 @@ class ToolsConfig:
 
     deny_builtin_tools: list = field(default_factory=list)
 
-    min_tools_used: int = 10
+    min_tools_used: int = 0
     max_tools_used: int = 0
+
+    # Identical read-only tool calls inside this window return the earlier
+    # result. 0 disables reuse.
+    tool_result_reuse_seconds: int = 60
+    tool_result_reuse_max_chars: int = 20000
+    # Larger tool results are saved to a file; the agent sees the preview
+    # (start and end) and the path.
+    tool_output_max_chars: int = 40000
+    tool_output_preview_chars: int = 12000
+    tool_output_dir: str = ""
 
     social_network_max_tools_used: int = 0
     scientific_max_tools_used: int = 0

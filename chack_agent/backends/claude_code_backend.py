@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
+from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import (
     STORE as TASK_STEPS_STORE,
@@ -32,9 +33,10 @@ from ..resume_compaction import ResumeCompactionResult
 from ..llm_gateway import (
     GatewayRoute,
     clone_config_for_gateway,
-    gateway_model_name,
     gateway_subprocess_env,
     get_gateway_route,
+    openrouter_selected_by_api_key_type,
+    route_model_name,
 )
 from ..model_aliases import ANTHROPIC_BEST_CHEAPEST
 from ..output_schema import JsonSchemaOutput
@@ -248,8 +250,21 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
 # So whenever a larger context budget is configured we opt into that beta.
 _CLAUDE_DEFAULT_CONTEXT_WINDOW = 200_000
 _CLAUDE_1M_CONTEXT_BETA = "context-1m-2025-08-07"
-# Claude Code tools that only work against Anthropic's own API.
-_GATEWAY_UNAVAILABLE_NATIVE_TOOLS = ("WebSearch",)
+# Built-in tools a Chack run keeps; the shell, web and planning tools are added
+# when the run's configuration allows them. ToolSearch loads deferred MCP tool
+# schemas, so Chack's own tools stay reachable when there are many.
+_CLAUDE_BUILTIN_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep", "ToolSearch")
+_CLAUDE_PLANNING_TOOLS = ("TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet")
+# Prompt parts a headless run never uses: the auto-memory instructions, the git
+# status snapshot and the commit/PR attribution reminder.
+_CLAUDE_HEADLESS_SETTINGS = json.dumps(
+    {
+        "autoMemoryEnabled": False,
+        "includeGitInstructions": False,
+        "attribution": {"commit": "", "pr": ""},
+    },
+    separators=(",", ":"),
+)
 # Model-family defaults Claude Code falls back to for subagents and background
 # work. On a gateway they must name models the gateway serves.
 _CLAUDE_GATEWAY_MODEL_ENV = (
@@ -287,7 +302,7 @@ def _claude_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, s
         )
     # Every model family resolves to the selected model unless the gateway also
     # serves a cheaper model for background work.
-    background_model = gateway_model_name(config, ANTHROPIC_BEST_CHEAPEST) or route.model_name
+    background_model = route_model_name(config, route, ANTHROPIC_BEST_CHEAPEST) or route.model_name
     for name in _CLAUDE_GATEWAY_MODEL_ENV:
         env[name] = route.model_name
     env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = background_model
@@ -690,6 +705,8 @@ class ClaudeCodeExecutor:
                 "  Never write directly to AISEC_LOCAL_VULN_STORE_PATH or any\n"
                 "  /tmp/aisec_local_vulnerabilities_* directory. Use only the MCP\n"
                 "  save tool or save_vuln.sh in the current repository.\n"
+                "  If the save tool is unavailable, run\n"
+                "    bash save_vuln.sh '<JSON with the same fields>'\n"
                 "  If you do NOT save findings they are LOST."
             )
             policy_lines.append(save_block)
@@ -764,6 +781,10 @@ class ClaudeCodeExecutor:
         return str(user_input or "")
 
     def _refresh_provider_credentials(self) -> None:
+        if getattr(self, "_uses_gateway_route", False):
+            # Gateway and OpenRouter runs authenticate with the gateway key;
+            # a Claude subscription token from the hook must not replace it.
+            return
         credentials = run_provider_pre_launch_hook("claude")
         if credentials.get("clear_access_token", "").lower() == "true":
             self._claude_access_token = ""
@@ -895,7 +916,7 @@ class ClaudeCodeExecutor:
         if bash_vulns_dir:
             os.makedirs(bash_vulns_dir, exist_ok=True)
             env["CHACK_VULN_FALLBACK_DIR"] = bash_vulns_dir
-        self._write_agents_md(exec_cwd)
+        self._write_save_vuln_script(exec_cwd)
         bash_vuln_snapshot = self._snapshot_bash_saved_vulns(bash_vulns_dir)
         timeout_seconds = int(
             os.environ.get("CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS", "") or "900"
@@ -1348,20 +1369,20 @@ class ClaudeCodeExecutor:
         if str(step.tool).strip() == "task_steps_manager":
             self._sync_task_steps_manager(tool_input, status)
 
-    def _write_agents_md(self, exec_cwd: str | None) -> str | None:
-        """Write AGENTS.md + save_vuln.sh + .vulns/ directory in exec_cwd so the model
-        knows how to save vulnerabilities. Only written when save_discovered_vulnerability
-        is available. Returns path to AGENTS.md or None."""
+    def _write_save_vuln_script(self, exec_cwd: str | None) -> str | None:
+        """Write save_vuln.sh + the .vulns/ directory in exec_cwd.
+
+        The script is the JSON fallback for saving a vulnerability when the
+        MCP save tool cannot be called; the prompt tells the model how to use
+        it. Only written when save_discovered_vulnerability is available.
+        Instruction files (AGENTS.md, .github/copilot-instructions.md) are not
+        written: Claude Code runs with project settings disabled, so it would
+        not read them, and the working directory is usually a repository
+        under audit that must not be modified. Returns the script path or None.
+        """
         if not exec_cwd or not self._has_save_vulnerability_tool():
             return None
-        agents_md_path = os.path.join(exec_cwd, "AGENTS.md")
-        if os.path.exists(agents_md_path):
-            return agents_md_path
-
         try:
-            mcp_prefix = self._mcp_tool_prefix()
-            save_tool_name = f"{mcp_prefix}save_discovered_vulnerability"
-
             # Create .vulns/ directory for bash JSON fallback
             vulns_dir = os.path.join(exec_cwd, ".vulns")
             os.makedirs(vulns_dir, exist_ok=True)
@@ -1402,59 +1423,9 @@ PYEOF
             with open(save_vuln_path, "w", encoding="utf-8") as f:
                 f.write(save_vuln_sh)
             os.chmod(save_vuln_path, 0o755)
-
-            agents_md_content = f"""# Agent Instructions
-
-## MANDATORY: Saving Vulnerability Findings
-
-### Method 1 (PREFERRED): Call `{save_tool_name}` directly
-Parameters:
-  - `name`: vulnerability title (required)
-  - `description`: detailed description (required)
-  - `worst_impact`: what the attacker gains
-  - `cvss_vector`: CVSS:3.0 vector string
-  - `remediation`: how to fix it
-  - `steps`: JSON array of exploitation steps
-  - `is_full_eop`: 1 if full privilege escalation chain, 0 otherwise
-  - `poc`: working PoC script (required for is_full_eop=1)
-  - `category`: vulnerability class (dylib_injection, xpc_abuse, etc.)
-  - `attack_vector`: trigger path
-
-### Method 2 (FALLBACK): Run `bash save_vuln.sh '<JSON>'`
-Example:
-```bash
-bash save_vuln.sh '{{
-  "name": "Vulnerability Title",
-  "description": "Detailed description",
-  "worst_impact": "root code execution",
-  "cvss_vector": "CVSS:3.0/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
-  "remediation": "Fix description",
-  "steps": [],
-  "is_full_eop": 0
-}}'
-```
-
-**If you do NOT save findings they are LOST. You MUST save every real vulnerability.**
-
-Never write directly to `AISEC_LOCAL_VULN_STORE_PATH`, any
-`/tmp/aisec_local_vulnerabilities_*` directory, or another component's internal
-state. Do not create summary/metadata files in a vulnerability directory. Use
-only the MCP save tool or `save_vuln.sh` in the current repository.
-"""
-            with open(agents_md_path, "w", encoding="utf-8") as f:
-                f.write(agents_md_content)
-
-            # Also write to .github/copilot-instructions.md for compatibility
-            gh_dir = os.path.join(exec_cwd, ".github")
-            os.makedirs(gh_dir, exist_ok=True)
-            gh_instructions = os.path.join(gh_dir, "copilot-instructions.md")
-            with open(gh_instructions, "w", encoding="utf-8") as f:
-                f.write(agents_md_content)
-
-            _LOGGER.info("Wrote AGENTS.md to %s", agents_md_path)
-            return agents_md_path
+            return save_vuln_path
         except Exception as exc:
-            _LOGGER.warning("Failed to write AGENTS.md: %s", exc)
+            _LOGGER.warning("Failed to write save_vuln.sh: %s", exc)
             return None
 
     def _bash_vuln_fallback_dir(self, exec_cwd: str | None) -> str:
@@ -1539,6 +1510,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             tools_cfg = json.loads(self._tools_config_json or "{}")
             _exec_enabled = bool(tools_cfg.get("exec_enabled", False))
         except Exception:
+            tools_cfg = {}
             _exec_enabled = False
 
         args: list[str] = [
@@ -1549,6 +1521,12 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "stream-json",
             "--allow-dangerously-skip-permissions",
             "--dangerously-skip-permissions",
+            # Load only user settings (Chack's isolated configuration): the
+            # working directory is often a repository under audit, and its
+            # CLAUDE.md, .claude/ settings, hooks, skills and agents are
+            # untrusted input that would also cost tokens on every request.
+            "--setting-sources",
+            "user",
         ]
         has_cli_tools = self._has_configured_tools() or self._playwright_mcp_enabled()
         if resume_compaction or not has_cli_tools:
@@ -1564,20 +1542,27 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
                     "--strict-mcp-config",
                 ]
             )
-        # ``--tools Bash`` is a built-in-tool allowlist in Claude Code. Passing
-        # it hides every configured MCP tool, which made models attempt MCP
-        # names as shell commands. Leave the normal tool registry intact when
-        # execution is enabled; when it is disabled, deny only native Bash so
-        # MCP tools remain discoverable and callable.
-        disallowed_tools: list[str] = []
-        if not resume_compaction and has_cli_tools and not _exec_enabled:
-            disallowed_tools.append("Bash")
-        if not resume_compaction and has_cli_tools and self._uses_gateway_route:
-            # WebSearch is executed by Anthropic's API, which gateways do not
-            # provide; the model would spend turns on a tool that always fails.
-            disallowed_tools.extend(_GATEWAY_UNAVAILABLE_NATIVE_TOOLS)
-        if disallowed_tools:
-            args.extend(["--disallowedTools", *disallowed_tools])
+        if not resume_compaction and has_cli_tools:
+            # Claude Code otherwise sends every built-in tool (subagents,
+            # workflows, cron, worktrees, monitors, ...) on each request: ~60k
+            # chars a headless run never uses. ``--tools`` limits only the
+            # built-in set; MCP tools stay available. Names a CLI version does
+            # not have are ignored.
+            builtin_tools = list(_CLAUDE_BUILTIN_TOOLS)
+            # Chack's own exec tool, when offered, is already the run's shell.
+            if _exec_enabled and "exec" not in self._offered_tool_names():
+                builtin_tools.append("Bash")
+            if tools_cfg.get("native_web_search_enabled", True):
+                builtin_tools.append("WebFetch")
+                if not self._uses_gateway_route:
+                    # WebSearch is executed by Anthropic's API, which gateways
+                    # do not provide; it would always fail there.
+                    builtin_tools.append("WebSearch")
+            if self._native_task_planning_backend:
+                builtin_tools.extend(_CLAUDE_PLANNING_TOOLS)
+            args.extend(["--tools", ",".join(builtin_tools)])
+        if not resume_compaction:
+            args.extend(["--settings", _CLAUDE_HEADLESS_SETTINGS])
 
         if resume_compaction:
             args.extend(["--max-turns", "1"])
@@ -1630,10 +1615,20 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
 
         return args
 
+    def _offered_tool_names(self) -> list[str]:
+        try:
+            names = json.loads(self._allowed_tools_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return [str(name) for name in names] if isinstance(names, list) else []
+
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
         env["PYTHONUNBUFFERED"] = "1"
         augment_subprocess_pythonpath(env)
+        # A run's instructions come from Chack only, never from CLAUDE.md files
+        # on the host or in the working directory.
+        env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
 
         # Claude Code defers MCP schemas through ToolSearch by default, but
         # Haiku does not support the tool_reference blocks that ToolSearch
@@ -1716,7 +1711,8 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         )
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
-        env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        # Child processes export into the same place and join this run's trace.
+        env.update(child_process_env())
 
         if self._uses_gateway_route:
             for name in (
@@ -1946,7 +1942,6 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
-            "CHACK_DISABLE_STDOUT_EVENTS",
             "CHACK_RESEARCH_MASTER_DIR",
             "CHACK_RESEARCH_DATA_DIR",
             "CHACK_RESEARCH_SAVE_ARTIFACTS",
@@ -2018,6 +2013,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "LLM_GATEWAY_MODEL_MAP",
             "PYTHONPATH",
         ]
+        env_keys.extend(OTEL_CHILD_ENV_NAMES)
 
         src_env = self._build_env()
         env_payload: dict[str, str] = {}
@@ -2103,7 +2099,14 @@ def build_executor(
     tools_append: list[Any] | None = None,
 ) -> ClaudeCodeExecutor:
     gateway_route = get_gateway_route(config)
-    if gateway_route is not None and gateway_route.is_openrouter:
+    if (
+        gateway_route is not None
+        and gateway_route.is_openrouter
+        and not openrouter_selected_by_api_key_type(config)
+    ):
+        # ``openrouter/`` model names select the Responses API backend; the
+        # ``openrouter`` API key type keeps Claude Code on OpenRouter's
+        # Anthropic-compatible endpoint.
         from .gateway_responses_backend import build_executor as build_gateway_responses_executor
 
         return build_gateway_responses_executor(

@@ -8,9 +8,10 @@ import sys
 import threading
 import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
 
 from agents.tool_context import ToolContext
@@ -18,7 +19,9 @@ from agents.usage import Usage
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
+from chack_tools.telemetry.otel import end_tool_span, flush_in_background, start_tool_span
 from chack_tools.task_steps_manager_state import STORE, set_active_context
+from chack_tools.tool_call_policy import ToolCallPolicy
 from chack_tools.tool_usage_state import is_budget_exempt_tool_name, register_budget_exempt_tools
 from chack_tools.run_lifecycle import (
     ToolBudgetClaim,
@@ -224,6 +227,7 @@ class _ServerPolicyState:
     session_id: str = ""
     has_task_steps_manager_init: bool = False
     non_task_tool_calls: int = 0
+    call_policy: ToolCallPolicy = field(default_factory=ToolCallPolicy)
 
 
 def _as_bool(raw: str, default: bool = False) -> bool:
@@ -240,18 +244,39 @@ def _as_int(raw: str, default: int = 0) -> int:
         return default
 
 
-def _truncate_tool_output(value: str) -> str:
-    token_budget = max(1, _as_int(os.environ.get("CHACK_MCP_TOOL_MAX_TOKENS", "10000"), 10000))
-    max_bytes = token_budget * 4
-    encoded = value.encode("utf-8", errors="replace")
-    if len(encoded) <= max_bytes:
-        return value
+def _tool_call_policy(tools_cfg_data: dict[str, Any]) -> ToolCallPolicy:
+    """Reuse/spill policy for this server; CLI agents can always read files."""
+    allowed = set(getattr(ToolsConfig, "__dataclass_fields__", {}).keys())
+    try:
+        tools_cfg = ToolsConfig(**{k: v for k, v in tools_cfg_data.items() if k in allowed})
+    except TypeError:
+        tools_cfg = ToolsConfig()
+    policy = ToolCallPolicy(tools_cfg, outputs_readable=True)
+    # ``CHACK_MCP_TOOL_MAX_TOKENS`` predates ``tool_output_max_chars`` and still
+    # lowers the limit when a caller sets it.
+    max_tokens = _as_int(os.environ.get("CHACK_MCP_TOOL_MAX_TOKENS", "0"), 0)
+    if max_tokens > 0:
+        policy.max_chars = min(policy.max_chars, max_tokens * 4) if policy.max_chars > 0 else max_tokens * 4
+        policy.preview_chars = min(policy.preview_chars, policy.max_chars)
+    return policy
 
-    marker = "\n... truncated by MCP tool response limit ...\n"
-    half = max(0, (max_bytes - len(marker.encode("utf-8"))) // 2)
-    prefix = encoded[:half].decode("utf-8", errors="ignore")
-    suffix = encoded[-half:].decode("utf-8", errors="ignore")
-    return f"{prefix}{marker}{suffix}"
+
+def _read_tools_config_data() -> dict[str, Any]:
+    tools_cfg_raw = (
+        read_payload_from_env_or_file(
+            os.environ.get("CHACK_TOOLS_CONFIG_JSON", ""),
+            os.environ.get(CHACK_TOOLS_CONFIG_JSON_PATH_ENV, ""),
+        ).strip()
+        or "{}"
+    )
+    try:
+        tools_cfg_data = json.loads(tools_cfg_raw)
+    except json.JSONDecodeError:
+        tools_cfg_data = {}
+    if not isinstance(tools_cfg_data, dict):
+        tools_cfg_data = {}
+    allowed_tool_cfg_keys = set(getattr(ToolsConfig, "__dataclass_fields__", {}).keys())
+    return {k: v for k, v in tools_cfg_data.items() if k in allowed_tool_cfg_keys}
 
 
 def _uses_windows_process_api() -> bool:
@@ -356,21 +381,7 @@ def _start_parent_watchdog() -> threading.Event:
 
 
 def _load_toolset() -> list[Any]:
-    tools_cfg_raw = (
-        read_payload_from_env_or_file(
-            os.environ.get("CHACK_TOOLS_CONFIG_JSON", ""),
-            os.environ.get(CHACK_TOOLS_CONFIG_JSON_PATH_ENV, ""),
-        ).strip()
-        or "{}"
-    )
-    try:
-        tools_cfg_data = json.loads(tools_cfg_raw)
-    except json.JSONDecodeError:
-        tools_cfg_data = {}
-    if not isinstance(tools_cfg_data, dict):
-        tools_cfg_data = {}
-    allowed_tool_cfg_keys = set(getattr(ToolsConfig, "__dataclass_fields__", {}).keys())
-    tools_cfg_data = {k: v for k, v in tools_cfg_data.items() if k in allowed_tool_cfg_keys}
+    tools_cfg_data = _read_tools_config_data()
 
     model_provider = str(os.environ.get("CHACK_MODEL_PROVIDER", "") or "").strip()
     if not model_provider:
@@ -554,6 +565,24 @@ def _load_toolset() -> list[Any]:
     return filtered_tools
 
 
+def _advertise_tools_only(mcp: FastMCP) -> None:
+    """Drop FastMCP's empty resource and prompt endpoints.
+
+    A server that advertises resources makes MCP clients add their own
+    resource-browser tools (list/read resource) to every model request, and
+    this server has no resources or prompts to browse.
+    """
+    handlers = mcp._mcp_server.request_handlers
+    for request_type in (
+        mcp_types.ListResourcesRequest,
+        mcp_types.ListResourceTemplatesRequest,
+        mcp_types.ReadResourceRequest,
+        mcp_types.ListPromptsRequest,
+        mcp_types.GetPromptRequest,
+    ):
+        handlers.pop(request_type, None)
+
+
 def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -> None:
     for tool in tools:
         name = str(getattr(tool, "name", "") or "").strip()
@@ -605,6 +634,21 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                 if value is None:
                     continue
                 payload[_mapping.get(py_name, py_name)] = value
+            span = start_tool_span(_name, payload)
+            result: Any = None
+            error = ""
+            try:
+                result = await _call(_tool, _name, payload)
+                return result
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                end_tool_span(span, result=result, error=error)
+                # The CLI may stop this server at any moment; send the span now.
+                flush_in_background()
+
+        async def _call(_tool: Any, _name: str, payload: dict[str, Any]) -> str:
             try:
                 has_persistent_init = bool(
                     state.session_id and task_manager_initialized(state.session_id)
@@ -621,6 +665,11 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                     _name == "task_steps_manager"
                     and str(payload.get("action", "")).strip().lower() == "init"
                 )
+                # A repeated read-only call is answered before it can spend a
+                # tool-budget slot, since the tool does not run.
+                reused = state.call_policy.reuse.lookup(_tool, payload)
+                if reused is not None:
+                    return state.call_policy.fit(inject_budget_warning_from_env(reused))
                 tool_claim = ToolBudgetClaim(
                     allowed=True,
                     used=state.non_task_tool_calls,
@@ -672,13 +721,14 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
 
                 record_mcp_tool_usage(_name, state.session_id)
                 result = await _invoke_function_tool(_tool, payload)
+                state.call_policy.reuse.store(_tool, payload, result)
                 if is_task_steps_manager_init and str(result).startswith("SUCCESS:"):
                     state.has_task_steps_manager_init = True
                     if state.session_id:
                         mark_task_manager_initialized(state.session_id)
                 result = str(result) + tool_budget_warning(tool_claim)
                 result = inject_budget_warning_from_env(result)
-                return _truncate_tool_output(result)
+                return state.call_policy.fit(result)
             except Exception:
                 raise
 
@@ -688,7 +738,10 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
         _proxy.__annotations__["return"] = str
         _proxy.__signature__ = inspect.Signature(parameters=parameters, return_annotation=str)
 
-        mcp.add_tool(_proxy, name=name, description=description)
+        # Plain text only: with structured output the result is sent twice,
+        # as text content and again as ``structuredContent``, and clients
+        # such as Codex's code mode hand both copies to the model.
+        mcp.add_tool(_proxy, name=name, description=description, structured_output=False)
 
 
 def main() -> None:
@@ -702,16 +755,6 @@ def main() -> None:
     if transport_hint == "stdio":
         parent_watchdog_stop = _start_parent_watchdog()
     try:
-        try:
-            from chack_tools.telemetry import sqs_logger as _sqs_logger  # type: ignore
-
-            def _noop_stdout_event(_event):
-                return None
-
-            _sqs_logger._emit_stdout_event = _noop_stdout_event  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
         session_id = str(os.environ.get("CHACK_TASK_SESSION_ID", "") or "").strip()
         run_label = str(os.environ.get("CHACK_RUN_LABEL", "") or "").strip() or "Run 1"
         if session_id:
@@ -741,8 +784,10 @@ def main() -> None:
             ),
             max_non_task_tools=max(0, _as_int(os.environ.get("CHACK_MAX_TOOLS_USED", "0"), 0)),
             session_id=session_id,
+            call_policy=_tool_call_policy(_read_tools_config_data()),
         )
         _register_tools(mcp, tools, state)
+        _advertise_tools_only(mcp)
         _write_startup_status(
             tool_names=[str(getattr(tool, "name", "") or "") for tool in tools]
             + ["check_budget_status"]
@@ -751,6 +796,7 @@ def main() -> None:
         # ── Built-in budget status tool (not part of the dynamic toolset) ──
         @mcp.tool(
             name="check_budget_status",
+            structured_output=False,
             description=(
                 "Returns the current runtime and cost budget status. "
                 "Use it only in a long run after at least five other tool calls, "

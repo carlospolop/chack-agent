@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 import requests
 
+from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import (
     STORE as TASK_STEPS_STORE,
@@ -96,11 +97,6 @@ def _codex_tool_instructions(
         )
     if has_configured_tools:
         return (
-            "CRITICAL: You do NOT have a tool called `report_intent`. "
-            "It does not exist. Never attempt to call it. "
-            "To report or save a vulnerability finding you MUST call the MCP tool "
-            "`chack_tools-save_discovered_vulnerability`. "
-            "Any call to `report_intent` will silently discard your finding. "
             "Do not call MCP resource browser helpers such as `list_mcp_resources`, "
             "`list_mcp_resource_templates`, or `read_mcp_resource`; use only the "
             "explicit task tools listed in the prompt."
@@ -109,6 +105,60 @@ def _codex_tool_instructions(
         "This is a no-tools task. Do not call or request tools; complete it "
         "solely from the context embedded in the prompt."
     )
+
+
+_CODEX_UNUSED_PROMPT_PARTS_OFF = (
+    "skills.include_instructions = false",
+    "skills.bundled.enabled = false",
+    "include_permissions_instructions = false",
+    "include_collaboration_mode_instructions = false",
+    "tools.experimental_request_user_input.enabled = false",
+    "features.sleep_tool = false",
+)
+
+_CODEX_CATALOGS: dict[str, Optional[list]] = {}
+_CODEX_CATALOGS_LOCK = threading.Lock()
+
+
+def _codex_catalog_models(codex_path: str, codex_home: str) -> Optional[list]:
+    """The model entries ``codex debug models`` lists, read once per binary."""
+    with _CODEX_CATALOGS_LOCK:
+        if codex_path in _CODEX_CATALOGS:
+            return _CODEX_CATALOGS[codex_path]
+        models = None
+        try:
+            done = subprocess.run(
+                [codex_path, "debug", "models"],
+                env={**os.environ, "CODEX_HOME": codex_home},
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            listed = json.loads(done.stdout).get("models") if done.returncode == 0 else None
+            if isinstance(listed, list):
+                models = listed
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
+            _LOGGER.info("Codex model catalog unavailable: %s", exc)
+        _CODEX_CATALOGS[codex_path] = models
+        return models
+
+
+def _codex_single_agent_catalog(codex_path: str, codex_home: str, model: str) -> Optional[dict]:
+    models = _codex_catalog_models(codex_path, codex_home) if codex_path else None
+    if not models:
+        return None
+    # Gateway routes prefix the model (``provider/model``); Codex matches the
+    # catalog entry by its bare name.
+    names = {str(model or ""), str(model or "").rsplit("/", 1)[-1]}
+    if not any(isinstance(entry, dict) and entry.get("slug") in names for entry in models):
+        return None
+    return {
+        "models": [
+            {**entry, "multi_agent_version": None} if isinstance(entry, dict) else entry
+            for entry in models
+        ]
+    }
 
 
 
@@ -987,6 +1037,7 @@ class CodexExecutor:
         env = self._build_env()
         self._write_codex_explicit_mcp_env(env)
         exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
+        self._pin_codex_workdir_untrusted(exec_cwd)
         timeout_seconds = max(
             30,
             int(
@@ -1318,6 +1369,10 @@ class CodexExecutor:
         return str(user_input or "")
 
     def _refresh_provider_credentials(self) -> None:
+        if getattr(self, "_uses_gateway_route", False):
+            # Gateway and OpenRouter runs authenticate with the gateway key;
+            # a ChatGPT login from the hook must not replace it.
+            return
         credentials = run_provider_pre_launch_hook("codex")
         if credentials.get("clear_access_token", "").lower() == "true":
             self._codex_access_token = ""
@@ -1901,6 +1956,7 @@ class CodexExecutor:
         self._write_codex_explicit_mcp_env(env)
         timeout_seconds = _resolve_codex_exec_timeout(self._sub_action, self._runtime_env())
         exec_cwd = _resolve_codex_exec_cwd(self._runtime_env())
+        self._pin_codex_workdir_untrusted(exec_cwd)
         _LOGGER.info(
             "Starting Codex CLI process: model=%s timeout_seconds=%s thread_id=%s cwd=%s ts=%s",
             self._model_name,
@@ -2655,7 +2711,8 @@ class CodexExecutor:
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         env["CHACK_MCP_PARENT_PID"] = str(os.getpid())
-        env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        # Child processes export into the same place and join this run's trace.
+        env.update(child_process_env())
         if self._codex_home and self._has_configured_tools():
             startup_status_path = os.path.join(
                 self._codex_home,
@@ -2808,7 +2865,6 @@ class CodexExecutor:
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
             "CHACK_MCP_PARENT_PID",
-            "CHACK_DISABLE_STDOUT_EVENTS",
             "CHACK_RESEARCH_MASTER_DIR",
             "CHACK_RESEARCH_DATA_DIR",
             "CHACK_RESEARCH_SAVE_ARTIFACTS",
@@ -2879,6 +2935,7 @@ class CodexExecutor:
             "LLM_GATEWAY_HEADERS",
             "LLM_GATEWAY_MODEL_MAP",
         ]
+        env_vars.extend(OTEL_CHILD_ENV_NAMES)
         # Retain the exact allowlist so the finalized per-run values can also
         # be written explicitly below. Some containerized Codex builds do not
         # reliably propagate dynamically-added parent variables via
@@ -2895,7 +2952,13 @@ class CodexExecutor:
             for v in ["-m", "chack_agent.backends.chack_tools_mcp_server"]
         ) + "]"
 
-        config_lines = [f"model = {_toml_string(self._model_name)}"]
+        config_lines = [
+            f"model = {_toml_string(self._model_name)}",
+            # The working directory is usually a repository under audit: its
+            # AGENTS.md files are untrusted input and cost tokens on every
+            # request, so none of them is read.
+            "project_doc_max_bytes = 0",
+        ]
         if _uses_windows_pipe_reader() and self._cacheable_developer_prompt:
             config_lines.append(
                 "developer_instructions = "
@@ -2923,6 +2986,12 @@ class CodexExecutor:
             has_configured_tools=self._has_configured_tools(),
         )
         config_lines.append(f"instructions = {_toml_string(instructions_text)}")
+        # Codex adds these to every request, yet a headless run never uses them:
+        # no one answers user-input requests, there are no skills (including
+        # the working directory's .agents/skills and .codex/skills) or approval
+        # prompts, and no collaboration modes. Dropping them saves ~2.5k tokens
+        # per model request. Dotted keys, so they stay ahead of the first table.
+        config_lines.extend(_CODEX_UNUSED_PROMPT_PARTS_OFF)
         chack_mcp_startup_timeout = int(
             self._runtime_env_value("CHACK_CODEX_MCP_STARTUP_TIMEOUT_SECONDS", "120")
             or "120"
@@ -2996,10 +3065,40 @@ class CodexExecutor:
                     "tool_timeout_sec = 180",
                 ]
             )
+        catalog_path = self._write_single_agent_model_catalog(codex_home)
+        if catalog_path:
+            # A top-level key: it must precede the first table.
+            config_lines.insert(1, f"model_catalog_json = {_toml_string(catalog_path)}")
         config_body = "\n".join(config_lines)
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(config_body + "\n")
         os.chmod(config_path, 0o600)
+
+    def _write_single_agent_model_catalog(self, codex_home: str) -> str:
+        """Write the CLI's model catalog with multi-agent mode off; return its path.
+
+        Chack runs are single non-interactive agents, but the catalog puts
+        current models in multi-agent mode, which adds agent-management tools
+        and instructions to every request; the ``multi_agent`` feature flags
+        do not turn it off. Returns "" (catalog untouched) when the CLI cannot
+        list its catalog or the model is not in it, so no model loses its
+        real settings.
+        """
+        path = os.path.join(codex_home, "model_catalog.json")
+        if os.path.isfile(path):
+            return path
+        catalog = _codex_single_agent_catalog(
+            getattr(self, "_codex_path", ""), codex_home, self._model_name
+        )
+        if catalog is None:
+            return ""
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(catalog, handle)
+        except OSError as exc:
+            _LOGGER.warning("Could not write the Codex model catalog: %s", exc)
+            return ""
+        return path
 
     def _write_codex_explicit_mcp_env(self, env: dict[str, str]) -> None:
         """Persist the isolated stdio MCP child's finalized environment.
@@ -3032,6 +3131,36 @@ class CodexExecutor:
         temporary_path = f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
         with open(temporary_path, "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n")
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, config_path)
+
+    def _pin_codex_workdir_untrusted(self, exec_cwd: str) -> None:
+        """Mark the launch directory untrusted in the isolated config.toml.
+
+        A ``codex exec --dangerously-bypass-approvals-and-sandbox`` run in a
+        directory with no ``[projects]`` entry records it (or its git root)
+        as ``trust_level = "trusted"``, and from the next launch on Codex
+        loads that project's ``.codex/config.toml`` (instructions, MCP
+        servers, model providers, notify commands) and AGENTS.md. The
+        directory is usually a repository under audit, so it is pinned as
+        untrusted before every launch; the bypass flag still governs
+        approvals and sandboxing. Trust entries left by earlier launches are
+        dropped.
+        """
+        if not self._codex_home or not exec_cwd:
+            return
+        config_path = os.path.join(self._codex_home, "config.toml")
+        try:
+            with open(config_path, "r", encoding="utf-8") as handle:
+                body = handle.read()
+        except FileNotFoundError:
+            return
+        updated = _codex_config_with_untrusted_workdir(body, exec_cwd)
+        if updated == body:
+            return
+        temporary_path = f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            handle.write(updated)
         os.chmod(temporary_path, 0o600)
         os.replace(temporary_path, config_path)
 
@@ -3403,6 +3532,27 @@ def _codex_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, st
     return env
 
 
+_CODEX_UNTRUSTED_WORKDIR_MARKER = "# chack: the launch directory is untrusted"
+_CODEX_PROJECT_TABLE_RE = re.compile(
+    r"^\[projects\.[^\n]*\]\n(?:[A-Za-z_][A-Za-z0-9_]*[ \t]*=[^\n]*(?:\n|$))*",
+    re.MULTILINE,
+)
+
+
+def _codex_config_with_untrusted_workdir(body: str, exec_cwd: str) -> str:
+    """Return config.toml text whose only project entry marks exec_cwd untrusted."""
+    body = body.replace(_CODEX_UNTRUSTED_WORKDIR_MARKER + "\n", "")
+    body = _CODEX_PROJECT_TABLE_RE.sub("", body).rstrip()
+    paths: list[str] = []
+    for candidate in (os.path.abspath(exec_cwd), os.path.realpath(exec_cwd)):
+        if candidate not in paths:
+            paths.append(candidate)
+    lines = [body, "", _CODEX_UNTRUSTED_WORKDIR_MARKER]
+    for path in paths:
+        lines.extend([f"[projects.{json.dumps(path)}]", 'trust_level = "untrusted"'])
+    return "\n".join(lines) + "\n"
+
+
 def _codex_gateway_provider_toml(route: GatewayRoute) -> str:
     def _toml_string(value: str) -> str:
         return json.dumps(str(value))
@@ -3584,15 +3734,12 @@ def build_executor(
         and has_task_steps_manager_tool
     )
     disable_native_shell = False
-    disable_native_web_search = False
+    # Codex's own web search is on unless the config turns it off.
+    disable_native_web_search = not bool(
+        getattr(config.tools, "native_web_search_enabled", True)
+    )
     if allowed_tool_names is not None:
-        allowed_set = set(allowed_tool_names)
         disable_native_shell = True
-        # The SerpAPI tools are only built when a key exists; Codex's own web search must not depend on that key.
-        disable_native_web_search = "search_google_web" not in allowed_set and not (
-            bool(getattr(config.tools, "serpapi_google_web_enabled", False))
-            or bool(getattr(config.tools, "serpapi_bing_web_enabled", False))
-        )
     if str(os.environ.get("CHACK_DISABLE_CODEX_NATIVE_WEB", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
         disable_native_web_search = True
 
@@ -3624,6 +3771,9 @@ def build_executor(
     existing_codex_auth_file = "" if uses_gateway_route else _existing_codex_auth_file()
     if explicitly_use_openai_api:
         existing_codex_auth_file = ""
+    if not codex_access_token and not existing_codex_auth_file:
+        # Without a Codex (ChatGPT) login the hosted web search tool fails.
+        disable_native_web_search = True
     codex_api_key = route.api_key if route is not None else (codex_access_token or fallback_openai_api_key)
     if not codex_api_key and not existing_codex_auth_file:
         raise ValueError(

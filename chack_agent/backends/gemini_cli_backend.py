@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import (
     STORE as TASK_STEPS_STORE,
@@ -58,7 +59,6 @@ _GEMINI_CLI_DENYLIST_TOOLS = {
     "ask_user",
     "enter_plan_mode",
     "exit_plan_mode",
-    "exec",
 }
 
 
@@ -322,13 +322,18 @@ class GeminiCliExecutor:
         command = self._build_command(prompt)
         env = self._build_env()
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
+        # The Chack tools work in exec_cwd; Gemini CLI itself (which has no
+        # native tools here) starts in an empty workspace of its own.
+        self._write_gemini_settings(self._gemini_home, tools_cwd=exec_cwd or os.getcwd())
+        launch_cwd = self._gemini_workspace_dir()
         timeout_seconds = int(os.environ.get("CHACK_GEMINI_EXEC_TIMEOUT_SECONDS", "900") or "900")
 
         _LOGGER.info(
-            "Starting Gemini CLI process: model=%s timeout_seconds=%s gemini_session_id=%s cwd=%s",
+            "Starting Gemini CLI process: model=%s timeout_seconds=%s gemini_session_id=%s cwd=%s tools_cwd=%s",
             self._model_name,
             timeout_seconds,
             self._gemini_session_id or "",
+            launch_cwd,
             exec_cwd or "(inherited)",
         )
 
@@ -341,7 +346,7 @@ class GeminiCliExecutor:
                 text=True,
                 bufsize=1,
                 env=env,
-                cwd=exec_cwd,
+                cwd=launch_cwd,
             )
         except FileNotFoundError:
             return (
@@ -529,6 +534,14 @@ class GeminiCliExecutor:
         augment_subprocess_pythonpath(env)
         env["PYTHONUNBUFFERED"] = "1"
         env["GEMINI_CLI_HOME"] = str(self._gemini_home or os.getcwd())
+        # Gemini CLI loads the launch directory's GEMINI.md, .gemini/settings.json
+        # (which can run commands), MCP servers, hooks, skills and agents once
+        # that directory is trusted, and in headless mode it refuses to start
+        # in an untrusted one. It is launched in an empty workspace Chack owns
+        # (see _gemini_workspace_dir), so trusting that directory loads
+        # nothing from the repository under audit.
+        env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
+        env.pop("GEMINI_RESTRICTED_MODE", None)
         if self._gemini_api_key:
             env["GEMINI_API_KEY"] = self._gemini_api_key
 
@@ -567,7 +580,8 @@ class GeminiCliExecutor:
         )
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
-        env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        # Child processes export into the same place and join this run's trace.
+        env.update(child_process_env())
         return env
 
     def _ensure_gemini_home_and_config(self) -> None:
@@ -582,8 +596,18 @@ class GeminiCliExecutor:
         self._gemini_home = base
         self._write_gemini_settings(base)
 
-    def _write_gemini_settings(self, gemini_home: str) -> None:
-        settings_path = os.path.join(gemini_home, "settings.json")
+    def _gemini_workspace_dir(self) -> str:
+        """Empty directory Gemini CLI is launched in, inside the isolated home."""
+        workspace = os.path.join(str(self._gemini_home or os.getcwd()), "workspace")
+        os.makedirs(workspace, exist_ok=True)
+        return workspace
+
+    def _write_gemini_settings(self, gemini_home: str, *, tools_cwd: str | None = None) -> None:
+        # GEMINI_CLI_HOME replaces the home directory, so the user settings
+        # file is <home>/.gemini/settings.json.
+        settings_dir = os.path.join(gemini_home, ".gemini")
+        os.makedirs(settings_dir, exist_ok=True)
+        settings_path = os.path.join(settings_dir, "settings.json")
         settings_payload = {
             "model": {
                 "name": self._model_name,
@@ -604,8 +628,12 @@ class GeminiCliExecutor:
                     }
                 ]
             },
+            # Gemini CLI's own tools are off: they would work in its empty
+            # launch directory, and headless runs drop every tool that needs
+            # approval. The model gets Chack's tools (a trusted server, so they
+            # run without approval) and, unless turned off, its web search.
             "tools": {
-                "core": [],
+                "core": self._gemini_core_tools(),
                 "shell": {
                     "inactivityTimeout": int(
                         os.environ.get("CHACK_GEMINI_SHELL_INACTIVITY_TIMEOUT", "300")
@@ -617,12 +645,22 @@ class GeminiCliExecutor:
                     "command": sys.executable,
                     "args": ["-m", "chack_agent.backends.chack_tools_mcp_server"],
                     "env": self._gemini_mcp_env_map(),
+                    "trust": True,
                     "timeout": int(
                         os.environ.get("CHACK_GEMINI_MCP_TOOL_TIMEOUT_MS", "300000")
                     ),
                 }
             },
         }
+        # Headless Gemini CLI exits when no auth type is selected.
+        settings_payload["security"] = {
+            "auth": {"selectedType": "gemini-api-key" if self._gemini_api_key else "vertex-ai"}
+        }
+        # Prompt sections for features a Chack run never uses.
+        settings_payload["skills"] = {"enabled": False}
+        settings_payload["general"] = {"topicUpdateNarration": False}
+        if tools_cwd:
+            settings_payload["mcpServers"]["chack_tools"]["cwd"] = tools_cwd
         if self._playwright_mcp_enabled():
             pw_cfg = playwright_mcp_server_config()
             pw_cfg["timeout"] = int(
@@ -632,6 +670,20 @@ class GeminiCliExecutor:
         with open(settings_path, "w", encoding="utf-8") as handle:
             json.dump(settings_payload, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+
+    def _gemini_core_tools(self) -> list[str]:
+        try:
+            cfg = json.loads(self._tools_config_json or "{}")
+        except Exception:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        tools = ["mcp_chack_tools_*"]
+        if self._playwright_mcp_enabled():
+            tools.append("mcp_playwright_*")
+        if cfg.get("native_web_search_enabled", True):
+            tools.append("google_web_search")
+        return tools
 
     def _playwright_mcp_enabled(self) -> bool:
         try:
@@ -682,7 +734,6 @@ class GeminiCliExecutor:
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
-            "CHACK_DISABLE_STDOUT_EVENTS",
             "CHACK_RESEARCH_MASTER_DIR",
             "CHACK_RESEARCH_DATA_DIR",
             "CHACK_RESEARCH_SAVE_ARTIFACTS",
@@ -732,7 +783,9 @@ class GeminiCliExecutor:
             "GOOGLE_CLOUD_PROJECT",
             "GOOGLE_CLOUD_LOCATION",
             "GEMINI_CLI_HOME",
+            "CHACK_EXEC_CWD",
         ]
+        env_keys.extend(OTEL_CHILD_ENV_NAMES)
         env_payload: dict[str, str] = {}
         src_env = self._build_env()
         for key in env_keys:

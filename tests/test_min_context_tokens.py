@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -379,14 +380,29 @@ class ClaudeContextBetaTests(unittest.TestCase):
 
 
 class CodexNativeWebSearchTests(unittest.TestCase):
-    """Codex's built-in web search follows the config, not the SerpAPI key."""
+    """Codex's hosted web search is on unless the config or the login rules it out."""
 
-    def _executor(self, serpapi_enabled: bool):
+    def _executor(self, *, token: str = "codex-token", api_key: str = "", **tools) -> object:
         config = _make_config("codex", 250_000)
-        config.tools.serpapi_google_web_enabled = serpapi_enabled
+        config.credentials.openai_api_key = api_key
+        config.credentials.codex_access_token = token
+        for name, value in tools.items():
+            setattr(config.tools, name, value)
+        empty_home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty_home, True)
         with patch("chack_agent.model_aliases._get_model_aliases", return_value={}), patch(
             "chack_agent.model_aliases._get_backend_aliases", return_value={}
-        ), patch.dict(os.environ, {"SERPAPI_API_KEY": "", "CHACK_DISABLE_CODEX_NATIVE_WEB": ""}):
+        ), patch.dict(
+            os.environ,
+            {
+                "SERPAPI_API_KEY": "",
+                "CHACK_DISABLE_CODEX_NATIVE_WEB": "",
+                "CODEX_ACCESS_TOKEN": "",
+                "OPENAI_API_KEY": "",
+                "CODEX_HOME": empty_home,
+                "HOME": empty_home,
+            },
+        ):
             return build_codex_executor(
                 resolve_config_aliases(config),
                 system_prompt="system",
@@ -396,11 +412,19 @@ class CodexNativeWebSearchTests(unittest.TestCase):
                 tools_override=[],
             )
 
-    def test_enabled_when_config_asks_for_web_search_without_a_key(self) -> None:
-        self.assertFalse(self._executor(True)._disable_native_web_search)
+    def _web_search_on(self, executor) -> bool:
+        return 'web_search="disabled"' not in executor._disabled_native_tool_args()
 
-    def test_disabled_when_config_has_no_web_search(self) -> None:
-        self.assertTrue(self._executor(False)._disable_native_web_search)
+    def test_on_by_default_with_a_codex_login_and_an_explicit_tool_list(self) -> None:
+        self.assertTrue(self._web_search_on(self._executor()))
+
+    def test_off_when_the_config_turns_it_off(self) -> None:
+        self.assertFalse(
+            self._web_search_on(self._executor(native_web_search_enabled=False))
+        )
+
+    def test_off_with_only_an_openai_api_key(self) -> None:
+        self.assertFalse(self._web_search_on(self._executor(token="", api_key="sk-test")))
 
 
 if __name__ == "__main__":

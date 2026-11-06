@@ -203,6 +203,38 @@ def _resolve_model_lookup(pricing: PricingTable, model: str) -> Optional[str]:
     return None
 
 
+def _model_family(model_name: str) -> str:
+    bare = str(model_name or "").strip().lower().rsplit("/", 1)[-1]
+    for part in bare.replace("_", "-").split("-"):
+        if part:
+            return part
+    return ""
+
+
+def fallback_model_pricing(pricing: PricingTable, model: str) -> Optional[Tuple[str, ModelPricing]]:
+    """Rates for a model the table does not list.
+
+    The most expensive model of the same family (``claude``, ``gpt``,
+    ``gemini``...) is used, or of the whole table when the family is unknown:
+    a cost cap must stop a run early rather than let it overspend.
+    """
+    if not pricing.models:
+        return None
+    family = _model_family(model)
+    candidates = [name for name in pricing.models if family and _model_family(name) == family]
+    if not candidates:
+        candidates = list(pricing.models)
+    name = max(
+        candidates,
+        key=lambda key: (pricing.models[key].output, pricing.models[key].input, key),
+    )
+    return name, pricing.models[name]
+
+
+def is_priced(pricing: PricingTable, model: str) -> bool:
+    return _resolve_model_lookup(pricing, model) is not None
+
+
 def _build_pricing_table(raw_models: Dict[str, Dict[str, float]]) -> PricingTable:
     models: Dict[str, ModelPricing] = {}
     for name, values in raw_models.items():
@@ -262,12 +294,20 @@ def estimate_cost(
     cached_prompt_tokens: int = 0,
     cache_write_tokens: int = 0,
     cache_write_rate_multiplier: float = 1.0,
+    fallback: bool = False,
 ) -> Optional[float]:
-    lookup = _resolve_model_lookup(pricing, model)
-    if not lookup:
-        return None
+    """Cost in USD, or ``None`` when the model has no price.
 
-    rates = pricing.models[lookup]
+    With ``fallback``, an unlisted model is priced by ``fallback_model_pricing``.
+    """
+    lookup = _resolve_model_lookup(pricing, model)
+    if lookup:
+        rates = pricing.models[lookup]
+    else:
+        fallback_rates = fallback_model_pricing(pricing, model) if fallback else None
+        if fallback_rates is None:
+            return None
+        rates = fallback_rates[1]
     # Provider usage reports total prompt tokens plus disjoint cache-read and
     # cache-write subsets. Cache writes are billed at their dedicated rate,
     # not once as ordinary input and again as a write.
@@ -291,6 +331,7 @@ def estimate_costs_by_model(
     usage_by_model: Dict[str, Tuple[int, int, int, int]],
     *,
     cache_write_rate_multiplier: float = 1.0,
+    fallback: bool = False,
 ) -> tuple[float, List[str]]:
     total = 0.0
     missing_models: List[str] = []
@@ -308,6 +349,7 @@ def estimate_costs_by_model(
             cached_prompt_tokens=cached_prompt_tokens,
             cache_write_tokens=cache_write_tokens,
             cache_write_rate_multiplier=cache_write_rate_multiplier,
+            fallback=fallback,
         )
         if model_cost is None:
             missing_models.append(model_name)

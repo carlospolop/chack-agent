@@ -117,7 +117,6 @@ def test_local_tool_instruction_is_preserved_without_shared_mcp():
         shared_mcp_url="",
         has_configured_tools=True,
     )
-    assert "report_intent" in instructions
     assert "no-tools task" not in instructions
 
 

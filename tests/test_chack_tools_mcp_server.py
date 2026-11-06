@@ -134,7 +134,6 @@ def test_stdio_server_completes_mcp_handshake() -> None:
                 "CHACK_DEFAULT_MODEL": "gpt-5.6-sol",
                 "CHACK_TOOLS_CONFIG_JSON": '{"exec_enabled": true}',
                 "CHACK_ALLOWED_TOOLS_JSON": '["exec"]',
-                "CHACK_DISABLE_STDOUT_EVENTS": "1",
             }
         )
         server = StdioServerParameters(
@@ -149,6 +148,38 @@ def test_stdio_server_completes_mcp_handshake() -> None:
                 return {tool.name for tool in tools.tools}
 
     assert "exec" in asyncio.run(_list_tool_names())
+
+
+def test_stdio_server_offers_only_tools() -> None:
+    # Clients add resource/prompt browsing tools to every model request when a
+    # server advertises those capabilities, so the server must not.
+    async def _capabilities():
+        env = os.environ.copy()
+        env.update(
+            {
+                "CHACK_MODEL_PROVIDER": "codex",
+                "CHACK_DEFAULT_MODEL": "gpt-5.6-sol",
+                "CHACK_TOOLS_CONFIG_JSON": '{"exec_enabled": true}',
+                "CHACK_ALLOWED_TOOLS_JSON": '["exec"]',
+            }
+        )
+        server = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "chack_agent.backends.chack_tools_mcp_server"],
+            env=env,
+        )
+        async with stdio_client(server) as streams:
+            async with ClientSession(*streams) as session:
+                init = await session.initialize()
+                tools = await session.list_tools()
+                return init.capabilities, {tool.name for tool in tools.tools}
+
+    capabilities, tool_names = asyncio.run(_capabilities())
+
+    assert capabilities.tools is not None
+    assert capabilities.resources is None
+    assert capabilities.prompts is None
+    assert "exec" in tool_names
 
 
 @pytest.mark.filterwarnings(
@@ -190,3 +221,31 @@ def test_schema_type_preserves_string_or_array_union() -> None:
 def test_schema_type_preserves_nullable_union() -> None:
     annotation = _py_type_from_schema({"type": ["integer", "null"]})
     assert annotation is not int
+
+
+def test_clients_receive_each_tool_result_once_as_text() -> None:
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    @function_tool(name_override="read_notes")
+    def read_notes(topic: str) -> str:
+        """Read notes about a topic."""
+        return f"notes about {topic}: " + "x" * 2000
+
+    server = FastMCP("result-shape-test")
+    _register_tools(
+        server,
+        [read_notes],
+        _ServerPolicyState(require_task_steps_manager_init_first=False, max_non_task_tools=0),
+    )
+
+    async def _exchange():
+        async with create_connected_server_and_client_session(server) as client:
+            listed = await client.list_tools()
+            result = await client.call_tool("read_notes", {"topic": "auth"})
+            return listed, result
+
+    listed, result = asyncio.run(_exchange())
+
+    assert [tool.outputSchema for tool in listed.tools] == [None]
+    assert result.structuredContent is None
+    assert [block.text for block in result.content] == ["notes about auth: " + "x" * 2000]

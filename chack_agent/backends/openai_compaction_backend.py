@@ -7,7 +7,6 @@ import logging
 import os
 import threading
 import time
-import traceback
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -24,6 +23,8 @@ from agents import (
 from agents.items import ToolCallItem
 from agents.exceptions import ModelBehaviorError
 
+from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
+
 from ..config import ChackConfig
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
@@ -34,7 +35,7 @@ from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import openai_thinking_effort
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
-from chack_tools.telemetry import log_event, log_tool_started, log_tool_executed, log_tool_error
+from chack_tools.telemetry import log_event, run_with_tool_logging
 from chack_tools.tool_usage_state import (
     STORE as TOOL_USAGE_STORE,
     current_max_tools_used,
@@ -782,34 +783,9 @@ def _wrap_tools_with_logging(tools: list[Any]) -> list[Any]:
 
         def _wrapped(*args, **kwargs):
             tool_input = _extract_tool_input(args, kwargs)
-            start_ts = log_tool_started(tool_name, tool_input)
-            start_time = time.time()
-            error = None
-            try:
-                return call_target(*args, **kwargs)
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-                try:
-                    log_tool_error(
-                        tool_name,
-                        tool_input,
-                        error=error,
-                        trace=traceback.format_exc(),
-                    )
-                except Exception:
-                    pass
-                raise
-            finally:
-                end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                duration_ms = int((time.time() - start_time) * 1000)
-                log_tool_executed(
-                    tool_name,
-                    tool_input,
-                    start_ts=start_ts,
-                    end_ts=end_ts,
-                    duration_ms=duration_ms,
-                    error=error,
-                )
+            return run_with_tool_logging(
+                tool_name, tool_input, lambda: call_target(*args, **kwargs)
+            )
 
         _wrapped.__name__ = getattr(call_target, "__name__", "wrapped_tool")
         _wrapped.__doc__ = getattr(call_target, "__doc__", None)
@@ -931,6 +907,7 @@ def build_executor(
         require_task_steps_manager_init_first=require_task_steps_manager_init_first,
     )
     tools = _apply_budget_injection(tools)
+    tools = ToolCallPolicy(config.tools, outputs_readable=has_exec_tool(tools)).wrap(tools)
     model: Any = model_name
     # For OpenAI compaction backend use native OpenAI Responses model.
 
