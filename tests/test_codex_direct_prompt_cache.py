@@ -101,6 +101,24 @@ def test_chatgpt_direct_request_uses_stable_key_and_session_without_unsupported_
     assert first_headers["originator"] == "codex_cli_rs"
 
 
+def test_direct_request_is_used_only_when_the_run_cannot_search_the_web():
+    # The direct request sends no tools: a run with web search must reach Codex.
+    offline = _executor()
+    offline._disable_native_web_search = True
+    offline._fallback_web_mcp_url = ""
+    assert offline._should_use_direct_prompt_cache() is True
+
+    native_web = _executor()
+    native_web._disable_native_web_search = False
+    native_web._fallback_web_mcp_url = ""
+    assert native_web._should_use_direct_prompt_cache() is False
+
+    keyless_web = _executor()
+    keyless_web._disable_native_web_search = True
+    keyless_web._fallback_web_mcp_url = "https://mcp.exa.ai/mcp"
+    assert keyless_web._should_use_direct_prompt_cache() is False
+
+
 def test_api_key_direct_request_uses_documented_explicit_cache_fields():
     executor = _executor()
     executor._direct_cache_credentials = lambda: ("api_key", "sk-test", "")
