@@ -517,6 +517,13 @@ class OpencodeCliExecutor:
         except Exception:
             return False
 
+    def _web_search_enabled(self) -> bool:
+        try:
+            cfg = json.loads(self._tools_config_json or "{}")
+        except Exception:
+            cfg = {}
+        return bool(cfg.get("native_web_search_enabled", True)) if isinstance(cfg, dict) else True
+
     def _playwright_mcp_enabled(self) -> bool:
         try:
             cfg = json.loads(self._tools_config_json or "{}")
@@ -567,6 +574,8 @@ class OpencodeCliExecutor:
         # Chack's own exec tool, when offered, is already the run's shell.
         if not self._exec_enabled() or "exec" in self._allowed_tool_names():
             permission["bash"] = "deny"
+        if not self._web_search_enabled():
+            permission["websearch"] = "deny"
         agent: dict[str, Any] = {
             "mode": "primary",
             "description": "Chack agent",
@@ -678,6 +687,10 @@ class OpencodeCliExecutor:
             "OPENCODE_DISABLE_LSP_DOWNLOAD",
         ):
             env[flag] = "1"
+        if self._web_search_enabled():
+            # opencode's websearch uses Exa's hosted search, which needs no
+            # account, so it works with every provider and key.
+            env["OPENCODE_ENABLE_EXA"] = "1"
         env.setdefault(
             "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
             os.environ.get("CHACK_OPENCODE_BASH_DEFAULT_TIMEOUT_MS", "120000"),

@@ -508,6 +508,19 @@ def test_the_native_shell_is_offered_only_when_exec_is_on_without_chack_exec(fak
     assert permission.get("bash", permission["*"]) == "allow"
 
 
+def test_web_search_is_on_by_default_and_off_when_configured(fake_opencode):
+    fake_opencode.script([{"events": [_text("ok"), _finish(1, 1)]}], env_keys=["OPENCODE_ENABLE_EXA"])
+    _build(_gateway_config("gpt-6-sol")).invoke({"input": "hi"})
+    off = ToolsConfig(task_steps_manager_enabled=False, native_web_search_enabled=False)
+    _build(_gateway_config("gpt-6-sol", tools=off)).invoke({"input": "hi"})
+
+    on_call, off_call = fake_opencode.calls
+    assert on_call["env"]["OPENCODE_ENABLE_EXA"] == "1"
+    assert on_call["config"]["permission"].get("websearch") != "deny"
+    assert off_call["env"]["OPENCODE_ENABLE_EXA"] is None
+    assert off_call["config"]["permission"]["websearch"] == "deny"
+
+
 def test_structured_output_is_extracted_and_validated(fake_opencode):
     fake_opencode.script([{"events": [_text('Here it is: {"capital": "Canberra"}'), _finish(1, 1)]}])
     agent = AgentConfig(

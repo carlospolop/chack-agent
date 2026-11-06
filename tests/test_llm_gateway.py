@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import tomllib
@@ -628,3 +629,116 @@ def test_chained_requests_keep_outputs_for_calls_stored_with_the_previous_respon
 
     assert chained == outputs
     assert all(item.get("type") != "function_call_output" for item in unchained)
+
+
+# --- web search without the vendor's own search ----------------------------
+
+
+def _claude_settings(executor):
+    executor._ensure_claude_home_and_settings()
+    with open(os.path.join(executor._claude_home, "settings.json"), encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _claude_builtins(command):
+    return command[command.index("--tools") + 1].split(",")
+
+
+def test_codex_on_a_gateway_searches_the_web_through_exa(catalog_requests):
+    config = _config("codex", "gpt-6-sol", api_key_type="gateway")
+    config.tools.exec_enabled = True
+
+    servers = _codex_config_toml(_build(build_codex_executor, config))["mcp_servers"]
+
+    assert servers["web_search"]["url"] == "https://mcp.exa.ai/mcp"
+    assert "chack_tools" in servers
+
+
+def test_codex_web_search_fallback_carries_an_exa_key(monkeypatch, catalog_requests):
+    monkeypatch.setenv("EXA_API_KEY", "exa key/1")
+    config = _config("codex", "gpt-6-sol", api_key_type="gateway")
+    config.tools.exec_enabled = True
+
+    servers = _codex_config_toml(_build(build_codex_executor, config))["mcp_servers"]
+
+    assert servers["web_search"]["url"] == "https://mcp.exa.ai/mcp?exaApiKey=exa%20key%2F1"
+
+
+def test_codex_without_a_codex_login_searches_the_web_through_exa(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = _config("codex", "gpt-6-sol", openai_api_key="sk-openai")
+    config.tools.exec_enabled = True
+    executor = _build(build_codex_executor, config)
+
+    servers = _codex_config_toml(executor)["mcp_servers"]
+
+    assert 'web_search="disabled"' in executor._build_command()
+    assert servers["web_search"]["url"] == "https://mcp.exa.ai/mcp"
+
+
+def test_codex_with_a_codex_login_keeps_its_own_web_search(monkeypatch):
+    claims = {"https://api.openai.com/auth": {"chatgpt_account_id": "acct"}}
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    monkeypatch.setenv("CODEX_ACCESS_TOKEN", f"h.{body}.s")
+    config = _config("codex", "gpt-6-sol")
+    config.tools.exec_enabled = True
+    executor = _build(build_codex_executor, config)
+
+    servers = _codex_config_toml(executor)["mcp_servers"]
+
+    assert 'web_search="disabled"' not in executor._build_command()
+    assert "web_search" not in servers
+
+
+@pytest.mark.parametrize("how", ["config", "env"])
+def test_codex_web_search_turned_off_adds_no_fallback(how, monkeypatch, catalog_requests):
+    config = _config("codex", "gpt-6-sol", api_key_type="gateway")
+    config.tools.exec_enabled = True
+    if how == "config":
+        config.tools.native_web_search_enabled = False
+    else:
+        monkeypatch.setenv("CHACK_DISABLE_CODEX_NATIVE_WEB", "1")
+
+    servers = _codex_config_toml(_build(build_codex_executor, config))["mcp_servers"]
+
+    assert "web_search" not in servers
+
+
+def test_codex_agent_without_tools_gets_no_web_search(catalog_requests):
+    config = _config("codex", "gpt-6-sol", api_key_type="gateway")
+
+    parsed = _codex_config_toml(_build(build_codex_executor, config))
+
+    assert "web_search" not in parsed.get("mcp_servers", {})
+
+
+def test_claude_on_a_gateway_searches_the_web_through_exa(catalog_requests):
+    config = _config("claude", "claude-opus-5-5", api_key_type="gateway")
+    config.tools.exec_enabled = True
+    executor = _build(build_claude_executor, config)
+
+    servers = _claude_settings(executor)["mcpServers"]
+
+    assert servers["web_search"] == {"type": "http", "url": "https://mcp.exa.ai/mcp"}
+    assert "WebSearch" not in _claude_builtins(executor._build_command("prompt"))
+
+
+def test_claude_on_openrouter_keeps_its_own_web_search():
+    config = _config(
+        "claude", "anthropic/claude-haiku-5.5", api_key_type="openrouter", openrouter_api_key="or-key"
+    )
+    config.tools.exec_enabled = True
+    executor = _build(build_claude_executor, config)
+
+    assert "WebSearch" in _claude_builtins(executor._build_command("prompt"))
+    assert "web_search" not in _claude_settings(executor)["mcpServers"]
+
+
+def test_claude_with_web_search_turned_off_has_none(catalog_requests):
+    config = _config("claude", "claude-opus-5-5", api_key_type="gateway")
+    config.tools.exec_enabled = True
+    config.tools.native_web_search_enabled = False
+    executor = _build(build_claude_executor, config)
+
+    assert "WebSearch" not in _claude_builtins(executor._build_command("prompt"))
+    assert "web_search" not in _claude_settings(executor)["mcpServers"]

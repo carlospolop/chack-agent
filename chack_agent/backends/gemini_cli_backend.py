@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
@@ -25,7 +25,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..resume_compaction import ResumeCompactionResult
-from ..llm_gateway import clone_config_for_gateway, get_gateway_route
+from ..llm_gateway import GATEWAY_KIND_LITELLM, GatewayRoute, clone_config_for_gateway, get_gateway_route
 from ..thinking_effort import gemini_thinking_config, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -130,6 +130,8 @@ class GeminiCliExecutor:
         serialized_tools_append_names_json: str = "",
         max_context_tokens: int = 0,
         compaction_threshold_ratio: float = 0.75,
+        gemini_base_url: str = "",
+        gemini_headers: dict[str, str] | None = None,
     ) -> None:
         self._conversation = conversation
         self._memory_limit = memory_max_messages
@@ -139,6 +141,9 @@ class GeminiCliExecutor:
         self._max_turns = int(max_turns or 0)
         self._gemini_cli_path = gemini_cli_path
         self._gemini_api_key = gemini_api_key
+        # Set when the Gemini API is reached through an LLM gateway.
+        self._gemini_base_url = str(gemini_base_url or "").strip()
+        self._gemini_headers = dict(gemini_headers or {})
         self._tools_config_json = tools_config_json
         self._allowed_tools_json = allowed_tools_json
         self._serialized_tools_override_b64 = str(serialized_tools_override_b64 or "")
@@ -275,7 +280,7 @@ class GeminiCliExecutor:
         return result
 
     def _compose_prompt(self, user_input: str) -> str:
-        base = str(self._base_system_prompt or "").strip()
+        # The base system prompt is the CLI's system prompt (GEMINI_SYSTEM_MD).
         policy_lines: list[str] = []
 
         if self._require_task_steps_manager_init_first:
@@ -314,7 +319,7 @@ class GeminiCliExecutor:
         if schema_lines:
             schema_block = "\n\n" + "\n".join(schema_lines)
 
-        prompt_parts = [p for p in (base, user_input, policy_block, schema_block) if p.strip()]
+        prompt_parts = [p for p in (user_input, policy_block, schema_block) if p.strip()]
         return "\n".join(prompt_parts)
 
     def _run_gemini(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
@@ -534,6 +539,9 @@ class GeminiCliExecutor:
         augment_subprocess_pythonpath(env)
         env["PYTHONUNBUFFERED"] = "1"
         env["GEMINI_CLI_HOME"] = str(self._gemini_home or os.getcwd())
+        # Chack's prompt replaces the CLI's built-in coding-assistant prompt
+        # (~7k tokens on every request).
+        env["GEMINI_SYSTEM_MD"] = self._system_prompt_path()
         # Gemini CLI loads the launch directory's GEMINI.md, .gemini/settings.json
         # (which can run commands), MCP servers, hooks, skills and agents once
         # that directory is trusted, and in headless mode it refuses to start
@@ -544,6 +552,13 @@ class GeminiCliExecutor:
         env.pop("GEMINI_RESTRICTED_MODE", None)
         if self._gemini_api_key:
             env["GEMINI_API_KEY"] = self._gemini_api_key
+        if self._gemini_base_url:
+            env["GOOGLE_GEMINI_BASE_URL"] = self._gemini_base_url
+            env.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
+        if self._gemini_headers:
+            env["GEMINI_CLI_CUSTOM_HEADERS"] = ", ".join(
+                f"{name}: {value}" for name, value in self._gemini_headers.items()
+            )
 
         env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
         env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
@@ -595,6 +610,11 @@ class GeminiCliExecutor:
         os.makedirs(base, exist_ok=True)
         self._gemini_home = base
         self._write_gemini_settings(base)
+        with open(self._system_prompt_path(), "w", encoding="utf-8") as handle:
+            handle.write(str(self._base_system_prompt or "").strip() + "\n")
+
+    def _system_prompt_path(self) -> str:
+        return os.path.join(str(self._gemini_home or os.getcwd()), "system.md")
 
     def _gemini_workspace_dir(self) -> str:
         """Empty directory Gemini CLI is launched in, inside the isolated home."""
@@ -632,6 +652,9 @@ class GeminiCliExecutor:
             # launch directory, and headless runs drop every tool that needs
             # approval. The model gets Chack's tools (a trusted server, so they
             # run without approval) and, unless turned off, its web search.
+            # Skip the listing of up to 200 workspace files the CLI otherwise
+            # adds to every conversation; the tools can inspect what matters.
+            "context": {"includeDirectoryTree": False},
             "tools": {
                 "core": self._gemini_core_tools(),
                 "shell": {
@@ -887,11 +910,15 @@ def build_executor(
     tools_append: list[Any] | None = None,
 ) -> GeminiCliExecutor:
     gateway_route = get_gateway_route(config)
-    if gateway_route is not None:
+    gateway_config = clone_config_for_gateway(config, gateway_route) if gateway_route is not None else None
+    if gateway_route is not None and _serves_gemini_api(gateway_route):
+        # The gateway's model names, still run by the Gemini CLI.
+        config = replace(gateway_config, model=replace(gateway_config.model, provider="gemini"))
+    elif gateway_route is not None:
         from .gateway_responses_backend import build_executor as build_gateway_responses_executor
 
         return build_gateway_responses_executor(
-            clone_config_for_gateway(config, gateway_route),
+            gateway_config,
             system_prompt=system_prompt,
             max_turns=max_turns,
             memory_max_messages=memory_max_messages,
@@ -1004,7 +1031,8 @@ def build_executor(
     )
 
     gemini_api_key = (
-        str(config.credentials.gemini_api_key or "").strip()
+        (gateway_route.api_key if gateway_route is not None else "")
+        or str(config.credentials.gemini_api_key or "").strip()
         or os.environ.get("GEMINI_API_KEY", "").strip()
         or os.environ.get("GOOGLE_API_KEY", "").strip()
     )
@@ -1082,4 +1110,18 @@ def build_executor(
         compaction_threshold_ratio=float(
             getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75
         ),
+        # The Gemini API sits at the gateway root (<root>/v1beta/models/...).
+        gemini_base_url=_gateway_root(gateway_route.base_url) if gateway_route is not None else "",
+        gemini_headers=gateway_route.headers if gateway_route is not None else None,
     )
+
+
+def _gateway_root(base_url: str) -> str:
+    root = base_url.rstrip("/")
+    return root[: -len("/v1")] if root.endswith("/v1") else root
+
+
+def _serves_gemini_api(route: GatewayRoute) -> bool:
+    """LiteLLM serves Gemini models on Google's own API, which the CLI speaks."""
+    model = (route.upstream or route.model_name).lower()
+    return route.kind == GATEWAY_KIND_LITELLM and "gemini" in model
