@@ -189,3 +189,31 @@ def test_schema_type_preserves_string_or_array_union() -> None:
 def test_schema_type_preserves_nullable_union() -> None:
     annotation = _py_type_from_schema({"type": ["integer", "null"]})
     assert annotation is not int
+
+
+def test_clients_receive_each_tool_result_once_as_text() -> None:
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    @function_tool(name_override="read_notes")
+    def read_notes(topic: str) -> str:
+        """Read notes about a topic."""
+        return f"notes about {topic}: " + "x" * 2000
+
+    server = FastMCP("result-shape-test")
+    _register_tools(
+        server,
+        [read_notes],
+        _ServerPolicyState(require_task_steps_manager_init_first=False, max_non_task_tools=0),
+    )
+
+    async def _exchange():
+        async with create_connected_server_and_client_session(server) as client:
+            listed = await client.list_tools()
+            result = await client.call_tool("read_notes", {"topic": "auth"})
+            return listed, result
+
+    listed, result = asyncio.run(_exchange())
+
+    assert [tool.outputSchema for tool in listed.tools] == [None]
+    assert result.structuredContent is None
+    assert [block.text for block in result.content] == ["notes about auth: " + "x" * 2000]

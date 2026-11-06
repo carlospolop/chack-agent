@@ -719,7 +719,10 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
         _proxy.__annotations__["return"] = str
         _proxy.__signature__ = inspect.Signature(parameters=parameters, return_annotation=str)
 
-        mcp.add_tool(_proxy, name=name, description=description)
+        # Plain text only: with structured output the result is sent twice,
+        # as text content and again as ``structuredContent``, and clients
+        # such as Codex's code mode hand both copies to the model.
+        mcp.add_tool(_proxy, name=name, description=description, structured_output=False)
 
 
 def main() -> None:
@@ -773,6 +776,7 @@ def main() -> None:
         # ── Built-in budget status tool (not part of the dynamic toolset) ──
         @mcp.tool(
             name="check_budget_status",
+            structured_output=False,
             description=(
                 "Returns the current runtime and cost budget status. "
                 "Use it only in a long run after at least five other tool calls, "
