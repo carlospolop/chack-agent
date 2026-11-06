@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
 
 from agents.tool_context import ToolContext
@@ -564,6 +565,24 @@ def _load_toolset() -> list[Any]:
     return filtered_tools
 
 
+def _advertise_tools_only(mcp: FastMCP) -> None:
+    """Drop FastMCP's empty resource and prompt endpoints.
+
+    A server that advertises resources makes MCP clients add their own
+    resource-browser tools (list/read resource) to every model request, and
+    this server has no resources or prompts to browse.
+    """
+    handlers = mcp._mcp_server.request_handlers
+    for request_type in (
+        mcp_types.ListResourcesRequest,
+        mcp_types.ListResourceTemplatesRequest,
+        mcp_types.ReadResourceRequest,
+        mcp_types.ListPromptsRequest,
+        mcp_types.GetPromptRequest,
+    ):
+        handlers.pop(request_type, None)
+
+
 def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -> None:
     for tool in tools:
         name = str(getattr(tool, "name", "") or "").strip()
@@ -768,6 +787,7 @@ def main() -> None:
             call_policy=_tool_call_policy(_read_tools_config_data()),
         )
         _register_tools(mcp, tools, state)
+        _advertise_tools_only(mcp)
         _write_startup_status(
             tool_names=[str(getattr(tool, "name", "") or "") for tool in tools]
             + ["check_budget_status"]

@@ -150,6 +150,38 @@ def test_stdio_server_completes_mcp_handshake() -> None:
     assert "exec" in asyncio.run(_list_tool_names())
 
 
+def test_stdio_server_offers_only_tools() -> None:
+    # Clients add resource/prompt browsing tools to every model request when a
+    # server advertises those capabilities, so the server must not.
+    async def _capabilities():
+        env = os.environ.copy()
+        env.update(
+            {
+                "CHACK_MODEL_PROVIDER": "codex",
+                "CHACK_DEFAULT_MODEL": "gpt-5.6-sol",
+                "CHACK_TOOLS_CONFIG_JSON": '{"exec_enabled": true}',
+                "CHACK_ALLOWED_TOOLS_JSON": '["exec"]',
+            }
+        )
+        server = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "chack_agent.backends.chack_tools_mcp_server"],
+            env=env,
+        )
+        async with stdio_client(server) as streams:
+            async with ClientSession(*streams) as session:
+                init = await session.initialize()
+                tools = await session.list_tools()
+                return init.capabilities, {tool.name for tool in tools.tools}
+
+    capabilities, tool_names = asyncio.run(_capabilities())
+
+    assert capabilities.tools is not None
+    assert capabilities.resources is None
+    assert capabilities.prompts is None
+    assert "exec" in tool_names
+
+
 @pytest.mark.filterwarnings(
     "ignore:Field 'lifespan' has an incomplete definition:"
 )
