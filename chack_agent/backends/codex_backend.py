@@ -1615,6 +1615,10 @@ class CodexExecutor:
             return False
         if self._has_configured_tools() or self._thread_id or self._conversation:
             return False
+        # The direct request carries no tools, so a run that may search the
+        # web (Codex's own search or the keyless fallback) goes through Codex.
+        if not self._disable_native_web_search or self._fallback_web_mcp_url:
+            return False
         try:
             self._direct_cache_credentials()
         except Exception:
