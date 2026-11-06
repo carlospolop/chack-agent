@@ -20,6 +20,7 @@ from agents import (
     tool_input_guardrail,
     set_default_openai_client,
     set_tracing_disabled,
+    WebSearchTool,
 )
 from agents.models.openai_responses import OpenAIResponsesModel
 from agents.items import ToolCallItem
@@ -46,7 +47,7 @@ from chack_tools.tool_usage_state import (
     non_task_tool_count,
 )
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_instance
-from .web_search_fallback import keyless_web_search_enabled
+from .hosted_web_search import WebToolPlan, plan_web_tools
 
 
 _FIRST_TOOL_LOCK = threading.Lock()
@@ -65,6 +66,19 @@ def _build_mcp_servers(config: ChackConfig) -> list[Any]:
 
 
 class _GatewayResponsesModel(OpenAIResponsesModel):
+    def __init__(self, *args: Any, server_tools: tuple[dict, ...] = (), **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Tools the provider runs itself (e.g. OpenRouter's web search),
+        # which the Agents SDK has no tool type for.
+        self._server_tools = list(server_tools)
+
+    def _build_response_create_kwargs(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        create_kwargs = super()._build_response_create_kwargs(*args, **kwargs)
+        if self._server_tools:
+            tools = create_kwargs.get("tools")
+            create_kwargs["tools"] = [*(tools if isinstance(tools, list) else []), *self._server_tools]
+        return create_kwargs
+
     @staticmethod
     def _prepare_input_items(
         items: Any,
@@ -1183,6 +1197,9 @@ def build_executor(
     route, client = _configure_openai_client(config)
     model_name = route.model_name
 
+    web_plan = (
+        plan_web_tools(config, route=route, responses_api=True) if tools_override is None else WebToolPlan()
+    )
     if tools_override is None:
         init_params = inspect.signature(AgentsToolset.__init__).parameters
         toolset_kwargs = {
@@ -1230,8 +1247,8 @@ def build_executor(
             toolset_kwargs["self_critique_rounds"] = int(
                 getattr(config.agent, "self_critique_rounds", 0) or 0
             )
-        if "keyless_web_search" in init_params:
-            toolset_kwargs["keyless_web_search"] = keyless_web_search_enabled(config)
+        if "keyless_web_tools" in init_params:
+            toolset_kwargs["keyless_web_tools"] = web_plan.keyless_tools
         toolset = AgentsToolset(config.tools, **toolset_kwargs)
         tools = toolset.tools
         if tools_append:
@@ -1255,7 +1272,12 @@ def build_executor(
     )
     tools = _apply_budget_injection(tools)
     tools = ToolCallPolicy(config.tools, outputs_readable=has_exec_tool(tools)).wrap(tools)
-    model: Any = _GatewayResponsesModel(model=model_name, openai_client=client)
+    if web_plan.hosted_web_search:
+        tools.append(WebSearchTool())
+    model: Any = _GatewayResponsesModel(
+        model=model_name, openai_client=client, server_tools=web_plan.server_tools
+    )
+    summary_model: Any = _GatewayResponsesModel(model=model_name, openai_client=client)
 
     output_schema = None
     schema_json = getattr(config.agent, "output_schema_json", None)
@@ -1287,7 +1309,7 @@ def build_executor(
             "Always return a concise factual summary preserving key facts, decisions, and constraints."
         ),
         tools=[],
-        model=model,
+        model=summary_model,
         model_settings=ModelSettings(
             reasoning={
                 "effort": openai_thinking_effort(config.agent.thinking_effort)

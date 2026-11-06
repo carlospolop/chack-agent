@@ -17,6 +17,7 @@ from typing_extensions import TypedDict
 from agents.tool_context import ToolContext
 from agents.usage import Usage
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
@@ -31,7 +32,7 @@ from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
 from ..resume_compaction import ResumeCompactionResult
-from .web_search_fallback import keyless_web_search_enabled
+from .hosted_web_search import WebToolPlan, plan_web_tools
 from .playwright_mcp import (
     playwright_mcp_call_tool,
     playwright_mcp_is_available,
@@ -790,6 +791,9 @@ def build_executor(
     if route is None:
         raise ValueError("model.provider=langgraph requires OPENROUTER_API_KEY or an LLM gateway")
 
+    web_plan = (
+        plan_web_tools(config, route=route, responses_api=False) if tools_override is None else WebToolPlan()
+    )
     if tools_override is None:
         toolset = AgentsToolset(
             config.tools,
@@ -814,7 +818,7 @@ def build_executor(
             subchack_max_turns=config.model.subchack_max_turns,
             researcher_administrator_max_turns=config.model.researcher_administrator_max_turns,
             self_critique_enabled=bool(getattr(config.agent, "self_critique_enabled", False)),
-            keyless_web_search=keyless_web_search_enabled(config),
+            keyless_web_tools=web_plan.keyless_tools,
             self_critique_rounds=int(getattr(config.agent, "self_critique_rounds", 0) or 0),
         )
         tools = list(toolset.tools)
@@ -861,8 +865,19 @@ def build_executor(
         timeout=timeout,
         default_headers=dict(route.headers) or None,
         reasoning_effort=normalize_thinking_effort(config.agent.thinking_effort),
+        # Server tools would otherwise switch langchain to the Responses API,
+        # whose replies this executor does not read; OpenRouter accepts them
+        # on Chat Completions too.
+        use_responses_api=False,
     )
-    model_with_tools = model.bind_tools(tool_schemas) if tool_schemas else model
+    if web_plan.server_tools:
+        # Tools the provider runs itself (e.g. OpenRouter's web search and
+        # fetch) are sent as given; ``bind_tools`` only accepts functions.
+        model_with_tools = model.bind(
+            tools=[*(convert_to_openai_tool(schema) for schema in tool_schemas), *web_plan.server_tools]
+        )
+    else:
+        model_with_tools = model.bind_tools(tool_schemas) if tool_schemas else model
 
     thread_id = str(current_session_id() or f"langgraph-{uuid.uuid4()}")
 
