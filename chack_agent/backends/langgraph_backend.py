@@ -31,6 +31,7 @@ from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
 from ..resume_compaction import ResumeCompactionResult
+from .web_search_fallback import keyless_web_search_enabled
 from .playwright_mcp import (
     playwright_mcp_call_tool,
     playwright_mcp_is_available,
@@ -813,6 +814,7 @@ def build_executor(
             subchack_max_turns=config.model.subchack_max_turns,
             researcher_administrator_max_turns=config.model.researcher_administrator_max_turns,
             self_critique_enabled=bool(getattr(config.agent, "self_critique_enabled", False)),
+            keyless_web_search=keyless_web_search_enabled(config),
             self_critique_rounds=int(getattr(config.agent, "self_critique_rounds", 0) or 0),
         )
         tools = list(toolset.tools)

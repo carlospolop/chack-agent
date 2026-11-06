@@ -4,17 +4,20 @@ Codex's and Claude Code's web search tools run on their vendor's API, so they
 fail when the model is reached through a gateway or without the vendor login.
 Those runs get Exa's hosted MCP server instead: it offers ``web_search_exa``
 and ``web_fetch_exa`` and works without an account (``EXA_API_KEY`` raises its
-rate limits). ``tools.native_web_search_enabled = false`` turns web search off
-everywhere, this fallback included.
+rate limits). Backends that call the model API directly get the same search
+as chack's own ``web_search``/``web_fetch`` tools.
+
+``tools.native_web_search_enabled = false`` turns web search off everywhere.
+``tools.keyless_web_search_enabled = false`` keeps the model's own hosted
+search but never sends searches to Exa.
 """
 
 from __future__ import annotations
 
-import os
 from typing import Any
-from urllib.parse import quote
 
-EXA_MCP_URL = "https://mcp.exa.ai/mcp"
+from chack_tools.exa_web_search import exa_mcp_url
+
 FALLBACK_WEB_MCP_SERVER = "web_search"
 
 
@@ -22,6 +25,11 @@ def web_search_enabled(config: Any) -> bool:
     return bool(getattr(getattr(config, "tools", None), "native_web_search_enabled", True))
 
 
+def keyless_web_search_enabled(config: Any) -> bool:
+    """Whether a run without hosted web search may use the keyless Exa search."""
+    tools = getattr(config, "tools", None)
+    return web_search_enabled(config) and bool(getattr(tools, "keyless_web_search_enabled", True))
+
+
 def fallback_web_mcp_url() -> str:
-    key = os.environ.get("EXA_API_KEY", "").strip()
-    return f"{EXA_MCP_URL}?exaApiKey={quote(key, safe='')}" if key else EXA_MCP_URL
+    return exa_mcp_url()

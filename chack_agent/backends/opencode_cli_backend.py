@@ -523,6 +523,15 @@ class OpencodeCliExecutor:
             cfg = {}
         return bool(cfg.get("native_web_search_enabled", True)) if isinstance(cfg, dict) else True
 
+    def _exa_search_enabled(self) -> bool:
+        # opencode's websearch runs on Exa's keyless hosted search.
+        try:
+            cfg = json.loads(self._tools_config_json or "{}")
+        except Exception:
+            cfg = {}
+        keyless = bool(cfg.get("keyless_web_search_enabled", True)) if isinstance(cfg, dict) else True
+        return self._web_search_enabled() and keyless
+
     def _playwright_mcp_enabled(self) -> bool:
         try:
             cfg = json.loads(self._tools_config_json or "{}")
@@ -574,6 +583,8 @@ class OpencodeCliExecutor:
             for tool in _NATIVE_FILE_TOOLS:
                 permission[tool] = "deny"
         if not self._web_search_enabled():
+            permission["webfetch"] = "deny"
+        if not self._exa_search_enabled():
             permission["websearch"] = "deny"
         agent: dict[str, Any] = {
             "mode": "primary",
@@ -686,7 +697,7 @@ class OpencodeCliExecutor:
             "OPENCODE_DISABLE_LSP_DOWNLOAD",
         ):
             env[flag] = "1"
-        if self._web_search_enabled():
+        if self._exa_search_enabled():
             # opencode's websearch uses Exa's hosted search, which needs no
             # account, so it works with every provider and key.
             env["OPENCODE_ENABLE_EXA"] = "1"

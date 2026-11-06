@@ -522,8 +522,22 @@ def test_web_search_is_on_by_default_and_off_when_configured(fake_opencode):
     on_call, off_call = fake_opencode.calls
     assert on_call["env"]["OPENCODE_ENABLE_EXA"] == "1"
     assert on_call["config"]["permission"].get("websearch") != "deny"
+    assert on_call["config"]["permission"].get("webfetch") != "deny"
     assert off_call["env"]["OPENCODE_ENABLE_EXA"] is None
     assert off_call["config"]["permission"]["websearch"] == "deny"
+    assert off_call["config"]["permission"]["webfetch"] == "deny"
+
+
+def test_turning_off_keyless_search_keeps_page_reading(fake_opencode):
+    fake_opencode.script([{"events": [_text("ok"), _finish(1, 1)]}], env_keys=["OPENCODE_ENABLE_EXA"])
+    no_exa = ToolsConfig(task_steps_manager_enabled=False, keyless_web_search_enabled=False)
+    _build(_gateway_config("gpt-6-sol", tools=no_exa)).invoke({"input": "hi"})
+
+    (call,) = fake_opencode.calls
+    # opencode's search runs on Exa, so it goes; fetching pages directly stays.
+    assert call["env"]["OPENCODE_ENABLE_EXA"] is None
+    assert call["config"]["permission"]["websearch"] == "deny"
+    assert call["config"]["permission"].get("webfetch") != "deny"
 
 
 def test_structured_output_is_extracted_and_validated(fake_opencode):

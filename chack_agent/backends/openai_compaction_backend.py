@@ -44,6 +44,7 @@ from chack_tools.tool_usage_state import (
     non_task_tool_count,
 )
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_instance
+from .web_search_fallback import keyless_web_search_enabled
 
 
 _FIRST_TOOL_LOCK = threading.Lock()
@@ -885,6 +886,8 @@ def build_executor(
             toolset_kwargs["self_critique_rounds"] = int(
                 getattr(config.agent, "self_critique_rounds", 0) or 0
             )
+        if "keyless_web_search" in init_params:
+            toolset_kwargs["keyless_web_search"] = keyless_web_search_enabled(config)
         toolset = AgentsToolset(config.tools, **toolset_kwargs)
         tools = toolset.tools
         if tools_append:

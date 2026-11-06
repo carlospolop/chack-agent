@@ -41,7 +41,12 @@ from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
 from . import codex_daybreak
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
-from .web_search_fallback import FALLBACK_WEB_MCP_SERVER, fallback_web_mcp_url, web_search_enabled
+from .web_search_fallback import (
+    FALLBACK_WEB_MCP_SERVER,
+    fallback_web_mcp_url,
+    keyless_web_search_enabled,
+    web_search_enabled,
+)
 from .tool_payloads import (
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_TOOLS_APPEND_B64_ENV,
@@ -3904,7 +3909,9 @@ def build_executor(
         _disable_native_file_tools="exec" not in allowed_tool_names,
         _disable_native_web_search=disable_native_web_search,
         _fallback_web_mcp_url=(
-            fallback_web_mcp_url() if web_search_wanted and disable_native_web_search else ""
+            fallback_web_mcp_url()
+            if web_search_wanted and disable_native_web_search and keyless_web_search_enabled(config)
+            else ""
         ),
         _runtime_env_json=json.dumps(
             {

@@ -44,7 +44,12 @@ from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
 from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
-from .web_search_fallback import FALLBACK_WEB_MCP_SERVER, fallback_web_mcp_url, web_search_enabled
+from .web_search_fallback import (
+    FALLBACK_WEB_MCP_SERVER,
+    fallback_web_mcp_url,
+    keyless_web_search_enabled,
+    web_search_enabled,
+)
 from .tool_payloads import (
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_INLINE_ENV_VALUE_MAX_CHARS,
@@ -2342,7 +2347,7 @@ def build_executor(
         _native_web_search=native_web_search,
         _fallback_web_mcp_url=(
             fallback_web_mcp_url()
-            if web_search_enabled(config) and not native_web_search
+            if keyless_web_search_enabled(config) and not native_web_search
             else ""
         ),
         _anthropic_api_key=str(
