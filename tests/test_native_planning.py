@@ -56,7 +56,9 @@ def test_forced_planning_prompt_uses_backend_native_tool_names() -> None:
         native_task_planning_backend="claude_code",
     )
 
-    assert "built-in `update_plan`" in codex
+    # codex exec has no update_plan tool, so the prompt must not send the model
+    # looking for one.
+    assert "update_plan" not in codex
     assert "task_steps_manager action=init" not in codex
     assert "`TodoWrite` or `TaskCreate`/`TaskUpdate`" in claude
     assert "task_steps_manager action=init" not in claude
@@ -268,7 +270,7 @@ def test_backend_compose_prompts_use_native_planning_policy() -> None:
     claude_prompt = ClaudeCodeExecutor._compose_prompt(claude, "do work")
     assert codex_prompt == "do work"
     assert claude_prompt == "do work"
-    assert "built-in `update_plan`" in codex._cacheable_developer_prompt
+    assert "update_plan" not in codex._cacheable_developer_prompt
     assert "`TodoWrite` or `TaskCreate`/`TaskUpdate`" in claude._cacheable_system_prompt
     assert "mcp__chack_tools__task_steps_manager" not in claude._cacheable_system_prompt
 

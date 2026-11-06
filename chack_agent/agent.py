@@ -148,10 +148,11 @@ def _build_initial_system_prompt(
 ) -> str:
     native_backend = native_planning_backend(native_task_planning_backend)
     if task_steps_manager_enabled and native_backend:
-        task_note = native_planning_prompt(
+        native_line = native_planning_prompt(
             native_backend,
             required_first=require_task_steps_manager_init_first,
-        ) + "\n"
+        )
+        task_note = native_line + "\n" if native_line else ""
     elif task_steps_manager_enabled and require_task_steps_manager_init_first:
         task_note = (
             "- Your first tool call must be task_steps_manager action=init with a concise plan. "

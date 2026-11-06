@@ -1,3 +1,4 @@
+import json
 import subprocess
 import os
 import re
@@ -15,6 +16,28 @@ from .run_lifecycle import (
     terminate_process_group,
 )
 from .telemetry import run_with_tool_logging
+
+def _command_env() -> dict[str, str] | None:
+    """The caller's environment for shell commands.
+
+    Inside the Chack MCP server PYTHONPATH also lists the runtime's own import
+    roots; a command running another Python would import them and fail.
+    """
+    caller = os.environ.get("CHACK_CALLER_PYTHONPATH_JSON")
+    if caller is None:
+        return None
+    env = dict(os.environ)
+    del env["CHACK_CALLER_PYTHONPATH_JSON"]
+    try:
+        pythonpath = json.loads(caller)
+    except ValueError:
+        return env
+    if isinstance(pythonpath, str):
+        env["PYTHONPATH"] = pythonpath
+    else:
+        env.pop("PYTHONPATH", None)
+    return env
+
 
 class ExecTool:
     def __init__(self, config: ToolsConfig):
@@ -53,7 +76,7 @@ class ExecTool:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=None,
+            env=_command_env(),
             cwd=resolved_cwd,
             start_new_session=True,
         )

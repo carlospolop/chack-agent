@@ -840,6 +840,7 @@ class CopilotCliExecutor:
             "PIP_REQUIRE_VIRTUALENV",
             "PIP_DISABLE_PIP_VERSION_CHECK",
             "PYTHONNOUSERSITE",
+            "CHACK_CALLER_PYTHONPATH_JSON",
             "DYNAMIC_POC_VIRTUAL_ENV",
             "ANDROID_HOME",
             "ANDROID_SDK_ROOT",

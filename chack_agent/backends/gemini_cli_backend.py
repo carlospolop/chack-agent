@@ -737,6 +737,7 @@ class GeminiCliExecutor:
             "PIP_REQUIRE_VIRTUALENV",
             "PIP_DISABLE_PIP_VERSION_CHECK",
             "PYTHONNOUSERSITE",
+            "CHACK_CALLER_PYTHONPATH_JSON",
             "DYNAMIC_POC_VIRTUAL_ENV",
             "CHACK_MODEL_PROVIDER",
             "CHACK_DEFAULT_MODEL",
