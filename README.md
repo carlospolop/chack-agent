@@ -177,6 +177,33 @@ Compaction is fail-open: its status and error are recorded in `RunResult`, and t
 
 The synchronous `run()` and asynchronous `arun()` APIs support per-run tool limits, required tools, self-critique, callbacks, prompt variables, context, working directory, cancellation, output-schema override, compaction, and executor reuse. See [`Chack.run`](chack_agent/agent.py) for the exact signature and [`chack_agent/config.py`](chack_agent/config.py) for every configuration field.
 
+## Telemetry (OpenTelemetry)
+
+Every `run()` is traced with OpenTelemetry using [OpenInference](https://github.com/Arize-ai/openinference) attributes, so any OTLP backend (Arize Phoenix, Langfuse, Jaeger, Grafana Tempo, an OpenTelemetry Collector...) can show it:
+
+- one `AGENT` span per run, named `main_action.sub_action`, with session ID, model, input, output, token counts (including cache reads/writes), cost, tool counts, rounds, and the terminal error;
+- one `TOOL` child span per tool call with its input, result (truncated) and error status, including tools called by CLI backends (Codex, Claude Code, Copilot, Gemini) through the Chack MCP server;
+- run events (compaction, budget warnings, limits...) as span events.
+
+Nothing is exported unless an endpoint is set. Use the standard OpenTelemetry variables or the matching `logging` fields (variables win):
+
+| Environment | `logging` field | Meaning |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` | `otlp_endpoint` | OTLP/HTTP collector URL; `/v1/traces` is appended to a base URL |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `otlp_headers` | e.g. `authorization=Bearer <key>` |
+| `OTEL_SERVICE_NAME` | `otel_service_name` | defaults to `chack-agent` |
+| `OTEL_RESOURCE_ATTRIBUTES` (`openinference.project.name=...`) | `otel_project` | project the traces are grouped under (Phoenix project) |
+
+```yaml
+logging:
+  otlp_endpoint: https://phoenix.example.com
+  otel_project: my-agents
+```
+
+Keep the API key out of the file: `export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer <key>"`.
+
+If the host application already installed a tracer provider, Chack uses it and exports nothing itself. CLI backends and their tool processes receive the exporter settings and a `TRACEPARENT`, so their spans join the same trace. Set `CHACK_OTEL_LLM_SPANS=1` and install the `otel_llm` extra to also record one `LLM` span per model request on the in-process backends. Recorded values are capped by `CHACK_TELEMETRY_MAX_VALUE_CHARS` (default 16000) and tool results by `CHACK_TELEMETRY_TOOL_RESULT_MAX_BYTES` (default 8192).
+
 ## GitHub Action
 
 For queue requests with read-enabled curated knowledge, the client-side researcher wrapper queries the policy-bound local Qdrant corpus before submitting a Deep/Pro browser job. The bounded, provenance-tagged passages are embedded in the exact browser prompt as untrusted leads, and an audit receipt is preserved with the run; the browser cannot choose or write a corpus.

@@ -189,6 +189,12 @@ class CredentialsConfig:
 @dataclass
 class LoggingConfig:
     level: str = "INFO"
+    # OpenTelemetry trace export. The standard OTEL_* environment variables
+    # take precedence; these only fill what the environment leaves unset.
+    otlp_endpoint: str = ""
+    otlp_headers: str = ""
+    otel_project: str = ""
+    otel_service_name: str = ""
 
 
 @dataclass

@@ -146,7 +146,6 @@ def load_env(path: Path) -> None:
     # Prefer the already-authenticated local Codex CLI session when present.
     # Some .env access tokens are short-lived and make Codex reject otherwise valid local auth.
     os.environ.pop("CODEX_ACCESS_TOKEN", None)
-    os.environ.setdefault("CHACK_DISABLE_STDOUT_EVENTS", "1")
     os.environ.setdefault("CHACK_DISABLE_CODEX_NATIVE_WEB", "1")
     os.environ.setdefault("CHACK_MCP_TOOL_MAX_TOKENS", "50000")
     os.environ.setdefault("CHACK_CODEX_EXEC_TIMEOUT_SECONDS", "3600")

@@ -115,7 +115,6 @@ def load_env(path: Path) -> None:
             if key and key not in os.environ:
                 os.environ[key] = value
     os.environ.pop("CODEX_ACCESS_TOKEN", None)
-    os.environ.setdefault("CHACK_DISABLE_STDOUT_EVENTS", "1")
     os.environ.setdefault("CHACK_DISABLE_CODEX_NATIVE_WEB", "1")
 
 

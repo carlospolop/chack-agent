@@ -1,7 +1,6 @@
 import os
 import re
 import time
-from datetime import datetime, timezone
 import random
 from typing import Optional
 
@@ -13,8 +12,7 @@ except ImportError:
 import requests
 
 from .config import ToolsConfig
-from .telemetry import log_tool_started, log_tool_executed, log_tool_error
-import traceback
+from .telemetry import run_with_tool_logging
 
 
 
@@ -165,42 +163,22 @@ def get_brave_search_tool(helper: BraveSearchTool):
             "freshness": freshness,
             "timeout_seconds": timeout_seconds,
         }
-        start_ts = log_tool_started("brave_search", tool_input)
-        start_time = time.time()
-        error = None
         try:
-            return helper.search(
-                query=query,
-                count=count,
-                country=country,
-                search_lang=search_lang,
-                ui_lang=ui_lang,
-                freshness=freshness,
-                timeout_seconds=timeout_seconds,
-            )
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            try:
-                log_tool_error(
-                    "brave_search",
-                    tool_input,
-                    error=error,
-                    trace=traceback.format_exc(),
-                )
-            except Exception:
-                pass
-            return f"ERROR: Brave search failed ({exc})"
-        finally:
-            end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            duration_ms = int((time.time() - start_time) * 1000)
-            log_tool_executed(
+            return run_with_tool_logging(
                 "brave_search",
                 tool_input,
-                start_ts=start_ts,
-                end_ts=end_ts,
-                duration_ms=duration_ms,
-                error=error,
+                lambda: helper.search(
+                    query=query,
+                    count=count,
+                    country=country,
+                    search_lang=search_lang,
+                    ui_lang=ui_lang,
+                    freshness=freshness,
+                    timeout_seconds=timeout_seconds,
+                ),
             )
+        except Exception as exc:
+            return f"ERROR: Brave search failed ({exc})"
 
     brave_search.description = (
         f"{brave_search.description}\n\n"

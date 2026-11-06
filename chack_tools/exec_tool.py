@@ -1,9 +1,6 @@
 import subprocess
-import time
-import traceback
 import os
 import re
-from datetime import datetime, timezone
 
 try:
     from agents import function_tool
@@ -17,7 +14,7 @@ from .run_lifecycle import (
     register_process_group,
     terminate_process_group,
 )
-from .telemetry import log_tool_started, log_tool_executed, log_tool_error
+from .telemetry import run_with_tool_logging
 
 class ExecTool:
     def __init__(self, config: ToolsConfig):
@@ -101,34 +98,7 @@ def _build_exec_tool(helper: ExecTool, *, name: str):
         Large output may be truncated, so narrow follow-up commands with rg/jq/sed/head/tail when needed.
         """
         tool_input = {"command": command, "cwd": cwd}
-        start_ts = log_tool_started(name, tool_input)
-        start_time = time.time()
-        error = None
-        try:
-            return helper.run(command, cwd=cwd)
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            try:
-                log_tool_error(
-                    name,
-                    tool_input,
-                    error=error,
-                    trace=traceback.format_exc(),
-                )
-            except Exception:
-                pass
-            raise
-        finally:
-            end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            duration_ms = int((time.time() - start_time) * 1000)
-            log_tool_executed(
-                name,
-                tool_input,
-                start_ts=start_ts,
-                end_ts=end_ts,
-                duration_ms=duration_ms,
-                error=error,
-            )
+        return run_with_tool_logging(name, tool_input, lambda: helper.run(command, cwd=cwd))
 
     exec_tool.description = (
         f"{exec_tool.description}\n\n"

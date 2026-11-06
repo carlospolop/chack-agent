@@ -18,6 +18,7 @@ from agents.usage import Usage
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.config import ToolsConfig
+from chack_tools.telemetry.otel import end_tool_span, flush_in_background, start_tool_span
 from chack_tools.task_steps_manager_state import STORE, set_active_context
 from chack_tools.tool_call_policy import ToolCallPolicy
 from chack_tools.tool_usage_state import is_budget_exempt_tool_name, register_budget_exempt_tools
@@ -614,6 +615,21 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                 if value is None:
                     continue
                 payload[_mapping.get(py_name, py_name)] = value
+            span = start_tool_span(_name, payload)
+            result: Any = None
+            error = ""
+            try:
+                result = await _call(_tool, _name, payload)
+                return result
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                end_tool_span(span, result=result, error=error)
+                # The CLI may stop this server at any moment; send the span now.
+                flush_in_background()
+
+        async def _call(_tool: Any, _name: str, payload: dict[str, Any]) -> str:
             try:
                 has_persistent_init = bool(
                     state.session_id and task_manager_initialized(state.session_id)
@@ -717,16 +733,6 @@ def main() -> None:
     if transport_hint == "stdio":
         parent_watchdog_stop = _start_parent_watchdog()
     try:
-        try:
-            from chack_tools.telemetry import sqs_logger as _sqs_logger  # type: ignore
-
-            def _noop_stdout_event(_event):
-                return None
-
-            _sqs_logger._emit_stdout_event = _noop_stdout_event  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
         session_id = str(os.environ.get("CHACK_TASK_SESSION_ID", "") or "").strip()
         run_label = str(os.environ.get("CHACK_RUN_LABEL", "") or "").strip() or "Run 1"
         if session_id:

@@ -134,7 +134,6 @@ def test_stdio_server_completes_mcp_handshake() -> None:
                 "CHACK_DEFAULT_MODEL": "gpt-5.6-sol",
                 "CHACK_TOOLS_CONFIG_JSON": '{"exec_enabled": true}',
                 "CHACK_ALLOWED_TOOLS_JSON": '["exec"]',
-                "CHACK_DISABLE_STDOUT_EVENTS": "1",
             }
         )
         server = StdioServerParameters(

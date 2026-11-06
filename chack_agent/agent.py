@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import logging
 import os
 import time
@@ -45,7 +47,11 @@ from chack_tools.tool_usage_state import (
     register_budget_exempt_tools,
 )
 from chack_tools.telemetry import (
+    configure_telemetry,
+    current_log_context,
+    end_run_span,
     log_event,
+    start_run_span,
     set_log_context,
     update_log_context,
     reset_log_context,
@@ -317,6 +323,50 @@ def _backend_failure_reason(output: Any) -> str:
     return "backend_failure"
 
 
+def _traced_run(func: Callable[..., "RunResult"]) -> Callable[..., "RunResult"]:
+    """Trace each ``Chack.run`` call as one AGENT span, keeping its signature."""
+
+    @functools.wraps(func)
+    def _traced(self: "Chack", session_id: str, text: str = "", **kwargs: Any) -> "RunResult":
+        config = self.config
+        span = start_run_span(
+            name=".".join(
+                part
+                for part in (
+                    str(config.agent.main_action or "").strip(),
+                    str(config.agent.sub_action or "").strip(),
+                )
+                if part
+            )
+            or "chack.run",
+            session_id=session_id,
+            model=str(config.model.primary or ""),
+            provider=str(config.model.provider or ""),
+            input_text=text,
+            log_context={
+                **current_log_context(),
+                "main_action": str(config.agent.main_action or ""),
+                "sub_action": str(config.agent.sub_action or ""),
+            },
+        )
+        result: Optional[RunResult] = None
+        error = ""
+        try:
+            result = func(self, session_id, text, **kwargs)
+            return result
+        except BaseException as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            end_run_span(
+                span,
+                output=result.output if result is not None else None,
+                error=error or (str(result.error or "") if result is not None else ""),
+            )
+
+    return _traced
+
+
 class Chack:
     def __init__(
         self,
@@ -357,6 +407,13 @@ class Chack:
             native_task_planning_backend=native_backend if planning_enabled else "",
         )
         export_env(self.config, self.config_path)
+        log_config = self.config.logging
+        configure_telemetry(
+            endpoint=str(getattr(log_config, "otlp_endpoint", "") or ""),
+            headers=str(getattr(log_config, "otlp_headers", "") or ""),
+            project=str(getattr(log_config, "otel_project", "") or ""),
+            service_name=str(getattr(log_config, "otel_service_name", "") or ""),
+        )
         self.logger.info(
             "Agent instantiated: model=%s backend=%s api_key_type=%s",
             str(getattr(self.config.model, "primary", "") or "").strip(),
@@ -1325,8 +1382,10 @@ class Chack:
                     trigger="interval",
                 )
 
+        # Run in a copy of this context so the metrics land on this run's span.
+        run_context = contextvars.copy_context()
         thread = threading.Thread(
-            target=_runner,
+            target=lambda: run_context.run(_runner),
             name=f"chack-system-metrics-{session_id}",
             daemon=True,
         )
@@ -1654,6 +1713,7 @@ class Chack:
             reuse_session_executor=reuse_session_executor,
         )
 
+    @_traced_run
     def run(
         self,
         session_id: str,
@@ -1809,8 +1869,8 @@ class Chack:
             # Common plan store for either Chack's manager or a backend-native planner.
             task_session_id = f"{session_id}:{uuid.uuid4().hex}"
             # If this run was spawned by a tool (sub-agent), usage_session_id is the
-            # parent run id; reuse it for telemetry so tool executions show under the
-            # same run section in chacks.hacktricks.wiki.
+            # parent run id; reuse it so the sub-agent's usage and plan are
+            # attributed to the run that spawned it.
             telemetry_task_session_id = (str(usage_session_id or "").strip() or task_session_id)
             update_log_context(
                 task_session_id=telemetry_task_session_id,

@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import (
     STORE as TASK_STEPS_STORE,
@@ -567,7 +568,8 @@ class GeminiCliExecutor:
         )
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
-        env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        # Child processes export into the same place and join this run's trace.
+        env.update(child_process_env())
         return env
 
     def _ensure_gemini_home_and_config(self) -> None:
@@ -682,7 +684,6 @@ class GeminiCliExecutor:
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
-            "CHACK_DISABLE_STDOUT_EVENTS",
             "CHACK_RESEARCH_MASTER_DIR",
             "CHACK_RESEARCH_DATA_DIR",
             "CHACK_RESEARCH_SAVE_ARTIFACTS",
@@ -733,6 +734,7 @@ class GeminiCliExecutor:
             "GOOGLE_CLOUD_LOCATION",
             "GEMINI_CLI_HOME",
         ]
+        env_keys.extend(OTEL_CHILD_ENV_NAMES)
         env_payload: dict[str, str] = {}
         src_env = self._build_env()
         for key in env_keys:

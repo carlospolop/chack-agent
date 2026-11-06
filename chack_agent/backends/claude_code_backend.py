@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
+from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import (
     STORE as TASK_STEPS_STORE,
@@ -1716,7 +1717,8 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
         )
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
-        env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        # Child processes export into the same place and join this run's trace.
+        env.update(child_process_env())
 
         if self._uses_gateway_route:
             for name in (
@@ -1946,7 +1948,6 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
-            "CHACK_DISABLE_STDOUT_EVENTS",
             "CHACK_RESEARCH_MASTER_DIR",
             "CHACK_RESEARCH_DATA_DIR",
             "CHACK_RESEARCH_SAVE_ARTIFACTS",
@@ -2018,6 +2019,7 @@ only the MCP save tool or `save_vuln.sh` in the current repository.
             "LLM_GATEWAY_MODEL_MAP",
             "PYTHONPATH",
         ]
+        env_keys.extend(OTEL_CHILD_ENV_NAMES)
 
         src_env = self._build_env()
         env_payload: dict[str, str] = {}

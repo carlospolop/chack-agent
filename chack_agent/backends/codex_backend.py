@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 import requests
 
+from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import (
     STORE as TASK_STEPS_STORE,
@@ -2655,7 +2656,8 @@ class CodexExecutor:
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         env["CHACK_MCP_PARENT_PID"] = str(os.getpid())
-        env["CHACK_DISABLE_STDOUT_EVENTS"] = "1"
+        # Child processes export into the same place and join this run's trace.
+        env.update(child_process_env())
         if self._codex_home and self._has_configured_tools():
             startup_status_path = os.path.join(
                 self._codex_home,
@@ -2808,7 +2810,6 @@ class CodexExecutor:
             "CHACK_TASK_SESSION_ID",
             "CHACK_RUN_LABEL",
             "CHACK_MCP_PARENT_PID",
-            "CHACK_DISABLE_STDOUT_EVENTS",
             "CHACK_RESEARCH_MASTER_DIR",
             "CHACK_RESEARCH_DATA_DIR",
             "CHACK_RESEARCH_SAVE_ARTIFACTS",
@@ -2879,6 +2880,7 @@ class CodexExecutor:
             "LLM_GATEWAY_HEADERS",
             "LLM_GATEWAY_MODEL_MAP",
         ]
+        env_vars.extend(OTEL_CHILD_ENV_NAMES)
         # Retain the exact allowlist so the finalized per-run values can also
         # be written explicitly below. Some containerized Codex builds do not
         # reliably propagate dynamically-added parent variables via
