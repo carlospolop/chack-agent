@@ -17,17 +17,22 @@ from .run_lifecycle import (
 )
 from .telemetry import run_with_tool_logging
 
-def _command_env() -> dict[str, str] | None:
+def _command_env() -> dict[str, str]:
     """The caller's environment for shell commands.
 
     Inside the Chack MCP server PYTHONPATH also lists the runtime's own import
     roots; a command running another Python would import them and fail.
+    OpenTelemetry settings are left out: tools that read them (docker,
+    containerd, buildx) would export their own spans into the run's trace.
     """
-    caller = os.environ.get("CHACK_CALLER_PYTHONPATH_JSON")
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("OTEL_") and key not in {"TRACEPARENT", "TRACESTATE"}
+    }
+    caller = env.pop("CHACK_CALLER_PYTHONPATH_JSON", None)
     if caller is None:
-        return None
-    env = dict(os.environ)
-    del env["CHACK_CALLER_PYTHONPATH_JSON"]
+        return env
     try:
         pythonpath = json.loads(caller)
     except ValueError:

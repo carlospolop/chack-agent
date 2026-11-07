@@ -413,10 +413,33 @@ def start_tool_span(tool: str, tool_input: Any) -> SpanHandle:
     )
 
 
+# How tools report a failure they return instead of raising.
+_ERROR_RESULT_PREFIXES = (
+    "ERROR",
+    "FAILED",
+    "TRACEBACK",
+    "\u274c",  # cross mark
+    "AN ERROR OCCURRED",
+    '{"ERROR"',
+    '{"SUCCESS": FALSE',
+    '{"SUCCESS":FALSE',
+)
+
+
+def tool_result_error(result: Any) -> str:
+    """The first line of a tool result that reports a failure, else ``""``."""
+    if not isinstance(result, str):
+        return ""
+    text = result.lstrip()
+    if not text[:40].upper().startswith(_ERROR_RESULT_PREFIXES):
+        return ""
+    return text.splitlines()[0][:500]
+
+
 def end_tool_span(handle: SpanHandle, *, result: Any = None, error: str = "") -> None:
     if handle.recording and handle.owns_span and result is not None:
         _set_attributes(handle.span, {"output.value": result}, _tool_result_max_chars())
-    _end(handle, error=error)
+    _end(handle, error=error or tool_result_error(result))
 
 
 # ---------------------------------------------------------------------------

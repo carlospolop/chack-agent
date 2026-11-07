@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional
 
+from .telemetry.otel import tool_result_error
 from .tool_usage_state import BUDGET_EXEMPT_ATTRIBUTE
 
 RESULT_REUSE_ATTRIBUTE = "chack_result_reuse"
@@ -181,8 +182,7 @@ class ToolResultReuse:
 
 
 def _looks_like_error(result: str) -> bool:
-    head = result.lstrip()[:40].upper()
-    return head.startswith(("ERROR", "FAILED", "TRACEBACK")) or head.startswith("{\"ERROR\"")
+    return bool(tool_result_error(result))
 
 
 def spill_large_output(

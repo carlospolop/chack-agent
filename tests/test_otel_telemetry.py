@@ -161,6 +161,53 @@ def test_a_failing_tool_is_an_error_span_and_the_run_continues():
     assert run.status.status_code is not StatusCode.ERROR
 
 
+def test_tools_of_a_run_with_limits_stay_inside_its_span():
+    # Runs with a runtime or cost limit invoke the backend on a worker thread.
+    agent = _InjectedChack(_config())
+    agent.config.agent.max_runtime_minutes = 5
+    agent.config.agent.max_cost_usd = 1.0
+    seen = {}
+
+    def _search():
+        seen["env"] = child_process_env()
+        return "found it"
+
+    agent.executor = _ToolUsingExecutor([("search_web", {"q": "bug"}, _search)])
+    agent.run("session-1", "find the bug", enable_self_critique=False,
+              require_task_steps_manager_init_first=False)
+
+    [run] = _finished("audit.check")
+    [tool] = _finished("search_web")
+    assert tool.parent.span_id == run.context.span_id
+    # A CLI backend's MCP child gets the run's trace context too.
+    assert f"{run.context.trace_id:032x}" in seen["env"]["TRACEPARENT"]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        "ERROR: no such file",
+        "\u274c outcome must be safe, vulnerable, or unresolved",
+        '{"error": "credentials unavailable"}',
+        '{"success": false, "status": "failed", "exit_code": 2}',
+        "An error occurred while running the tool. Please try again.",
+    ],
+)
+def test_a_tool_returning_an_error_is_an_error_span(result):
+    run_with_tool_logging("read_file", {"path": "a"}, lambda: result)
+
+    [tool] = _finished("read_file")
+    assert tool.status.status_code is StatusCode.ERROR
+    assert tool.attributes["chack.error"] == result.splitlines()[0]
+
+
+def test_a_tool_returning_data_is_not_an_error_span():
+    run_with_tool_logging("read_file", {"path": "a"}, lambda: '{"count": 1, "error_count": 0}')
+
+    [tool] = _finished("read_file")
+    assert tool.status.status_code is not StatusCode.ERROR
+
+
 def test_large_tool_results_are_cut_in_the_trace_only(monkeypatch):
     monkeypatch.setenv("CHACK_TELEMETRY_TOOL_RESULT_MAX_BYTES", "1000")
     big = "x" * 50_000

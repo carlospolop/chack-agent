@@ -85,3 +85,15 @@ def test_exec_outside_a_chack_mcp_server_keeps_the_process_environment(monkeypat
     output = ExecTool(ToolsConfig(exec_enabled=True)).run('printf "%s" "$PYTHONPATH"')
 
     assert output == "/kept/as/is"
+
+
+def test_exec_commands_do_not_export_traces(monkeypatch):
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example")
+    monkeypatch.setenv("TRACEPARENT", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+    monkeypatch.setenv("CHACK_EXEC_TEST_KEEP", "kept")
+
+    output = ExecTool(ToolsConfig(exec_enabled=True)).run(
+        'printf "%s|%s|%s" "${OTEL_EXPORTER_OTLP_ENDPOINT-unset}" "${TRACEPARENT-unset}" "$CHACK_EXEC_TEST_KEEP"'
+    )
+
+    assert output == "unset|unset|kept"
