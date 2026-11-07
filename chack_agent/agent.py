@@ -2461,7 +2461,13 @@ class Chack:
                             except Exception as exc:
                                 result_queue.put(("error", exc))
 
-                        worker = threading.Thread(target=_runner, daemon=True)
+                        # Run in a copy of this context: the run's span and log
+                        # context stay current, so tool spans and the CLI's MCP
+                        # child (via TRACEPARENT) join this run's trace.
+                        run_context = contextvars.copy_context()
+                        worker = threading.Thread(
+                            target=lambda: run_context.run(_runner), daemon=True
+                        )
                         worker.start()
                         runtime_exceeded = False
                         cost_exceeded = False
