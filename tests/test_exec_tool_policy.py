@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import time
+
 import pytest
 
 from chack_tools.config import ToolsConfig
@@ -97,3 +100,26 @@ def test_exec_commands_do_not_export_traces(monkeypatch):
     )
 
     assert output == "unset|unset|kept"
+
+def test_a_command_that_leaves_a_background_process_returns_when_the_shell_exits():
+    # A PoC agent starts a server with `&` and keeps working; the call must not
+    # wait for that server, which still holds the command's output.
+    tool = ExecTool(ToolsConfig(exec_enabled=True, exec_timeout_seconds=20))
+
+    started = time.monotonic()
+    output = tool.run("sleep 8 & printf started")
+
+    assert output == "started"
+    assert time.monotonic() - started < 5
+
+def test_a_timed_out_command_returns_even_if_a_child_left_its_process_group():
+    tool = ExecTool(ToolsConfig(exec_enabled=True, exec_timeout_seconds=1))
+
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        tool.run(
+            "python3 -c 'import os, time; os.setsid(); time.sleep(8)' & printf partial; sleep 5"
+        )
+
+    assert "partial" in (raised.value.output or "")
+    assert time.monotonic() - started < 5
