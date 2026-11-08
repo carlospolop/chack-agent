@@ -2,6 +2,7 @@ import json
 import subprocess
 import os
 import re
+import tempfile
 
 try:
     from agents import function_tool
@@ -44,6 +45,11 @@ def _command_env() -> dict[str, str]:
     return env
 
 
+def _read_back(handle) -> str:
+    handle.seek(0)
+    return handle.read().decode("utf-8", errors="replace")
+
+
 class ExecTool:
     def __init__(self, config: ToolsConfig):
         self.config = config
@@ -75,28 +81,32 @@ class ExecTool:
         timeout = max(1, int(self.config.exec_timeout_seconds or 60))
         max_chars = max(1, int(self.config.exec_max_output_chars or 5000))
         resolved_cwd = self._resolve_cwd(cwd)
-        process = subprocess.Popen(
-            command,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=_command_env(),
-            cwd=resolved_cwd,
-            start_new_session=True,
-        )
-        register_process_group(active_task_session_id(), process.pid)
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            terminate_process_group(process.pid, grace_seconds=0.2)
-            stdout, stderr = process.communicate()
-            raise subprocess.TimeoutExpired(
-                process.args,
-                timeout,
-                output=stdout,
-                stderr=stderr,
+        # Output goes to files, not pipes: a process the command leaves running
+        # (`server &`) inherits them, and waiting for pipes to close would hold
+        # the call, and with it a tool-server thread, until that process ends.
+        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                env=_command_env(),
+                cwd=resolved_cwd,
+                start_new_session=True,
             )
+            register_process_group(active_task_session_id(), process.pid)
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                terminate_process_group(process.pid, grace_seconds=0.2)
+                process.wait()
+                raise subprocess.TimeoutExpired(
+                    process.args,
+                    timeout,
+                    output=_read_back(stdout_file),
+                    stderr=_read_back(stderr_file),
+                )
+            stdout, stderr = _read_back(stdout_file), _read_back(stderr_file)
         output = (stdout or "") + (stderr or "")
         output = output.strip() or "(no output)"
         return _truncate(output, max_chars)
