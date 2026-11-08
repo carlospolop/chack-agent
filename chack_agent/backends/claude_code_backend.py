@@ -521,6 +521,11 @@ class ClaudeCodeExecutor:
         """
         if not self._output_schema_json:
             return output
+        if (output or "").startswith("ERROR:"):
+            # A backend error is not an answer: repairing it against the schema
+            # turns its diagnostics into an empty object and hides the error.
+            _LOGGER.warning("Claude backend returned an error instead of schema output: %s", output[:2000])
+            return output
 
         raw_schema = str(self._output_schema_json or "").strip()
         if not raw_schema:
