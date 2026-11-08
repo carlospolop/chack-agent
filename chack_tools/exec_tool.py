@@ -84,10 +84,14 @@ class ExecTool:
         # Output goes to files, not pipes: a process the command leaves running
         # (`server &`) inherits them, and waiting for pipes to close would hold
         # the call, and with it a tool-server thread, until that process ends.
+        # Input is empty: in the MCP tool server stdin carries the client's
+        # requests, and a command that reads it (`cat`, `jq .`, `rg x` with no
+        # path) would swallow every later tool call.
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
             process = subprocess.Popen(
                 command,
                 shell=True,
+                stdin=subprocess.DEVNULL,
                 stdout=stdout_file,
                 stderr=stderr_file,
                 env=_command_env(),

@@ -249,3 +249,34 @@ def test_clients_receive_each_tool_result_once_as_text() -> None:
     assert [tool.outputSchema for tool in listed.tools] == [None]
     assert result.structuredContent is None
     assert [block.text for block in result.content] == ["notes about auth: " + "x" * 2000]
+
+
+def test_a_command_that_reads_stdin_leaves_later_tool_calls_answered() -> None:
+    async def _exchange() -> list[str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "CHACK_MODEL_PROVIDER": "codex",
+                "CHACK_DEFAULT_MODEL": "gpt-5.6-sol",
+                "CHACK_TOOLS_CONFIG_JSON": '{"exec_enabled": true}',
+                "CHACK_ALLOWED_TOOLS_JSON": '["exec"]',
+                "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST": "0",
+            }
+        )
+        server = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "chack_agent.backends.chack_tools_mcp_server"],
+            env=env,
+        )
+        async with stdio_client(server) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                answers = []
+                for command in ("cat; echo read-done", "echo after"):
+                    result = await asyncio.wait_for(
+                        session.call_tool("exec", {"command": command, "timeout": 30}), 15
+                    )
+                    answers.append(result.content[0].text.strip())
+                return answers
+
+    assert asyncio.run(_exchange()) == ["read-done", "after"]
