@@ -414,3 +414,42 @@ def test_claude_backend_prefers_claude_access_token_over_anthropic_env_vars():
     assert 'env["CLAUDE_CODE_OAUTH_TOKEN"] = self._claude_access_token' in source
     assert 'env.pop("ANTHROPIC_API_KEY", None)' in source
     assert 'env.pop("CLAUDE_API_KEY", None)' in source
+
+
+def test_claude_backend_returns_a_backend_error_unchanged_instead_of_an_empty_object():
+    normalize_schema_output = _load_claude_helper("_normalize_schema_output")
+
+    class _ClaudeShim:
+        _output_schema_json = json.dumps(
+            {
+                "type": "object",
+                "properties": {"results": {"type": "array", "items": {"type": "object"}}},
+                "required": ["results"],
+                "additionalProperties": False,
+            }
+        )
+        _output_schema_name = "poc_output"
+        _output_schema_strict = True
+
+        @staticmethod
+        def _extract_embedded_json(output):
+            start = output.find("{")
+            return json.loads(output[start:]) if start >= 0 else None
+
+    error = (
+        "ERROR: Claude returned an error in final result event. API Error: 429 "
+        'Event diagnostics: {"subtype": "success", "is_error": true}'
+    )
+
+    warnings = []
+
+    class _Recorder:
+        @staticmethod
+        def warning(message, *args):
+            warnings.append(message % args)
+
+    normalize_schema_output.__globals__["_LOGGER"] = _Recorder()
+
+    assert normalize_schema_output(_ClaudeShim(), error) == error
+    # The log must carry the backend error itself, not a schema mismatch on `{}`.
+    assert any("API Error: 429" in warning for warning in warnings)
