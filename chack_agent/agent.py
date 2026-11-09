@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover - optional dependency / analysis fallback
     MaxTurnsExceeded = None
 
 from .config import ChackConfig, load_config, resolve_api_key_type, resolve_backend_type, resolve_config_aliases
+from .run_model import RunModel, executor_run_model, run_model_for_config, tag_executor
 from .env_utils import export_env
 from .backends import build_executor
 from .long_term_memory import (
@@ -248,6 +249,9 @@ class RunResult:
     # nested) and ``by_attempt`` (each model call of the main loop, in order,
     # so retries and reminders show up as their own rows).
     cost_breakdown: Dict[str, Any] = field(default_factory=dict)
+    # The model, backend and thinking effort this run was sent to, read from
+    # the executor that ran it.
+    run_model: RunModel = field(default_factory=RunModel)
 
 
 def _cache_hit_rate(usages: Sequence[Sequence[int]]) -> Optional[float]:
@@ -410,6 +414,8 @@ class Chack:
             resolved_config = config
         resolved_config = resolve_config_aliases(resolved_config)
         self.config = resolved_config
+        # The run model of the run in progress, or of the last one.
+        self.run_model: RunModel = run_model_for_config(self.config)
         self.config_path = resolved_path or os.path.join(os.getcwd(), "chack.yaml")
         self.logger = logging.getLogger("chack.agent")
         self._executors: Dict[str, Any] = {}
@@ -1542,7 +1548,7 @@ class Chack:
         if (
             tools_override is not None or tools_append is not None
         ) and not reuse_session_executor:
-            return build_executor(
+            executor = build_executor(
                 config,
                 system_prompt=system_prompt_override or self.config.system_prompt,
                 max_turns=self.config.session.max_turns,
@@ -1552,6 +1558,8 @@ class Chack:
                 tools_override=tools_override,
                 tools_append=tools_append,
             )
+            tag_executor(executor, config)
+            return executor
 
         schema_cache_key = json.dumps(output_schema_json_override, sort_keys=True) if output_schema_json_override else ""
         cache_key = f"{session_id}:{system_prompt_override or ''}:{exec_cwd_value}:{schema_cache_key}"
@@ -1580,6 +1588,7 @@ class Chack:
                 memory_summary_max_chars=memory_summary_max_chars,
                 **executor_tool_kwargs,
             )
+            tag_executor(executor, config)
             self._executors[cache_key] = executor
         else:
             self.logger.debug(
@@ -1806,6 +1815,8 @@ class Chack:
         # after construction (provider profiles, failover); resolve it now so
         # every run uses the alias's current model and a valid effort.
         self.config = resolve_config_aliases(self.config)
+        run_model = run_model_for_config(self.config)
+        self.run_model = run_model
         log_token = set_log_context(
             main_action=str(self.config.agent.main_action or ""),
             sub_action=str(self.config.agent.sub_action or ""),
@@ -1864,6 +1875,9 @@ class Chack:
             if reuse_session_executor:
                 executor_kwargs["reuse_session_executor"] = True
             executor = self._get_executor(session_id, **executor_kwargs)
+            # A reused executor keeps the model it was built with.
+            run_model = executor_run_model(executor) or run_model
+            self.run_model = run_model
             self._last_activity_at[session_id] = time.time()
             run_started_at = self._last_activity_at[session_id]
             max_runtime_minutes = max(0, int(self.config.agent.max_runtime_minutes or 0))
@@ -3273,6 +3287,7 @@ class Chack:
                 error=str(result.get("error") or ""),
                 cache_hit_rate=cache_hit_rate,
                 cost_breakdown=cost_breakdown,
+                run_model=run_model,
             )
         except Exception as exc:
             limit_text = str(exc or "").lower()
@@ -3320,6 +3335,7 @@ class Chack:
                             read_live_cost(task_session_id)
                             or float(locals().get("estimated_cost_spent", 0.0) or 0.0)
                         ),
+                        run_model=run_model,
                     )
             self.logger.exception(
                 "Run failed: session=%s task_session=%s ts=%s.",

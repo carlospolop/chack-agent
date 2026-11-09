@@ -11,6 +11,7 @@ from .config import (
 )
 from .llm_gateway import GatewayModel, list_gateway_models
 from .pricing import refresh_pricing_from_github_if_newer
+from .run_model import RunModel
 from .runtime_capabilities import (
     BACKENDS_BY_API_KEY_TYPE,
     SUPPORTED_API_KEY_TYPES,
@@ -31,6 +32,7 @@ __all__ = [
     "LoggingConfig",
     "ModelConfig",
     "BACKENDS_BY_API_KEY_TYPE",
+    "RunModel",
     "RunResult",
     "SessionConfig",
     "SUPPORTED_API_KEY_TYPES",

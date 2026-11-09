@@ -108,6 +108,11 @@ class ModelConfig:
     cli_max_turns: int = 50
     subchack_max_turns: int = 100
     researcher_administrator_max_turns: int = 100
+    # Set by alias resolution: the tier alias ``primary`` was resolved from and
+    # the model it resolved to. The alias only describes ``primary`` while
+    # ``primary`` is still that model.
+    primary_alias: str = ""
+    primary_alias_model: str = ""
 
 
 @dataclass
@@ -467,6 +472,17 @@ def _role_model_alias(model_cfg: ModelConfig, role: str) -> str:
     return "CHEAP_BUT_QUALITY" if role in _CHEAP_DEFAULT_ROLES else str(model_cfg.primary or "")
 
 
+def _remember_primary_alias(model_cfg: ModelConfig, requested: str) -> None:
+    resolved = str(model_cfg.primary or "").strip()
+    if requested and requested != resolved:
+        model_cfg.primary_alias = requested
+        model_cfg.primary_alias_model = resolved
+    elif resolved != str(model_cfg.primary_alias_model or "").strip():
+        # The caller named another model directly; the old alias is stale.
+        model_cfg.primary_alias = ""
+        model_cfg.primary_alias_model = ""
+
+
 def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
     credentials = getattr(config, "credentials", CredentialsConfig())
     model_cfg = config.model
@@ -515,11 +531,13 @@ def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
         configured_context = int(getattr(model_cfg, "max_context_tokens", 0) or 0)
         if 0 < configured_context < CLI_BACKEND_MIN_CONTEXT_TOKENS:
             model_cfg.max_context_tokens = CLI_BACKEND_MIN_CONTEXT_TOKENS
+    requested_primary = str(model_cfg.primary or "").strip()
     model_cfg.primary = resolve_model_alias(
         model_cfg.primary,
         provider=provider,
         credentials=credentials,
     )
+    _remember_primary_alias(model_cfg, requested_primary)
     if not str(model_cfg.social_network or "").strip():
         model_cfg.social_network = "CHEAP_BUT_QUALITY"
     if not str(model_cfg.scientific or "").strip():
