@@ -698,7 +698,7 @@ def test_claude_oauth_does_not_wait_past_configured_bound(monkeypatch) -> None:
     assert len(calls) == 1
 
 
-def _run_claude_stream(monkeypatch, tmp_path, events: list[dict]) -> str:
+def _run_claude_stream(monkeypatch, tmp_path, events: list[dict], output_schema_json: str = "") -> str:
     stream = "\n".join(json.dumps(event) for event in events) + "\n"
 
     class _FakeProcess:
@@ -714,7 +714,7 @@ def _run_claude_stream(monkeypatch, tmp_path, events: list[dict]) -> str:
         def wait(self):
             return 0
 
-    executor = _build_executor("")
+    executor = _build_executor(output_schema_json)
     executor._claude_home = str(tmp_path)
     monkeypatch.setattr(
         "chack_agent.backends.claude_code_backend.subprocess.Popen",
@@ -757,3 +757,147 @@ def test_claude_streamed_text_is_the_answer_when_the_result_event_is_empty(monke
     )
 
     assert output == "final answer"
+
+
+# A tool call whose name carries the model's leaked tool-call tokens, as Kimi
+# K2.5 on Bedrock returns them through the gateway.
+_LEAKED_TOOL_USE = {
+    "type": "assistant",
+    "message": {
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "t1",
+                "name": 'functions_mcp__chack_tools__exec_2 <|tool_call_argument_begin|> {"command"',
+                "input": {},
+            }
+        ]
+    },
+}
+_NO_SUCH_TOOL = {
+    "type": "user",
+    "message": {
+        "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "is_error": True, "content": "No such tool available"}
+        ]
+    },
+}
+
+
+def test_claude_names_malformed_provider_tool_calls_when_the_run_has_no_answer(monkeypatch, tmp_path) -> None:
+    output = _run_claude_stream(
+        monkeypatch,
+        tmp_path,
+        [
+            _INIT_EVENT,
+            _LEAKED_TOOL_USE,
+            _NO_SUCH_TOOL,
+            {"type": "result", "subtype": "success", "result": "", "stop_reason": "end_turn", "num_turns": 2},
+        ],
+    )
+
+    assert output.startswith("ERROR: Claude provider returned malformed tool calls: 1 tool call(s)")
+    assert "tool_call_argument_begin" in output
+    assert "Claude finished without a final answer." in output
+    assert '"stop_reason": "end_turn"' in output
+
+
+def test_claude_keeps_the_answer_of_a_run_that_recovered_from_malformed_tool_calls(monkeypatch, tmp_path) -> None:
+    output = _run_claude_stream(
+        monkeypatch,
+        tmp_path,
+        [
+            _INIT_EVENT,
+            _LEAKED_TOOL_USE,
+            _NO_SUCH_TOOL,
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "final answer"}]}},
+            {"type": "result", "subtype": "success", "result": "final answer"},
+        ],
+    )
+
+    assert output == "final answer"
+
+
+def test_claude_stream_cut_without_result_event_is_an_error_not_the_raw_stream(monkeypatch, tmp_path) -> None:
+    output = _run_claude_stream(monkeypatch, tmp_path, [_INIT_EVENT, _LEAKED_TOOL_USE])
+
+    assert output.startswith("ERROR: Claude provider returned malformed tool calls")
+    assert "The CLI sent no result event." in output
+
+
+def test_claude_schema_run_ending_in_narration_is_an_error(monkeypatch, tmp_path) -> None:
+    schema = json.dumps(
+        {
+            "type": "object",
+            "properties": {"verdict": {"type": "string"}},
+            "required": ["verdict"],
+            "additionalProperties": False,
+        }
+    )
+    output = _run_claude_stream(
+        monkeypatch,
+        tmp_path,
+        [
+            _INIT_EVENT,
+            {"type": "result", "subtype": "success", "result": "Let me check the handler first."},
+        ],
+        output_schema_json=schema,
+    )
+
+    assert output.startswith("ERROR: Claude finished without the structured output its schema requires.")
+    assert "Let me check the handler first." in output
+
+
+def test_claude_sends_cache_markers_unless_the_model_turns_them_off() -> None:
+    executor = _build_executor("")
+    assert "DISABLE_PROMPT_CACHING" not in executor._build_env()
+
+    executor._prompt_cache_enabled = False
+    assert executor._build_env()["DISABLE_PROMPT_CACHING"] == "1"
+
+
+def test_claude_retries_once_without_cache_markers_when_the_provider_rejects_them(monkeypatch) -> None:
+    monkeypatch.setattr("chack_agent.backends.claude_code_backend._PROMPT_CACHE_REJECTED", set())
+    executor = _build_executor("")
+    executor._claude_session_id = ""
+    rejection = (
+        "ERROR: Claude returned an error in final result event.\n"
+        'API Error: 400 {"error":{"message":"litellm.BadRequestError: Model `gemini-4-argon` '
+        'does not support explicit context caching."}}'
+    )
+    envs: list[dict[str, str]] = []
+
+    def _run_once(_prompt):
+        envs.append(executor._build_env())
+        # The rejected attempt still opened a session that must not be resumed.
+        executor._claude_session_id = "rejected-session"
+        return (rejection, [], None) if len(envs) == 1 else ("answer", [], None)
+
+    monkeypatch.setattr(executor, "_run_claude_once", _run_once)
+
+    output, _, _ = executor._run_claude("prompt")
+
+    assert output == "answer"
+    assert "DISABLE_PROMPT_CACHING" not in envs[0]
+    assert envs[1]["DISABLE_PROMPT_CACHING"] == "1"
+
+    # Later runs of the same model skip the request the provider rejects.
+    later = _build_executor("")
+    assert later._build_env()["DISABLE_PROMPT_CACHING"] == "1"
+
+
+def test_claude_does_not_retry_errors_unrelated_to_cache_markers(monkeypatch) -> None:
+    monkeypatch.setattr("chack_agent.backends.claude_code_backend._PROMPT_CACHE_REJECTED", set())
+    executor = _build_executor("")
+    calls: list[str] = []
+
+    def _run_once(prompt):
+        calls.append(prompt)
+        return ("ERROR: Claude exec failed (exit=1).\nboom", [], None)
+
+    monkeypatch.setattr(executor, "_run_claude_once", _run_once)
+
+    output, _, _ = executor._run_claude("prompt")
+
+    assert output.startswith("ERROR: Claude exec failed")
+    assert len(calls) == 1
