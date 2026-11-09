@@ -574,6 +574,17 @@ def test_gemini_cli_runs_on_the_gemini_api_a_custom_gateway_names(catalog_reques
     ] == "https://gateway.example.test/google"
 
 
+def test_gemini_tool_server_inherits_the_gateway(catalog_requests):
+    executor = _build(build_gemini_executor, _config("gemini", "corp/opus-5.5", api_key_type="gateway"))
+
+    tool_env = executor._gemini_mcp_env_map()
+
+    assert tool_env["LLM_GATEWAY_TYPE"] == "litellm"
+    assert tool_env["LLM_GATEWAY_API_KEY"] == GATEWAY_KEY
+    assert tool_env["LLM_GATEWAY_BASE_URL"] == GATEWAY_URL
+    assert tool_env["LLM_GATEWAY_GEMINI_BASE_URL"] == "https://gateway.example.test"
+
+
 def test_gemini_on_a_custom_gateway_without_a_gemini_api_says_which_backend_runs(catalog_requests, caplog):
     with caplog.at_level("WARNING", logger="chack.gemini_cli_backend"):
         executor = _build(build_gemini_executor, _config("gemini", "gateway/claude-opus-5-5", gateway_type="custom"))
