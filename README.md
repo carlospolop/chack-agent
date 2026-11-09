@@ -12,7 +12,7 @@ pip install chack-agent
 
 Python 3.10 or newer is required.
 
-CLI backends also require their provider command on `PATH`: `codex`, `claude`, `gemini`, `copilot`, or `opencode` (`npm i -g opencode-ai@1.19.5`; set `OPENCODE_CLI_PATH` when it is not on `PATH`). The Python package includes Playwright, but browser-backed tools require an installed Chromium binary:
+CLI backends also require their provider command on `PATH`: `codex`, `claude`, `gemini`, `copilot`, or `opencode`. Pin the Gemini CLI and opencode versions Chack is tested with: `npm i -g @google/gemini-cli@0.67.0` (set `GEMINI_CLI_PATH` when it is not on `PATH`) and `npm i -g opencode-ai@1.19.5` (set `OPENCODE_CLI_PATH` when it is not on `PATH`). The Python package includes Playwright, but browser-backed tools require an installed Chromium binary:
 
 ```bash
 python -m playwright install chromium
@@ -86,7 +86,7 @@ Set `agent.provider` to one of these values:
 | `openrouter` | OpenRouter Responses through `openai-agents` | `OPENROUTER_API_KEY` |
 | `codex` | Codex CLI, with a direct Responses path for eligible no-tool GPT-5.6+ runs | `CODEX_ACCESS_TOKEN` or `OPENAI_API_KEY` |
 | `claude` | Claude Code CLI | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` |
-| `gemini` | Gemini CLI | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or an OpenRouter route |
+| `gemini` | Gemini CLI | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or `LLM_GATEWAY_API_KEY` for a gateway that serves the Gemini API |
 | `copilot` | GitHub Copilot CLI | `COPILOT_GITHUB_TOKEN` or existing CLI authentication |
 | `opencode` | opencode CLI (`opencode run`) with the model from any key type | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, or `LLM_GATEWAY_API_KEY` |
 | `langgraph` | LangGraph with an OpenRouter or gateway `ChatOpenAI` transport | `OPENROUTER_API_KEY` or `LLM_GATEWAY_API_KEY` |
@@ -96,13 +96,15 @@ Aliases are normalized when configuration loads. Unsupported providers and unsup
 
 `api_key_type` picks the key a backend uses. With `api_key_type: openrouter`, `codex` and `claude` still run their CLIs, against OpenRouter with `OPENROUTER_API_KEY`: Codex through a Responses model provider, Claude Code through `ANTHROPIC_BASE_URL=https://openrouter.ai/api`. Model names are mapped to OpenRouter IDs (`claude-sonnet-5-5` becomes `anthropic/claude-sonnet-5.5`) and priced from the OpenRouter table.
 
-`opencode` runs the opencode CLI with a private config per session: OpenAI keys use the Responses API, Anthropic keys the Messages API, OpenRouter its own provider, and a gateway the Messages API for Claude models, the Responses API for OpenAI models and Chat Completions for the rest. `agent.thinking_effort` becomes the model's reasoning effort or adaptive thinking. Chack tools run over MCP next to opencode's file, search, edit and (with `exec_enabled`) shell tools; opencode's question, sub-agent, skill and todo tools are denied. opencode cannot use Codex or Claude Code subscription tokens.
+`opencode` runs the opencode CLI with a private config per session: OpenAI keys use the Responses API, Anthropic keys the Messages API, OpenRouter its own provider, and a gateway the Messages API for Claude models, the Responses API for OpenAI models and Chat Completions for the rest. `agent.thinking_effort` becomes the model's reasoning effort or adaptive thinking. Chack tools run over MCP next to opencode's file, search, edit and (with `exec_enabled`) shell tools; opencode's question, sub-agent, skill and todo tools are denied. opencode cannot use Codex or Claude Code subscription tokens. opencode 2 runs `opencode run` on one background service shared by every run, so Chack passes `--standalone` (a private server per run) to each opencode that offers it in `opencode run --help`; opencode 1 always uses a private server.
 
 See [the backend guide](chack_agent/backends/README.md) for transport, memory, compaction, and guardrail differences.
 
 ### Custom LLM gateways
 
-A gateway is any service that serves vendor models behind one key through the OpenAI Responses API and, for Claude Code, the Anthropic Messages API: LiteLLM, Portkey, Kong, Cloudflare AI Gateway, or a company proxy. Set `LLM_GATEWAY_BASE_URL` (the OpenAI root, usually ending in `/v1`) and `LLM_GATEWAY_API_KEY`, then select the gateway with `provider: gateway`, `api_key_type: gateway`, or a `gateway/<model>` name. `codex` and `claude` keep running their CLIs against the gateway (OpenAI- and Anthropic-hosted web search are turned off because gateways cannot serve them); `gemini`, `copilot`, and `openai` move to the `gateway` Responses runtime.
+A gateway is any service that serves vendor models behind one key through the OpenAI Responses API and, for Claude Code, the Anthropic Messages API: LiteLLM, Portkey, Kong, Cloudflare AI Gateway, or a company proxy. Set `LLM_GATEWAY_BASE_URL` (the OpenAI root, usually ending in `/v1`) and `LLM_GATEWAY_API_KEY`, then select the gateway with `provider: gateway`, `api_key_type: gateway`, or a `gateway/<model>` name. `codex` and `claude` keep running their CLIs against the gateway (OpenAI- and Anthropic-hosted web search are turned off because gateways cannot serve them); `copilot` and `openai` move to the `gateway` Responses runtime.
+
+`gemini` keeps the Gemini CLI when the gateway serves Google's Gemini API (`<root>/v1beta/models/<model>:generateContent`, with the gateway key as `x-goog-api-key`). LiteLLM serves it at `LLM_GATEWAY_BASE_URL` without `/v1` and translates it for every model it serves, so with `LLM_GATEWAY_TYPE=litellm` the CLI runs Gemini and non-Gemini models alike; other gateways set `LLM_GATEWAY_GEMINI_BASE_URL` (or `credentials.llm_gateway_gemini_base_url`). Without either, `gemini` runs on the `gateway` Responses runtime and logs a warning saying so. For non-Gemini models LiteLLM drops the Gemini `thinkingConfig`, so `thinking_effort` has no effect, and LiteLLM releases that do not request streamed usage from those models report zero tokens: Chack then logs that the run's tokens and cost are not counted.
 
 Chack reads the models the key may use from the gateway (`/models`, or `/model/info` with `LLM_GATEWAY_TYPE=litellm`). Vendor IDs such as `claude-opus-5-5` are mapped to the gateway's own names, and a model the key cannot use fails before the run with the allowed list. `list_gateway_models()` returns that list for model pickers. With `litellm`, the gateway also supplies context windows and the prices used for cost accounting. `LLM_GATEWAY_MODEL_MAP` overrides the mapping.
 

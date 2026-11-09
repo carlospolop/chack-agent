@@ -67,6 +67,10 @@ LITELLM_MODEL_INFO = {
 FAKE_OPENCODE = textwrap.dedent(
     """
     import json, os, sys, time
+    if "--help" in sys.argv:
+        # opencode 1.x help unless a test sets the help of another version.
+        print(os.environ.get("FAKE_OC_HELP", "opencode run [message..]\\n  --format  json"))
+        sys.exit(0)
     record = os.environ["FAKE_OC_RECORD"]
     with open(os.environ["FAKE_OC_SCENARIO"]) as handle:
         scenario = json.load(handle)
@@ -411,6 +415,28 @@ def test_system_prompt_and_stable_prefix_go_to_the_agent_and_the_task_to_stdin(f
     assert agent["steps"] == 7
     # The agent prompt is identical across tasks so the provider cache is reused.
     assert second["config"]["agent"]["chack"]["prompt"] == agent["prompt"]
+
+
+def test_opencode_1_runs_without_the_standalone_flag_it_does_not_know(fake_opencode):
+    _build(_gateway_config("corp/opus-5.5")).invoke({"input": "hi"})
+
+    argv = fake_opencode.calls[0]["argv"]
+    assert argv[:3] == ["run", "--format", "json"]
+    assert "--standalone" not in argv
+
+
+def test_opencode_2_runs_on_a_private_server_so_concurrent_runs_do_not_share_one(fake_opencode, monkeypatch):
+    # opencode 2's help, trimmed: `run` attaches to a shared background
+    # service on a fixed port unless --standalone asks for a private server.
+    monkeypatch.setenv(
+        "FAKE_OC_HELP",
+        "USAGE\n  opencode run [flags] [<message...>]\nGLOBAL FLAGS\n"
+        "  --standalone    Run with a private server instead of the background service\n",
+    )
+
+    _build(_gateway_config("corp/opus-5.5")).invoke({"input": "hi"})
+
+    assert fake_opencode.calls[0]["argv"][:4] == ["run", "--standalone", "--format", "json"]
 
 
 def test_later_invocations_resume_the_session(fake_opencode):

@@ -25,7 +25,12 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..resume_compaction import ResumeCompactionResult
-from ..llm_gateway import GATEWAY_KIND_LITELLM, GatewayRoute, clone_config_for_gateway, get_gateway_route
+from ..llm_gateway import (
+    LLM_GATEWAY_ENV_GEMINI_BASE_URL,
+    LLM_GATEWAY_ENV_TYPE,
+    clone_config_for_gateway,
+    get_gateway_route,
+)
 from ..thinking_effort import gemini_thinking_config, normalize_thinking_effort
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -483,6 +488,16 @@ class GeminiCliExecutor:
                             cache_write_tokens=0,
                         )
                         raw_responses.append({"usage": usage})
+                        if self._gemini_base_url and not usage["input_tokens"]:
+                            # LiteLLM translates the Gemini API for other models, and
+                            # releases that do not ask those models for streamed usage
+                            # report zero tokens.
+                            _LOGGER.warning(
+                                "The gateway at %s reported no token usage for %s; this run's "
+                                "tokens and cost are not counted",
+                                self._gemini_base_url,
+                                self._model_name,
+                            )
                     if str(event.get("status") or "").strip().lower() == "error":
                         error_obj = event.get("error")
                         details = event.get("message") or ""
@@ -912,12 +927,20 @@ def build_executor(
 ) -> GeminiCliExecutor:
     gateway_route = get_gateway_route(config)
     gateway_config = clone_config_for_gateway(config, gateway_route) if gateway_route is not None else None
-    if gateway_route is not None and _serves_gemini_api(gateway_route):
+    if gateway_route is not None and gateway_route.gemini_base_url:
         # The gateway's model names, still run by the Gemini CLI.
         config = replace(gateway_config, model=replace(gateway_config.model, provider="gemini"))
     elif gateway_route is not None:
         from .gateway_responses_backend import build_executor as build_gateway_responses_executor
 
+        _LOGGER.warning(
+            "%s serves no Gemini API, so the Gemini CLI cannot run %s; running it on the gateway "
+            "Responses backend instead (set %s=litellm or %s to use the Gemini CLI)",
+            gateway_route.display_name,
+            gateway_route.model_name,
+            LLM_GATEWAY_ENV_TYPE,
+            LLM_GATEWAY_ENV_GEMINI_BASE_URL,
+        )
         return build_gateway_responses_executor(
             gateway_config,
             system_prompt=system_prompt,
@@ -1111,18 +1134,6 @@ def build_executor(
         compaction_threshold_ratio=float(
             getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75
         ),
-        # The Gemini API sits at the gateway root (<root>/v1beta/models/...).
-        gemini_base_url=_gateway_root(gateway_route.base_url) if gateway_route is not None else "",
+        gemini_base_url=gateway_route.gemini_base_url if gateway_route is not None else "",
         gemini_headers=gateway_route.headers if gateway_route is not None else None,
     )
-
-
-def _gateway_root(base_url: str) -> str:
-    root = base_url.rstrip("/")
-    return root[: -len("/v1")] if root.endswith("/v1") else root
-
-
-def _serves_gemini_api(route: GatewayRoute) -> bool:
-    """LiteLLM serves Gemini models on Google's own API, which the CLI speaks."""
-    model = (route.upstream or route.model_name).lower()
-    return route.kind == GATEWAY_KIND_LITELLM and "gemini" in model
