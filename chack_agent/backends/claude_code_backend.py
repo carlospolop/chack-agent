@@ -330,6 +330,11 @@ def _claude_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, s
             "ANTHROPIC_AUTH_TOKEN": route.api_key,
             "ANTHROPIC_API_KEY": "",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            # On a refusal or a model it cannot reach, Claude Code retries on a
+            # hardcoded Anthropic model id that bypasses the model variables
+            # below, and the gateway rejects it as an unknown model.
+            "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1",
+            "CLAUDE_CODE_NO_MODEL_FALLBACK": "1",
         }
     )
     # Betas such as deferred tool loading save tens of thousands of tokens per
