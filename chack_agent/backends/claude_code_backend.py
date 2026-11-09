@@ -43,6 +43,7 @@ from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
 from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
+from .cli_process import cli_exec_timeout_seconds
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .web_search_fallback import (
     FALLBACK_WEB_MCP_SERVER,
@@ -72,6 +73,8 @@ from .prompt_cache import (
 
 
 _LOGGER = logging.getLogger("chack.claude_code_backend")
+
+CLAUDE_EXEC_TIMEOUT_ENV = "CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS"
 _MCP_STARTUP_STATUS_PATH_ENV = "CHACK_MCP_STARTUP_STATUS_PATH"
 
 
@@ -1031,9 +1034,7 @@ class ClaudeCodeExecutor:
             env["CHACK_VULN_FALLBACK_DIR"] = bash_vulns_dir
         self._write_save_vuln_script(exec_cwd)
         bash_vuln_snapshot = self._snapshot_bash_saved_vulns(bash_vulns_dir)
-        timeout_seconds = int(
-            os.environ.get("CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS", "") or "900"
-        )
+        timeout_seconds = cli_exec_timeout_seconds(CLAUDE_EXEC_TIMEOUT_ENV)
 
         _LOGGER.info(
             "Starting Claude Code process: model=%s timeout_seconds=%s session_id=%s cwd=%s",
