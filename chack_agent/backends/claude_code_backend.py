@@ -288,6 +288,11 @@ _CLAUDE_GATEWAY_MODEL_ENV = (
     "ANTHROPIC_SMALL_FAST_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
 )
+# The model Claude Code itself retries on when a model's safeguards refuse a
+# request. It sends this vendor ID as is, which a gateway does not serve, so on
+# a gateway its fallback is off and the run is retried here under the
+# gateway's name for the same model.
+_CLAUDE_REFUSAL_FALLBACK_MODEL = "claude-opus-4-8"
 
 
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
@@ -332,7 +337,8 @@ def _claude_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, s
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             # On a refusal or a model it cannot reach, Claude Code retries on a
             # hardcoded Anthropic model id that bypasses the model variables
-            # below, and the gateway rejects it as an unknown model.
+            # below, and the gateway rejects it as an unknown model. Refusals
+            # are retried by the executor on the gateway's own name instead.
             "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1",
             "CLAUDE_CODE_NO_MODEL_FALLBACK": "1",
         }
@@ -354,6 +360,24 @@ def _claude_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, s
     env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = background_model
     env["ANTHROPIC_SMALL_FAST_MODEL"] = background_model
     return env
+
+
+def _is_model_refusal(output: str) -> bool:
+    """Whether a run ended because the model's safeguards refused it."""
+
+    return str(output or "").startswith("ERROR:") and '"stop_reason": "refusal"' in str(output)
+
+
+def _gateway_refusal_fallback(config: ChackConfig, route: GatewayRoute) -> tuple[str, str]:
+    """Gateway name and Claude Code environment for the refusal fallback model, if served."""
+
+    try:
+        fallback = get_gateway_route(config, model_name=_CLAUDE_REFUSAL_FALLBACK_MODEL)
+    except ValueError:
+        return "", ""
+    if fallback is None or not fallback.model_name or fallback.model_name == route.model_name:
+        return "", ""
+    return fallback.model_name, json.dumps(_claude_gateway_env(config, fallback), sort_keys=True)
 
 
 @lru_cache(maxsize=8)
@@ -466,6 +490,10 @@ class ClaudeCodeExecutor:
     # starts) at the gateway; empty when Claude talks to Anthropic directly.
     _gateway_env_json: str = ""
     _gateway_context_window: int = 0
+    # Gateway name and environment of the model a refused run is retried on;
+    # empty when the gateway does not serve it or the run already uses it.
+    _gateway_refusal_model: str = ""
+    _gateway_refusal_env_json: str = ""
     _claude_home: str | None = None
     _claude_session_id: str | None = None
     _output_schema: str | None = None
@@ -921,6 +949,19 @@ class ClaudeCodeExecutor:
             _PROMPT_CACHE_REJECTED.add(self._prompt_cache_route())
             self._claude_session_id = session_before
             result = self._run_claude_once(prompt)
+        if self._gateway_refusal_model and _is_model_refusal(result[0]):
+            _LOGGER.warning(
+                "Model %s refused the request; retrying on %s.",
+                self._model_name,
+                self._gateway_refusal_model,
+            )
+            model_name, env_json = self._model_name, self._gateway_env_json
+            self._model_name, self._gateway_env_json = self._gateway_refusal_model, self._gateway_refusal_env_json
+            self._claude_session_id = session_before
+            try:
+                result = self._run_claude_once(prompt)
+            finally:
+                self._model_name, self._gateway_env_json = model_name, env_json
         while self._looks_like_credential_failure(result[0]):
             rotated = rotate_environment_credentials("claude", self._claude_access_token)
             rotated_token = str(rotated.get("access_token", "") or "").strip()
@@ -2425,6 +2466,7 @@ def build_executor(
     serialized_tools_append_b64 = serialize_tools_payload(tools_append)
 
     route = gateway_route
+    refusal_model, refusal_env_json = _gateway_refusal_fallback(config, route) if route is not None else ("", "")
     native_web_search = web_search_enabled(config) and (route is None or route.is_openrouter)
 
     return ClaudeCodeExecutor(
@@ -2520,4 +2562,6 @@ def build_executor(
             else ""
         ),
         _gateway_context_window=int(route.context_window if route is not None else 0),
+        _gateway_refusal_model=refusal_model,
+        _gateway_refusal_env_json=refusal_env_json,
     )
