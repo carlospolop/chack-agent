@@ -18,7 +18,7 @@
 
 Provider aliases and credentials are resolved before this router runs. A configured OpenRouter route can redirect an otherwise CLI-oriented model through an API transport.
 
-[`../llm_gateway.py`](../llm_gateway.py) resolves OpenRouter and custom gateway routes. On a custom gateway route, Codex gets a `responses` model provider in its generated `config.toml` (key and headers passed by environment, native web search and Daybreak off) and Claude Code gets `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` with every model family mapped to gateway names and `WebSearch` disallowed. Gemini, Copilot, and OpenAI routes move to the `gateway` Responses runtime. The key's model list is read once per hour; unavailable explicit models fail early, while built-in role aliases the key cannot use fall back to the primary model.
+[`../llm_gateway.py`](../llm_gateway.py) resolves OpenRouter and custom gateway routes. On a custom gateway route, Codex gets a `responses` model provider in its generated `config.toml` (key and headers passed by environment, native web search and Daybreak off) and Claude Code gets `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` with every model family mapped to gateway names and `WebSearch` disallowed. The Gemini CLI runs on the gateway's Gemini API when it serves one (LiteLLM at its root for every model, other gateways at `LLM_GATEWAY_GEMINI_BASE_URL`); otherwise Gemini, like Copilot and OpenAI routes, moves to the `gateway` Responses runtime with a warning. The key's model list is read once per hour; unavailable explicit models fail early, while built-in role aliases the key cannot use fall back to the primary model.
 
 ## Shared contracts
 

@@ -2958,6 +2958,7 @@ class CodexExecutor:
             "LLM_GATEWAY_TYPE",
             "LLM_GATEWAY_BASE_URL",
             "LLM_GATEWAY_ANTHROPIC_BASE_URL",
+            "LLM_GATEWAY_GEMINI_BASE_URL",
             "LLM_GATEWAY_API_KEY",
             "LLM_GATEWAY_HEADERS",
             "LLM_GATEWAY_MODEL_MAP",

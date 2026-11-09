@@ -28,6 +28,7 @@ _LLM_GATEWAY_CREDENTIAL_ENV = (
     ("llm_gateway_type", "LLM_GATEWAY_TYPE"),
     ("llm_gateway_base_url", "LLM_GATEWAY_BASE_URL"),
     ("llm_gateway_anthropic_base_url", "LLM_GATEWAY_ANTHROPIC_BASE_URL"),
+    ("llm_gateway_gemini_base_url", "LLM_GATEWAY_GEMINI_BASE_URL"),
     ("llm_gateway_api_key", "LLM_GATEWAY_API_KEY"),
     ("llm_gateway_headers", "LLM_GATEWAY_HEADERS"),
     ("llm_gateway_model_map", "LLM_GATEWAY_MODEL_MAP"),
@@ -194,6 +195,7 @@ class CredentialsConfig:
     llm_gateway_type: str = ""
     llm_gateway_base_url: str = ""
     llm_gateway_anthropic_base_url: str = ""
+    llm_gateway_gemini_base_url: str = ""
     llm_gateway_api_key: str = ""
     llm_gateway_headers: Dict[str, str] = field(default_factory=dict)
     llm_gateway_model_map: Dict[str, str] = field(default_factory=dict)

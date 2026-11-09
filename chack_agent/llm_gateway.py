@@ -18,8 +18,11 @@ Two kinds are configured here:
 
 Routing only decides where requests go. The Codex, Claude Code and opencode
 backends keep running their CLIs against the gateway (for OpenRouter, Codex and
-Claude Code do so when it is selected with ``api_key_type: openrouter``); the
-other backends switch to the Responses API backend.
+Claude Code do so when it is selected with ``api_key_type: openrouter``). The
+Gemini CLI keeps running when the gateway serves Google's Gemini API: LiteLLM
+does at its root for every model it serves, other gateways where
+``LLM_GATEWAY_GEMINI_BASE_URL`` points. The other backends switch to the
+Responses API backend.
 """
 
 from __future__ import annotations
@@ -76,6 +79,7 @@ _OPENROUTER_FAMILY_VENDORS = (
 LLM_GATEWAY_ENV_TYPE = "LLM_GATEWAY_TYPE"
 LLM_GATEWAY_ENV_BASE_URL = "LLM_GATEWAY_BASE_URL"
 LLM_GATEWAY_ENV_ANTHROPIC_BASE_URL = "LLM_GATEWAY_ANTHROPIC_BASE_URL"
+LLM_GATEWAY_ENV_GEMINI_BASE_URL = "LLM_GATEWAY_GEMINI_BASE_URL"
 LLM_GATEWAY_ENV_API_KEY = "LLM_GATEWAY_API_KEY"
 LLM_GATEWAY_ENV_HEADERS = "LLM_GATEWAY_HEADERS"
 LLM_GATEWAY_ENV_MODEL_MAP = "LLM_GATEWAY_MODEL_MAP"
@@ -84,6 +88,7 @@ LLM_GATEWAY_ENV_NAMES = (
     LLM_GATEWAY_ENV_TYPE,
     LLM_GATEWAY_ENV_BASE_URL,
     LLM_GATEWAY_ENV_ANTHROPIC_BASE_URL,
+    LLM_GATEWAY_ENV_GEMINI_BASE_URL,
     LLM_GATEWAY_ENV_API_KEY,
     LLM_GATEWAY_ENV_HEADERS,
     LLM_GATEWAY_ENV_MODEL_MAP,
@@ -127,6 +132,9 @@ class GatewayRoute:
     context_window: int = 0
     # Upstream model the gateway forwards to (e.g. "bedrock/..."); "" when unknown.
     upstream: str = ""
+    # Google Gemini API root (the Gemini CLI appends /v1beta/models/...); ""
+    # when the gateway does not serve that API.
+    gemini_base_url: str = ""
 
     @property
     def is_openrouter(self) -> bool:
@@ -474,6 +482,7 @@ class _GatewaySettings:
     kind: str
     base_url: str
     anthropic_base_url: str
+    gemini_base_url: str
     api_key: str
     headers: dict[str, str]
     model_map: dict[str, str]
@@ -496,10 +505,17 @@ def _gateway_settings(config: ChackConfig) -> _GatewaySettings:
         _credential(config, "llm_gateway_anthropic_base_url", LLM_GATEWAY_ENV_ANTHROPIC_BASE_URL)
         or _anthropic_root(base_url)
     ).rstrip("/")
+    # LiteLLM serves the Gemini API at its root and translates it for every
+    # model it serves, not only Gemini ones; other gateways must name theirs.
+    gemini_base_url = (
+        _credential(config, "llm_gateway_gemini_base_url", LLM_GATEWAY_ENV_GEMINI_BASE_URL)
+        or (_anthropic_root(base_url) if kind == GATEWAY_KIND_LITELLM else "")
+    ).rstrip("/")
     return _GatewaySettings(
         kind=kind,
         base_url=base_url,
         anthropic_base_url=anthropic_base_url,
+        gemini_base_url=gemini_base_url,
         api_key=api_key,
         headers=_mapping(config, "llm_gateway_headers", LLM_GATEWAY_ENV_HEADERS),
         model_map=_mapping(config, "llm_gateway_model_map", LLM_GATEWAY_ENV_MODEL_MAP),
@@ -550,6 +566,7 @@ def _custom_gateway_route(config: ChackConfig, raw_model: str) -> GatewayRoute:
         headers=settings.headers,
         context_window=entry.context_window if entry is not None else 0,
         upstream=entry.upstream if entry is not None else "",
+        gemini_base_url=settings.gemini_base_url,
     )
 
 
@@ -656,6 +673,8 @@ def gateway_subprocess_env(config: ChackConfig, route: GatewayRoute) -> dict[str
         LLM_GATEWAY_ENV_ANTHROPIC_BASE_URL: settings.anthropic_base_url,
         LLM_GATEWAY_ENV_API_KEY: settings.api_key,
     }
+    if settings.gemini_base_url:
+        env[LLM_GATEWAY_ENV_GEMINI_BASE_URL] = settings.gemini_base_url
     if settings.headers:
         env[LLM_GATEWAY_ENV_HEADERS] = json.dumps(settings.headers, sort_keys=True)
     if settings.model_map:

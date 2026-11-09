@@ -159,3 +159,109 @@ def test_a_litellm_gateway_serves_gemini_models_to_the_cli(captured, monkeypatch
     assert request["path"].startswith("/v1beta/models/corp/gemini-3.5-flash:")
     assert request["headers"]["x-goog-api-key"] == "sk-gateway-test"
     assert request["headers"]["x-team"] == "red"
+
+def _litellm_config(model: str, base_url: str, **credentials) -> ChackConfig:
+    return ChackConfig(
+        model=ModelConfig(primary=model, provider="gemini", api_key_type="gateway"),
+        agent=AgentConfig(main_action="test", sub_action="gemini"),
+        session=SessionConfig(max_turns=2, long_term_memory_enabled=False),
+        tools=ToolsConfig(task_steps_manager_enabled=False, exec_enabled=True),
+        credentials=CredentialsConfig(
+            llm_gateway_base_url=base_url + "/v1", llm_gateway_api_key="sk-gateway-test", **credentials
+        ),
+        logging=LoggingConfig(level="WARNING"),
+        system_prompt=SYSTEM_PROMPT,
+        env={},
+    )
+
+def _litellm_catalog(monkeypatch, name: str, upstream: str) -> None:
+    llm_gateway._CATALOG_CACHE.clear()
+    catalog = {"data": [{"model_name": name, "litellm_params": {"model": upstream}, "model_info": {}}]}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return catalog
+
+    monkeypatch.setattr(llm_gateway, "_http_get", lambda url, headers=None, timeout=None: _Response())
+
+def test_a_litellm_gateway_serves_other_models_to_the_cli_through_its_gemini_api(captured, monkeypatch):
+    _litellm_catalog(monkeypatch, "corp/kimi-k2.5", "openai/kimi-k2.5")
+    monkeypatch.delenv("GOOGLE_GEMINI_BASE_URL")
+    config = _litellm_config("corp/kimi-k2.5", os.environ["CAPTURE_URL"], llm_gateway_type="litellm")
+
+    build_executor(
+        config, system_prompt=SYSTEM_PROMPT, max_turns=2, memory_max_messages=10, memory_reset_to_messages=5
+    ).invoke({"input": "Say hello."})
+    llm_gateway._CATALOG_CACHE.clear()
+
+    assert captured, "the Gemini CLI sent no request to the gateway"
+    assert captured.sent[0]["path"].startswith("/v1beta/models/corp/kimi-k2.5:")
+    assert captured.sent[0]["headers"]["x-goog-api-key"] == "sk-gateway-test"
+
+def test_a_custom_gateway_serves_the_cli_on_the_gemini_api_it_names(captured, monkeypatch):
+    _litellm_catalog(monkeypatch, "corp/gemini-3.5-flash", "corp/gemini-3.5-flash")
+    monkeypatch.delenv("GOOGLE_GEMINI_BASE_URL")
+    config = _litellm_config(
+        "corp/gemini-3.5-flash",
+        "http://127.0.0.1:9",
+        llm_gateway_type="custom",
+        llm_gateway_gemini_base_url=os.environ["CAPTURE_URL"] + "/google",
+    )
+
+    build_executor(
+        config, system_prompt=SYSTEM_PROMPT, max_turns=2, memory_max_messages=10, memory_reset_to_messages=5
+    ).invoke({"input": "Say hello."})
+    llm_gateway._CATALOG_CACHE.clear()
+
+    assert captured, "the Gemini CLI sent no request to the gateway"
+    assert captured.sent[0]["path"].startswith("/google/v1beta/models/corp/gemini-3.5-flash:")
+
+def test_a_gateway_answer_without_token_usage_is_reported(monkeypatch, tmp_path, caplog):
+    """LiteLLM releases that translate the Gemini API for other models stream
+    usageMetadata of zeros; the run must say its cost is not counted."""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            chunks = [
+                {"candidates": [{"content": {"parts": [{"text": "hello"}], "role": "model"}, "index": 0}]},
+                {
+                    "candidates": [{"content": {"parts": [], "role": "model"}, "finishReason": "STOP", "index": 0}],
+                    "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0},
+                },
+            ]
+            body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks).encode()
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("GEMINI_CLI_PATH", GEMINI)
+    monkeypatch.setenv("CHACK_GEMINI_HOME", str(tmp_path / "gemini-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(name, raising=False)
+    _litellm_catalog(monkeypatch, "corp/glm-5.2", "openai/glm-5.2")
+    config = _litellm_config(
+        "corp/glm-5.2", f"http://127.0.0.1:{server.server_address[1]}", llm_gateway_type="litellm"
+    )
+    try:
+        with caplog.at_level("WARNING", logger="chack.gemini_cli_backend"):
+            result = build_executor(
+                config, system_prompt=SYSTEM_PROMPT, max_turns=2, memory_max_messages=10, memory_reset_to_messages=5
+            ).invoke({"input": "Say hello."})
+    finally:
+        server.shutdown()
+        llm_gateway._CATALOG_CACHE.clear()
+
+    assert "hello" in str(result.get("output"))
+    assert "reported no token usage for corp/glm-5.2" in caplog.text

@@ -535,11 +535,50 @@ def test_gateway_provider_uses_the_responses_backend(catalog_requests):
 
 
 def test_cli_without_gateway_support_moves_to_the_responses_backend(catalog_requests):
-    executor = _build(build_gemini_executor, _config("gemini", "gateway/claude-opus-5-5"))
+    executor = _build(build_executor, _config("copilot", "gateway/claude-opus-5-5"))
 
     assert executor.__class__.__module__ == "chack_agent.backends.gateway_responses_backend"
     assert executor._config.model.provider == "gateway"
     assert executor.agent.model.model == "corp/opus-5.5"
+
+
+@pytest.mark.parametrize("primary", ["gateway/claude-opus-5-5", "corp/gpt-6-sol"])
+def test_gemini_cli_runs_any_litellm_model_on_the_gateways_gemini_api(primary, catalog_requests):
+    # LiteLLM translates its Gemini API for every model it serves.
+    executor = _build(build_gemini_executor, _config("gemini", primary, api_key_type="gateway"))
+
+    assert executor.__class__.__name__ == "GeminiCliExecutor"
+    assert executor._model_name == ("corp/opus-5.5" if "opus" in primary else "corp/gpt-6-sol")
+    assert executor._gemini_base_url == "https://gateway.example.test"
+    assert executor._gemini_api_key == GATEWAY_KEY
+
+
+def test_gemini_cli_runs_on_the_gemini_api_a_custom_gateway_names(catalog_requests):
+    config = _config(
+        "gemini",
+        "gateway/claude-opus-5-5",
+        gateway_type="custom",
+        llm_gateway_gemini_base_url="https://gateway.example.test/google/",
+    )
+
+    executor = _build(build_gemini_executor, config)
+
+    assert executor.__class__.__name__ == "GeminiCliExecutor"
+    assert executor._model_name == "anthropic/claude-opus-5.5"
+    assert executor._gemini_base_url == "https://gateway.example.test/google"
+    assert llm_gateway.gateway_subprocess_env(config, get_gateway_route(config))[
+        "LLM_GATEWAY_GEMINI_BASE_URL"
+    ] == "https://gateway.example.test/google"
+
+
+def test_gemini_on_a_custom_gateway_without_a_gemini_api_says_which_backend_runs(catalog_requests, caplog):
+    with caplog.at_level("WARNING", logger="chack.gemini_cli_backend"):
+        executor = _build(build_gemini_executor, _config("gemini", "gateway/claude-opus-5-5", gateway_type="custom"))
+
+    assert executor.__class__.__module__ == "chack_agent.backends.gateway_responses_backend"
+    assert "cannot run anthropic/claude-opus-5.5" in caplog.text
+    assert "Responses backend" in caplog.text
+    assert "LLM_GATEWAY_GEMINI_BASE_URL" in caplog.text
 
 
 # --- cost ------------------------------------------------------------------
