@@ -28,7 +28,7 @@ from chack_agent.config import (
 pytestmark = pytest.mark.skipif(shutil.which("claude") is None, reason="Claude Code CLI not installed")
 
 
-def _capture_first_request(tmp_path, monkeypatch, **tools) -> dict:
+def _capture_first_request(tmp_path, monkeypatch, model: dict | None = None, **tools) -> dict:
     requests: list[dict] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -55,9 +55,9 @@ def _capture_first_request(tmp_path, monkeypatch, **tools) -> dict:
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         monkeypatch.setenv("CHACK_CLAUDE_HOME_BASE", str(tmp_path / "claude-homes"))
         workdir = tmp_path / "work"
-        workdir.mkdir()
+        workdir.mkdir(parents=True)
         config = ChackConfig(
-            model=ModelConfig(primary="claude-haiku-5-5", provider="claude"),
+            model=ModelConfig(**{"primary": "claude-haiku-5-5", "provider": "claude", **(model or {})}),
             agent=AgentConfig(main_action="test", sub_action="test"),
             session=SessionConfig(max_turns=2),
             tools=ToolsConfig(**{"exec_enabled": True, "task_steps_manager_enabled": False, **tools}),
@@ -126,3 +126,11 @@ def test_a_run_without_exec_gets_no_shell_or_host_file_tools(tmp_path, monkeypat
     tools = {tool["name"] for tool in request.get("tools") or []}
     assert not tools & {"Bash", "Read", "Edit", "Write", "Glob", "Grep", "mcp__chack_tools__exec"}
     assert "Run printf alpha" in json.dumps(request)
+
+
+def test_prompt_caching_marks_the_request_unless_the_model_turns_it_off(tmp_path, monkeypatch):
+    cached = _capture_first_request(tmp_path / "cached", monkeypatch)
+    assert "cache_control" in json.dumps(cached)
+
+    uncached = _capture_first_request(tmp_path / "uncached", monkeypatch, model={"prompt_cache_enabled": False})
+    assert "cache_control" not in json.dumps(uncached)

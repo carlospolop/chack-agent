@@ -65,3 +65,15 @@ def openai_model_requires_explicit_prompt_cache(model_name: str) -> bool:
         return False
     major, minor = (int(value) for value in match.groups())
     return major > 5 or (major == 5 and minor >= 6)
+
+# How providers reject explicit cache markers for a model that cannot cache,
+# e.g. Vertex AI behind LiteLLM: "Model `gemini-4-argon` does not support
+# explicit context caching."
+_PROMPT_CACHE_REJECTION_RE = re.compile(
+    r"does not support (?:explicit )?(?:context|prompt) caching", re.IGNORECASE
+)
+
+
+def provider_rejects_prompt_cache(error_text: str) -> bool:
+    """Whether a provider error says the model does not accept cache markers."""
+    return bool(_PROMPT_CACHE_REJECTION_RE.search(str(error_text or "")))

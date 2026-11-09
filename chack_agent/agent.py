@@ -295,12 +295,16 @@ _BACKEND_FAILURE_OUTPUT_PREFIXES = (
     "error: codex execution timed out",
     "error: codex execution cancelled",
     "error: codex exec produced no usable response",
+    "error: codex model wrote a tool call as text",
+    "error: codex model returned a placeholder",
     "error: claude exec failed",
     "error: failed to launch claude cli",
     "error: claude cli executable was not found",
     "error: claude execution timed out",
     "error: claude execution cancelled",
     "error: claude returned an error in final result event",
+    "error: claude provider returned malformed tool calls",
+    "error: claude finished without",
     "error: required claude mcp server failed to start",
     "error: gemini exec failed",
     "error: failed to launch gemini cli",
@@ -335,6 +339,13 @@ def _backend_failure_reason(output: Any) -> str:
         return "backend_policy_refusal"
     if "selected model is at capacity" in normalized:
         return "backend_capacity"
+    # Both keep the backend_failure prefix so callers that match it still retry.
+    if normalized.startswith(
+        ("error: claude provider returned malformed tool calls", "error: codex model wrote a tool call as text")
+    ):
+        return "backend_failure_malformed_tool_call"
+    if normalized.startswith(("error: claude finished without", "error: codex model returned a placeholder")):
+        return "backend_failure_no_answer"
     return "backend_failure"
 
 

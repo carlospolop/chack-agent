@@ -61,6 +61,10 @@ class ModelConfig:
     # either a Codex account token or an OpenAI API key.
     api_key_type: str = ""
     max_context_tokens: int = 0
+    # Whether the model CLI may mark prompt prefixes for provider caching.
+    # Turn it off for a model that rejects cache markers (some gateway models
+    # do); Claude Code also turns it off by itself after such a rejection.
+    prompt_cache_enabled: bool = True
     social_network: str = "CHEAP_BUT_QUALITY"
     scientific: str = "CHEAP_BUT_QUALITY"
     websearcher: str = "CHEAP_BUT_QUALITY"

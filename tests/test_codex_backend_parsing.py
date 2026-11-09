@@ -393,6 +393,7 @@ def test_claude_backend_normalizes_schema_output_from_wrapped_text():
         )
         _output_schema_name = "grouping_output"
         _output_schema_strict = True
+        _validated_schema_output = _load_claude_helper("_validated_schema_output")
 
     normalized = normalize_schema_output(
         _ClaudeShim(),

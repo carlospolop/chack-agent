@@ -64,7 +64,11 @@ from .tool_payloads import (
     serialize_tools_payload,
     write_payload_to_file,
 )
-from .prompt_cache import prompt_cache_key, split_prompt_cache_breakpoint
+from .prompt_cache import (
+    prompt_cache_key,
+    provider_rejects_prompt_cache,
+    split_prompt_cache_breakpoint,
+)
 
 
 _LOGGER = logging.getLogger("chack.claude_code_backend")
@@ -283,6 +287,34 @@ _CLAUDE_GATEWAY_MODEL_ENV = (
 )
 
 
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
+
+
+def _malformed_tool_use_names(message: dict[str, Any]) -> list[str]:
+    """Names of tool calls in an assistant message that are not tool names.
+
+    A provider that fails to parse a model's tool-call tokens can leak them
+    into the call, e.g. ``functions_mcp__chack_tools__exec_2
+    <|tool_call_argument_begin|> {"command"`` with empty input (Kimi K2.5 on
+    Bedrock behind LiteLLM).
+    """
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [
+        str(item.get("name") or "")
+        for item in content
+        if isinstance(item, dict)
+        and str(item.get("type") or "") == "tool_use"
+        and not _TOOL_NAME_RE.match(str(item.get("name") or ""))
+    ]
+
+
+# (Anthropic base URL, model) pairs whose provider rejected cache markers in
+# this process, so later runs of the same model skip the failing request.
+_PROMPT_CACHE_REJECTED: set[tuple[str, str]] = set()
+
+
 def _claude_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, str]:
     """Claude Code environment for a gateway serving the Anthropic Messages API."""
 
@@ -435,6 +467,8 @@ class ClaudeCodeExecutor:
     _travel_max_turns: int = 50
     _cacheable_system_prompt: str = ""
     _prompt_cache_prefix_key: str = ""
+    # Whether Claude Code may send cache_control markers (DISABLE_PROMPT_CACHING).
+    _prompt_cache_enabled: bool = True
     _serialized_tools_override_names_json: str = ""
     _serialized_tools_append_names_json: str = ""
 
@@ -485,7 +519,11 @@ class ClaudeCodeExecutor:
             )
             retry_output, retry_steps, retry_raw = self._run_claude(retry_prompt)
             retry_output = self._normalize_schema_output(retry_output)
-            if retry_output:
+            if retry_output.startswith("ERROR:") and output and not output.startswith("ERROR:"):
+                # The answer already given stands; a failed save prompt must
+                # not turn it into an error.
+                _LOGGER.warning("Save-retry failed: %s", retry_output[:2000])
+            elif retry_output:
                 output = output + "\n\n" + retry_output if output else retry_output
             steps.extend(retry_steps)
             if retry_raw.raw_responses:
@@ -526,7 +564,17 @@ class ClaudeCodeExecutor:
             # turns its diagnostics into an empty object and hides the error.
             _LOGGER.warning("Claude backend returned an error instead of schema output: %s", output[:2000])
             return output
+        validated = self._validated_schema_output(output)
+        if validated is None:
+            _LOGGER.warning("Claude backend output failed local schema normalization")
+            return output
+        return validated
 
+    def _validated_schema_output(self, output: str) -> str | None:
+        """Schema-shaped JSON for ``output``, or None when it does not match.
+
+        Without a usable schema every output is accepted unchanged.
+        """
         raw_schema = str(self._output_schema_json or "").strip()
         if not raw_schema:
             return output
@@ -540,29 +588,53 @@ class ClaudeCodeExecutor:
         if not isinstance(schema_obj, dict):
             return output
 
+        validator = JsonSchemaOutput(
+            schema_obj,
+            name=str(self._output_schema_name or "output_schema"),
+            strict=bool(self._output_schema_strict),
+        )
         try:
-            validator = JsonSchemaOutput(
-                schema_obj,
-                name=str(self._output_schema_name or "output_schema"),
-                strict=bool(self._output_schema_strict),
-            )
-            validated = validator.validate_json(output or "")
-            return json.dumps(validated, ensure_ascii=False)
-        except Exception as exc:
+            return json.dumps(validator.validate_json(output or ""), ensure_ascii=False)
+        except Exception:
             extracted = self._extract_embedded_json(output or "")
-            if extracted is not None:
-                try:
-                    validator = JsonSchemaOutput(
-                        schema_obj,
-                        name=str(self._output_schema_name or "output_schema"),
-                        strict=bool(self._output_schema_strict),
-                    )
-                    validated = validator.validate_json(json.dumps(extracted, ensure_ascii=False))
-                    return json.dumps(validated, ensure_ascii=False)
-                except Exception:
-                    pass
-            _LOGGER.warning("Claude backend output failed local schema normalization: %s", exc)
-            return output
+            if extracted is None:
+                return None
+            try:
+                validated = validator.validate_json(json.dumps(extracted, ensure_ascii=False))
+            except Exception:
+                return None
+            return json.dumps(validated, ensure_ascii=False)
+
+    @staticmethod
+    def _missing_answer_error(
+        reason: str,
+        malformed_tool_names: list[str],
+        result_event: dict[str, Any],
+        raw_lines: list[str],
+    ) -> str:
+        """The error for a run that ended without a usable answer.
+
+        A provider that broke the model's tool calls is named as the cause, so
+        callers can tell it from a model that simply stopped.
+        """
+        if malformed_tool_names:
+            message = (
+                "ERROR: Claude provider returned malformed tool calls: "
+                f"{len(malformed_tool_names)} tool call(s) were named with leaked "
+                f"tool-call tokens, e.g. {malformed_tool_names[-1][:200]!r}. {reason}"
+            )
+        else:
+            message = f"ERROR: {reason}"
+        if result_event:
+            diagnostic = {
+                key: result_event.get(key)
+                for key in ("subtype", "stop_reason", "num_turns", "session_id")
+                if result_event.get(key) not in (None, "")
+            }
+            message += " Event diagnostics: " + json.dumps(diagnostic, ensure_ascii=False, default=str)
+        elif raw_lines:
+            message += " The CLI sent no result event. Output tail: " + "\n".join(raw_lines)[-2000:]
+        return message
 
     @staticmethod
     def _extract_embedded_json(output: str) -> Any | None:
@@ -812,9 +884,35 @@ class ClaudeCodeExecutor:
             # the ordered credential pool advances.
             self._claude_session_id = None
 
+    def _prompt_cache_route(self) -> tuple[str, str]:
+        base_url = str(json.loads(self._gateway_env_json or "{}").get("ANTHROPIC_BASE_URL", "") or "")
+        return base_url, str(self._model_name or "")
+
+    def _sends_prompt_cache_markers(self) -> bool:
+        return (
+            self._prompt_cache_enabled
+            and self._prompt_cache_route() not in _PROMPT_CACHE_REJECTED
+        )
+
     def _run_claude(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._refresh_provider_credentials()
+        session_before = self._claude_session_id
         result = self._run_claude_once(prompt)
+        if (
+            result[0].startswith("ERROR:")
+            and provider_rejects_prompt_cache(result[0])
+            and self._sends_prompt_cache_markers()
+        ):
+            # The provider refused the request before the model ran, so it is
+            # sent again, once, without cache markers.
+            _LOGGER.warning(
+                "Model %s rejects prompt-cache markers; retrying without them. "
+                "Set model.prompt_cache_enabled: false for this model to skip the failing request.",
+                self._model_name,
+            )
+            _PROMPT_CACHE_REJECTED.add(self._prompt_cache_route())
+            self._claude_session_id = session_before
+            result = self._run_claude_once(prompt)
         while self._looks_like_credential_failure(result[0]):
             rotated = rotate_environment_credentials("claude", self._claude_access_token)
             rotated_token = str(rotated.get("access_token", "") or "").strip()
@@ -982,6 +1080,10 @@ class ClaudeCodeExecutor:
         raw_lines: list[str] = []
         raw_responses: list[Any] = []
         tool_calls: dict[str, tuple[str, Any]] = {}
+        # Tool calls whose name is not a tool name at all: the provider failed
+        # to parse the model's tool-call tokens and leaked them into the name.
+        malformed_tool_names: list[str] = []
+        result_event: dict[str, Any] = {}
         failed_mcp_servers: dict[str, str] = {}
         started_at = time.monotonic()
         time_to_first_token_seconds: float | None = None
@@ -1065,6 +1167,7 @@ class ClaudeCodeExecutor:
                     msg = event.get("message")
                     if isinstance(msg, dict):
                         self._extract_message_content(msg, output_parts, tool_calls, steps)
+                        malformed_tool_names.extend(_malformed_tool_use_names(msg))
                     continue
 
                 if event_type == "user":
@@ -1075,6 +1178,7 @@ class ClaudeCodeExecutor:
                     continue
 
                 if event_type == "result":
+                    result_event = event
                     result_text = str(event.get("result") or "").strip()
                     if result_text:
                         result_parts.append(result_text)
@@ -1199,16 +1303,42 @@ class ClaudeCodeExecutor:
                 _RawResult(raw_responses=raw_responses),
             )
 
-        response = "".join(result_parts or output_parts).strip()
-        if not response and raw_lines:
-            response = "\n".join(raw_lines).strip()
-            if response:
-                response = response[-4000:]
-
         # Pick up any JSON-fallback vulns written via save_vuln.sh
         bash_vuln_steps = self._collect_bash_saved_vulns(bash_vulns_dir, bash_vuln_snapshot)
         if bash_vuln_steps:
             steps.extend(bash_vuln_steps)
+
+        if malformed_tool_names:
+            _LOGGER.warning(
+                "Claude provider returned %d malformed tool call(s) for model %s, e.g. %r.",
+                len(malformed_tool_names),
+                self._model_name,
+                malformed_tool_names[0][:200],
+            )
+        response = "".join(result_parts or output_parts).strip()
+        missing_answer = ""
+        if not response:
+            missing_answer = "Claude finished without a final answer."
+        elif (
+            self._output_schema_json
+            and result_event.get("structured_output") is None
+            and self._validated_schema_output(response) is None
+        ):
+            missing_answer = (
+                "Claude finished without the structured output its schema requires. "
+                f"Final text: {response[:500]!r}."
+            )
+        if missing_answer:
+            return (
+                self._missing_answer_error(
+                    missing_answer,
+                    malformed_tool_names,
+                    result_event,
+                    raw_lines,
+                ),
+                steps,
+                _RawResult(raw_responses=raw_responses),
+            )
 
         return response, steps, _RawResult(
             raw_responses=raw_responses,
@@ -1775,6 +1905,11 @@ PYEOF
             # Chack's configured fraction inside the running CLI conversation.
             ratio = min(0.95, max(0.01, self._compaction_threshold_ratio))
             env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(round(ratio * 100))
+
+        # Claude Code marks the tools, system prompt and last message with
+        # cache_control. A model that cannot cache rejects the whole request.
+        if not self._sends_prompt_cache_markers():
+            env["DISABLE_PROMPT_CACHING"] = "1"
 
         # Allow --dangerously-skip-permissions when running as root inside Docker/CI.
         env.setdefault("IS_SANDBOX", "1")
@@ -2346,6 +2481,7 @@ def build_executor(
         _output_schema_name=str(getattr(config.agent, "output_schema_name", "") or "output_schema"),
         _output_schema_strict=bool(getattr(config.agent, "output_schema_strict", True)),
         _max_context_tokens=int(getattr(config.model, "max_context_tokens", 0) or 0),
+        _prompt_cache_enabled=bool(getattr(config.model, "prompt_cache_enabled", True)),
         _compaction_threshold_ratio=float(
             getattr(config.agent, "compaction_threshold_ratio", 0.50) or 0.50
         ),
