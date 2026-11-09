@@ -166,42 +166,63 @@ def _claude_last_dash_to_dot_variant(model_name: str) -> Optional[str]:
     return candidate_bare
 
 
+_OPENROUTER_PREFIX = "openrouter/"
+# Gateways name Claude tiers without "claude-" ("opus-5.5").
+_CLAUDE_TIERS = ("opus-", "sonnet-", "haiku-")
+# Instruction-tuned open-weight models (Gemma) carry "-it" on OpenRouter.
+_INSTRUCTION_TUNED_SUFFIX = "-it"
+# Gateway names OpenRouter lists under another name.
+_BARE_NAME_ALIASES = {
+    # OpenRouter's qwen3-coder is the 480B-A35B instruct model.
+    "qwen3-coder-480b-a35b-instruct": "qwen3-coder",
+}
+
+def _bare_name_candidates(bare: str) -> List[str]:
+    """Names a model may have in the pricing table, most literal first."""
+    candidates = [bare]
+    alias = _BARE_NAME_ALIASES.get(bare.lower())
+    if alias:
+        candidates.append(alias)
+    if bare.lower().startswith(_CLAUDE_TIERS):
+        candidates.append(f"claude-{bare}")
+    candidates.append(f"{bare}{_INSTRUCTION_TUNED_SUFFIX}")
+    return candidates
+
+def _unique_bare_match(pricing: PricingTable, bare: str) -> Optional[str]:
+    # OpenRouter's own models (its ``openrouter/auto`` router...) are matched
+    # only by their full name: another provider's ``auto`` is not them.
+    matches = [
+        key
+        for key in pricing.models.keys()
+        if not key.startswith(_OPENROUTER_PREFIX) and _strip_provider_prefix(key) == bare
+    ]
+    return matches[0] if len(matches) == 1 else None
+
 def _resolve_model_lookup(pricing: PricingTable, model: str) -> Optional[str]:
     lookup = str(model or "").strip()
     if not lookup:
         return None
     if lookup in pricing.models:
         return lookup
-    # "openrouter/<vendor>/<model>" is a routing name; OpenRouter bills the
-    # vendor model's rate, which the table stores as "<vendor>/<model>".
-    if lookup.startswith("openrouter/"):
-        lookup = lookup[len("openrouter/") :]
+    if lookup.startswith(_OPENROUTER_PREFIX):
+        lookup = lookup[len(_OPENROUTER_PREFIX) :]
         if lookup in pricing.models:
             return lookup
 
-    bare_lookup = _strip_provider_prefix(lookup)
-    stripped_matches = [
-        key for key in pricing.models.keys() if _strip_provider_prefix(key) == bare_lookup
-    ]
-    if len(stripped_matches) == 1:
-        return stripped_matches[0]
-
-    claude_variant = _claude_last_dash_to_dot_variant(lookup)
-    if not claude_variant:
-        return None
-
-    if claude_variant in pricing.models:
-        return claude_variant
-
-    bare_variant = _strip_provider_prefix(claude_variant)
-    bare_variant_matches = [
-        key for key in pricing.models.keys() if _strip_provider_prefix(key) == bare_variant
-    ]
-    if len(bare_variant_matches) == 1:
-        return bare_variant_matches[0]
-
+    provider = lookup.split("/", 1)[0] + "/" if "/" in lookup else ""
+    for bare in _bare_name_candidates(_strip_provider_prefix(lookup)):
+        match = _unique_bare_match(pricing, bare)
+        if match:
+            return match
+        claude_variant = _claude_last_dash_to_dot_variant(bare)
+        if not claude_variant:
+            continue
+        if provider + claude_variant in pricing.models:
+            return provider + claude_variant
+        match = _unique_bare_match(pricing, claude_variant)
+        if match:
+            return match
     return None
-
 
 def _model_family(model_name: str) -> str:
     bare = str(model_name or "").strip().lower().rsplit("/", 1)[-1]

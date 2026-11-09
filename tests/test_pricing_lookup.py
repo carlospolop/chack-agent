@@ -65,3 +65,53 @@ def test_fallback_pricing_sums_into_per_model_costs():
 
     assert total == pytest.approx(6.0)
     assert missing == []
+
+@pytest.mark.parametrize(
+    ("model", "priced_as"),
+    [
+        # OpenRouter names the instruction-tuned Gemma "-it".
+        ("bakkt/gemma-4-26b-a4b", "google/gemma-4-26b-a4b-it"),
+        # Gateways often drop the "claude-" of Claude tiers.
+        ("bakkt/opus-5.5", "anthropic/claude-opus-5.5"),
+        ("bakkt/opus-5", "anthropic/claude-opus-5"),
+        ("bakkt/opus-4.8", "anthropic/claude-opus-4.8"),
+        ("bakkt/sonnet-5", "anthropic/claude-sonnet-5"),
+        ("bakkt/haiku-4.5", "anthropic/claude-haiku-4.5"),
+        ("corp/opus-4-8", "anthropic/claude-opus-4.8"),
+        # OpenRouter's qwen3-coder is the 480B-A35B instruct model.
+        ("bakkt/qwen3-coder-480b-a35b-instruct", "qwen/qwen3-coder"),
+        # Names that already matched keep their price.
+        ("bakkt/claude-opus-5.5", "anthropic/claude-opus-5.5"),
+        ("vertex_ai/claude-opus-4-8", "anthropic/claude-opus-4.8"),
+        ("bakkt/minimax-m2.5", "minimax/minimax-m2.5"),
+        ("openrouter/auto", "openrouter/auto"),
+        ("openrouter/openai/gpt-6-sol", "openai/gpt-6-sol"),
+    ],
+)
+def test_gateway_model_names_resolve_to_the_openrouter_price(model, priced_as):
+    table = load_pricing(_package_pricing_path())
+    expected = estimate_cost(table, priced_as, prompt_tokens=1_000_000, completion_tokens=1_000_000)
+
+    assert expected
+    assert estimate_cost(table, model, prompt_tokens=1_000_000, completion_tokens=1_000_000) == expected
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # A gateway's own router is not OpenRouter's.
+        "bakkt/auto",
+        "auto",
+        "corp/free",
+        # Close names of other models stay unpriced.
+        "bakkt/minimax-m2",
+        "bakkt/minimax-m2.1",
+        "bakkt/opus-9",
+        "bakkt/qwen3-coder-480b",
+        "bakkt/code",
+    ],
+)
+def test_gateway_names_without_an_openrouter_model_stay_unpriced(model):
+    table = load_pricing(_package_pricing_path())
+
+    assert estimate_cost(table, model, prompt_tokens=10, completion_tokens=10) is None

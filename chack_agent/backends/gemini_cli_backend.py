@@ -29,9 +29,11 @@ from ..llm_gateway import (
     LLM_GATEWAY_ENV_GEMINI_BASE_URL,
     LLM_GATEWAY_ENV_TYPE,
     clone_config_for_gateway,
+    gateway_subprocess_env,
     get_gateway_route,
 )
 from ..thinking_effort import gemini_thinking_config, normalize_thinking_effort
+from .gemini_gateway_relay import GeminiGatewayRelay
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
@@ -137,6 +139,7 @@ class GeminiCliExecutor:
         compaction_threshold_ratio: float = 0.75,
         gemini_base_url: str = "",
         gemini_headers: dict[str, str] | None = None,
+        gateway_env: dict[str, str] | None = None,
     ) -> None:
         self._conversation = conversation
         self._memory_limit = memory_max_messages
@@ -149,6 +152,9 @@ class GeminiCliExecutor:
         # Set when the Gemini API is reached through an LLM gateway.
         self._gemini_base_url = str(gemini_base_url or "").strip()
         self._gemini_headers = dict(gemini_headers or {})
+        # Lets the Chack tool server (and the sub-agents it starts) reach the
+        # same gateway.
+        self._gateway_env = dict(gateway_env or {})
         self._tools_config_json = tools_config_json
         self._allowed_tools_json = allowed_tools_json
         self._serialized_tools_override_b64 = str(serialized_tools_override_b64 or "")
@@ -328,15 +334,29 @@ class GeminiCliExecutor:
         return "\n".join(prompt_parts)
 
     def _run_gemini(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        timeout_seconds = int(os.environ.get("CHACK_GEMINI_EXEC_TIMEOUT_SECONDS", "900") or "900")
+        if not self._gemini_base_url:
+            return self._run_gemini_cli(prompt, timeout_seconds=timeout_seconds)
+        # A gateway reports real token usage only for requests it does not
+        # stream, so the CLI reaches it through a relay that un-streams them.
+        with GeminiGatewayRelay(self._gemini_base_url, timeout_seconds=timeout_seconds) as relay:
+            return self._run_gemini_cli(prompt, timeout_seconds=timeout_seconds, relay_url=relay.base_url)
+
+    def _run_gemini_cli(
+        self, prompt: str, *, timeout_seconds: int, relay_url: str = ""
+    ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_gemini_home_and_config()
         command = self._build_command(prompt)
         env = self._build_env()
+        if relay_url:
+            env["GOOGLE_GEMINI_BASE_URL"] = relay_url
+            for name in ("NO_PROXY", "no_proxy"):
+                env[name] = ",".join(part for part in (env.get(name, ""), "127.0.0.1") if part)
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
         # The Chack tools work in exec_cwd; Gemini CLI itself (which has no
         # native tools here) starts in an empty workspace of its own.
         self._write_gemini_settings(self._gemini_home, tools_cwd=exec_cwd or os.getcwd())
         launch_cwd = self._gemini_workspace_dir()
-        timeout_seconds = int(os.environ.get("CHACK_GEMINI_EXEC_TIMEOUT_SECONDS", "900") or "900")
 
         _LOGGER.info(
             "Starting Gemini CLI process: model=%s timeout_seconds=%s gemini_session_id=%s cwd=%s tools_cwd=%s",
@@ -489,9 +509,9 @@ class GeminiCliExecutor:
                         )
                         raw_responses.append({"usage": usage})
                         if self._gemini_base_url and not usage["input_tokens"]:
-                            # LiteLLM translates the Gemini API for other models, and
-                            # releases that do not ask those models for streamed usage
-                            # report zero tokens.
+                            # The relay asks the gateway for unstreamed answers, which
+                            # carry usage; a gateway that still reports none leaves
+                            # this run uncounted.
                             _LOGGER.warning(
                                 "The gateway at %s reported no token usage for %s; this run's "
                                 "tokens and cost are not counted",
@@ -570,6 +590,7 @@ class GeminiCliExecutor:
         if self._gemini_base_url:
             env["GOOGLE_GEMINI_BASE_URL"] = self._gemini_base_url
             env.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
+        env.update(self._gateway_env)
         if self._gemini_headers:
             env["GEMINI_CLI_CUSTOM_HEADERS"] = ", ".join(
                 f"{name}: {value}" for name, value in self._gemini_headers.items()
@@ -823,6 +844,17 @@ class GeminiCliExecutor:
             "GOOGLE_CLOUD_LOCATION",
             "GEMINI_CLI_HOME",
             "CHACK_EXEC_CWD",
+            "OPENROUTER_API_KEY",
+            "OPENROUTER_BASE_URL",
+            "OPENROUTER_HTTP_REFERER",
+            "OPENROUTER_APP_NAME",
+            "LLM_GATEWAY_TYPE",
+            "LLM_GATEWAY_BASE_URL",
+            "LLM_GATEWAY_ANTHROPIC_BASE_URL",
+            "LLM_GATEWAY_GEMINI_BASE_URL",
+            "LLM_GATEWAY_API_KEY",
+            "LLM_GATEWAY_HEADERS",
+            "LLM_GATEWAY_MODEL_MAP",
         ]
         env_keys.extend(OTEL_CHILD_ENV_NAMES)
         env_payload: dict[str, str] = {}
@@ -1136,4 +1168,5 @@ def build_executor(
         ),
         gemini_base_url=gateway_route.gemini_base_url if gateway_route is not None else "",
         gemini_headers=gateway_route.headers if gateway_route is not None else None,
+        gateway_env=gateway_subprocess_env(config, gateway_route) if gateway_route is not None else None,
     )
