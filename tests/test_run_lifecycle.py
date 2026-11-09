@@ -31,7 +31,7 @@ from chack_agent.config import (
     ToolsConfig,
 )
 from chack_tools.exec_tool import ExecTool
-from chack_tools.cancellation import current_cancellation_event
+from chack_tools.cancellation import RunCancelled, current_cancellation_event
 from chack_tools.run_lifecycle import (
     claim_non_task_tool_slot,
     cleanup_run_state,
@@ -678,6 +678,37 @@ def test_resume_compaction_is_opt_in_and_its_usage_is_counted(
     assert compacted.prompt_tokens == 100
     assert compacted.completion_tokens == 20
     assert compacted.cached_prompt_tokens == 40
+
+
+class _CancelledBeforeResumeExecutor(_ObservableExecutor):
+    """Its run was cancelled (e.g. no budget left) when the resume compaction starts."""
+
+    def __init__(self):
+        self.invocations = 0
+
+    def compact_for_resume(self, focus_instructions):
+        raise RunCancelled("Run cancelled before its compaction call.")
+
+    def invoke(self, payload, context=None):
+        self.invocations += 1
+        return super().invoke(payload, context)
+
+
+def test_a_run_cancelled_before_its_resume_compaction_makes_no_model_call(isolated_run_state):
+    agent = _InjectedExecutorChack(_fallback_config())
+    executor = _CancelledBeforeResumeExecutor()
+    agent.executor = executor
+
+    with pytest.raises(RunCancelled):
+        agent.run(
+            "cancelled-resume",
+            "next turn",
+            enable_self_critique=False,
+            require_task_steps_manager_init_first=False,
+            compact_before_resume=True,
+        )
+
+    assert executor.invocations == 0
 
 
 @pytest.mark.parametrize("agent_type", [_RuntimeLimitChack, _ToolLimitChack])

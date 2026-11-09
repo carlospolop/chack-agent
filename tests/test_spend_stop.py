@@ -189,3 +189,48 @@ def test_parallel_sub_agents_run_with_the_runs_observer_and_cancellation(cancel_
         run_parallel_subagent_prompts(["a", "b", "c"], runner)
 
     assert seen == [(observer, True)] * 3
+
+
+# --------------------------------------------------------------------------
+# Responses compaction
+# --------------------------------------------------------------------------
+
+class _CompactingClient:
+    """``OpenAI`` whose ``responses.compact`` bills 5000 input / 500 output tokens."""
+
+    calls = []
+
+    def __init__(self, **_):
+        self.responses = SimpleNamespace(compact=self.compact)
+
+    def compact(self, **kwargs):
+        _CompactingClient.calls.append(kwargs)
+        return SimpleNamespace(id="resp-2", usage=SimpleNamespace(input_tokens=5000, output_tokens=500,
+                                                                  input_tokens_details=None))
+
+
+@pytest.fixture
+def compacting(monkeypatch):
+    _CompactingClient.calls = []
+    monkeypatch.setattr(openai_compaction_backend, "OpenAI", _CompactingClient)
+    executor = _compaction_executor(_agent(_ToolThenAnswerModel(turns=1, usage_reports=[])))
+    executor._config.credentials = SimpleNamespace(openai_api_key="k", openai_org_id="")
+    executor._compaction_model = MODEL
+    executor._previous_response_id = "resp-1"
+    return executor
+
+
+def test_a_compaction_call_reports_its_usage(compacting, usage_reports):
+    assert compacting.compact_for_resume().succeeded
+
+    assert usage_reports == [(MODEL, 5000, 500)]
+
+
+def test_a_cancelled_run_makes_no_compaction_call(compacting, cancel_event, usage_reports):
+    cancel_event.set()
+
+    with pytest.raises(RunCancelled):
+        compacting.compact_for_resume()
+
+    assert _CompactingClient.calls == []
+    assert compacting._previous_response_id == "resp-1"

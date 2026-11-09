@@ -36,6 +36,7 @@ from ..llm_gateway import clone_config_for_gateway, get_gateway_route
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import openai_thinking_effort
 from chack_tools.agents_toolset import AgentsToolset
+from chack_tools.cancellation import raise_if_cancelled
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
 from chack_tools.telemetry import log_event, run_with_tool_logging
 from chack_tools.tool_usage_state import (
@@ -599,6 +600,8 @@ class AgentsExecutor:
             self._conversation = self._conversation[-reset_to:]
 
     def _run_compaction(self, response_id: str) -> Optional[str]:
+        # A compaction is a model call: a cancelled run (e.g. no budget left) makes none.
+        raise_if_cancelled("Run cancelled before its compaction call.")
         try:
             api_key = (
                 str(self._config.credentials.openai_api_key or "").strip()
@@ -615,10 +618,6 @@ class AgentsExecutor:
                 model=self._compaction_model,
                 previous_response_id=response_id,
             )
-            response_id = getattr(compacted, "id", None) or getattr(
-                compacted, "response_id", None
-            )
-            return response_id
         except Exception as exc:
             _LOGGER.exception("Responses compaction failed.")
             log_event(
@@ -635,6 +634,13 @@ class AgentsExecutor:
                 run_label=current_run_label() or "",
             )
             return None
+        # Reported as it ends, like every other model call (outside the try:
+        # a live budget callback may raise to stop the run).
+        report_response(
+            str(self._compaction_model or getattr(self._config.model, "primary", "") or ""),
+            compacted,
+        )
+        return getattr(compacted, "id", None) or getattr(compacted, "response_id", None)
 
 
 def _extract_tool_steps(items: list[Any]) -> list[tuple[ToolAction, Any]]:
