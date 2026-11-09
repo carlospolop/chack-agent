@@ -473,6 +473,53 @@ def test_claude_runs_its_cli_against_the_gateway(monkeypatch, catalog_requests):
     assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" not in env
 
 
+_REFUSAL = (
+    "ERROR: Claude returned an error in final result event. API Error: safeguards flagged this session. "
+    'Event diagnostics: {"subtype": "success", "is_error": true, "stop_reason": "refusal", "num_turns": 3}'
+)
+
+
+def _refusing_executor(monkeypatch, catalog):
+    monkeypatch.setattr(
+        llm_gateway, "_http_get", lambda url, headers=None, timeout=None: _FakeResponse({"data": catalog})
+    )
+    executor = _build(build_claude_executor, _config("claude", "claude-opus-5-5", api_key_type="gateway"))
+    calls = []
+
+    def _run_once(prompt):
+        env = json.loads(executor._gateway_env_json)
+        calls.append((executor._model_name, env["ANTHROPIC_MODEL"], env["CLAUDE_CODE_SUBAGENT_MODEL"]))
+        return (_REFUSAL if len(calls) == 1 else "answer"), [], None
+
+    monkeypatch.setattr(executor, "_run_claude_once", _run_once)
+    return executor, calls
+
+
+def test_claude_retries_a_refused_run_on_the_gateway_name_of_the_fallback_model(monkeypatch):
+    opus_48 = {"model_name": "corp/claude-opus-4.8", "litellm_params": {"model": "vertex_ai/claude-opus-4-8"}}
+    executor, calls = _refusing_executor(monkeypatch, LITELLM_MODEL_INFO["data"] + [opus_48])
+
+    output, _, _ = executor._run_claude("prompt")
+
+    assert output == "answer"
+    assert calls == [
+        ("corp/opus-5.5", "corp/opus-5.5", "corp/opus-5.5"),
+        ("corp/claude-opus-4.8", "corp/claude-opus-4.8", "corp/claude-opus-4.8"),
+    ]
+    # Later runs start on the selected model again.
+    assert executor._model_name == "corp/opus-5.5"
+    assert json.loads(executor._gateway_env_json)["ANTHROPIC_MODEL"] == "corp/opus-5.5"
+
+
+def test_claude_keeps_a_refusal_when_the_gateway_does_not_serve_the_fallback_model(monkeypatch):
+    executor, calls = _refusing_executor(monkeypatch, LITELLM_MODEL_INFO["data"])
+
+    output, _, _ = executor._run_claude("prompt")
+
+    assert output == _REFUSAL
+    assert len(calls) == 1
+
+
 def test_claude_turns_off_betas_only_for_bedrock_served_models(catalog_requests):
     config = _config("claude", "claude-sonnet-5-5", api_key_type="gateway")
 
