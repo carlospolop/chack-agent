@@ -285,6 +285,7 @@ def _executor() -> CodexExecutor:
     executor._disable_native_web_search = False
     executor._thinking_effort = "high"
     executor._output_schema_path = None
+    executor._output_schema_json = ""
     return executor
 
 

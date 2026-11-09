@@ -106,6 +106,7 @@ def test_web_research_silent_tool_call_terminates_owned_codex_process(monkeypatc
 
     monkeypatch.setattr(codex_backend_module.subprocess, "Popen", launch)
     executor = object.__new__(CodexExecutor)
+    executor._output_schema_json = ""
     executor._model_name = "fake-model"
     executor._model_provider = "fake-provider"
     executor._sub_action = "webresearcher"
@@ -187,6 +188,7 @@ def test_admin_silence_watchdog_follows_writing_child_then_stops_on_stale_child(
         "print(json.dumps({'type':'turn.completed','usage':{}}),flush=True)"
     )
     executor = object.__new__(CodexExecutor)
+    executor._output_schema_json = ""
     executor._model_name = "fake-model"
     executor._model_provider = "fake-provider"
     executor._sub_action = "researcher_administrator"
@@ -314,6 +316,7 @@ def test_admin_watchdog_reconciles_real_stopped_child_and_preserves_artifacts(
         "time.sleep(10)"
     )
     executor = object.__new__(CodexExecutor)
+    executor._output_schema_json = ""
     executor._model_name = "fake-model"
     executor._model_provider = "fake-provider"
     executor._sub_action = "researcher_administrator"
@@ -386,6 +389,7 @@ def test_executor_cleanup_resets_runtime_paths(tmp_path: Path):
     target = home_base / "session-2"
     target.mkdir(parents=True)
     executor = object.__new__(CodexExecutor)
+    executor._output_schema_json = ""
     executor._runtime_env_json = (
         '{"CHACK_CODEX_HOME_BASE": "' + str(home_base) + '"}'
     )

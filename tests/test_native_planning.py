@@ -386,6 +386,8 @@ def test_codex_stream_item_updates_reach_live_plan_callback(monkeypatch) -> None
     monkeypatch.setattr(codex_backend_module, "_resolve_codex_exec_cwd", lambda *args: "")
 
     executor = object.__new__(CodexExecutor)
+
+    executor._output_schema_json = ""
     executor._build_command = lambda: ["codex"]
     executor._build_env = lambda: {}
     executor._runtime_env = lambda: {}

@@ -40,6 +40,7 @@ from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
 from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
 from . import codex_daybreak
+from .final_answer import TOOL_CALL_AS_TEXT, final_answer_problem, tool_argument_shapes
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .web_search_fallback import (
     FALLBACK_WEB_MCP_SERVER,
@@ -946,6 +947,8 @@ class CodexExecutor:
     _runtime_env_json: str = "{}"
     _serialized_tools_override_names_json: str = ""
     _serialized_tools_append_names_json: str = ""
+    # Argument names of the run's tools, to tell a tool call written as text.
+    _tool_argument_shapes_json: str = "{}"
     _cacheable_developer_prompt: str = ""
     _prompt_cache_prefix_key: str = ""
     # Daybreak program enabled for the current launch ("" = off). Resolved per
@@ -1008,6 +1011,8 @@ class CodexExecutor:
         user_input = str(payload.get("input", "") or "")
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_codex(prompt)
+        if not output.startswith("ERROR:"):
+            output = self._reject_non_answer(output)
 
         if user_input:
             self._conversation.append({"role": "user", "content": user_input})
@@ -1026,6 +1031,39 @@ class CodexExecutor:
             "intermediate_steps": steps,
             "raw_result": raw_result,
         }
+
+    def _final_output(self, messages: list[str]) -> str:
+        """The run's answer from the agent messages it sent.
+
+        With an output schema each message is a complete schema object, so the
+        last one is the answer; joining them would put an interim message
+        (e.g. a "pending" placeholder) in front of it.
+        """
+        messages = [message.strip() for message in messages if message and message.strip()]
+        if self._output_schema_json:
+            return messages[-1] if messages else ""
+        return "\n".join(messages)
+
+    def _reject_non_answer(self, output: str) -> str:
+        """``output``, or an error when the model's final message is not an answer."""
+        kind, detail = final_answer_problem(
+            output,
+            output_schema_json=self._output_schema_json,
+            output_schema_strict=self._output_schema_strict,
+            tools=json.loads(self._tool_argument_shapes_json or "{}"),
+        )
+        if not kind:
+            return output
+        self._log_codex_failure(
+            "codex_final_message_not_an_answer",
+            command=[],
+            cwd="",
+            details=detail,
+            return_code=0,
+        )
+        if kind == TOOL_CALL_AS_TEXT:
+            return f"ERROR: Codex model wrote a tool call as text instead of calling the tool: {detail}"
+        return f"ERROR: Codex model returned a placeholder instead of an answer: {detail}"
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
@@ -2339,7 +2377,7 @@ class CodexExecutor:
                     cache_write_tokens=remaining["cache_write_input_tokens"],
                 )
 
-        output = "\n".join(part for part in output_parts if part).strip()
+        output = self._final_output(output_parts)
         return_code = process.wait()
         unregister_process(cancel_registration)
         if return_code != 0:
@@ -3753,11 +3791,12 @@ def build_executor(
         return list(configured_tools)
 
     if tools_override is not None:
-        allowed_tool_names = _extract_tool_names(list(tools_override))
+        run_tools = list(tools_override)
     elif tools_append:
-        allowed_tool_names = _extract_tool_names(_configured_base_tools() + list(tools_append))
+        run_tools = _configured_base_tools() + list(tools_append)
     else:
-        allowed_tool_names = _extract_tool_names(_configured_base_tools())
+        run_tools = _configured_base_tools()
+    allowed_tool_names = _extract_tool_names(run_tools)
 
     native_task_planning_backend = (
         "codex"
@@ -3940,4 +3979,5 @@ def build_executor(
         ),
         _serialized_tools_override_names_json=serialized_tools_override_names_json,
         _serialized_tools_append_names_json=serialized_tools_append_names_json,
+        _tool_argument_shapes_json=json.dumps(tool_argument_shapes(run_tools), ensure_ascii=False),
     )
