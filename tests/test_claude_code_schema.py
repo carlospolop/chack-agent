@@ -901,3 +901,19 @@ def test_claude_does_not_retry_errors_unrelated_to_cache_markers(monkeypatch) ->
 
     assert output.startswith("ERROR: Claude exec failed")
     assert len(calls) == 1
+
+
+def test_claude_save_retry_failure_keeps_the_answer_already_given(monkeypatch) -> None:
+    executor = _build_executor("")
+    outputs = iter(
+        [
+            ("found an injection", [], None),
+            ("ERROR: Claude finished without a final answer.", [], None),
+        ]
+    )
+    monkeypatch.setattr(executor, "_run_claude", lambda _prompt: (*next(outputs)[:2], type("R", (), {"raw_responses": []})()))
+    monkeypatch.setattr(executor, "_has_save_vulnerability_tool", lambda: True)
+    monkeypatch.setattr(executor, "_steps_contain_save", lambda _steps: False)
+    monkeypatch.setattr(executor, "_steps_contain_analysis", lambda _steps: True)
+
+    assert executor.invoke({"input": "review"})["output"] == "found an injection"
