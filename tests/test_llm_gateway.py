@@ -709,6 +709,41 @@ def test_gateway_runs_of_one_executor_each_get_a_client_on_their_own_event_loop(
     assert all(transport.closed_on is transport.loop for transport in used)
 
 
+def test_openai_runs_of_one_executor_each_get_a_client_on_their_own_event_loop(monkeypatch):
+    from chack_agent.backends import openai_compaction_backend as backend
+
+    # The SDK would otherwise export traces to OpenAI with the fake key.
+    monkeypatch.setenv("OPENAI_AGENTS_DISABLE_TRACING", "1")
+    transports = []
+    real_client = backend.AsyncOpenAI
+
+    def _client(**kwargs):
+        transport = _LoopBoundTransport(transports)
+        return real_client(**kwargs, http_client=httpx.AsyncClient(transport=transport))
+
+    monkeypatch.setattr(backend, "AsyncOpenAI", _client)
+    executor = backend.build_executor(
+        _config("openai", "gpt-6-sol", openai_api_key="sk-openai-test"),
+        system_prompt="system",
+        max_turns=2,
+        memory_max_messages=10,
+        memory_reset_to_messages=5,
+        tools_override=[],
+    )
+
+    outputs = []
+    for _ in range(2):
+        # Chack runs every turn on a fresh worker thread, so on a fresh event loop.
+        worker = threading.Thread(target=lambda: outputs.append(executor.invoke({"input": "Say OK."})["output"]))
+        worker.start()
+        worker.join()
+
+    assert outputs == ["OK", "OK"]
+    used = [transport for transport in transports if transport.loop is not None]
+    assert len(used) == 2
+    assert all(transport.closed_on is transport.loop for transport in used)
+
+
 def test_gateway_content_filter_stop_ends_the_run_with_an_explicit_error(monkeypatch):
     executor = _gateway_executor_on(
         monkeypatch, [], status="incomplete", incomplete_details={"reason": "content_filter"}
