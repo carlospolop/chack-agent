@@ -9,6 +9,11 @@ The relay listens on 127.0.0.1 and forwards every request to the gateway
 unchanged, except that a streaming request is sent as ``:generateContent`` and
 its JSON answer is returned to the CLI as one server-sent event. Gateway errors
 pass through with their status and body.
+
+The relay also keeps the token usage of every answer it relays, so a run that
+is stopped before the CLI prints its closing stats still counts the calls it
+made. A CLI that goes away while the relay answers it (a cancelled or timed-out
+run) is no error: the answer is dropped quietly.
 """
 from __future__ import annotations
 
@@ -27,6 +32,8 @@ _LOGGER = logging.getLogger("chack.gemini_gateway_relay")
 _STREAM_METHOD = ":streamGenerateContent"
 _UNARY_METHOD = ":generateContent"
 _CHUNK_BYTES = 64 * 1024
+# Errors of writing to a client that has gone away.
+_CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 # Headers that describe one hop, or that the relay sets itself.
 _HOP_HEADERS = {
@@ -73,6 +80,19 @@ def _upstream_target(base_url: str, path: str) -> tuple[str, bool]:
     return url, streaming
 
 
+def _usage_of(answer: Any) -> dict[str, int] | None:
+    """Token usage of one Gemini API answer, counted the way the Gemini CLI counts it."""
+
+    metadata = answer.get("usageMetadata") if isinstance(answer, dict) else None
+    if not isinstance(metadata, dict):
+        return None
+    return {
+        "input_tokens": int(metadata.get("promptTokenCount", 0) or 0),
+        "output_tokens": int(metadata.get("candidatesTokenCount", 0) or 0),
+        "cached_tokens": int(metadata.get("cachedContentTokenCount", 0) or 0),
+    }
+
+
 def _sse_event(body: bytes) -> bytes:
     # The Gemini SDK reads each event as one ``data:`` line, so the JSON
     # must not span lines.
@@ -89,6 +109,24 @@ class GeminiGatewayRelay:
         self._opener = urllib.request.build_opener(_NoRedirect())
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._usage_lock = threading.Lock()
+        self._usage: list[dict[str, int]] = []
+
+    def take_usage(self) -> list[dict[str, int]]:
+        """Usage of the answers relayed since the last call, one entry per answer."""
+        with self._usage_lock:
+            usage, self._usage = self._usage, []
+        return usage
+
+    def _record_usage(self, body: bytes) -> None:
+        try:
+            usage = _usage_of(json.loads(body))
+        except ValueError:
+            return
+        if usage is None:
+            return
+        with self._usage_lock:
+            self._usage.append(usage)
 
     @property
     def base_url(self) -> str:
@@ -106,7 +144,12 @@ class GeminiGatewayRelay:
                 _LOGGER.debug("relay %s", format % args)
 
             def _relay(self) -> None:
-                relay._forward(self)
+                try:
+                    relay._forward(self)
+                except _CLIENT_GONE:
+                    # The CLI was stopped (cancelled, timed out) while it waited.
+                    self.close_connection = True
+                    _LOGGER.debug("Gemini CLI went away before the relay answered %s", self.path)
 
             do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _relay
 
@@ -165,8 +208,13 @@ class GeminiGatewayRelay:
                 for name, value in response.headers.items()
                 if name.lower() not in _HOP_HEADERS
             }
-            if streaming and 200 <= status < 300:
+            if urllib.parse.urlsplit(url).path.endswith(_UNARY_METHOD) and 200 <= status < 300:
+                # A model answer: read it whole to count its tokens before the CLI gets it.
                 raw = response.read()
+                self._record_usage(raw)
+                if not streaming:
+                    self._send(handler, status, response_headers, raw)
+                    return
                 try:
                     event = _sse_event(raw)
                 except ValueError:

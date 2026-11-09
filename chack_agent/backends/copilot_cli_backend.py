@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
 from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import (
@@ -26,6 +27,8 @@ from ..config import ChackConfig
 from ..llm_gateway import clone_config_for_gateway, get_gateway_route
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import copilot_thinking_effort, normalize_thinking_effort
+from .claude_code_backend import _terminate_process_tree
+from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     CHACK_TOOLS_APPEND_B64_ENV,
@@ -38,6 +41,9 @@ from .tool_payloads import (
 
 
 _LOGGER = logging.getLogger("chack.copilot_cli_backend")
+
+COPILOT_EXEC_TIMEOUT_ENV = "CHACK_COPILOT_EXEC_TIMEOUT_SECONDS"
+COPILOT_CANCELLED_OUTPUT = "ERROR: Copilot execution cancelled."
 
 # chack's ``exec`` tool is the run's only shell; Copilot's own shells stay off.
 _COPILOT_SHELL_TOOLS = (
@@ -377,9 +383,7 @@ class CopilotCliExecutor:
         self._disable_project_skills(os.getcwd())
         command = self._build_command(prompt)
         env = self._build_env()
-        timeout_seconds = int(
-            os.environ.get("CHACK_COPILOT_EXEC_TIMEOUT_SECONDS", "900") or "900"
-        )
+        timeout_seconds = cli_exec_timeout_seconds(COPILOT_EXEC_TIMEOUT_ENV)
 
         _LOGGER.info(
             "Starting Copilot CLI process: model=%s timeout_seconds=%s session_id=%s",
@@ -397,6 +401,7 @@ class CopilotCliExecutor:
                 text=True,
                 bufsize=1,
                 env=env,
+                start_new_session=True,
             )
         except FileNotFoundError:
             return (
@@ -414,6 +419,8 @@ class CopilotCliExecutor:
                 _RawResult(raw_responses=[]),
             )
 
+        cancel_registration = register_process(process, _terminate_process_tree)
+        reader = CliLineReader(process.stdout)
         output_parts: list[str] = []
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
@@ -431,23 +438,22 @@ class CopilotCliExecutor:
                     pass
 
             while True:
-                if (time.monotonic() - started_at) > timeout_seconds:
-                    process.kill()
+                if cancellation_requested():
+                    _terminate_process_tree(process)
+                    return COPILOT_CANCELLED_OUTPUT, steps, _RawResult(raw_responses=raw_responses)
+                if timeout_seconds > 0 and (time.monotonic() - started_at) > timeout_seconds:
+                    _terminate_process_tree(process)
                     return (
                         f"ERROR: Copilot execution timed out after {timeout_seconds}s.",
                         steps,
                         _RawResult(raw_responses=raw_responses),
                     )
 
-                if process.stdout is None:
-                    break
-
-                line = process.stdout.readline()
-                if line == "" and process.poll() is not None:
-                    break
-                if not line:
-                    time.sleep(0.05)
+                line = reader.next_line()
+                if line is None:
                     continue
+                if line is END_OF_OUTPUT:
+                    break
 
                 raw_line = str(line).rstrip("\n")
                 if raw_line:
@@ -603,6 +609,7 @@ class CopilotCliExecutor:
                     break
 
         finally:
+            unregister_process(cancel_registration)
             try:
                 if process.stdout is not None:
                     process.stdout.close()
@@ -611,6 +618,9 @@ class CopilotCliExecutor:
 
         return_code = process.wait()
 
+        if return_code != 0 and cancellation_requested():
+            # Cancelled while the loop waited: the cancel stopped the CLI itself.
+            return COPILOT_CANCELLED_OUTPUT, steps, _RawResult(raw_responses=raw_responses)
         if return_code != 0:
             details = "\n".join(raw_lines).strip() or "No output captured."
             return (

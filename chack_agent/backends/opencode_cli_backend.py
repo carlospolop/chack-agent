@@ -55,6 +55,7 @@ from ..thinking_effort import (
     opencode_thinking_effort,
 )
 from .claude_code_backend import _terminate_process_tree
+from .cli_process import cli_exec_timeout_seconds
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .prompt_cache import split_prompt_cache_breakpoint
 from .tool_payloads import (
@@ -73,6 +74,8 @@ from .tool_payloads import (
 )
 
 _LOGGER = logging.getLogger("chack.opencode_cli_backend")
+
+OPENCODE_EXEC_TIMEOUT_ENV = "CHACK_OPENCODE_EXEC_TIMEOUT_SECONDS"
 
 OPENCODE_PROVIDER_ID = "chack"
 OPENCODE_AGENT_NAME = "chack"
@@ -817,7 +820,7 @@ class OpencodeCliExecutor:
         command = self._build_command()
         env = self._build_env()
         exec_cwd = _clean(env.get("CHACK_EXEC_CWD")) or None
-        timeout_seconds = int(os.environ.get("CHACK_OPENCODE_EXEC_TIMEOUT_SECONDS", "") or "900")
+        timeout_seconds = cli_exec_timeout_seconds(OPENCODE_EXEC_TIMEOUT_ENV)
         _LOGGER.info(
             "Starting opencode process: model=%s timeout_seconds=%s session_id=%s cwd=%s",
             self._model_name,

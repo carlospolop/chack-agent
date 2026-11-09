@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any
 
+from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
 from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import (
@@ -33,6 +34,8 @@ from ..llm_gateway import (
     get_gateway_route,
 )
 from ..thinking_effort import gemini_thinking_config, normalize_thinking_effort
+from .claude_code_backend import _terminate_process_tree
+from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds
 from .gemini_gateway_relay import GeminiGatewayRelay
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -46,6 +49,9 @@ from .tool_payloads import (
 
 
 _LOGGER = logging.getLogger("chack.gemini_cli_backend")
+
+GEMINI_EXEC_TIMEOUT_ENV = "CHACK_GEMINI_EXEC_TIMEOUT_SECONDS"
+GEMINI_CANCELLED_OUTPUT = "ERROR: Gemini execution cancelled."
 
 
 _GEMINI_CLI_DENYLIST_TOOLS = {
@@ -334,22 +340,50 @@ class GeminiCliExecutor:
         return "\n".join(prompt_parts)
 
     def _run_gemini(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
-        timeout_seconds = int(os.environ.get("CHACK_GEMINI_EXEC_TIMEOUT_SECONDS", "900") or "900")
+        timeout_seconds = cli_exec_timeout_seconds(GEMINI_EXEC_TIMEOUT_ENV)
         if not self._gemini_base_url:
             return self._run_gemini_cli(prompt, timeout_seconds=timeout_seconds)
         # A gateway reports real token usage only for requests it does not
         # stream, so the CLI reaches it through a relay that un-streams them.
+        # The relay also counts each answer's usage as it lands, so a run that
+        # is stopped before the CLI prints its stats still reports its calls.
         with GeminiGatewayRelay(self._gemini_base_url, timeout_seconds=timeout_seconds) as relay:
-            return self._run_gemini_cli(prompt, timeout_seconds=timeout_seconds, relay_url=relay.base_url)
+            return self._run_gemini_cli(prompt, timeout_seconds=timeout_seconds, relay=relay)
+
+    def _count_relay_usage(self, relay: GeminiGatewayRelay | None, raw_responses: list[Any]) -> int:
+        """Report the usage of the answers the relay passed on since the last call.
+
+        Returns the input tokens counted, so a run can tell a gateway that
+        reports no usage at all.
+        """
+        if relay is None:
+            return 0
+        input_tokens = 0
+        for answer in relay.take_usage():
+            usage = {
+                "input_tokens": answer["input_tokens"],
+                "output_tokens": answer["output_tokens"],
+                "input_tokens_details": {"cached_tokens": answer["cached_tokens"], "cache_write_tokens": 0},
+            }
+            raw_responses.append({"usage": usage})
+            input_tokens += answer["input_tokens"]
+            report_live_usage(
+                self._model_name,
+                prompt_tokens=answer["input_tokens"],
+                completion_tokens=answer["output_tokens"],
+                cached_prompt_tokens=answer["cached_tokens"],
+                cache_write_tokens=0,
+            )
+        return input_tokens
 
     def _run_gemini_cli(
-        self, prompt: str, *, timeout_seconds: int, relay_url: str = ""
+        self, prompt: str, *, timeout_seconds: int, relay: GeminiGatewayRelay | None = None
     ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_gemini_home_and_config()
         command = self._build_command(prompt)
         env = self._build_env()
-        if relay_url:
-            env["GOOGLE_GEMINI_BASE_URL"] = relay_url
+        if relay is not None:
+            env["GOOGLE_GEMINI_BASE_URL"] = relay.base_url
             for name in ("NO_PROXY", "no_proxy"):
                 env[name] = ",".join(part for part in (env.get(name, ""), "127.0.0.1") if part)
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
@@ -377,6 +411,7 @@ class GeminiCliExecutor:
                 bufsize=1,
                 env=env,
                 cwd=launch_cwd,
+                start_new_session=True,
             )
         except FileNotFoundError:
             return (
@@ -393,33 +428,38 @@ class GeminiCliExecutor:
                 _RawResult(raw_responses=[]),
             )
 
+        cancel_registration = register_process(process, _terminate_process_tree)
+        reader = CliLineReader(process.stdout)
         output_parts: list[str] = []
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
         raw_responses: list[Any] = []
+        relay_input_tokens = 0
         started_at = time.monotonic()
         time_to_first_token_seconds: float | None = None
         tool_calls: dict[str, tuple[str, dict[str, Any]]] = {}
 
         try:
             while True:
-                if (time.monotonic() - started_at) > timeout_seconds:
-                    process.kill()
+                relay_input_tokens += self._count_relay_usage(relay, raw_responses)
+                if cancellation_requested():
+                    _terminate_process_tree(process)
+                    self._count_relay_usage(relay, raw_responses)
+                    return GEMINI_CANCELLED_OUTPUT, steps, _RawResult(raw_responses=raw_responses)
+                if timeout_seconds > 0 and (time.monotonic() - started_at) > timeout_seconds:
+                    _terminate_process_tree(process)
+                    self._count_relay_usage(relay, raw_responses)
                     return (
                         f"ERROR: Gemini execution timed out after {timeout_seconds}s.",
                         steps,
                         _RawResult(raw_responses=raw_responses),
                     )
 
-                if process.stdout is None:
-                    break
-
-                raw_line = process.stdout.readline()
-                if raw_line == "" and process.poll() is not None:
-                    break
-                if not raw_line:
-                    time.sleep(0.05)
+                raw_line = reader.next_line()
+                if raw_line is None:
                     continue
+                if raw_line is END_OF_OUTPUT:
+                    break
 
                 line = str(raw_line).rstrip("\n")
                 if line:
@@ -489,7 +529,18 @@ class GeminiCliExecutor:
 
                 if event_type == "result":
                     stats = event.get("stats")
-                    if isinstance(stats, dict):
+                    if relay is not None:
+                        # The relay counted each answer as it landed; the CLI's
+                        # stats are the same calls again.
+                        relay_input_tokens += self._count_relay_usage(relay, raw_responses)
+                        if not relay_input_tokens:
+                            _LOGGER.warning(
+                                "The gateway at %s reported no token usage for %s; this run's "
+                                "tokens and cost are not counted",
+                                self._gemini_base_url,
+                                self._model_name,
+                            )
+                    elif isinstance(stats, dict):
                         usage = {
                             "input_tokens": int(stats.get("input_tokens", 0) or 0),
                             "output_tokens": int(stats.get("output_tokens", 0) or 0),
@@ -508,16 +559,6 @@ class GeminiCliExecutor:
                             cache_write_tokens=0,
                         )
                         raw_responses.append({"usage": usage})
-                        if self._gemini_base_url and not usage["input_tokens"]:
-                            # The relay asks the gateway for unstreamed answers, which
-                            # carry usage; a gateway that still reports none leaves
-                            # this run uncounted.
-                            _LOGGER.warning(
-                                "The gateway at %s reported no token usage for %s; this run's "
-                                "tokens and cost are not counted",
-                                self._gemini_base_url,
-                                self._model_name,
-                            )
                     if str(event.get("status") or "").strip().lower() == "error":
                         error_obj = event.get("error")
                         details = event.get("message") or ""
@@ -535,12 +576,20 @@ class GeminiCliExecutor:
 
             return_code = process.wait()
         finally:
+            unregister_process(cancel_registration)
+            if process.poll() is None:
+                # Returning early (a result error): leave no CLI or MCP server behind.
+                _terminate_process_tree(process)
             try:
                 if process.stdout is not None:
                     process.stdout.close()
             except Exception:
                 pass
 
+        self._count_relay_usage(relay, raw_responses)
+        if return_code != 0 and cancellation_requested():
+            # Cancelled while the loop waited: the cancel stopped the CLI itself.
+            return GEMINI_CANCELLED_OUTPUT, steps, _RawResult(raw_responses=raw_responses)
         if return_code != 0:
             details = "\n".join(raw_lines).strip() or "No output captured."
             return (

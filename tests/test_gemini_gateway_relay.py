@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -123,3 +124,78 @@ def test_the_relay_stops_listening_when_closed(gateway):
 
     with pytest.raises(urllib.error.URLError):
         urllib.request.urlopen(url + "/v1beta/models", timeout=2)
+
+
+def test_the_relay_counts_each_model_answer_it_passes_on(gateway):
+    base_url, _, answers = gateway
+    with GeminiGatewayRelay(base_url) as relay:
+        _post(f"{relay.base_url}/v1beta/models/m:streamGenerateContent?alt=sse")
+        _post(f"{relay.base_url}/v1beta/models/m:generateContent")
+        # Not model answers: a token count, and a refused call.
+        _post(f"{relay.base_url}/v1beta/models/m:countTokens")
+        answers["generateContent"] = (429, b'{"error": {"code": 429, "message": "slow down"}}')
+        _post(f"{relay.base_url}/v1beta/models/m:generateContent")
+        counted = relay.take_usage()
+        again = relay.take_usage()
+
+    one = {"input_tokens": 120, "output_tokens": 30, "cached_tokens": 0}
+    assert counted == [one, one]
+    assert again == []
+
+
+def test_a_cli_that_goes_away_mid_answer_is_dropped_quietly(capsys, caplog):
+    """The relay was still writing an answer when the CLI was killed (a timed
+    out or cancelled run): no traceback, as production logged after a timeout."""
+
+    import socket
+
+    sent = threading.Event()
+    big = b"x" * (8 * 1024 * 1024)
+
+    class Slow(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            self.send_response(200)
+            self.send_header("content-type", "application/octet-stream")
+            self.send_header("content-length", str(len(big)))
+            self.end_headers()
+            try:
+                self.wfile.write(big)
+            except OSError:
+                pass
+            sent.set()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    seen_errors = ""
+    try:
+        with caplog.at_level("DEBUG", logger="chack.gemini_gateway_relay"):
+            with GeminiGatewayRelay(f"http://127.0.0.1:{server.server_address[1]}") as relay:
+                port = int(relay.base_url.rsplit(":", 1)[1])
+                client = socket.create_connection(("127.0.0.1", port))
+                body = b'{"contents": []}'
+                client.sendall(
+                    b"POST /v1beta/models/m:countTokens HTTP/1.1\r\nHost: x\r\n"
+                    b"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n%s" % (len(body), body)
+                )
+                client.recv(1024)
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+                client.close()
+                # Wait until the relay has given up on this client, one way or the other.
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    seen_errors += capsys.readouterr().err
+                    if "Traceback" in seen_errors or "went away" in caplog.text:
+                        break
+                    time.sleep(0.05)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    seen_errors += capsys.readouterr().err
+    assert "Traceback" not in seen_errors
+    assert "Exception occurred during processing" not in seen_errors
+    assert "went away" in caplog.text
