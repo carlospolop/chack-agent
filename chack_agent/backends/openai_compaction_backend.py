@@ -30,12 +30,13 @@ from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
 from ..config import ChackConfig
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
-from ..live_cost_state import report_live_usage
+from .sdk_run_hooks import LiveUsageHooks, mark_reported, report_response, response_usage, unreported_responses
 from ..resume_compaction import ResumeCompactionResult
 from ..llm_gateway import clone_config_for_gateway, get_gateway_route
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import openai_thinking_effort
 from chack_tools.agents_toolset import AgentsToolset
+from chack_tools.cancellation import cancellation_requested, raise_if_cancelled
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
 from chack_tools.telemetry import log_event, run_with_tool_logging
 from chack_tools.tool_usage_state import (
@@ -368,34 +369,14 @@ class AgentsExecutor:
         conversation_id = getattr(result, "_conversation_id", None)
         if isinstance(conversation_id, str) and conversation_id.strip():
             self._conversation_id = conversation_id.strip()
-        raw_responses = getattr(result, "raw_responses", None) or []
+        # The run hooks reported each call's usage as it ended; report the rest.
+        for response in unreported_responses(result):
+            report_response(str(self._config.model.primary or ""), response)
         latest_input_tokens = 0
-        for response in raw_responses:
-            usage = getattr(response, "usage", None)
-            if usage is None and isinstance(response, dict):
-                usage = response.get("usage")
-            if usage is None:
-                continue
-            if isinstance(usage, dict):
-                input_tokens = int(usage.get("input_tokens", 0) or 0)
-                output_tokens = int(usage.get("output_tokens", 0) or 0)
-                input_details = usage.get("input_tokens_details") or {}
-                cached_tokens = int(input_details.get("cached_tokens", 0) or 0)
-                cache_write_tokens = int(input_details.get("cache_write_tokens", 0) or 0)
-            else:
-                input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-                output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-                input_details = getattr(usage, "input_tokens_details", None)
-                cached_tokens = int(getattr(input_details, "cached_tokens", 0) or 0) if input_details else 0
-                cache_write_tokens = int(getattr(input_details, "cache_write_tokens", 0) or 0) if input_details else 0
-            report_live_usage(
-                str(self._config.model.primary or ""),
-                prompt_tokens=input_tokens,
-                completion_tokens=output_tokens,
-                cached_prompt_tokens=cached_tokens,
-                cache_write_tokens=cache_write_tokens,
-            )
-            latest_input_tokens = input_tokens
+        for response in getattr(result, "raw_responses", None) or []:
+            tokens = response_usage(response)
+            if tokens is not None:
+                latest_input_tokens = tokens[0]
         self._maybe_compact(latest_input_tokens)
         steps = _extract_tool_steps(result.new_items)
         return {
@@ -426,7 +407,10 @@ class AgentsExecutor:
         client = self._client_factory()
         try:
             run_config = RunConfig(model_provider=MultiProvider(openai_client=client))
-            return await Runner.run(agent, input_items, run_config=run_config, **kwargs)
+            hooks = LiveUsageHooks(str(self._config.model.primary or ""))
+            result = await Runner.run(agent, input_items, run_config=run_config, hooks=hooks, **kwargs)
+            mark_reported(result, hooks)
+            return result
         finally:
             await client.close()
 
@@ -545,6 +529,11 @@ class AgentsExecutor:
         )
         if not should_compact_by_messages and not should_compact_by_tokens:
             return
+        if cancellation_requested():
+            # The turn's answer is done; a cancelled run (e.g. no budget left)
+            # keeps it and makes no further model call.
+            _LOGGER.info("Skipping response compaction: the run was cancelled after its answer.")
+            return
 
         conversation_messages_before = len(self._conversation or [])
         reset_to = self._normalized_memory_reset_to()
@@ -616,6 +605,8 @@ class AgentsExecutor:
             self._conversation = self._conversation[-reset_to:]
 
     def _run_compaction(self, response_id: str) -> Optional[str]:
+        # A compaction is a model call: a cancelled run (e.g. no budget left) makes none.
+        raise_if_cancelled("Run cancelled before its compaction call.")
         try:
             api_key = (
                 str(self._config.credentials.openai_api_key or "").strip()
@@ -632,10 +623,6 @@ class AgentsExecutor:
                 model=self._compaction_model,
                 previous_response_id=response_id,
             )
-            response_id = getattr(compacted, "id", None) or getattr(
-                compacted, "response_id", None
-            )
-            return response_id
         except Exception as exc:
             _LOGGER.exception("Responses compaction failed.")
             log_event(
@@ -652,6 +639,13 @@ class AgentsExecutor:
                 run_label=current_run_label() or "",
             )
             return None
+        # Reported as it ends, like every other model call (outside the try:
+        # a live budget callback may raise to stop the run).
+        report_response(
+            str(self._compaction_model or getattr(self._config.model, "primary", "") or ""),
+            compacted,
+        )
+        return getattr(compacted, "id", None) or getattr(compacted, "response_id", None)
 
 
 def _extract_tool_steps(items: list[Any]) -> list[tuple[ToolAction, Any]]:

@@ -88,3 +88,17 @@ def request_cancel(event: Optional[threading.Event]) -> bool:
         except Exception:
             pass
     return cancelled
+
+
+class RunCancelled(RuntimeError):
+    """The run's cancellation event was set: stop before the next model call."""
+
+
+def raise_if_cancelled(message: str = "Run cancelled before its next model call.") -> None:
+    """Raise ``RunCancelled`` when this run was cancelled.
+
+    In-process backends call it before every model call, so a cancelled run
+    (for example one whose spend cap has no room left) makes no further calls.
+    """
+    if cancellation_requested():
+        raise RunCancelled(message)

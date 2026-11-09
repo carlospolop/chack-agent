@@ -57,6 +57,7 @@ from chack_tools.telemetry import (
     reset_log_context,
 )
 from chack_tools.cancellation import (
+    RunCancelled,
     current_cancellation_event,
     request_cancel,
     reset_cancellation_event,
@@ -2072,6 +2073,8 @@ class Chack:
                                 attempted=bool(compacted),
                                 succeeded=bool(compacted),
                             )
+                    except RunCancelled:
+                        raise  # cancelled (e.g. no budget left): no Run 1 either
                     except Exception as exc:
                         resume_compaction = ResumeCompactionResult(
                             backend=str(

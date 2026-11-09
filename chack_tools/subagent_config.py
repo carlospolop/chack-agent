@@ -1145,7 +1145,10 @@ def run_parallel_subagent_prompts(
     max_workers = min(5, len(prompts))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(runner, prompt): idx
+            # Each sub-agent runs in a copy of this context, so the run's
+            # cancellation and usage observer reach it: its spend is counted
+            # while it runs and it stops when the run is cancelled.
+            executor.submit(contextvars.copy_context().run, runner, prompt): idx
             for idx, prompt in enumerate(prompts)
         }
         for future in as_completed(futures):

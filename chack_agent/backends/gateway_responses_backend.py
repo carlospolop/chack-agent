@@ -26,13 +26,14 @@ from agents.models.openai_responses import OpenAIResponsesModel
 from agents.items import ToolCallItem
 from agents.exceptions import ModelBehaviorError
 
+from chack_tools.cancellation import cancellation_requested
 from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
 
 from ..config import ChackConfig
 from ..llm_gateway import GatewayRoute, get_gateway_route
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
-from ..live_cost_state import report_live_usage
+from .sdk_run_hooks import LiveUsageHooks, mark_reported, report_response, unreported_responses
 from ..resume_compaction import ResumeCompactionResult
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import openai_thinking_effort
@@ -730,32 +731,9 @@ class AgentsExecutor:
             conversation_id = getattr(result, "_conversation_id", None)
             if isinstance(conversation_id, str) and conversation_id.strip():
                 self._conversation_id = conversation_id.strip()
-        raw_responses = getattr(result, "raw_responses", None) or []
-        for response in raw_responses:
-            usage = getattr(response, "usage", None)
-            if usage is None and isinstance(response, dict):
-                usage = response.get("usage")
-            if usage is None:
-                continue
-            if isinstance(usage, dict):
-                input_tokens = int(usage.get("input_tokens", 0) or 0)
-                output_tokens = int(usage.get("output_tokens", 0) or 0)
-                input_details = usage.get("input_tokens_details") or {}
-                cached_tokens = int(input_details.get("cached_tokens", 0) or 0)
-                cache_write_tokens = int(input_details.get("cache_write_tokens", 0) or 0)
-            else:
-                input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-                output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-                input_details = getattr(usage, "input_tokens_details", None)
-                cached_tokens = int(getattr(input_details, "cached_tokens", 0) or 0) if input_details else 0
-                cache_write_tokens = int(getattr(input_details, "cache_write_tokens", 0) or 0) if input_details else 0
-            report_live_usage(
-                str(self._config.model.primary or ""),
-                prompt_tokens=input_tokens,
-                completion_tokens=output_tokens,
-                cached_prompt_tokens=cached_tokens,
-                cache_write_tokens=cache_write_tokens,
-            )
+        # The run hooks reported each call's usage as it ended; report the rest.
+        for response in unreported_responses(result):
+            report_response(str(self._config.model.primary or ""), response)
         self._maybe_summarize_for_next_turn(input_tokens=self._extract_input_tokens(result))
         steps = _extract_tool_steps(result.new_items)
         return {
@@ -921,6 +899,11 @@ class AgentsExecutor:
         )
         if not should_summarize_by_messages and not should_summarize_by_tokens:
             return
+        if cancellation_requested():
+            # A summary is a model call: a cancelled run (e.g. no budget left)
+            # makes none, and keeps the answer its turn already has.
+            _LOGGER.info("Skipping conversation summary: the run was cancelled.")
+            return
 
         before_len = len(self._conversation)
         keep = self._summary_keep_messages if self._summary_keep_messages > 0 else 0
@@ -979,7 +962,10 @@ class AgentsExecutor:
         client = self._client_factory()
         try:
             run_agent = agent.clone(model=agent.model.with_client(client))
-            return await Runner.run(run_agent, input_items, **kwargs)
+            hooks = LiveUsageHooks(str(self._config.model.primary or ""))
+            result = await Runner.run(run_agent, input_items, hooks=hooks, **kwargs)
+            mark_reported(result, hooks)
+            return result
         finally:
             await client.close()
 
