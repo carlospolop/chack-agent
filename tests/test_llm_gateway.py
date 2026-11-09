@@ -467,6 +467,9 @@ def test_claude_runs_its_cli_against_the_gateway(monkeypatch, catalog_requests):
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "corp/opus-5.5"
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "corp/opus-5.5"
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "corp/claude-haiku-5.5"
+    # Fallbacks would switch to a hardcoded Anthropic id the gateway does not serve.
+    assert env["CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"] == "1"
+    assert env["CLAUDE_CODE_NO_MODEL_FALLBACK"] == "1"
     assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" not in env
 
 
