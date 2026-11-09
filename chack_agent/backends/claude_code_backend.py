@@ -907,7 +907,7 @@ class ClaudeCodeExecutor:
             # sent again, once, without cache markers.
             _LOGGER.warning(
                 "Model %s rejects prompt-cache markers; retrying without them. "
-                "Set model.prompt_cache_enabled: false for this model to skip the failing request.",
+                "Set prompt_cache_enabled: false in the agent config for this model to skip the failing request.",
                 self._model_name,
             )
             _PROMPT_CACHE_REJECTED.add(self._prompt_cache_route())
