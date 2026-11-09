@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -18,7 +19,6 @@ from agents import (
     Runner,
     ToolGuardrailFunctionOutput,
     tool_input_guardrail,
-    set_default_openai_client,
     set_tracing_disabled,
     WebSearchTool,
 )
@@ -46,6 +46,7 @@ from chack_tools.tool_usage_state import (
     is_budget_exempt_tool_name,
     non_task_tool_count,
 )
+from .content_filter import ProviderContentFilterError
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_instance
 from .hosted_web_search import WebToolPlan, plan_web_tools
 
@@ -83,6 +84,25 @@ class _GatewayResponsesModel(OpenAIResponsesModel):
         # Tools the provider runs itself (e.g. OpenRouter's web search),
         # which the Agents SDK has no tool type for.
         self._server_tools = list(server_tools)
+
+    def with_client(self, client: AsyncOpenAI) -> "_GatewayResponsesModel":
+        clone = copy.copy(self)
+        clone._client = client
+        return clone
+
+    async def _fetch_response(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            response = await super()._fetch_response(*args, **kwargs)
+        except ModelBehaviorError as exc:
+            # The SDK turns an incomplete response into this error, naming
+            # its incomplete_details. A content filter stop is a refusal.
+            if "content_filter" in str(exc):
+                raise ProviderContentFilterError("incomplete_details.reason=content_filter") from exc
+            raise
+        incomplete_details = getattr(response, "incomplete_details", None)
+        if getattr(incomplete_details, "reason", None) == "content_filter":
+            raise ProviderContentFilterError("incomplete_details.reason=content_filter")
+        return response
 
     def _build_response_create_kwargs(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         create_kwargs = super()._build_response_create_kwargs(*args, **kwargs)
@@ -380,7 +400,7 @@ def _default_openrouter_title(config: ChackConfig) -> str:
     return "-".join(part for part in (main_action, sub_action) if part)
 
 
-def _configure_openai_client(config: ChackConfig) -> tuple[GatewayRoute, AsyncOpenAI]:
+def _configure_client_factory(config: ChackConfig) -> tuple[GatewayRoute, Callable[[], AsyncOpenAI]]:
     route = _select_route(config)
     headers = dict(route.headers)
     if route.is_openrouter and "X-Title" not in headers:
@@ -388,15 +408,16 @@ def _configure_openai_client(config: ChackConfig) -> tuple[GatewayRoute, AsyncOp
         if title:
             headers["X-Title"] = title
 
-    client = AsyncOpenAI(
-        base_url=route.base_url,
-        api_key=route.api_key,
-        default_headers=headers or None,
-    )
-    set_default_openai_client(client, use_for_tracing=False)
+    def _new_client() -> AsyncOpenAI:
+        return AsyncOpenAI(
+            base_url=route.base_url,
+            api_key=route.api_key,
+            default_headers=headers or None,
+        )
+
     # Gateways do not serve OpenAI's tracing endpoints.
     set_tracing_disabled(True)
-    return route, client
+    return route, _new_client
 
 
 def _run_scope_key() -> str:
@@ -640,6 +661,7 @@ class AgentsExecutor:
     _summary_max_chars: int
     _compaction_threshold_ratio: float
     _max_context_tokens: int
+    _client_factory: Callable[[], AsyncOpenAI]
     # Server-side chains (previous_response_id) are only reliable where the
     # provider stores responses natively. Gateways that translate the Responses
     # API to another vendor rebuild earlier turns lossily, so they get the full
@@ -826,7 +848,7 @@ class AgentsExecutor:
                 f"{chunk}{focus_block}"
             )
 
-        result = Runner.run_sync(
+        result = self._run_agent(
             self._summary_agent,
             [{"role": "user", "content": prompt}],
             max_turns=1,
@@ -944,11 +966,28 @@ class AgentsExecutor:
             input_items.append({"role": "user", "content": user_input})
         return _sanitize_input_items(input_items)
 
+    def _run_agent(self, agent: Agent, input_items: list[dict[str, Any]], **kwargs: Any) -> Any:
+        return asyncio.run(self._run_agent_with_own_client(agent, input_items, **kwargs))
+
+    async def _run_agent_with_own_client(
+        self, agent: Agent, input_items: list[dict[str, Any]], **kwargs: Any
+    ) -> Any:
+        # An HTTP client pools its connections on the event loop that opened
+        # them, and Chack runs each turn on a new thread, so a new loop. A
+        # client shared between runs fails the next run with "bound to a
+        # different event loop"; each run gets its own, closed on its loop.
+        client = self._client_factory()
+        try:
+            run_agent = agent.clone(model=agent.model.with_client(client))
+            return await Runner.run(run_agent, input_items, **kwargs)
+        finally:
+            await client.close()
+
     def _invoke_runner_with_recovery(self, user_input: str, context: Any) -> Any:
         include_history = not bool(self._previous_response_id or self._conversation_id)
         input_items = self._build_runner_input(user_input, include_history=include_history)
         try:
-            return Runner.run_sync(
+            return self._run_agent(
                 self.agent,
                 input_items,
                 max_turns=self.max_turns,
@@ -977,7 +1016,7 @@ class AgentsExecutor:
             retry_previous_response_id = None
             retry_conversation_id = None
             retry_input = self._build_runner_input(user_input, include_history=True)
-            return Runner.run_sync(
+            return self._run_agent(
                 self.agent,
                 retry_input,
                 max_turns=self.max_turns,
@@ -1209,7 +1248,7 @@ def build_executor(
     tools_override: Optional[list[Any]] = None,
     tools_append: Optional[list[Any]] = None,
 ) -> AgentsExecutor:
-    route, client = _configure_openai_client(config)
+    route, client_factory = _configure_client_factory(config)
     model_name = route.model_name
 
     web_plan = (
@@ -1296,6 +1335,8 @@ def build_executor(
     tools = ToolCallPolicy(config.tools, outputs_readable=has_exec_tool(tools)).wrap(tools)
     if web_plan.hosted_web_search:
         tools.append(WebSearchTool())
+    # Runs swap in a client of their own (``AgentsExecutor._run_agent``).
+    client = client_factory()
     model: Any = _GatewayResponsesModel(
         model=model_name, openai_client=client, server_tools=web_plan.server_tools
     )
@@ -1362,5 +1403,6 @@ def build_executor(
         ),
         _compaction_threshold_ratio=float(getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75),
         _max_context_tokens=int(config.model.max_context_tokens or 0),
+        _client_factory=client_factory,
         _chain_responses=route.is_openrouter,
     )

@@ -1,8 +1,11 @@
+import asyncio
 import base64
 import json
 import os
+import threading
 import tomllib
 
+import httpx
 import pytest
 
 from chack_agent import llm_gateway
@@ -576,7 +579,7 @@ class _FakeRunResult:
 def _record_runs(monkeypatch, backend):
     runs = []
 
-    def _run_sync(agent, input_items, **kwargs):
+    async def _run(agent, input_items, **kwargs):
         runs.append({"input": list(input_items), "previous_response_id": kwargs.get("previous_response_id")})
         transcript = list(input_items) + [
             {"type": "function_call", "call_id": f"call_{len(runs)}", "name": "exec", "arguments": "{}"},
@@ -585,7 +588,7 @@ def _record_runs(monkeypatch, backend):
         ]
         return _FakeRunResult(transcript, f"resp_{len(runs)}")
 
-    monkeypatch.setattr(backend.Runner, "run_sync", _run_sync)
+    monkeypatch.setattr(backend.Runner, "run", _run)
     return runs
 
 
@@ -617,6 +620,102 @@ def test_follow_up_runs_resend_history_unless_the_provider_stores_responses(
         assert second["previous_response_id"] is None
         assert [item.get("content") for item in second["input"] if item.get("role") == "user"] == ["first", "second"]
         assert {"type": "function_call_output", "call_id": "call_1", "output": "42"} in second["input"]
+
+
+class _LoopBoundTransport(httpx.AsyncBaseTransport):
+    """Answers like a gateway, with httpcore's catch: its pooled connection
+    belongs to the event loop that opened it and fails on any other loop."""
+
+    def __init__(self, transports, status="completed", incomplete_details=None):
+        self.status = status
+        self.incomplete_details = incomplete_details
+        self.loop = None
+        self.closed_on = None
+        transports.append(self)
+
+    async def handle_async_request(self, request):
+        loop = asyncio.get_running_loop()
+        if self.loop is None:
+            self.loop = loop
+        elif self.loop is not loop:
+            raise RuntimeError("<asyncio.locks.Event object> is bound to a different event loop")
+        body = {
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 0,
+            "model": "corp/opus-5.5",
+            "status": self.status,
+            "incomplete_details": self.incomplete_details,
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "OK", "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": 1,
+                "total_tokens": 4,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+        return httpx.Response(200, json=body, request=request)
+
+    async def aclose(self):
+        self.closed_on = asyncio.get_running_loop()
+
+
+def _gateway_executor_on(monkeypatch, transports, **response):
+    from chack_agent.backends import gateway_responses_backend as backend
+
+    real_client = backend.AsyncOpenAI
+
+    def _client(**kwargs):
+        transport = _LoopBoundTransport(transports, **response)
+        return real_client(**kwargs, http_client=httpx.AsyncClient(transport=transport))
+
+    monkeypatch.setattr(backend, "AsyncOpenAI", _client)
+    return backend.build_executor(
+        _config("gateway", "corp/opus-5.5"),
+        system_prompt="system",
+        max_turns=2,
+        memory_max_messages=10,
+        memory_reset_to_messages=5,
+        tools_override=[],
+    )
+
+
+def test_gateway_runs_of_one_executor_each_get_a_client_on_their_own_event_loop(monkeypatch):
+    transports = []
+    executor = _gateway_executor_on(monkeypatch, transports)
+
+    outputs = []
+    for _ in range(2):
+        # Chack runs every turn on a fresh worker thread, so on a fresh event loop.
+        worker = threading.Thread(target=lambda: outputs.append(executor.invoke({"input": "Say OK."})["output"]))
+        worker.start()
+        worker.join()
+
+    assert outputs == ["OK", "OK"]
+    used = [transport for transport in transports if transport.loop is not None]
+    assert len(used) == 2
+    assert all(transport.closed_on is transport.loop for transport in used)
+
+
+def test_gateway_content_filter_stop_ends_the_run_with_an_explicit_error(monkeypatch):
+    executor = _gateway_executor_on(
+        monkeypatch, [], status="incomplete", incomplete_details={"reason": "content_filter"}
+    )
+
+    with pytest.raises(RuntimeError, match=r"Provider content filter stopped the response \(.*content_filter"):
+        executor.invoke({"input": "Say OK."})
 
 
 def test_chained_requests_keep_outputs_for_calls_stored_with_the_previous_response():
