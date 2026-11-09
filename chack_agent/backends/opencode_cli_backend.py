@@ -18,6 +18,7 @@ Later invocations resume the same opencode session.
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import logging
@@ -104,6 +105,11 @@ _DENIED_NATIVE_TOOLS = ("question", "task", "skill", "todowrite", "todoread", "b
 # Host file access, only for runs that also have Chack's ``exec``.
 _NATIVE_FILE_TOOLS = ("read", "edit", "write", "patch", "apply_patch", "glob", "grep", "list", "lsp", "codesearch")
 _OPENAI_FAMILY_RE = re.compile(r"^(?:gpt|o\d|codex|chatgpt)")
+# opencode 2 runs ``opencode run`` on a background service shared by every run
+# on one fixed port, so concurrent runs fight over it; ``--standalone`` gives
+# each run a private server. opencode 1 always used one and has no such flag.
+_STANDALONE_FLAG = "--standalone"
+_HELP_TIMEOUT_SECONDS = 60
 
 _ROLE_MODEL_FIELDS = (
     "social_network",
@@ -256,6 +262,34 @@ def resolve_opencode_provider(config: ChackConfig) -> OpencodeProvider:
     raise ValueError(
         f"The opencode backend supports api_key_type openai, anthropic, openrouter or gateway (got {key_type!r})"
     )
+
+
+@functools.lru_cache(maxsize=None)
+def _run_help_offers_standalone(cli_path: str, modified_ns: int) -> bool:
+    del modified_ns  # part of the cache key: a reinstalled CLI is checked again
+    try:
+        done = subprocess.run(
+            [cli_path, "run", "--help"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_HELP_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _LOGGER.warning("Could not read `%s run --help` to check for %s: %s", cli_path, _STANDALONE_FLAG, exc)
+        return False
+    return _STANDALONE_FLAG in f"{done.stdout}\n{done.stderr}"
+
+
+def opencode_supports_standalone(cli_path: str) -> bool:
+    """True when ``opencode run`` takes ``--standalone`` (opencode 2 and later)."""
+
+    try:
+        modified_ns = os.stat(cli_path).st_mtime_ns
+    except OSError:
+        # A missing CLI is reported when the run launches it.
+        return False
+    return _run_help_offers_standalone(cli_path, modified_ns)
 
 
 def _sanitize_session_id(session_id: str) -> str:
@@ -754,6 +788,7 @@ class OpencodeCliExecutor:
         command = [
             self._opencode_cli_path,
             "run",
+            *([_STANDALONE_FLAG] if opencode_supports_standalone(self._opencode_cli_path) else []),
             "--format",
             "json",
             "--model",
