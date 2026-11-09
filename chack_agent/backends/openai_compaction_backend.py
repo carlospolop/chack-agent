@@ -36,7 +36,7 @@ from ..llm_gateway import clone_config_for_gateway, get_gateway_route
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import openai_thinking_effort
 from chack_tools.agents_toolset import AgentsToolset
-from chack_tools.cancellation import raise_if_cancelled
+from chack_tools.cancellation import cancellation_requested, raise_if_cancelled
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
 from chack_tools.telemetry import log_event, run_with_tool_logging
 from chack_tools.tool_usage_state import (
@@ -528,6 +528,11 @@ class AgentsExecutor:
             self._memory_limit and len(self._conversation) > self._memory_limit
         )
         if not should_compact_by_messages and not should_compact_by_tokens:
+            return
+        if cancellation_requested():
+            # The turn's answer is done; a cancelled run (e.g. no budget left)
+            # keeps it and makes no further model call.
+            _LOGGER.info("Skipping response compaction: the run was cancelled after its answer.")
             return
 
         conversation_messages_before = len(self._conversation or [])

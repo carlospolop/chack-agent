@@ -234,3 +234,44 @@ def test_a_cancelled_run_makes_no_compaction_call(compacting, cancel_event, usag
 
     assert _CompactingClient.calls == []
     assert compacting._previous_response_id == "resp-1"
+
+
+class _AnswerThenCancelledModel(_ToolThenAnswerModel):
+    """Answers at once; the run is cancelled after that call (no budget left for another)."""
+
+    def __init__(self, event, usage_reports):
+        super().__init__(turns=1, usage_reports=usage_reports)
+        self.event = event
+
+    async def get_response(self, *args, **kwargs):
+        response = await super().get_response(*args, **kwargs)
+        self.event.set()
+        return response
+
+
+def test_a_run_cancelled_after_its_answer_keeps_it_and_makes_no_compaction_call(
+        compacting, cancel_event, usage_reports):
+    executor = _compaction_executor(_agent(_AnswerThenCancelledModel(cancel_event, usage_reports)))
+    executor._config.credentials = SimpleNamespace(openai_api_key="k", openai_org_id="")
+    executor._compaction_model = MODEL
+    executor._previous_response_id = "resp-1"
+    executor._memory_limit = executor._memory_reset_to = 1  # the turn's messages call for a compaction
+
+    result = executor.invoke({"input": "go"})
+
+    assert result["output"] == "done", "the finished answer was lost to the compaction after it"
+    assert _CompactingClient.calls == []
+    assert usage_reports == [(MODEL, 1000, 100)]
+
+
+def test_a_gateway_run_cancelled_after_its_answer_keeps_it_and_makes_no_summary_call(cancel_event, usage_reports):
+    model = _AnswerThenCancelledModel(cancel_event, usage_reports)
+    executor = _gateway_executor(_agent(model))
+    # One earlier message: the turn's two take the conversation past the summary trigger.
+    executor._conversation = [{"role": "user", "content": "earlier"}]
+    executor._summary_trigger_messages = 1
+
+    result = executor.invoke({"input": "go"})
+
+    assert result["output"] == "done", "the finished answer was lost to the summary after it"
+    assert model.calls == 1, "a cancelled run made a summary call"

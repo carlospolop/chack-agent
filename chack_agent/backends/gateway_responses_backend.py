@@ -26,6 +26,7 @@ from agents.models.openai_responses import OpenAIResponsesModel
 from agents.items import ToolCallItem
 from agents.exceptions import ModelBehaviorError
 
+from chack_tools.cancellation import cancellation_requested
 from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
 
 from ..config import ChackConfig
@@ -897,6 +898,11 @@ class AgentsExecutor:
             threshold_tokens > 0 and input_tokens >= threshold_tokens
         )
         if not should_summarize_by_messages and not should_summarize_by_tokens:
+            return
+        if cancellation_requested():
+            # A summary is a model call: a cancelled run (e.g. no budget left)
+            # makes none, and keeps the answer its turn already has.
+            _LOGGER.info("Skipping conversation summary: the run was cancelled.")
             return
 
         before_len = len(self._conversation)
