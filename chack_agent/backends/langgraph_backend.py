@@ -32,6 +32,8 @@ from ..llm_gateway import get_gateway_route
 from ..thinking_effort import normalize_thinking_effort
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
+from chack_tools.cancellation import raise_if_cancelled
+
 from ..live_cost_state import report_live_usage
 from ..output_schema import JsonSchemaOutput
 from ..resume_compaction import ResumeCompactionResult
@@ -50,6 +52,18 @@ _LOGGER = logging.getLogger("chack.langgraph_backend")
 
 def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _report_message_usage(model: Any, response: Any) -> None:
+    usage = getattr(response, "usage_metadata", None) or {}
+    details = usage.get("input_token_details", {}) or {}
+    report_live_usage(
+        str(getattr(model, "model_name", "") or ""),
+        prompt_tokens=int(usage.get("input_tokens", 0) or 0),
+        completion_tokens=int(usage.get("output_tokens", 0) or 0),
+        cached_prompt_tokens=int(details.get("cache_read", 0) or 0),
+        cache_write_tokens=int(details.get("cache_creation", 0) or 0),
+    )
 
 
 @dataclass
@@ -459,7 +473,9 @@ class LangGraphExecutor:
                 f"{chunk}{focus_block}"
             )
 
+        raise_if_cancelled()
         response = self._summary_model.invoke([HumanMessage(content=prompt)])
+        _report_message_usage(self._summary_model, response)
         content = getattr(response, "content", "")
         if isinstance(content, str):
             summary = content.strip() or previous_summary
@@ -606,6 +622,7 @@ class LangGraphExecutor:
             else:
                 prompt_messages.extend(messages)
 
+            raise_if_cancelled()
             response = self._model_with_tools.invoke(prompt_messages)
             usage = getattr(response, "usage_metadata", None) or {}
             usage_event = {

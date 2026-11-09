@@ -1,6 +1,7 @@
 import asyncio
 from typing import Optional
 from collections import Counter
+import contextvars
 import threading
 import os
 
@@ -142,7 +143,8 @@ class SubAgentRunner:
             except Exception as exc:
                 box["error"] = exc
 
-        t = threading.Thread(target=_target, daemon=True)
+        context = contextvars.copy_context()
+        t = threading.Thread(target=lambda: context.run(_target), daemon=True)
         t.start()
         t.join()
         if box["error"] is not None:
