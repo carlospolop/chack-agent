@@ -14,6 +14,8 @@ from dataclasses import dataclass, replace
 from typing import Annotated, Any, Optional
 from typing_extensions import TypedDict
 
+from agents import MaxTurnsExceeded
+from agents.exceptions import ModelBehaviorError
 from agents.tool_context import ToolContext
 from agents.usage import Usage
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
@@ -31,7 +33,9 @@ from ..thinking_effort import normalize_thinking_effort
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from ..live_cost_state import report_live_usage
+from ..output_schema import JsonSchemaOutput
 from ..resume_compaction import ResumeCompactionResult
+from .content_filter import ProviderContentFilterError
 from .hosted_web_search import WebToolPlan, plan_web_tools
 from .playwright_mcp import (
     playwright_mcp_call_tool,
@@ -75,6 +79,13 @@ def _to_int(raw: str, default: int) -> int:
         return default
 
 
+def _recursion_limit_for(max_turns: int) -> int:
+    # A turn is one model call, as in the Agents SDK backends. In the graph a
+    # call that uses tools takes two steps (llm_call, then tool_node), so the
+    # step limit is twice the turn budget.
+    return 2 * max(1, int(max_turns or 0))
+
+
 def _run_coro_sync(coro):
     try:
         asyncio.get_running_loop()
@@ -115,7 +126,6 @@ class LangGraphExecutor:
     _thread_id: str
     _max_non_task_tools: int
     _require_task_steps_manager_init_first: bool
-    _recursion_limit: int
     _summary_trigger_messages: int
     _summary_keep_messages: int
     _summary_max_chars: int
@@ -124,6 +134,7 @@ class LangGraphExecutor:
     _output_schema_json: str
     _output_schema_name: str
     _output_schema_strict: bool
+    _max_turns: int = 0
     _pending_resume_summary: str = ""
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
@@ -134,7 +145,7 @@ class LangGraphExecutor:
 
         config = {
             "configurable": {"thread_id": self._thread_id},
-            "recursion_limit": self._recursion_limit,
+            "recursion_limit": _recursion_limit_for(self._max_turns),
         }
 
         prev_tool_events = 0
@@ -154,11 +165,26 @@ class LangGraphExecutor:
         if self._pending_resume_summary:
             graph_input["summary"] = self._pending_resume_summary
             self._pending_resume_summary = ""
-        result_state = self._graph.invoke(graph_input, config=config)
+        result_state = self._invoke_graph(graph_input, config)
         state_values = dict(result_state or {})
 
         messages = state_values.get("messages", []) or []
         output = self._extract_output(messages)
+        if self._output_schema_json:
+            output, schema_error = self._validate_schema_output(output)
+            if schema_error:
+                # The schema is only a prompt contract here, so the model can
+                # answer in prose. Give it one turn to fix the answer.
+                _LOGGER.warning("LangGraph answer did not match the output schema; asking for a repair: %s", schema_error)
+                result_state = self._invoke_graph(
+                    {"messages": [HumanMessage(content=self._schema_repair_prompt(schema_error))]},
+                    config,
+                )
+                state_values = dict(result_state or {})
+                messages = state_values.get("messages", []) or []
+                output, schema_error = self._validate_schema_output(self._extract_output(messages))
+                if schema_error:
+                    _LOGGER.warning("LangGraph answer still did not match the output schema after a repair turn: %s", schema_error)
 
         tool_events = state_values.get("tool_events", []) or []
         usage_events = state_values.get("usage_events", []) or []
@@ -257,6 +283,33 @@ class LangGraphExecutor:
             "intermediate_steps": steps,
             "raw_result": _RawResult(raw_responses=raw_responses),
         }
+
+    def _invoke_graph(self, graph_input: dict[str, Any], config: dict[str, Any]) -> Any:
+        graph_errors = importlib.import_module("langgraph.errors")
+        try:
+            return self._graph.invoke(graph_input, config=config)
+        except graph_errors.GraphRecursionError as exc:
+            raise MaxTurnsExceeded(f"Max turns ({self._max_turns}) exceeded") from exc
+
+    def _validate_schema_output(self, output: str) -> tuple[str, str]:
+        """Return the answer as schema-shaped JSON, or as given with the reason it fails."""
+        validator = JsonSchemaOutput(
+            json.loads(self._output_schema_json),
+            name=str(self._output_schema_name or "output_schema"),
+            strict=bool(self._output_schema_strict),
+        )
+        try:
+            return json.dumps(validator.validate_json(output or ""), ensure_ascii=False), ""
+        except ModelBehaviorError as exc:
+            return output, str(exc)
+
+    def _schema_repair_prompt(self, schema_error: str) -> str:
+        schema_name = str(self._output_schema_name or "output_schema").strip() or "output_schema"
+        return (
+            f"Your final answer does not match the required output schema `{schema_name}`: {schema_error}\n"
+            "Reply again with only the final answer as one JSON object that matches the schema, "
+            "with no text before or after it."
+        )
 
     async def aget_memory_messages(self) -> list[Any]:
         config = {"configurable": {"thread_id": self._thread_id}}
@@ -568,6 +621,9 @@ class LangGraphExecutor:
                 cached_prompt_tokens=usage_event["cached_input_tokens"],
                 cache_write_tokens=usage_event["cache_write_input_tokens"],
             )
+            finish_reason = (getattr(response, "response_metadata", None) or {}).get("finish_reason")
+            if finish_reason == "content_filter":
+                raise ProviderContentFilterError()
             payload: dict[str, Any] = {
                 "messages": [response],
                 "usage_events": [usage_event],
@@ -897,7 +953,7 @@ def build_executor(
             getattr(config.agent, "require_task_steps_manager_init_first", True)
             and has_task_steps_manager_tool
         ),
-        _recursion_limit=max_turns,
+        _max_turns=max_turns,
         _summary_trigger_messages=memory_max_messages,
         _summary_keep_messages=memory_reset_to_messages,
         _summary_max_chars=max(

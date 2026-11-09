@@ -18,10 +18,11 @@ from agents import (
     Runner,
     ToolGuardrailFunctionOutput,
     tool_input_guardrail,
-    set_default_openai_client,
     WebSearchTool,
 )
 from agents.items import ToolCallItem
+from agents.models.multi_provider import MultiProvider
+from agents.run import RunConfig
 from agents.exceptions import ModelBehaviorError
 
 from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
@@ -84,24 +85,23 @@ def _select_provider(config: ChackConfig) -> str:
     return provider
 
 
-def _configure_openai_client(config: ChackConfig) -> tuple[str, Optional[AsyncOpenAI]]:
-    provider = _select_provider(config)
-    # OpenAI
+def _configure_client_factory(config: ChackConfig) -> Callable[[], AsyncOpenAI]:
+    _select_provider(config)
     api_key = (
         str(config.credentials.openai_api_key or "").strip()
         or os.environ.get("OPENAI_API_KEY", "").strip()
     )
     base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or None
     organization = str(config.credentials.openai_org_id or "").strip() or None
-    client: Optional[AsyncOpenAI] = None
-    if api_key or base_url or organization:
-        client = AsyncOpenAI(
+
+    def _new_client() -> AsyncOpenAI:
+        return AsyncOpenAI(
             api_key=api_key or None,
             base_url=base_url,
             organization=organization,
         )
-        set_default_openai_client(client)
-    return provider, client
+
+    return _new_client
 
 
 def _web_tool_plan(config: ChackConfig) -> WebToolPlan:
@@ -339,6 +339,7 @@ class AgentsExecutor:
     _compaction_threshold_ratio: float
     _max_context_tokens: int
     _compaction_model: str
+    _client_factory: Callable[[], AsyncOpenAI]
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         user_input = payload.get("input", "")
@@ -411,6 +412,24 @@ class AgentsExecutor:
             input_items.append({"role": "user", "content": user_input})
         return _sanitize_input_items(input_items)
 
+    def _run_agent(self, agent: Agent, input_items: list[dict[str, Any]], **kwargs: Any) -> Any:
+        return asyncio.run(self._run_agent_with_own_client(agent, input_items, **kwargs))
+
+    async def _run_agent_with_own_client(
+        self, agent: Agent, input_items: list[dict[str, Any]], **kwargs: Any
+    ) -> Any:
+        # An HTTP client pools its connections on the event loop that opened
+        # them, and Chack runs each turn on a new thread, so a new loop. A
+        # client shared between runs (ours or the SDK's shared one) fails the
+        # next run with "bound to a different event loop"; each run gets its
+        # own, closed on its loop.
+        client = self._client_factory()
+        try:
+            run_config = RunConfig(model_provider=MultiProvider(openai_client=client))
+            return await Runner.run(agent, input_items, run_config=run_config, **kwargs)
+        finally:
+            await client.close()
+
     def _invoke_runner_with_recovery(self, user_input: str, context: Any) -> Any:
         # For OpenAI, rely on server-side conversation state only.
         include_history = False
@@ -418,7 +437,7 @@ class AgentsExecutor:
         last_connection_error: Optional[APIConnectionError] = None
         for attempt in range(1, _OPENAI_RUNNER_MAX_RETRIES + 1):
             try:
-                return Runner.run_sync(
+                return self._run_agent(
                     self.agent,
                     input_items,
                     max_turns=self.max_turns,
@@ -431,12 +450,11 @@ class AgentsExecutor:
                 if attempt >= _OPENAI_RUNNER_MAX_RETRIES:
                     raise
                 _LOGGER.warning(
-                    "OpenAI runner connection failed on attempt %s/%s; rebuilding client and retrying. Error: %s",
+                    "OpenAI runner connection failed on attempt %s/%s; retrying with a new client. Error: %s",
                     attempt,
                     _OPENAI_RUNNER_MAX_RETRIES,
                     exc,
                 )
-                _configure_openai_client(self._config)
                 time.sleep(_OPENAI_RUNNER_RETRY_DELAY_SECONDS * attempt)
                 continue
             except (BadRequestError, ModelBehaviorError) as exc:
@@ -454,7 +472,7 @@ class AgentsExecutor:
                 retry_previous_response_id = None
                 retry_conversation_id = self._conversation_id
                 retry_input = self._build_runner_input(user_input, include_history=False)
-                return Runner.run_sync(
+                return self._run_agent(
                     self.agent,
                     retry_input,
                     max_turns=self.max_turns,
@@ -845,7 +863,7 @@ def build_executor(
         _LOGGER.debug(
             "openai_compaction build_executor: memory_summary_max_chars provided (unable to coerce to int in debug log)"
         )
-    _configure_openai_client(config)
+    client_factory = _configure_client_factory(config)
     model_name = config.model.primary
 
     web_plan = _web_tool_plan(config) if tools_override is None else WebToolPlan()
@@ -979,4 +997,5 @@ def build_executor(
         _compaction_model=(
             str(config.agent.compaction_model).strip() or model_name
         ),
+        _client_factory=client_factory,
     )
