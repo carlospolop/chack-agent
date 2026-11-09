@@ -260,7 +260,8 @@ def test_langgraph_compaction_summarizes_and_rotates_checkpoint_thread():
 def test_langgraph_threshold_compaction_rotates_checkpoint_after_turn():
     executor = LangGraphExecutor.__new__(LangGraphExecutor)
     executor._thread_id = "thread-1"
-    executor._recursion_limit = 10
+    executor._max_turns = 10
+    executor._output_schema_json = ""
     executor._conversation = []
     executor._memory_limit = 0
     executor._max_context_tokens = 100
