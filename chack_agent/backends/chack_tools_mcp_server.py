@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import keyword
@@ -9,7 +10,9 @@ import threading
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import AliasChoices, Field
 
 from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
@@ -35,6 +38,7 @@ from chack_agent.limit_event_state import emit_limit_reached
 from chack_agent.budget_warning_state import budget_status_from_env, inject_budget_warning_from_env
 from chack_agent.thinking_effort import normalize_thinking_effort
 from .tool_payloads import (
+    MCP_INPUT_SCHEMA_ATTRIBUTE,
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_APPEND_B64_PATH_ENV,
@@ -595,6 +599,7 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
             continue
         schema = getattr(tool, "params_json_schema", None) or {}
         description = str(getattr(tool, "description", "") or "")
+        preserve_schema = bool(getattr(tool, MCP_INPUT_SCHEMA_ATTRIBUTE, False))
 
         properties = schema.get("properties") if isinstance(schema, dict) else {}
         required = set(schema.get("required", []) if isinstance(schema, dict) else [])
@@ -613,6 +618,13 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
             annotations[py_name] = _py_type_from_schema(
                 prop_schema if isinstance(prop_schema, dict) else {}
             )
+            if preserve_schema and py_name != json_key:
+                # Advertise the original JSON name while accepting the safe
+                # Python name used by older clients of this bridge too.
+                annotations[py_name] = Annotated[
+                    annotations[py_name],
+                    Field(validation_alias=AliasChoices(json_key, py_name)),
+                ]
             schema_obj = prop_schema if isinstance(prop_schema, dict) else {}
             has_schema_default = "default" in schema_obj
             schema_default = schema_obj.get("default")
@@ -747,6 +759,16 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
         # as text content and again as ``structuredContent``, and clients
         # such as Codex's code mode hand both copies to the model.
         mcp.add_tool(_proxy, name=name, description=description, structured_output=False)
+        if not preserve_schema:
+            continue
+        registered = mcp._tool_manager.get_tool(name)
+        if registered is None:
+            raise RuntimeError(f"Tool registration failed: {name}")
+        if registered.fn is _proxy and isinstance(schema, dict) and schema:
+            # Proxy annotations are deliberately shallow. Rebuilding the public
+            # schema from them loses nested fields, refs, enums and constraints.
+            # A duplicate name keeps the first handler and its matching schema.
+            registered.parameters = copy.deepcopy(schema)
 
 
 def main() -> None:

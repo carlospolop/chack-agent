@@ -7,6 +7,8 @@ import sys
 
 import pytest
 from agents import function_tool
+from typing_extensions import TypedDict
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
@@ -19,7 +21,18 @@ from chack_agent.backends.chack_tools_mcp_server import (
     _py_type_from_schema,
     _register_tools,
 )
+from chack_agent.backends.tool_payloads import (
+    deserialize_tools_payload,
+    preserve_mcp_input_schema,
+    serialize_tools_payload,
+)
 from chack_tools.subagent_config import enforce_prompt_str_or_list_schema
+
+
+class _SchemaLookup(TypedDict):
+    symbol_name: str
+    limit: int
+
 
 def test_name_based_administrator_tool_reconstruction(monkeypatch) -> None:
     monkeypatch.setenv("CHACK_MODEL_PROVIDER", "codex")
@@ -206,9 +219,11 @@ def test_schema_type_preserves_string_or_array_union() -> None:
     )
 
     listed = asyncio.run(server.list_tools())
-    prompt_schema = listed[0].inputSchema["properties"]["prompt"]
-    assert "anyOf" in prompt_schema
-    assert {entry.get("type") for entry in prompt_schema["anyOf"]} == {"string", "array"}
+    from jsonschema import Draft202012Validator
+    validator = Draft202012Validator(listed[0].inputSchema)
+    assert validator.is_valid({"prompt":"first"})
+    assert validator.is_valid({"prompt":["first","second"]})
+    assert not validator.is_valid({"prompt":42})
 
     result = asyncio.run(server.call_tool("accepts_batch", {"prompt": ["first", "second"]}))
     rendered = "\n".join(str(block) for block in result)
@@ -280,3 +295,73 @@ def test_a_command_that_reads_stdin_leaves_later_tool_calls_answered() -> None:
                 return answers
 
     assert asyncio.run(_exchange()) == ["read-done", "after"]
+
+
+def test_published_batch_schema_rejects_unknown_fields_and_wrong_nested_types():
+    from jsonschema import Draft202012Validator
+
+    @function_tool
+    def lookup_symbols(requests: list[_SchemaLookup]) -> str:
+        return ','.join(f"{r['symbol_name']}:{r['limit']}" for r in requests)
+
+    server = FastMCP('nested-schema-test')
+    tools = deserialize_tools_payload(serialize_tools_payload([preserve_mcp_input_schema(lookup_symbols)]))
+    _register_tools(server, tools, _ServerPolicyState(False, 0))
+    schema = asyncio.run(server.list_tools())[0].inputSchema
+    validator = Draft202012Validator(schema)
+    valid = {'requests':[{'symbol_name':'alpha','limit':3}]}
+    assert validator.is_valid(valid)
+    assert not validator.is_valid({'requests':[{'name':'alpha','limit':3}]})
+    assert not validator.is_valid({'requests':[{'symbol_name':'alpha','limit':'many'}]})
+    result = asyncio.run(server.call_tool('lookup_symbols', valid))
+    assert [block.text for block in result] == ['alpha:3']
+
+
+def test_original_json_argument_names_and_previous_python_aliases_both_invoke_tool():
+    from agents.tool import FunctionTool
+    from jsonschema import Draft202012Validator
+    from chack_agent.backends.chack_tools_mcp_server import _safe_identifier
+
+    async def invoke(_context, arguments):
+        return json.loads(arguments)['class']['kind']
+
+    tool = FunctionTool(name='read_class', description='Read a selected class',
+        params_json_schema={
+            'type':'object', 'properties':{'class':{'$ref':'#/$defs/Options'}},
+            'required':['class'], 'additionalProperties':False,
+            '$defs':{'Options':{'type':'object','properties':{'kind':{'enum':['public','private']}},
+                'required':['kind'],'additionalProperties':False}},
+        }, on_invoke_tool=invoke)
+    server = FastMCP('json-name-test')
+    _register_tools(server, [preserve_mcp_input_schema(tool)], _ServerPolicyState(False, 0))
+    schema = asyncio.run(server.list_tools())[0].inputSchema
+    validator = Draft202012Validator(schema)
+    valid = {'class':{'kind':'public'}}
+    assert validator.is_valid(valid)
+    assert not validator.is_valid({'class':{'kind':'unknown'}})
+    assert [b.text for b in asyncio.run(server.call_tool('read_class', valid))] == ['public']
+    old_name = _safe_identifier('class', set())
+    assert [b.text for b in asyncio.run(server.call_tool('read_class', {old_name:{'kind':'private'}}))] == ['private']
+
+
+def test_duplicate_tool_name_keeps_first_schema_and_handler():
+    from jsonschema import Draft202012Validator
+
+    @function_tool(name_override='read_value')
+    def first(value: str) -> str:
+        return 'first '+value
+
+    @function_tool(name_override='read_value')
+    def second(number: int) -> str:
+        return str(number)
+
+    server = FastMCP('duplicate-name-test')
+    _register_tools(
+        server,
+        [preserve_mcp_input_schema(first), preserve_mcp_input_schema(second)],
+        _ServerPolicyState(False, 0),
+    )
+    validator = Draft202012Validator(asyncio.run(server.list_tools())[0].inputSchema)
+    assert validator.is_valid({'value':'alpha'})
+    assert not validator.is_valid({'number':3})
+    assert [b.text for b in asyncio.run(server.call_tool('read_value', {'value':'alpha'}))] == ['first alpha']

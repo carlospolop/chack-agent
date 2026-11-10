@@ -18,6 +18,7 @@ CHACK_TOOLS_APPEND_NAMES_JSON_ENV = "CHACK_TOOLS_APPEND_NAMES_JSON"
 CHACK_TOOLS_CONFIG_JSON_PATH_ENV = "CHACK_TOOLS_CONFIG_JSON_PATH"
 CHACK_ALLOWED_TOOLS_JSON_PATH_ENV = "CHACK_ALLOWED_TOOLS_JSON_PATH"
 CHACK_INLINE_ENV_VALUE_MAX_CHARS = 24000
+MCP_INPUT_SCHEMA_ATTRIBUTE = "chack_preserve_mcp_input_schema"
 # The caller's own PYTHONPATH (JSON: a string or null), so the exec tool can
 # give shell commands the caller's environment instead of the import roots
 # added for the MCP server.
@@ -58,6 +59,12 @@ def _cloudpickle():
         raise RuntimeError(
             "cloudpickle is required to pass custom tools to CLI backends"
         ) from exc
+
+
+def preserve_mcp_input_schema(tool: Any) -> Any:
+    """Publish the declared JSON input schema when serving this tool over MCP."""
+    setattr(tool, MCP_INPUT_SCHEMA_ATTRIBUTE, True)
+    return tool
 
 
 def serialize_tools_payload(tools: list[Any] | None) -> str:

@@ -13,8 +13,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from agents import function_tool
+from typing_extensions import TypedDict
 
 from chack_agent.backends.claude_code_backend import build_executor
+from chack_agent.backends.tool_payloads import preserve_mcp_input_schema
 from chack_agent.config import (
     AgentConfig,
     ChackConfig,
@@ -28,7 +31,7 @@ from chack_agent.config import (
 pytestmark = pytest.mark.skipif(shutil.which("claude") is None, reason="Claude Code CLI not installed")
 
 
-def _capture_first_request(tmp_path, monkeypatch, model: dict | None = None, **tools) -> dict:
+def _capture_first_request(tmp_path, monkeypatch, model: dict | None = None, *, tools_override=None, **tools) -> dict:
     requests: list[dict] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -67,7 +70,8 @@ def _capture_first_request(tmp_path, monkeypatch, model: dict | None = None, **t
             env={},
         )
         executor = build_executor(
-            config, system_prompt="system", max_turns=2, memory_max_messages=10, memory_reset_to_messages=5
+            config, system_prompt="system", max_turns=2, memory_max_messages=10,
+            memory_reset_to_messages=5, tools_override=tools_override
         )
         executor._ensure_claude_home_and_settings()
         env = executor._build_env()
@@ -134,3 +138,23 @@ def test_prompt_caching_marks_the_request_unless_the_model_turns_it_off(tmp_path
 
     uncached = _capture_first_request(tmp_path / "uncached", monkeypatch, model={"prompt_cache_enabled": False})
     assert "cache_control" not in json.dumps(uncached)
+
+
+class _Lookup(TypedDict):
+    symbol_name: str
+    limit: int
+
+
+def test_nested_request_constraints_reach_claude_model_request(tmp_path, monkeypatch):
+    from jsonschema import Draft202012Validator
+
+    @function_tool
+    def lookup_symbols(requests: list[_Lookup]) -> str:
+        return ','.join(r['symbol_name'] for r in requests)
+
+    request = _capture_first_request(tmp_path, monkeypatch, tools_override=[preserve_mcp_input_schema(lookup_symbols)], exec_enabled=False)
+    tool = next(t for t in request['tools'] if t['name'] == 'mcp__chack_tools__lookup_symbols')
+    validator = Draft202012Validator(tool['input_schema'])
+    assert validator.is_valid({'requests':[{'symbol_name':'alpha','limit':3}]})
+    assert not validator.is_valid({'requests':[{'name':'alpha','limit':3}]})
+    assert not validator.is_valid({'requests':[{'symbol_name':'alpha','limit':'many'}]})
