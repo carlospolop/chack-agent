@@ -77,6 +77,9 @@ _REMOTE_METADATA_FIELDS = {
 # prompt and still selects the real Extra High UI mode. Native xhigh submission
 # remains the first and preferred path.
 _XHIGH_COMPAT_PROMPT_PREFIX = "__CHACK_CHATGPT_XHIGH_V1__\n"
+# Remote workers fail about one job in four on a selector, click or CDP timeout
+# within the first minutes; a fresh job usually lands on a healthy page.
+_REMOTE_BROWSER_RETRIES = 2
 
 
 def resolve_chatgpt_timeout_seconds(config: ToolsConfig, mode: Mode) -> int:
@@ -105,6 +108,10 @@ def resolve_chatgpt_timeout_seconds(config: ToolsConfig, mode: Mode) -> int:
 
 class ChatGPTWebResearchError(RuntimeError):
     """A launch, terminal-state, or extraction failure in ChatGPT Web."""
+
+
+class _RemoteBrowserFailure(ChatGPTWebResearchError):
+    """The remote worker's browser failed before ChatGPT produced any text."""
 
 
 def _compact(payload: Any) -> str:
@@ -335,6 +342,30 @@ class ChatGPTWebResearchAgentTool:
     ) -> tuple[str, str, dict[str, Any]]:
         """Submit through the cloud broker and poll without touching local CDP."""
         client = self._async_client()
+        deadline = time.monotonic() + self._async_max_wait_seconds()
+        retry = 0
+        while True:
+            try:
+                return self._remote_attempt(
+                    client, prompt, deadline, retry, run_state_path=run_state_path, partial_path=partial_path
+                )
+            except _RemoteBrowserFailure:
+                # Only retry while at least half of the browser deadline is left.
+                if retry >= _REMOTE_BROWSER_RETRIES or deadline - time.monotonic() < self._timeout_seconds() / 2:
+                    raise
+                retry += 1
+                self._emit_progress("remote_retrying", answer_chars=0, running=True)
+
+    def _remote_attempt(
+        self,
+        client: ChatGPTAsyncApiClient,
+        prompt: str,
+        deadline: float,
+        retry: int,
+        *,
+        run_state_path: Path | None,
+        partial_path: Path | None,
+    ) -> tuple[str, str, dict[str, Any]]:
         output_timeout_seconds = self._timeout_seconds()
         idempotency_key = str(uuid.uuid4())
         try:
@@ -364,11 +395,11 @@ class ChatGPTWebResearchAgentTool:
             raise ChatGPTWebResearchError("ChatGPT async API did not return a job id.")
 
         started = time.time()
-        deadline = time.monotonic() + self._async_max_wait_seconds()
         metadata: dict[str, Any] = {
             "mode": self.mode,
             "execution_backend": "remote",
             "remote_job_id": job_id,
+            "remote_retry_count": retry,
             "submitted_at": started,
             "terminal_state": "queued",
             "output_timeout_seconds": output_timeout_seconds,
@@ -446,7 +477,8 @@ class ChatGPTWebResearchAgentTool:
                     self._write_partial(partial_path, partial)
                 error_code = str(result_payload.get("error_code") or status or "remote_failed")
                 error_message = str(result_payload.get("error_message") or "")
-                raise ChatGPTWebResearchError(
+                retryable = status == "FAILED" and error_code == "BROWSER_EXECUTION_FAILED" and not partial
+                raise (_RemoteBrowserFailure if retryable else ChatGPTWebResearchError)(
                     f"Remote ChatGPT {self.mode} job ended as {status} ({error_code})"
                     + (f": {error_message}" if error_message else "")
                 )

@@ -781,6 +781,67 @@ def test_xhigh_remote_backend_submits_exact_mode_and_preserves_result(monkeypatc
     assert helper.tool_name == "chatgptxhigh"
 
 
+def test_remote_backend_resubmits_after_a_browser_failure_without_output(monkeypatch, tmp_path):
+    class FakeClient:
+        def __init__(self, failures):
+            self.failures = failures
+            self.submissions = []
+
+        def submit(self, **kwargs):
+            self.submissions.append(kwargs)
+            return {"job_id": f"job_{len(self.submissions)}"}
+
+        def status(self, job_id):
+            failed = int(job_id.split("_")[1]) <= self.failures
+            return {"status": "FAILED" if failed else "SUCCEEDED", "answer_chars": 0 if failed else 300}
+
+        def result(self, job_id):
+            if int(job_id.split("_")[1]) <= self.failures:
+                return {"status": "FAILED", "error_code": "BROWSER_EXECUTION_FAILED",
+                        "error_message": "TimeoutError: Locator.click: Timeout 5000ms exceeded."}
+            return {"status": "SUCCEEDED", "result": "R" * 300}
+
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(chatgpt_execution_backend="remote"), mode="xhigh")
+    monkeypatch.setattr("chack_tools.chatgpt_research_agents.time.sleep", lambda *_args: None)
+
+    client = FakeClient(failures=2)
+    monkeypatch.setattr(helper, "_async_client", lambda: client)
+    answer, _, metadata = helper._remote_research(
+        "P" * 500, run_state_path=tmp_path / "run.json", partial_path=tmp_path / "partial.md"
+    )
+    assert answer == "R" * 300
+    assert metadata["remote_retry_count"] == 2
+    assert len({call["idempotency_key"] for call in client.submissions}) == 3
+
+    client = FakeClient(failures=3)
+    monkeypatch.setattr(helper, "_async_client", lambda: client)
+    with pytest.raises(ChatGPTWebResearchError, match="BROWSER_EXECUTION_FAILED"):
+        helper._remote_research("P" * 500, run_state_path=tmp_path / "run.json", partial_path=tmp_path / "partial.md")
+    assert len(client.submissions) == 3
+
+
+def test_remote_backend_does_not_resubmit_other_failures(monkeypatch, tmp_path):
+    class FakeClient:
+        submissions = 0
+
+        def submit(self, **_kwargs):
+            self.submissions += 1
+            return {"job_id": "job_1"}
+
+        def status(self, _job_id):
+            return {"status": "TIMED_OUT", "answer_chars": 0}
+
+        def result(self, _job_id):
+            return {"status": "TIMED_OUT", "error_code": "OUTPUT_TIMEOUT"}
+
+    client = FakeClient()
+    helper = ChatGPTWebResearchAgentTool(ToolsConfig(chatgpt_execution_backend="remote"), mode="xhigh")
+    monkeypatch.setattr(helper, "_async_client", lambda: client)
+    with pytest.raises(ChatGPTWebResearchError, match="TIMED_OUT"):
+        helper._remote_research("P" * 500, run_state_path=tmp_path / "run.json", partial_path=tmp_path / "partial.md")
+    assert client.submissions == 1
+
+
 def test_remote_backend_honors_async_cancellation(monkeypatch, tmp_path):
     class FakeClient:
         def __init__(self):
