@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 import tempfile
 from typing import Any
@@ -109,3 +110,13 @@ def deserialize_tools_payload(payload_b64: str) -> list[Any]:
     if not isinstance(tools, list):
         raise RuntimeError("Serialized tool payload must deserialize to a list")
     return list(tools)
+
+
+def configured_mcp_env_names(tools_config_json: str) -> tuple[str, ...]:
+    """Extra environment names explicitly selected by the trusted caller."""
+    names = json.loads(tools_config_json or "{}").get("mcp_env_vars", [])
+    if not isinstance(names, list) or len(names) > 64:
+        raise ValueError("tools.mcp_env_vars must be a list of at most 64 environment names")
+    if any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in names):
+        raise ValueError("tools.mcp_env_vars contains an invalid environment name")
+    return tuple(dict.fromkeys(names))

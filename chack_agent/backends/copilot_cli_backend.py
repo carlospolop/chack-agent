@@ -31,6 +31,7 @@ from .claude_code_backend import _terminate_process_tree
 from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
+    configured_mcp_env_names,
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_OVERRIDE_B64_ENV,
     CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV,
@@ -927,6 +928,7 @@ class CopilotCliExecutor:
             "GEMINI_API_KEY",
         ]
         env_keys.extend(OTEL_CHILD_ENV_NAMES)
+        env_keys.extend(configured_mcp_env_names(self._tools_config_json))
 
         src_env = self._build_env()
         env_payload: dict[str, str] = {}

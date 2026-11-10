@@ -52,6 +52,7 @@ from .web_search_fallback import (
     web_search_enabled,
 )
 from .tool_payloads import (
+    configured_mcp_env_names,
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_INLINE_ENV_VALUE_MAX_CHARS,
     CHACK_TOOLS_APPEND_B64_PATH_ENV,
@@ -2218,6 +2219,7 @@ PYEOF
             "CHACK_CALLER_PYTHONPATH_JSON",
         ]
         env_keys.extend(OTEL_CHILD_ENV_NAMES)
+        env_keys.extend(configured_mcp_env_names(self._tools_config_json))
 
         src_env = self._build_env()
         env_payload: dict[str, str] = {}

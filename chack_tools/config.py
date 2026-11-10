@@ -4,6 +4,10 @@ from typing import Any, Optional
 
 @dataclass
 class ToolsConfig:
+    # Additional caller environment names required by custom MCP tools.
+    # Values stay in the tool process configuration, never in the model prompt.
+    mcp_env_vars: list[str] = field(default_factory=list)
+
     task_steps_manager_enabled: bool = True
 
     exec_enabled: bool = False

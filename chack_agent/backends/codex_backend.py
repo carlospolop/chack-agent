@@ -49,6 +49,7 @@ from .web_search_fallback import (
     web_search_enabled,
 )
 from .tool_payloads import (
+    configured_mcp_env_names,
     CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
     CHACK_TOOLS_APPEND_B64_ENV,
     CHACK_TOOLS_APPEND_B64_PATH_ENV,
@@ -3002,6 +3003,7 @@ class CodexExecutor:
             "LLM_GATEWAY_MODEL_MAP",
         ]
         env_vars.extend(OTEL_CHILD_ENV_NAMES)
+        env_vars.extend(configured_mcp_env_names(self._tools_config_json))
         # Retain the exact allowlist so the finalized per-run values can also
         # be written explicitly below. Some containerized Codex builds do not
         # reliably propagate dynamically-added parent variables via

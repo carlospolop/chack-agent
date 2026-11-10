@@ -251,3 +251,5 @@ The core runtime is in `chack_agent/`; tool registration and specialist agents a
 ```bash
 python -m pytest -q
 ```
+
+Custom tools that need application resource settings can declare their environment names in `tools.mcp_env_vars`. Codex, Claude Code, Gemini and Copilot pass the current values to their MCP subprocess; opencode already inherits the caller environment. Unset values stay unset. This does not add values to model prompts; keep credentials in the existing credential configuration.
