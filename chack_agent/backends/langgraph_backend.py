@@ -18,8 +18,9 @@ from agents import MaxTurnsExceeded
 from agents.exceptions import ModelBehaviorError
 from agents.tool_context import ToolContext
 from agents.usage import Usage
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from langgraph.graph.message import add_messages
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
@@ -78,7 +79,7 @@ class _RawResult:
 
 
 class _GraphState(TypedDict, total=False):
-    messages: Annotated[list[AnyMessage], add]
+    messages: Annotated[list[AnyMessage], add_messages]
     summary: str
     tool_events: Annotated[list[dict[str, Any]], add]
     usage_events: Annotated[list[dict[str, int]], add]
@@ -531,7 +532,7 @@ class LangGraphExecutor:
         )
         return summary
 
-    def _system_prompt(self, summary: str) -> str:
+    def _system_prompt(self, summary: str, *, remaining_tools: int | None = None) -> str:
         base = str(self._base_system_prompt or "").strip()
         policy_lines: list[str] = []
         if self._require_task_steps_manager_init_first:
@@ -541,6 +542,18 @@ class LangGraphExecutor:
         if self._max_non_task_tools > 0:
             policy_lines.append(
                 f"- Do not exceed {self._max_non_task_tools} non-task tool calls."
+            )
+        if remaining_tools is not None:
+            if remaining_tools == 0:
+                policy_lines.append("- The tool-call budget is exhausted. Answer from the evidence already gathered; do not call another tool.")
+            else:
+                policy_lines.append(
+                    f"- {remaining_tools} non-task tool calls remain. Combine related checks and do not repeat a successful lookup."
+                )
+        available_tools = (*self._function_tools_by_name, *self._mcp_tools_by_name)
+        if any("web" in name.lower() or "fetch" in name.lower() for name in available_tools):
+            policy_lines.append(
+                "- When the task asks you to check a current external source, use an available web tool before citing it."
             )
 
         policy_block = ""
@@ -596,29 +609,38 @@ class LangGraphExecutor:
                 threshold_tokens > 0 and latest_input_tokens >= threshold_tokens
             )
 
+            older: list[AnyMessage] = []
+            start = 0
             if should_summarize_by_messages or should_summarize_by_tokens:
-                keep = self._summary_keep_messages if self._summary_keep_messages > 0 else 0
-                older = messages[:-keep] if keep else list(messages)
+                # Keep the current request even when the configured tail size
+                # is zero. Never start the retained tail with a tool result:
+                # its matching assistant tool call must remain beside it.
+                keep = max(1, self._summary_keep_messages)
+                start = max(0, len(messages) - keep)
+                while start > 0 and isinstance(messages[start], ToolMessage):
+                    start -= 1
+                older = messages[:start]
                 maybe_new_summary = self._summarize_messages(
                     summary,
                     older,
                     trigger_input_tokens=latest_input_tokens,
                     threshold_tokens=threshold_tokens,
                     messages_before=len(messages),
-                    messages_after_keep=min(len(messages), keep),
+                    messages_after_keep=len(messages) - start,
                     triggered_by_messages=should_summarize_by_messages,
                     triggered_by_tokens=should_summarize_by_tokens,
                 )
 
+            tool_limit = int(current_max_tools_used() or self._max_non_task_tools or 0)
+            remaining = max(0, tool_limit - int(state.get("non_task_tool_calls", 0) or 0)) if tool_limit > 0 else None
             prompt_messages: list[AnyMessage] = [
-                SystemMessage(content=self._system_prompt(maybe_new_summary))
+                SystemMessage(content=self._system_prompt(maybe_new_summary, remaining_tools=remaining))
             ]
             # Until a summary exists, every message is still part of the live
             # conversation. Silently keeping only the tail here discards facts
             # before the configured compaction threshold is reached.
             if maybe_new_summary:
-                if self._summary_keep_messages > 0:
-                    prompt_messages.extend(messages[-self._summary_keep_messages:])
+                prompt_messages.extend(messages[start:] if older else messages)
             else:
                 prompt_messages.extend(messages)
 
@@ -642,7 +664,7 @@ class LangGraphExecutor:
             if finish_reason == "content_filter":
                 raise ProviderContentFilterError()
             payload: dict[str, Any] = {
-                "messages": [response],
+                "messages": [RemoveMessage(id=m.id) for m in older] + [response] if older else [response],
                 "usage_events": [usage_event],
             }
             if maybe_new_summary != summary:

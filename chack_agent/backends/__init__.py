@@ -12,6 +12,7 @@ from .gemini_cli_backend import build_executor as build_gemini_executor
 from .claude_code_backend import build_executor as build_claude_executor
 from .copilot_cli_backend import build_executor as build_copilot_executor
 from .opencode_cli_backend import build_executor as build_opencode_executor
+from .code_cli_backend import build_kimi_executor, build_qwen_executor
 from ..llm_gateway import get_gateway_route, openrouter_selected_by_api_key_type
 
 
@@ -66,6 +67,10 @@ def build_executor(config: ChackConfig, **kwargs: Any):
         return _call_executor_with_supported_kwargs(build_copilot_executor, config, **kwargs)
     if backend_type == "opencode":
         return _call_executor_with_supported_kwargs(build_opencode_executor, config, **kwargs)
+    if backend_type == "kimi":
+        return _call_executor_with_supported_kwargs(build_kimi_executor, config, **kwargs)
+    if backend_type == "qwen":
+        return _call_executor_with_supported_kwargs(build_qwen_executor, config, **kwargs)
     raise ValueError(f"Unsupported backend resolved from model.provider: {backend_type}")
 
 __all__ = ["build_executor"]

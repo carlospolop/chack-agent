@@ -1,6 +1,6 @@
 # Chack backends
 
-`build_executor()` in [`__init__.py`](__init__.py) resolves `agent.provider` and constructs one of nine runtime routes. The common loop in [`../agent.py`](../agent.py) owns run limits, required-tool retries, self-critique, usage aggregation, and final `RunResult` construction.
+`build_executor()` in [`__init__.py`](__init__.py) resolves `agent.provider` and constructs a runtime route. The common loop in [`../agent.py`](../agent.py) owns run limits, required-tool retries, self-critique, usage aggregation, and final `RunResult` construction.
 
 ## Runtime matrix
 
@@ -12,9 +12,13 @@
 | `codex` | `codex_backend.py` | Codex CLI thread resume; eligible no-tool GPT-5.6+ runs may use direct Responses transport and fall back to the CLI | Codex native tools plus non-duplicate Chack tools over MCP |
 | `claude` | `claude_code_backend.py` | Claude Code CLI session resume | Claude native tools plus non-duplicate Chack tools over MCP |
 | `gemini` | `gemini_cli_backend.py` | Gemini CLI session resume | Chack tools over MCP; the generated settings turn Gemini's native built-ins off |
+| `kimi` | `code_cli_backend.py` | Kimi Code CLI print-mode JSONL and session resume | Chack tools over MCP; native host tools off |
+| `qwen` | `code_cli_backend.py` | Qwen Code CLI print-mode JSONL and session resume | Chack tools over MCP; native host tools off |
 | `copilot` | `copilot_cli_backend.py` | GitHub Copilot CLI session resume | Copilot native tools plus Chack tools over MCP |
 | `opencode` | `opencode_cli_backend.py` | opencode CLI session resume; a per-session config defines one provider (OpenAI Responses, Anthropic Messages, OpenRouter, or a gateway) and one agent carrying the system prompt and `steps` | opencode file, search and edit tools (shell only with `exec_enabled`) plus Chack tools over MCP |
 | `langgraph` | `langgraph_backend.py` | LangGraph checkpoint thread using OpenRouter or gateway `ChatOpenAI` | Chack tools in a ReAct graph |
+
+LangGraph summarizes older turns when its configured message or token threshold is reached, then removes those turns from checkpoint state. It retains the current request and complete assistant tool-call/result pairs so the next model request has a valid history. Its prompt states the remaining tool budget and asks for source verification when a web tool is available and the task calls for current external evidence.
 
 Provider aliases and credentials are resolved before this router runs. A configured OpenRouter route can redirect an otherwise CLI-oriented model through an API transport.
 
@@ -30,7 +34,7 @@ The Codex direct transport is limited to eligible no-tool GPT-5.6+ runs. Public 
 
 Codex launches opt into Daybreak, OpenAI's trusted-access program for cyber work, only when the credential's model catalog offers a Daybreak program for the agent's model. [`codex_daybreak.py`](codex_daybreak.py) asks `codex app-server` (`model/list`, no inference) once per credential identity, model, and Codex version, caches the answer under a SHA-256 fingerprint, and then adds `--enable cli_daybreak -c daybreak=true` (or `access_programs` on the direct transport). A run refused because of Daybreak is retried without it and the credential is remembered as unavailable. `CHACK_CODEX_DAYBREAK=off` disables it, `on` skips the probe; Codex 0.162 or newer is required.
 
-`run(..., compact_before_resume=True)` compacts the live conversation before the new top-level instruction. The backend methods are OpenAI Responses compaction, Codex `thread/compact/start`, Claude `/compact`, Gemini `/compress`, Copilot `/compact`, and summary plus thread rotation for OpenRouter and LangGraph. Failure is recorded but does not cancel the continuation.
+`run(..., compact_before_resume=True)` compacts the live conversation before the new top-level instruction. The backend methods are OpenAI Responses compaction, Codex `thread/compact/start`, Claude `/compact`, Gemini `/compress`, Kimi `/compact`, Qwen `/compress`, Copilot `/compact`, and summary plus thread rotation for OpenRouter and LangGraph. Failure is recorded but does not cancel the continuation.
 
 ## Memory and schemas
 
