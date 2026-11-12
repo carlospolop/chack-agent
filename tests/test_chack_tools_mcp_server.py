@@ -266,6 +266,40 @@ def test_clients_receive_each_tool_result_once_as_text() -> None:
     assert [block.text for block in result.content] == ["notes about auth: " + "x" * 2000]
 
 
+def test_json_answers_reach_clients_with_an_object_root() -> None:
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    answers = {
+        "list": json.dumps([{"path": "a.md", "score": 2}, {"path": "b.md", "score": 1}]),
+        "scalar": "42",
+        "object": json.dumps({"hits": ["a.md"]}),
+        "text": "plain [not json",
+    }
+
+    @function_tool(name_override="lookup")
+    def lookup(kind: str) -> str:
+        """Look something up."""
+        return answers[kind]
+
+    server = FastMCP("object-root-test")
+    _register_tools(
+        server,
+        [lookup],
+        _ServerPolicyState(require_task_steps_manager_init_first=False, max_non_task_tools=0),
+    )
+
+    async def _exchange():
+        async with create_connected_server_and_client_session(server) as client:
+            return {kind: (await client.call_tool("lookup", {"kind": kind})).content[0].text for kind in answers}
+
+    texts = asyncio.run(_exchange())
+
+    assert json.loads(texts["list"]) == {"result": [{"path": "a.md", "score": 2}, {"path": "b.md", "score": 1}]}
+    assert json.loads(texts["scalar"]) == {"result": 42}
+    assert texts["object"] == answers["object"]
+    assert texts["text"] == answers["text"]
+
+
 def test_a_command_that_reads_stdin_leaves_later_tool_calls_answered() -> None:
     async def _exchange() -> list[str]:
         env = os.environ.copy()
