@@ -48,6 +48,12 @@ from .tool_payloads import (
     CHACK_TOOLS_APPEND_NAMES_JSON_ENV,
     augment_subprocess_pythonpath,
     serialize_tools_payload,
+    CHACK_ALLOWED_TOOLS_JSON_PATH_ENV,
+    CHACK_INLINE_ENV_VALUE_MAX_CHARS,
+    CHACK_TOOLS_APPEND_B64_PATH_ENV,
+    CHACK_TOOLS_CONFIG_JSON_PATH_ENV,
+    CHACK_TOOLS_OVERRIDE_B64_PATH_ENV,
+    write_payload_to_file,
 )
 
 
@@ -655,6 +661,25 @@ class GeminiCliExecutor:
             args.extend(["-r", self._gemini_session_id])
         return args
 
+    def _set_env_or_file(self, env: dict[str, str], key: str, value: str, *, path_key: str, prefix: str) -> None:
+        raw = str(value or "")
+        env.pop(key, None)
+        env.pop(path_key, None)
+        if not raw:
+            return
+        if len(raw) <= CHACK_INLINE_ENV_VALUE_MAX_CHARS:
+            env[key] = raw
+            return
+        # Large payloads (serialized tool closures) go to files: Linux caps a
+        # single environment string at 128 KiB, for the CLI and its MCP server.
+        # One file per payload and run keeps _build_env idempotent.
+        cache = self.__dict__.setdefault("_payload_files", {})
+        path = cache.get((key, raw))
+        if not path or not os.path.isfile(path):
+            path = write_payload_to_file(raw, prefix=prefix, directory=str(self._gemini_home or os.getcwd()))
+            cache[(key, raw)] = path
+        env[path_key] = path
+
     def _build_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if v is not None}
         augment_subprocess_pythonpath(env)
@@ -682,12 +707,17 @@ class GeminiCliExecutor:
                 f"{name}: {value}" for name, value in self._gemini_headers.items()
             )
 
-        env["CHACK_TOOLS_CONFIG_JSON"] = self._tools_config_json
-        env["CHACK_ALLOWED_TOOLS_JSON"] = self._allowed_tools_json
-        if self._serialized_tools_override_b64:
-            env[CHACK_TOOLS_OVERRIDE_B64_ENV] = self._serialized_tools_override_b64
-        if self._serialized_tools_append_b64:
-            env[CHACK_TOOLS_APPEND_B64_ENV] = self._serialized_tools_append_b64
+        for key, value, path_key, prefix in (
+            ("CHACK_TOOLS_CONFIG_JSON", self._tools_config_json,
+             CHACK_TOOLS_CONFIG_JSON_PATH_ENV, "chack_tools_config_"),
+            ("CHACK_ALLOWED_TOOLS_JSON", self._allowed_tools_json,
+             CHACK_ALLOWED_TOOLS_JSON_PATH_ENV, "chack_allowed_tools_"),
+            (CHACK_TOOLS_OVERRIDE_B64_ENV, self._serialized_tools_override_b64,
+             CHACK_TOOLS_OVERRIDE_B64_PATH_ENV, "chack_tools_override_"),
+            (CHACK_TOOLS_APPEND_B64_ENV, self._serialized_tools_append_b64,
+             CHACK_TOOLS_APPEND_B64_PATH_ENV, "chack_tools_append_"),
+        ):
+            self._set_env_or_file(env, key, value, path_key=path_key, prefix=prefix)
         if getattr(self, "_serialized_tools_override_names_json", ""):
             env[CHACK_TOOLS_OVERRIDE_NAMES_JSON_ENV] = self._serialized_tools_override_names_json
         if getattr(self, "_serialized_tools_append_names_json", ""):
@@ -845,6 +875,10 @@ class GeminiCliExecutor:
             "CHACK_ALLOWED_TOOLS_JSON",
             "CHACK_TOOLS_OVERRIDE_B64",
             "CHACK_TOOLS_APPEND_B64",
+            "CHACK_TOOLS_CONFIG_JSON_PATH",
+            "CHACK_ALLOWED_TOOLS_JSON_PATH",
+            "CHACK_TOOLS_OVERRIDE_B64_PATH",
+            "CHACK_TOOLS_APPEND_B64_PATH",
             "CHACK_TOOLS_OVERRIDE_NAMES_JSON",
             "CHACK_TOOLS_APPEND_NAMES_JSON",
             "CHACK_CHATGPT_ASYNC_API_URL",
