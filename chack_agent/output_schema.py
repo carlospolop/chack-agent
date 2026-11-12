@@ -1,9 +1,12 @@
 import json
+import logging
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from agents.agent_output import AgentOutputSchemaBase, ensure_strict_json_schema
 from agents.exceptions import ModelBehaviorError
+
+_LOGGER = logging.getLogger("chack.output_schema")
 
 
 def _strip_thinking_blocks(text: str) -> str:
@@ -313,3 +316,177 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
             raise ModelBehaviorError(f"Output did not match schema: {exc}") from exc
 
         return data
+
+
+# ---------------------------------------------------------------------------
+# Schema validation and the one-turn repair shared by the backends that only
+# state the schema in the prompt.
+
+SCHEMA_ERROR_MAX_CHARS = 400
+_SCHEMA_ERROR_MESSAGE_MAX_CHARS = 300
+_SCHEMA_ERROR_INSTANCE_MAX_CHARS = 80
+
+
+def extract_last_json_value(output: str) -> Any | None:
+    """The last complete JSON object or array embedded anywhere in ``output``."""
+    text = str(output or "")
+    decoder = json.JSONDecoder()
+    idx = 0
+    found: Any | None = None
+    while idx < len(text):
+        starts = [pos for pos in (text.find("{", idx), text.find("[", idx)) if pos >= 0]
+        if not starts:
+            break
+        start = min(starts)
+        try:
+            parsed, end = decoder.raw_decode(text[start:])
+            found = parsed
+            idx = start + max(end, 1)
+        except ValueError:
+            idx = start + 1
+    return found
+
+
+def _json_path(path: Any) -> str:
+    text = ""
+    for part in path or ():
+        if isinstance(part, int):
+            text += f"[{part}]"
+        else:
+            text += f".{part}" if text else str(part)
+    return text or "the top level"
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def short_schema_error(exc: BaseException) -> str:
+    """A short, bounded reason an answer failed the schema.
+
+    jsonschema's own message embeds the whole schema and instance; this keeps
+    only what failed and where.
+    """
+    cause: BaseException | None = exc
+    while cause is not None:
+        if isinstance(cause, json.JSONDecodeError):
+            return _clip(f"Invalid JSON output: {cause.msg} (line {cause.lineno} column {cause.colno})", SCHEMA_ERROR_MAX_CHARS)
+        message = getattr(cause, "message", None)
+        path = getattr(cause, "absolute_path", None)
+        if isinstance(message, str) and path is not None:
+            # Messages quote the failing value ("[...] is not of type 'string'");
+            # a short excerpt of it keeps the reason itself visible.
+            try:
+                instance_text = repr(getattr(cause, "instance"))
+            except Exception:
+                instance_text = ""
+            if len(instance_text) > _SCHEMA_ERROR_INSTANCE_MAX_CHARS and instance_text in message:
+                message = message.replace(instance_text, _clip(instance_text, _SCHEMA_ERROR_INSTANCE_MAX_CHARS))
+            return _clip(
+                f"{_clip(message, _SCHEMA_ERROR_MESSAGE_MAX_CHARS)} (at {_json_path(path)})",
+                SCHEMA_ERROR_MAX_CHARS,
+            )
+        cause = cause.__cause__
+    return _clip(str(exc), SCHEMA_ERROR_MAX_CHARS)
+
+
+def _load_schema(schema: Any) -> dict[str, Any] | None:
+    if isinstance(schema, str):
+        try:
+            schema = json.loads(schema)
+        except json.JSONDecodeError:
+            return None
+    return schema if isinstance(schema, dict) and schema else None
+
+
+def validate_schema_output(
+    output: str,
+    schema: Any,
+    *,
+    name: str = "output_schema",
+    strict: bool = True,
+) -> tuple[str, str]:
+    """Return ``(schema-shaped JSON text, "")`` or ``(output as given, short error)``.
+
+    The answer itself is tried first, then the last JSON value embedded in it.
+    """
+    loaded = _load_schema(schema)
+    if loaded is None:
+        return output, ""
+    validator = JsonSchemaOutput(loaded, name=name or "output_schema", strict=strict)
+    errors: list[BaseException] = []
+    embedded = extract_last_json_value(output or "")
+    candidates: list[str] = [output or ""]
+    if embedded is not None:
+        candidates.append(json.dumps(embedded, ensure_ascii=False))
+    for candidate in candidates:
+        try:
+            return json.dumps(validator.validate_json(candidate), ensure_ascii=False), ""
+        except Exception as exc:
+            errors.append(exc)
+    # A schema mismatch says more than a parse error of the surrounding prose.
+    for exc in reversed(errors):
+        if not isinstance(exc.__cause__, json.JSONDecodeError):
+            return output, short_schema_error(exc)
+    return output, short_schema_error(errors[0])
+
+
+def schema_repair_prompt(schema_error: str, schema: Any, *, name: str = "output_schema") -> str:
+    """The user turn asking for the answer again in the required shape."""
+    loaded = _load_schema(schema)
+    schema_text = (
+        json.dumps(loaded, ensure_ascii=False, separators=(",", ":"))
+        if loaded is not None
+        else str(schema or "")
+    )
+    schema_name = str(name or "").strip() or "output_schema"
+    return (
+        f"Your final answer does not match the required output schema `{schema_name}`: "
+        f"{_clip(schema_error, SCHEMA_ERROR_MAX_CHARS)}\n"
+        "Reply again with only the final answer as one JSON object that matches this schema, "
+        "with no text before or after it:\n"
+        f"{schema_text}"
+    )
+
+
+def is_backend_error_output(output: str) -> bool:
+    return str(output or "").strip().lower().startswith("error:")
+
+
+def repair_schema_output(
+    output: str,
+    *,
+    schema: Any,
+    name: str = "output_schema",
+    strict: bool = True,
+    resumable: bool,
+    run_turn: Callable[[str], tuple[str, list[Any], Any]],
+    label: str = "agent",
+) -> tuple[str, list[Any], list[Any]]:
+    """Validate a CLI answer and give the same session one turn to fix it.
+
+    Returns ``(answer, steps of the repair turn, raw responses of the repair
+    turn)``. The answer is the schema-shaped JSON when the first answer or the
+    repair validates, otherwise the latest output as given. Backend errors are
+    returned untouched, and no repair runs without a session to resume.
+    """
+    if _load_schema(schema) is None or is_backend_error_output(output):
+        return output, [], []
+    normalized, error = validate_schema_output(output, schema, name=name, strict=strict)
+    if not error:
+        return normalized, [], []
+    if not resumable:
+        _LOGGER.warning("%s answer did not match the output schema; no session to repair it in: %s", label, error)
+        return output, [], []
+    _LOGGER.warning("%s answer did not match the output schema; asking for a repair: %s", label, error)
+    repaired, steps, raw = run_turn(schema_repair_prompt(error, schema, name=name))
+    raw_responses = list(getattr(raw, "raw_responses", None) or [])
+    if is_backend_error_output(repaired):
+        _LOGGER.warning("%s schema repair turn failed: %s", label, _clip(repaired, SCHEMA_ERROR_MAX_CHARS))
+        return output, list(steps or []), raw_responses
+    normalized, error = validate_schema_output(repaired, schema, name=name, strict=strict)
+    if error:
+        _LOGGER.warning("%s answer still did not match the output schema after a repair turn: %s", label, error)
+        return repaired, list(steps or []), raw_responses
+    return normalized, list(steps or []), raw_responses

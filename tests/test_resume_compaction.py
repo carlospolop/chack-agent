@@ -84,6 +84,9 @@ def test_gemini_compacts_after_turn_crosses_configured_threshold():
     executor._memory_limit = 0
     executor._max_context_tokens = 20
     executor._compaction_threshold_ratio = 0.5
+    executor._output_schema_json = ""
+    executor._output_schema_name = "output_schema"
+    executor._output_schema_strict = True
     executor._gemini_session_id = "session-1"
     executor._compose_prompt = lambda text: text
     calls = []
@@ -262,6 +265,8 @@ def test_langgraph_threshold_compaction_rotates_checkpoint_after_turn():
     executor._thread_id = "thread-1"
     executor._max_turns = 10
     executor._output_schema_json = ""
+    executor._output_schema_name = "output_schema"
+    executor._output_schema_strict = True
     executor._conversation = []
     executor._memory_limit = 0
     executor._max_context_tokens = 100

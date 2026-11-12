@@ -585,6 +585,100 @@ def test_structured_output_is_extracted_and_validated(fake_opencode):
     assert json.loads(result["output"]) == {"capital": "Canberra"}
 
 
+_REPAIR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "result": {
+            "type": "object",
+            "properties": {"service_id": {"type": "string"}, "assessment": {"type": "string"}},
+            "required": ["service_id", "assessment"],
+            "additionalProperties": False,
+        }
+    },
+    "required": ["result"],
+    "additionalProperties": False,
+}
+_VALID = {"result": {"service_id": "svc-1", "assessment": "exploitable"}}
+_DRIFTED = {"findings": [{"observation": "open port", "remediation": "close it"}], "summary": "done"}
+
+
+def _tool_use(call_id, session="ses_1"):
+    return _event(
+        "tool_use",
+        {"tool": "exec", "callID": call_id, "state": {"status": "completed", "input": {"command": "id"}, "output": "uid=0"}},
+        session,
+    )
+
+
+def _schema_agent():
+    return AgentConfig(
+        main_action="test", sub_action="opencode", output_schema_json=_REPAIR_SCHEMA, output_schema_name="answer"
+    )
+
+
+def test_drifted_schema_answer_gets_one_repair_turn_in_the_same_session(fake_opencode):
+    fake_opencode.script(
+        [
+            {"events": [_tool_use("c1"), _text(json.dumps(_DRIFTED)), _finish(1000, 50)]},
+            {"events": [_tool_use("c2"), _text(json.dumps(_VALID)), _finish(1100, 20)]},
+        ]
+    )
+
+    result = _build(_gateway_config("gpt-6-sol", agent=_schema_agent())).invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == _VALID
+    first, second = fake_opencode.calls
+    assert second["argv"][second["argv"].index("--session") + 1] == "ses_1"
+    # The repair is a user turn; the agent prompt the session was started with is unchanged.
+    assert second["config_text"] == first["config_text"]
+    assert second["prompt"] != first["prompt"]
+    usage = [response["usage"] for response in result["raw_result"].raw_responses]
+    assert sum(item["input_tokens"] for item in usage) == 2100
+    assert sum(item["output_tokens"] for item in usage) == 70
+    assert [step[0].tool_input["tool_id"] for step in result["intermediate_steps"]] == ["c1", "c2"]
+
+
+def test_schema_answer_still_drifting_after_the_repair_is_returned_as_given(fake_opencode):
+    fake_opencode.script(
+        [
+            {"events": [_text(json.dumps(_DRIFTED)), _finish(1, 1)]},
+            {"events": [_text("Sorry, here is the summary in prose."), _finish(1, 1)]},
+        ]
+    )
+
+    result = _build(_gateway_config("gpt-6-sol", agent=_schema_agent())).invoke({"input": "Assess the service."})
+
+    assert result["output"] == "Sorry, here is the summary in prose."
+    assert len(fake_opencode.calls) == 2
+
+
+def test_valid_schema_answer_gets_no_repair_turn(fake_opencode):
+    fake_opencode.script([{"events": [_text("Here: " + json.dumps(_VALID)), _finish(1, 1)]}])
+
+    result = _build(_gateway_config("gpt-6-sol", agent=_schema_agent())).invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == _VALID
+    assert len(fake_opencode.calls) == 1
+
+
+def test_backend_error_gets_no_schema_repair(fake_opencode):
+    fake_opencode.script([{"lines": ["boom"], "exit": 2}])
+
+    result = _build(_gateway_config("gpt-6-sol", agent=_schema_agent())).invoke({"input": "Assess the service."})
+
+    assert result["output"].startswith("ERROR: opencode exec failed (exit=2)")
+    assert len(fake_opencode.calls) == 1
+
+
+def test_schema_answer_without_a_session_to_resume_is_not_repaired(fake_opencode):
+    fake_opencode.script([{"events": [_text(json.dumps(_DRIFTED), session=""), _finish(1, 1, session="")]}])
+
+    result = _build(_gateway_config("gpt-6-sol", agent=_schema_agent())).invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == _DRIFTED
+    assert len(fake_opencode.calls) == 1
+
+
 def test_large_tool_payloads_are_passed_as_files(fake_opencode):
     big = json.dumps({"blob": "y" * 50_000})
     fake_opencode.script(
