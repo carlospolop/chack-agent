@@ -30,7 +30,7 @@ _GEMINI = shutil.which(os.environ.get("GEMINI_CLI_PATH", "") or "gemini")
 pytestmark = pytest.mark.skipif(_GEMINI is None, reason="Gemini CLI not installed")
 
 
-def _capture_first_request(tmp_path, monkeypatch, **tools) -> dict:
+def _capture_first_request(tmp_path, monkeypatch, prompt="Run printf alpha", run_backend=False, **tools) -> dict:
     requests: list[dict] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -75,13 +75,18 @@ def _capture_first_request(tmp_path, monkeypatch, **tools) -> dict:
         )
         executor._ensure_gemini_home_and_config()
         executor._write_gemini_settings(executor._gemini_home, tools_cwd=str(workdir))
+        if run_backend:
+            executor._gemini_base_url = f"http://127.0.0.1:{server.server_address[1]}"
+            output = executor._run_gemini_cli(prompt, timeout_seconds=180)[0]
+            assert requests, f"Gemini CLI sent no model request: {output[-1500:]}"
+            return requests[0]
         env = executor._build_env()
         env["GOOGLE_GEMINI_BASE_URL"] = f"http://127.0.0.1:{server.server_address[1]}"
         done = subprocess.run(
-            executor._build_command("Run printf alpha"),
+            executor._build_command(),
             env=env,
             cwd=executor._gemini_workspace_dir(),
-            stdin=subprocess.DEVNULL,
+            input=prompt,
             capture_output=True,
             text=True,
             timeout=180,
@@ -179,3 +184,13 @@ def test_a_gateway_run_counts_the_tokens_of_unstreamed_answers(tmp_path, monkeyp
     assert raw.raw_responses[-1]["usage"]["output_tokens"] == 56
     assert paths and all(":generateContent" in path and "alt=sse" not in path for path in paths)
     assert all(path.startswith("/gw/") for path in paths)
+
+
+def test_a_prompt_larger_than_one_argv_string_reaches_the_model(tmp_path, monkeypatch):
+    # Linux rejects any single argv string above 128 KiB with E2BIG.
+    prompt = "Audit this context.\n" + "x" * 300_000 + "\nEND-OF-PROMPT-MARKER"
+    request = _capture_first_request(tmp_path, monkeypatch, prompt=prompt, run_backend=True)
+
+    sent = json.dumps(request.get("contents") or [])
+    assert "END-OF-PROMPT-MARKER" in sent
+    assert sent.count("x" * 1000) >= 300

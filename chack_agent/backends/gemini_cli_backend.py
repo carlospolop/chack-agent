@@ -8,6 +8,7 @@ import inspect
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, replace
 from typing import Any
@@ -85,6 +86,24 @@ def _safe_settings_value(value: Any) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _send_prompt(process: subprocess.Popen, prompt: str) -> None:
+    """Write the prompt to the CLI's stdin without blocking on the pipe buffer.
+
+    Gemini CLI gives piped input only 500 ms to start arriving, so the write
+    starts at launch; a thread keeps prompts larger than the pipe buffer from
+    blocking the caller before it begins draining stdout.
+    """
+
+    def write() -> None:
+        try:
+            process.stdin.write(prompt)
+            process.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+    threading.Thread(target=write, name="gemini-cli-prompt", daemon=True).start()
 
 
 @dataclass
@@ -395,7 +414,7 @@ class GeminiCliExecutor:
         self, prompt: str, *, timeout_seconds: int, relay: GeminiGatewayRelay | None = None
     ) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._ensure_gemini_home_and_config()
-        command = self._build_command(prompt)
+        command = self._build_command()
         env = self._build_env()
         if relay is not None:
             env["GOOGLE_GEMINI_BASE_URL"] = relay.base_url
@@ -443,6 +462,7 @@ class GeminiCliExecutor:
                 _RawResult(raw_responses=[]),
             )
 
+        _send_prompt(process, prompt)
         cancel_registration = register_process(process, _terminate_process_tree)
         reader = CliLineReader(process.stdout)
         output_parts: list[str] = []
@@ -625,8 +645,10 @@ class GeminiCliExecutor:
             time_to_first_token_source="gemini_first_response_event",
         )
 
-    def _build_command(self, prompt: str) -> list[str]:
-        args: list[str] = [self._gemini_cli_path, "-p", prompt, "-o", "stream-json"]
+    def _build_command(self) -> list[str]:
+        # The prompt goes over stdin (see _send_prompt); Linux caps one argv
+        # string at 128 KiB. An empty -p keeps the CLI headless.
+        args: list[str] = [self._gemini_cli_path, "-p", "", "-o", "stream-json"]
         if self._model_name:
             args.extend(["-m", self._model_name])
         if self._gemini_session_id:
