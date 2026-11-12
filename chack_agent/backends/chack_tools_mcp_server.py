@@ -592,6 +592,21 @@ def _advertise_tools_only(mcp: FastMCP) -> None:
         handlers.pop(request_type, None)
 
 
+def _object_root(text: str) -> str:
+    """Wrap a JSON answer whose root is not an object as {"result": ...}.
+
+    Gemini CLI parses a JSON tool answer into structuredContent, which MCP
+    requires to be an object, so a list or scalar answer fails the call.
+    """
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(value, dict):
+        return text
+    return json.dumps({"result": value}, ensure_ascii=False)
+
+
 def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -> None:
     for tool in tools:
         name = str(getattr(tool, "name", "") or "").strip()
@@ -686,7 +701,7 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                 # tool-budget slot, since the tool does not run.
                 reused = state.call_policy.reuse.lookup(_tool, payload)
                 if reused is not None:
-                    return state.call_policy.fit(inject_budget_warning_from_env(reused))
+                    return state.call_policy.fit(inject_budget_warning_from_env(_object_root(str(reused))))
                 tool_claim = ToolBudgetClaim(
                     allowed=True,
                     used=state.non_task_tool_calls,
@@ -743,7 +758,7 @@ def _register_tools(mcp: FastMCP, tools: list[Any], state: _ServerPolicyState) -
                     state.has_task_steps_manager_init = True
                     if state.session_id:
                         mark_task_manager_initialized(state.session_id)
-                result = str(result) + tool_budget_warning(tool_claim)
+                result = _object_root(str(result)) + tool_budget_warning(tool_claim)
                 result = inject_budget_warning_from_env(result)
                 return state.call_policy.fit(result)
             except Exception:
