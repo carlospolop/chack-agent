@@ -124,3 +124,40 @@ def test_failed_repair_turn_keeps_the_first_answer_and_counts_its_usage():
     assert len(turns) == 1
     assert steps == [("step", None)]
     assert raw == [{"usage": {"input_tokens": 7}}]
+
+
+_GROUP_RESULTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "group_results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"group_id": {"type": "string"}, "reasoning": {"type": "string"}},
+                "required": ["group_id", "reasoning"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["group_results"],
+    "additionalProperties": False,
+}
+
+
+def test_bare_item_or_list_is_wrapped_in_the_only_root_array():
+    item = {"group_id": "g1", "reasoning": "same sink"}
+    for answer in (item, [item]):
+        normalized, error = MODULE.validate_schema_output(json.dumps(answer), _GROUP_RESULTS_SCHEMA)
+
+        assert error == ""
+        assert json.loads(normalized) == {"group_results": [item]}
+
+
+def test_bare_answer_is_not_wrapped_when_the_root_has_other_fields():
+    schema = json.loads(json.dumps(_GROUP_RESULTS_SCHEMA))
+    schema["properties"]["summary"] = {"type": "string"}
+    schema["required"].append("summary")
+
+    _, error = MODULE.validate_schema_output(json.dumps({"group_id": "g1", "reasoning": "x"}), schema)
+
+    assert "required property" in error

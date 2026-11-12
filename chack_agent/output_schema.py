@@ -205,6 +205,25 @@ def _coerce_types(data: Any, schema: dict[str, Any]) -> Any:
     return result
 
 
+def _wrap_single_array_root(data: Any, schema: dict[str, Any]) -> Any:
+    """Wrap a bare item or list in the root's only property when that is an array.
+
+    Some models answer ``{"items": [x]}`` schemas with ``x`` or ``[x]``; there
+    is only one place either can belong.
+    """
+    properties = schema.get("properties")
+    if schema.get("type") != "object" or not isinstance(properties, dict) or len(properties) != 1:
+        return data
+    (key, prop_schema), = properties.items()
+    if not isinstance(prop_schema, dict) or prop_schema.get("type") != "array":
+        return data
+    if isinstance(data, list):
+        return {key: data}
+    if isinstance(data, dict) and data and key not in data:
+        return {key: [data]}
+    return data
+
+
 def _normalize_root_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
     if "type" in schema:
         return schema
@@ -264,6 +283,7 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
             except json.JSONDecodeError as exc:
                 raise ModelBehaviorError(f"Invalid JSON output: {exc}") from exc
 
+        data = _wrap_single_array_root(data, self._schema)
         try:
             import jsonschema  # type: ignore
 
