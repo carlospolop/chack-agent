@@ -260,7 +260,7 @@ def test_langgraph_compaction_summarizes_and_rotates_checkpoint_thread():
     assert calls[0][1]["focus_instructions"] == "preserve checks"
 
 
-def test_langgraph_threshold_compaction_rotates_checkpoint_after_turn():
+def test_langgraph_threshold_compaction_runs_before_the_next_turn_not_after_the_last():
     executor = LangGraphExecutor.__new__(LangGraphExecutor)
     executor._thread_id = "thread-1"
     executor._max_turns = 10
@@ -273,8 +273,10 @@ def test_langgraph_threshold_compaction_rotates_checkpoint_after_turn():
     executor._compaction_threshold_ratio = 0.75
     executor._pending_resume_summary = ""
     executor._extract_output = lambda messages: "Answer"
-    executor._summarize_messages = lambda *args, **kwargs: "summary"
+    summaries = []
+    executor._summarize_messages = lambda *args, **kwargs: summaries.append(args) or "summary"
     state = {"invoked": False}
+    runs = []
 
     def get_state(_config):
         if not state["invoked"]:
@@ -286,15 +288,24 @@ def test_langgraph_threshold_compaction_rotates_checkpoint_after_turn():
             "usage_events": [{"input_tokens": 75, "output_tokens": 3}],
         })
 
-    def invoke(_input, config):
+    def invoke(graph_input, config):
         state["invoked"] = True
+        runs.append((graph_input, config["configurable"]["thread_id"]))
         return get_state(config).values
 
     executor._graph = SimpleNamespace(get_state=get_state, invoke=invoke)
 
     result = executor.invoke({"input": "Question"})
 
+    # A run that ends near the limit is not summarized unless work continues.
     assert result["output"] == "Answer"
-    assert executor._thread_id != "thread-1"
-    assert executor._pending_resume_summary == "summary"
-    assert executor._conversation == []
+    assert executor._thread_id == "thread-1"
+    assert summaries == []
+
+    executor.invoke({"input": "Follow-up"})
+
+    assert len(summaries) == 1
+    follow_up, thread = runs[-1]
+    assert thread != "thread-1"
+    assert follow_up["summary"] == "summary"
+    assert follow_up["messages"][0].content == "Follow-up"
