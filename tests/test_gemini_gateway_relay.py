@@ -253,3 +253,196 @@ def test_a_cli_that_goes_away_mid_answer_is_dropped_quietly(capsys, caplog):
     assert "Traceback" not in seen_errors
     assert "Exception occurred during processing" not in seen_errors
     assert "went away" in caplog.text
+
+
+def _slow_gateway(delay, status=200, payload=None):
+    """A gateway whose ``:generateContent`` answers after ``delay`` seconds."""
+
+    class Slow(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            time.sleep(delay)
+            answer = payload if payload is not None else json.dumps(ANSWER).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _stream_with_timing(relay_url):
+    """POSTs a streaming call; returns status, content type, seconds to headers, and body chunks."""
+
+    import http.client
+
+    port = int(relay_url.rsplit(":", 1)[1])
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    started = time.monotonic()
+    connection.request(
+        "POST",
+        "/v1beta/models/bakkt/glm-5.2:streamGenerateContent?alt=sse",
+        body=b'{"contents": []}',
+        headers={"Content-Type": "application/json"},
+    )
+    response = connection.getresponse()
+    headers_after = time.monotonic() - started
+    chunks = []
+    while True:
+        chunk = response.read1(65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    connection.close()
+    return response.status, response.getheader("Content-Type"), headers_after, chunks
+
+
+def test_a_slow_answer_keeps_the_cli_connection_alive_until_it_arrives():
+    """The Gemini CLI drops a call whose headers take over a minute; a slow
+    model answer gets its headers early and blank lines until the event."""
+
+    server = _slow_gateway(1.5)
+    try:
+        relay = GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            keepalive_after_seconds=0.2,
+            keepalive_every_seconds=0.2,
+        )
+        with relay:
+            status, content_type, headers_after, chunks = _stream_with_timing(relay.base_url)
+            usage = relay.take_usage()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    assert content_type == "text/event-stream"
+    assert headers_after < 1.0
+    body = b"".join(chunks)
+    # Keepalives come before the event, each in its own chunk, and are only whitespace.
+    assert len(chunks) >= 3
+    keepalive, _, event = body.partition(b"data: ")
+    assert keepalive and not keepalive.strip()
+    assert event.endswith(b"\r\n\r\n")
+    assert json.loads(event) == ANSWER
+    assert usage == [{"input_tokens": 120, "output_tokens": 30, "cached_tokens": 0}]
+
+
+@pytest.mark.parametrize(
+    "gateway_status, gateway_body, expected_code",
+    [
+        (429, b'{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "slow down"}}', 429),
+        (503, b"upstream overloaded", 503),
+        (500, b'{"error": {"message": "no code here"}}', 500),
+    ],
+)
+def test_a_slow_gateway_error_reaches_the_cli_as_an_error_with_its_status(
+    gateway_status, gateway_body, expected_code
+):
+    server = _slow_gateway(0.6, gateway_status, gateway_body)
+    try:
+        relay = GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            keepalive_after_seconds=0.1,
+            keepalive_every_seconds=0.1,
+        )
+        with relay:
+            status, _, _, chunks = _stream_with_timing(relay.base_url)
+            usage = relay.take_usage()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # The headers already said 200; the CLI parses the last chunk as an API error.
+    assert status == 200
+    error = json.loads(chunks[-1])["error"]
+    assert error["code"] == expected_code
+    assert usage == []
+
+
+def test_a_fast_answer_keeps_its_own_status():
+    server = _slow_gateway(0, 429, b'{"error": {"code": 429, "message": "slow down"}}')
+    try:
+        with GeminiGatewayRelay(f"http://127.0.0.1:{server.server_address[1]}") as relay:
+            status, _, body = _post(f"{relay.base_url}/v1beta/models/m:streamGenerateContent?alt=sse")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 429
+    assert json.loads(body)["error"]["message"] == "slow down"
+
+
+def test_a_connection_the_gateway_drops_is_tried_again(monkeypatch):
+    import socket
+
+    import chack_agent.backends.gemini_gateway_relay as relay_module
+
+    monkeypatch.setattr(relay_module, "_RECONNECT_DELAY_SECONDS", 0.01)
+    calls = []
+
+    class Flaky(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            calls.append(self.path)
+            if len(calls) == 1:
+                # Hang up without answering, as a gateway that closes the connection.
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.close_connection = True
+                return
+            payload = json.dumps(ANSWER).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Flaky)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with GeminiGatewayRelay(f"http://127.0.0.1:{server.server_address[1]}") as relay:
+            status, _, body = _post(f"{relay.base_url}/v1beta/models/m:streamGenerateContent?alt=sse")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    assert json.loads(body[len(b"data: "):]) == ANSWER
+    assert len(calls) == 2
+
+
+def test_an_unreachable_gateway_is_tried_a_bounded_number_of_times(monkeypatch):
+    import socket
+
+    import chack_agent.backends.gemini_gateway_relay as relay_module
+
+    monkeypatch.setattr(relay_module, "_RECONNECT_DELAY_SECONDS", 0.01)
+    attempts = []
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    closed_port = probe.getsockname()[1]
+    probe.close()
+
+    with GeminiGatewayRelay(f"http://127.0.0.1:{closed_port}") as relay:
+        opener_open = relay._opener.open
+
+        def counting_open(request, timeout=None):
+            attempts.append(request.full_url)
+            return opener_open(request, timeout=timeout)
+
+        monkeypatch.setattr(relay._opener, "open", counting_open)
+        status, _, body = _post(f"{relay.base_url}/v1beta/models/m:streamGenerateContent?alt=sse")
+
+    assert status == 502
+    assert json.loads(body)["error"]["code"] == 502
+    assert len(attempts) == relay_module._CONNECTION_ATTEMPTS
