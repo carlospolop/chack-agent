@@ -492,3 +492,65 @@ def test_plan_updates_do_not_use_the_tool_budget():
 
     results = [m.content for m in model.prompts[-1] if isinstance(m, ToolMessage)]
     assert results[1].startswith("ok") and not any(r.startswith("ERROR") for r in results)
+
+
+def test_independent_tool_calls_in_one_turn_run_in_parallel_and_keep_order(monkeypatch):
+    # Two slow tools issued in one turn should overlap (total wall time near one
+    # tool's duration, not the sum), and their results must come back in the
+    # order the model issued them.
+    import time as _time
+
+    def _make(name, delay, payload):
+        async def _run(_ctx, _raw):
+            _time.sleep(delay)
+            return payload
+        return SimpleNamespace(name=name, on_invoke_tool=_run)
+
+    tools = {"slow_a": _make("slow_a", 0.4, "RESULT_A"), "slow_b": _make("slow_b", 0.4, "RESULT_B")}
+    both = AIMessage(content="", tool_calls=[
+        {"name": "slow_a", "args": {}, "id": "call_a"},
+        {"name": "slow_b", "args": {}, "id": "call_b"},
+    ])
+    model = _ScriptedModel([both, AIMessage(content="done")])
+
+    monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", "4")
+    start = _time.perf_counter()
+    result = _executor(model, function_tools=tools).invoke({"input": "go"})
+    elapsed = _time.perf_counter() - start
+
+    steps = result["intermediate_steps"]
+    # Results preserved and in issue order.
+    assert [s[0].tool for s in steps] == ["slow_a", "slow_b"]
+    # The tool messages are delivered back to the model on the next turn, in
+    # the order the calls were issued.
+    tool_msgs = [m for m in model.prompts[-1] if isinstance(m, ToolMessage)]
+    assert [m.name for m in tool_msgs] == ["slow_a", "slow_b"]
+    assert [m.content for m in tool_msgs] == ["RESULT_A", "RESULT_B"]
+    # Overlapped: well under the 0.8s a serial run would take.
+    assert elapsed < 0.7
+
+
+def test_serial_default_runs_tool_calls_one_at_a_time(monkeypatch):
+    import time as _time
+
+    def _make(name):
+        async def _run(_ctx, _raw):
+            _time.sleep(0.3)
+            return name
+        return SimpleNamespace(name=name, on_invoke_tool=_run)
+
+    tools = {"a": _make("a"), "b": _make("b")}
+    both = AIMessage(content="", tool_calls=[
+        {"name": "a", "args": {}, "id": "ca"},
+        {"name": "b", "args": {}, "id": "cb"},
+    ])
+    model = _ScriptedModel([both, AIMessage(content="done")])
+
+    monkeypatch.delenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", raising=False)
+    start = _time.perf_counter()
+    result = _executor(model, function_tools=tools).invoke({"input": "go"})
+    elapsed = _time.perf_counter() - start
+
+    assert [s[0].tool for s in result["intermediate_steps"]] == ["a", "b"]
+    # Serial: both sleeps run end to end.
+    assert elapsed >= 0.6

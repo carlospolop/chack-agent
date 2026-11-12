@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 from operator import add
@@ -245,6 +246,17 @@ _SUMMARY_CHUNK_CHARS = 120_000
 # Provider content filters stop the same request only some of the time:
 # asking again keeps the run's work, where a refusal restarts it from zero.
 _CONTENT_FILTER_RETRIES = 2
+# Independent tool calls a model issues in one turn block one another when run
+# one at a time; running them together overlaps the slow part (a shell command,
+# an HTTP fetch). Default 1 keeps the original strictly serial behavior.
+_PARALLEL_TOOLS_DEFAULT = 1
+_PARALLEL_TOOLS_MAX = 16
+
+
+def _parallel_tool_workers() -> int:
+    raw = os.environ.get("CHACK_LANGGRAPH_PARALLEL_TOOLS", "").strip()
+    workers = _to_int(raw, _PARALLEL_TOOLS_DEFAULT) if raw else _PARALLEL_TOOLS_DEFAULT
+    return max(1, min(_PARALLEL_TOOLS_MAX, workers))
 
 
 def _clip_middle(text: str, limit: int) -> str:
@@ -1028,6 +1040,28 @@ class LangGraphExecutor:
                 )
                 events.append({"tool": call_name, "tool_input": received, "status": "error", "reason": "invalid_arguments"})
 
+            def _execute_tool(tool: Any, mcp_name: str, call_args: dict[str, Any]) -> tuple[str, str]:
+                # The slow part of a tool call (a shell command, an HTTP fetch).
+                # No shared mutable state, so several run safely at once.
+                try:
+                    if tool is not None:
+                        result = self._invoke_function_tool(tool, call_args)
+                    else:
+                        result = playwright_mcp_result_to_text(playwright_mcp_call_tool(mcp_name, call_args))
+                    return inject_budget_warning(result), "ok"
+                except Exception as exc:  # pragma: no cover
+                    return f"ERROR: {type(exc).__name__}: {exc}", "error"
+
+            workers = _parallel_tool_workers()
+            # The init-first gate reads the init call's result within the same
+            # turn, so that mode stays strictly serial (invoked in order below).
+            run_in_order = workers <= 1 or (self._require_task_steps_manager_init_first and not has_init)
+
+            # Each processed call becomes an ordered slot, so the model sees its
+            # outputs in the order it issued them even when invocations overlap.
+            # A slot is ("ready", ToolMessage, event_or_None) or ("job", dict).
+            slots: list[tuple[str, Any, Any]] = []
+
             for tool_call in tool_calls:
                 call_name = str(tool_call.get("name", "") or "").strip()
                 call_id = str(tool_call.get("id", "") or "")
@@ -1040,31 +1074,30 @@ class LangGraphExecutor:
                     plan = _parse_plan(args)
                     plan_seen_at = model_calls
                     _LOGGER.info("LangGraph plan updated: items=%s open=%s", len(plan), len(_open_plan_items(plan)))
-                    outputs.append(ToolMessage(
+                    slots.append(("ready", ToolMessage(
                         content=f"Plan updated:\n{_render_plan(plan)}" if plan else "Plan cleared.",
                         tool_call_id=call_id,
                         name=call_name,
-                    ))
+                    ), None))
                     continue
 
                 if self._require_task_steps_manager_init_first and not has_init:
                     is_init = call_name == "task_steps_manager" and str(args.get("action", "")).strip().lower() == "init"
                     if not is_init:
-                        outputs.append(
+                        slots.append((
+                            "ready",
                             ToolMessage(
                                 content="ERROR: You must call task_steps_manager with action=init before any other tool.",
                                 tool_call_id=call_id,
                                 name=call_name,
-                            )
-                        )
-                        events.append(
+                            ),
                             {
                                 "tool": call_name,
                                 "tool_input": args,
                                 "status": "blocked",
                                 "reason": "task_steps_manager_init_required",
-                            }
-                        )
+                            },
+                        ))
                         continue
 
                 is_non_task = not is_budget_exempt_tool_name(call_name)
@@ -1081,7 +1114,8 @@ class LangGraphExecutor:
                             "tool": call_name,
                         },
                     )
-                    outputs.append(
+                    slots.append((
+                        "ready",
                         ToolMessage(
                             content=(
                                 f"ERROR: Tool budget reached ({configured_max_non_task_tools}). "
@@ -1089,22 +1123,21 @@ class LangGraphExecutor:
                             ),
                             tool_call_id=call_id,
                             name=call_name,
-                        )
-                    )
-                    events.append(
+                        ),
                         {
                             "tool": call_name,
                             "tool_input": args,
                             "status": "blocked",
                             "reason": "max_non_task_tools_reached",
-                        }
-                    )
+                        },
+                    ))
                     continue
 
                 tool = tool_map.get(call_name)
                 mcp_tool = self._mcp_tools_by_name.get(call_name)
                 if tool is None and mcp_tool is None:
-                    outputs.append(
+                    slots.append((
+                        "ready",
                         ToolMessage(
                             content=(
                                 f"ERROR: Unknown tool '{call_name}'. Available tools: "
@@ -1112,52 +1145,77 @@ class LangGraphExecutor:
                             ),
                             tool_call_id=call_id,
                             name=call_name,
-                        )
-                    )
-                    events.append(
+                        ),
                         {
                             "tool": call_name,
                             "tool_input": args,
                             "status": "error",
                             "reason": "unknown_tool",
-                        }
-                    )
+                        },
+                    ))
                     continue
 
-                try:
-                    if tool is not None:
-                        result = self._invoke_function_tool(tool, args)
-                    else:
-                        result = playwright_mcp_result_to_text(playwright_mcp_call_tool(call_name, args))
-                    result = inject_budget_warning(result)
-                    status = "ok"
-                except Exception as exc:  # pragma: no cover
-                    result = f"ERROR: {type(exc).__name__}: {exc}"
-                    status = "error"
-
-                if call_name == "task_steps_manager" and str(args.get("action", "")).strip().lower() == "init" and str(result).startswith("SUCCESS:"):
-                    has_init = True
+                # This call will run. Do the in-order bookkeeping that does not
+                # need its result now (budget count, repeat detection); the
+                # result-dependent notes are applied in issue order afterwards.
                 if is_non_task:
                     non_task_count += 1
-                    if configured_max_non_task_tools > 0:
-                        result = f"{result}{_tool_budget_note(configured_max_non_task_tools - non_task_count, configured_max_non_task_tools)}"
+                    budget_note = (
+                        _tool_budget_note(configured_max_non_task_tools - non_task_count, configured_max_non_task_tools)
+                        if configured_max_non_task_tools > 0 else ""
+                    )
+                else:
+                    budget_note = ""
                 # Models stuck in a loop repeat the same call; Gemini CLI
                 # detects this. Point it out so the agent changes approach.
                 key = _call_key(call_name, args)
                 repeats = recent_calls.count(key) + 1
                 recent_calls = [*recent_calls, key][-_REPEAT_WINDOW:]
-                if repeats >= 3:
-                    result = (
-                        f"{result}\n\n[Repeated call: this exact call was made {repeats} times in this run. "
-                        "Reuse its earlier result or change approach instead of repeating it.]"
-                    )
+                repeat_note = (
+                    f"\n\n[Repeated call: this exact call was made {repeats} times in this run. "
+                    "Reuse its earlier result or change approach instead of repeating it.]"
+                    if repeats >= 3 else ""
+                )
+                job = {
+                    "call_name": call_name,
+                    "call_id": call_id,
+                    "args": args,
+                    "tool": tool,
+                    "is_non_task": is_non_task,
+                    "budget_note": budget_note,
+                    "repeat_note": repeat_note,
+                }
+                if run_in_order:
+                    job["result"], job["status"] = _execute_tool(tool, call_name, args)
+                    if call_name == "task_steps_manager" and str(args.get("action", "")).strip().lower() == "init" and str(job["result"]).startswith("SUCCESS:"):
+                        has_init = True
+                slots.append(("job", job, None))
 
-                outputs.append(ToolMessage(content=result, tool_call_id=call_id, name=call_name))
+            pending = [job for kind, job, _ in slots if kind == "job" and "result" not in job]
+            if pending:
+                with ThreadPoolExecutor(max_workers=min(workers, len(pending))) as pool:
+                    for job, (result, status) in zip(
+                        pending, pool.map(lambda j: _execute_tool(j["tool"], j["call_name"], j["args"]), pending)
+                    ):
+                        job["result"], job["status"] = result, status
+
+            for kind, payload, event in slots:
+                if kind == "ready":
+                    outputs.append(payload)
+                    if event is not None:
+                        events.append(event)
+                    continue
+                job = payload
+                result = job["result"]
+                if job["call_name"] == "task_steps_manager" and str(job["args"].get("action", "")).strip().lower() == "init" and str(result).startswith("SUCCESS:"):
+                    has_init = True
+                result = f"{result}{job['budget_note']}{job['repeat_note']}"
+                outputs.append(ToolMessage(content=result, tool_call_id=job["call_id"], name=job["call_name"]))
                 events.append(
                     {
-                        "tool": call_name,
-                        "tool_input": args,
-                        "status": status,
+                        "tool": job["call_name"],
+                        "tool_input": job["args"],
+                        "status": job["status"],
                     }
                 )
 
