@@ -99,6 +99,7 @@ from .budget_warning_state import (
     update_spent_usd,
 )
 from .llm_gateway import gateway_model_pricing
+from .output_schema import answer_repair_prompt, answer_repair_turns, final_answer_rejection
 from .pricing import (
     estimate_cost,
     estimate_costs_by_model,
@@ -1750,6 +1751,7 @@ class Chack:
         compact_before_resume: bool = False,
         resume_compaction_instructions: Optional[str] = None,
         reuse_session_executor: bool = False,
+        output_validator: Optional[Callable[[str], str]] = None,
     ) -> RunResult:
         return await asyncio.to_thread(
             self.run,
@@ -1774,6 +1776,7 @@ class Chack:
             compact_before_resume=compact_before_resume,
             resume_compaction_instructions=resume_compaction_instructions,
             reuse_session_executor=reuse_session_executor,
+            output_validator=output_validator,
         )
 
     @_traced_run
@@ -1803,6 +1806,7 @@ class Chack:
         compact_before_resume: bool = False,
         resume_compaction_instructions: Optional[str] = None,
         reuse_session_executor: bool = False,
+        output_validator: Optional[Callable[[str], str]] = None,
     ) -> RunResult:
         """Run one turn in a logical session.
 
@@ -1810,6 +1814,11 @@ class Chack:
         attached to the same executor across continuation turns. The first
         executor configuration for a session/cache key remains authoritative
         until that session is reset.
+
+        ``output_validator`` receives the final answer and returns why it is
+        unusable ("" when accepted, or raises). A final answer that fails it or
+        the output schema is sent back to the same session with that error for
+        a repair, instead of being returned for the caller to rerun the task.
         """
         # Callers may set an alias such as OPENAI_BEST_QUALITY on the config
         # after construction (provider profiles, failover); resolve it now so
@@ -3018,6 +3027,72 @@ class Chack:
                         tools_used,
                         _log_timestamp(),
                     )
+
+            answer_schema = (
+                output_schema_json_override
+                if output_schema_json_override is not None
+                else self.config.agent.output_schema_json
+            )
+
+            def _answer_rejection(answer: str) -> str:
+                return final_answer_rejection(
+                    answer,
+                    schema=answer_schema,
+                    name=str(self.config.agent.output_schema_name or "output_schema"),
+                    strict=bool(self.config.agent.output_schema_strict),
+                    validator=output_validator,
+                )
+
+            if (
+                (answer_schema or output_validator is not None)
+                and not result.get("error")
+                and not result.get("completion_preserved_after_limit")
+                and not result.get("limit_reached")
+            ):
+                repair_turns = answer_repair_turns(run_model.model)
+                for repair_round in range(1, repair_turns + 1):
+                    rejection = _answer_rejection(output)
+                    if not rejection or _should_stop():
+                        break
+                    run_label = f"Answer repair {repair_round}/{repair_turns}"
+                    self.logger.warning(
+                        "%s: final answer rejected; asking the session to fix it: %s",
+                        run_label,
+                        rejection[:400],
+                    )
+                    suppress_followup_prompt = getattr(
+                        executor,
+                        "suppress_system_prompt_for_next_invocation",
+                        None,
+                    )
+                    if callable(suppress_followup_prompt):
+                        suppress_followup_prompt()
+                    (
+                        repair_result,
+                        repair_steps,
+                        repair_prompt_tokens,
+                        repair_completion_tokens,
+                        repair_cached_prompt_tokens,
+                        repair_cache_write_prompt_tokens,
+                    ) = _invoke_with_min_tools(
+                        answer_repair_prompt(rejection, structured=bool(answer_schema)),
+                        run_label,
+                        min_tools_target=0,
+                        require_task_steps_manager_init=False,
+                        required_tools_target=[],
+                    )
+                    prompt_tokens += repair_prompt_tokens
+                    completion_tokens += repair_completion_tokens
+                    cached_prompt_tokens += repair_cached_prompt_tokens
+                    cache_write_prompt_tokens += repair_cache_write_prompt_tokens
+                    run2_all_steps.extend(repair_steps)
+                    repaired_output = repair_result.get("output", "")
+                    rounds_used += len(repair_steps) + (1 if repaired_output else 0)
+                    if not repaired_output or repair_result.get("error"):
+                        break
+                    output = repaired_output
+                    run2_output = repaired_output
+                    result = repair_result
 
             nested_counts_total = TOOL_USAGE_STORE.snapshot(task_session_id)
             nested_counts_run2 = Counter(nested_counts_total)

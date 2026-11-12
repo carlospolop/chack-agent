@@ -510,3 +510,57 @@ def repair_schema_output(
         _LOGGER.warning("%s answer still did not match the output schema after a repair turn: %s", label, error)
         return repaired, list(steps or []), raw_responses
     return normalized, list(steps or []), raw_responses
+
+
+def answer_repair_turns(model: str) -> int:
+    """Repair turns a rejected final answer gets in its session.
+
+    GPT and Claude models fix a named error in one turn; other models often fix
+    one error and introduce another, and a second turn still costs far less
+    than rerunning the whole task.
+    """
+    bare = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    if "claude" in bare or bare.startswith(("gpt", "codex")) or re.match(r"o\d", bare):
+        return 1
+    return 2
+
+
+def final_answer_rejection(
+    output: str,
+    *,
+    schema: Any = None,
+    name: str = "output_schema",
+    strict: bool = True,
+    validator: Callable[[str], str] | None = None,
+) -> str:
+    """Why a final answer is unusable, or "" when it is accepted.
+
+    The answer must match the output schema and pass the caller's validator,
+    which returns an error message (or raises) for rules a schema cannot state.
+    Backend errors and empty answers are not answers to repair.
+    """
+    if not str(output or "").strip() or is_backend_error_output(output):
+        return ""
+    if _load_schema(schema) is not None:
+        output, error = validate_schema_output(output, schema, name=name, strict=strict)
+        if error:
+            return error
+    if validator is None:
+        return ""
+    try:
+        return str(validator(output) or "").strip()
+    except Exception as exc:  # the validator reports the rejection by raising
+        return str(exc).strip() or type(exc).__name__
+
+
+def answer_repair_prompt(rejection: str, *, structured: bool) -> str:
+    """The user turn asking to fix a rejected final answer."""
+    shape = (
+        "as one JSON document matching the required output schema, with no text before or after it"
+        if structured
+        else "in the same format"
+    )
+    return (
+        f"Your final answer was rejected: {_clip(rejection, SCHEMA_ERROR_MAX_CHARS)}\n"
+        f"Fix that and reply again with only the complete corrected final answer {shape}."
+    )
