@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from operator import add
+import re
 import threading
 import time
 import uuid
@@ -84,10 +85,13 @@ class _GraphState(TypedDict, total=False):
     usage_events: Annotated[list[dict[str, int]], add]
     has_task_steps_manager_init: bool
     non_task_tool_calls: int
-    # Per invoke: model calls made, recovery nudges sent, recent call keys.
+    # Per invoke: model calls made, recovery nudges sent, recent call keys,
+    # the agent's plan and the model call that last updated or recalled it.
     model_calls: int
     nudges: int
     recent_calls: list[str]
+    plan: list[dict[str, str]]
+    plan_seen_at: int
 
 
 # Interleaved-thinking models (Kimi, MiniMax, GLM, DeepSeek; OpenRouter's
@@ -157,8 +161,8 @@ _EMPTY_REPLY_NUDGE = (
     "Your last reply was empty. Continue the task: call a tool, or give your final answer if the work is done."
 )
 _LENGTH_NUDGE = (
-    "Your last reply hit the output token limit. Continue from where it stopped, without repeating "
-    "yourself, and break large outputs into smaller pieces."
+    "Your last reply hit the output token limit. Continue exactly where it stopped, without repeating "
+    "anything: your continuation is joined to it. Break remaining large outputs into smaller pieces."
 )
 _UNFINISHED_NUDGE = (
     "Your last reply had no tool call, so it would end the run, but it is not the required final answer. "
@@ -169,6 +173,67 @@ _FINAL_TURN_PROMPT = (
     "This is the last turn of this run: tools are no longer available. Give your final answer now from the "
     "evidence gathered so far, in the required format, and state what remains unverified."
 )
+# A plan tool like the CLIs' todo lists (Claude Code TodoWrite, opencode
+# todowrite, Gemini CLI write_todos): models that track a plan stop early
+# far less often, especially when reminded of it and held to it.
+_PLAN_TOOL = "todo_write"
+_PLAN_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": _PLAN_TOOL,
+        "description": (
+            "Create or replace your plan for this task. Use it for work with several steps: list the steps, "
+            "mark one in_progress while you work on it and completed as soon as it is done, and add steps you "
+            "discover. Send the whole list each time."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                        },
+                        "required": ["content", "status"],
+                    },
+                },
+            },
+            "required": ["todos"],
+        },
+    },
+}
+_MAX_PLAN_ITEMS = 30
+_PLAN_ITEM_CHARS = 200
+# Model calls without a plan update before the open items are recalled.
+_PLAN_REMINDER_EVERY = 10
+_PLAN_MARKS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
+
+
+def _parse_plan(args: Any) -> list[dict[str, str]]:
+    items = args.get("todos") if isinstance(args, dict) else None
+    plan = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or not str(item.get("content", "")).strip():
+            continue
+        status = str(item.get("status", "pending")).strip().lower()
+        plan.append({
+            "content": str(item["content"]).strip()[:_PLAN_ITEM_CHARS],
+            "status": status if status in _PLAN_MARKS else "pending",
+        })
+    return plan[:_MAX_PLAN_ITEMS]
+
+
+def _open_plan_items(plan: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [item for item in plan if item.get("status") != "completed"]
+
+
+def _render_plan(plan: list[dict[str, str]]) -> str:
+    return "\n".join(f"- {_PLAN_MARKS.get(item['status'], '[ ]')} {item['content']}" for item in plan)
+
+
 _MASKED_OUTPUT = "[Earlier output of this tool call was cleared to save context; call the tool again if you need it.]"
 # Tool results kept in full when older ones are cleared.
 _KEEP_RECENT_TOOL_RESULTS = 5
@@ -181,6 +246,23 @@ def _clip_middle(text: str, limit: int) -> str:
         return text
     half = limit // 2
     return f"{text[:half]}\n[... {len(text) - limit} characters omitted ...]\n{text[-half:]}"
+
+
+# Some gateways leave the model's own tool-call markup (fullwidth-bar special
+# tokens such as "</｜DSML｜parameter>") inside a string argument; everything
+# from the first such token on is parser debris, not part of the value.
+_LEAKED_CALL_MARKUP = re.compile(r"\s*</?｜[^｜\n]{1,40}｜")
+
+
+def _strip_leaked_call_markup(value: Any) -> Any:
+    if isinstance(value, str):
+        match = _LEAKED_CALL_MARKUP.search(value)
+        return value[: match.start()] if match else value
+    if isinstance(value, dict):
+        return {key: _strip_leaked_call_markup(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_strip_leaked_call_markup(item) for item in value]
+    return value
 
 
 def _call_key(name: str, args: Any) -> str:
@@ -247,6 +329,7 @@ class LangGraphExecutor:
     _output_schema_name: str
     _output_schema_strict: bool
     _max_turns: int = 0
+    _plan_tool: bool = False
     _pending_resume_summary: str = ""
     # Set when a run ended near the context limit: the next run compacts first.
     _compact_before_next_run: bool = False
@@ -280,7 +363,7 @@ class LangGraphExecutor:
         except Exception:
             pass
 
-        fresh_run = {"model_calls": 0, "nudges": 0, "recent_calls": []}
+        fresh_run = {"model_calls": 0, "nudges": 0, "recent_calls": [], "plan": [], "plan_seen_at": 0}
         graph_input: dict[str, Any] = {
             "messages": [HumanMessage(content=user_input)],
             **fresh_run,
@@ -499,16 +582,32 @@ class LangGraphExecutor:
         return result
 
     def _extract_output(self, messages: list[AnyMessage]) -> str:
-        for message in reversed(messages):
+        def text(message: Any) -> str:
+            content = message.content
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "\n".join(str(part) for part in content)
+            return str(content or "")
+
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
             if isinstance(message, AIMessage):
                 if getattr(message, "tool_calls", None):
                     continue
-                content = message.content
-                if isinstance(content, str):
-                    return content
-                if isinstance(content, list):
-                    return "\n".join(str(part) for part in content)
-                return str(content or "")
+                # An answer cut at the output limit was continued after a
+                # prompt: the parts together are the answer.
+                parts = [text(message)]
+                while (
+                    index >= 2
+                    and isinstance(messages[index - 1], HumanMessage)
+                    and messages[index - 1].content == _LENGTH_NUDGE
+                    and isinstance(messages[index - 2], AIMessage)
+                    and not messages[index - 2].tool_calls
+                ):
+                    index -= 2
+                    parts.insert(0, text(messages[index]))
+                return "".join(parts)
         return ""
 
     def _invoke_function_tool(self, tool: Any, args: dict[str, Any]) -> str:
@@ -556,7 +655,7 @@ class LangGraphExecutor:
             if isinstance(message, HumanMessage):
                 role = "user"
             elif isinstance(message, ToolMessage):
-                role = "tool"
+                role = f"tool {message.name}" if message.name else "tool"
             content = getattr(message, "content", "")
             if not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False, default=str)
@@ -670,6 +769,10 @@ class LangGraphExecutor:
             "- A reply without a tool call ends the run and is taken as your final answer; "
             "send one only when the work is done."
         )
+        if self._plan_tool:
+            policy_lines.append(
+                f"- For work with several steps, keep a plan with {_PLAN_TOOL} and update it as you go."
+            )
         available_tools = (*self._function_tools_by_name, *self._mcp_tools_by_name)
         if any("web" in name.lower() or "fetch" in name.lower() for name in available_tools):
             policy_lines.append(
@@ -726,7 +829,18 @@ class LangGraphExecutor:
                     by_id = {m.id: m for m in masked}
                     _LOGGER.info("LangGraph cleared %s old tool outputs: trigger_input_tokens=%s threshold_tokens=%s",
                                  len(masked), latest_input_tokens, threshold_tokens)
-                    return [], masked, [by_id.get(m.id, m) for m in messages], summary
+                    # Agents that call tools without notes keep their facts
+                    # only in those outputs: carry them in the checkpoint.
+                    new_summary = self._summarize_messages(
+                        summary,
+                        [messages[i] for i in old if messages[i].id in by_id],
+                        trigger_input_tokens=latest_input_tokens,
+                        threshold_tokens=threshold_tokens,
+                        messages_before=len(messages),
+                        messages_after_keep=len(messages),
+                        triggered_by_tokens=True,
+                    )
+                    return [], masked, [by_id.get(m.id, m) for m in messages], new_summary
             # Keep the current request even when the configured tail size
             # is zero. Never start the retained tail with a tool result:
             # its matching assistant tool call must remain beside it.
@@ -874,6 +988,9 @@ class LangGraphExecutor:
             configured_max_non_task_tools = int(current_max_tools_used() or self._max_non_task_tools or 0)
 
             recent_calls = list(state.get("recent_calls", []) or [])
+            plan = list(state.get("plan", []) or [])
+            model_calls = int(state.get("model_calls", 0) or 0)
+            plan_seen_at = int(state.get("plan_seen_at", 0) or 0)
 
             outputs: list[ToolMessage] = []
             events: list[dict[str, Any]] = []
@@ -898,9 +1015,20 @@ class LangGraphExecutor:
             for tool_call in tool_calls:
                 call_name = str(tool_call.get("name", "") or "").strip()
                 call_id = str(tool_call.get("id", "") or "")
-                args = tool_call.get("args") if isinstance(tool_call.get("args"), dict) else {}
+                args = _strip_leaked_call_markup(tool_call.get("args") if isinstance(tool_call.get("args"), dict) else {})
 
                 if not call_name:
+                    continue
+
+                if self._plan_tool and call_name == _PLAN_TOOL:
+                    plan = _parse_plan(args)
+                    plan_seen_at = model_calls
+                    _LOGGER.info("LangGraph plan updated: items=%s open=%s", len(plan), len(_open_plan_items(plan)))
+                    outputs.append(ToolMessage(
+                        content=f"Plan updated:\n{_render_plan(plan)}" if plan else "Plan cleared.",
+                        tool_call_id=call_id,
+                        name=call_name,
+                    ))
                     continue
 
                 if self._require_task_steps_manager_init_first and not has_init:
@@ -1017,23 +1145,47 @@ class LangGraphExecutor:
                     }
                 )
 
+            open_items = _open_plan_items(plan)
+            if open_items and outputs and model_calls - plan_seen_at >= _PLAN_REMINDER_EVERY:
+                last = outputs[-1]
+                outputs[-1] = ToolMessage(
+                    content=(
+                        f"{last.content}\n\n[Plan reminder: these items are still open:\n{_render_plan(open_items)}\n"
+                        f"Keep the plan current with {_PLAN_TOOL}.]"
+                    ),
+                    tool_call_id=last.tool_call_id,
+                    name=last.name,
+                )
+                plan_seen_at = model_calls
+                _LOGGER.info("LangGraph plan reminder: open=%s", len(open_items))
+
             payload: dict[str, Any] = {
                 "messages": outputs,
                 "tool_events": events,
                 "has_task_steps_manager_init": has_init,
                 "non_task_tool_calls": non_task_count,
                 "recent_calls": recent_calls,
+                "plan": plan,
+                "plan_seen_at": plan_seen_at,
             }
             return payload
 
-        def nudge_for(message: Any) -> str:
+        def nudge_for(state: _GraphState) -> str:
             """The recovery prompt for a reply that must not end the run, or ''."""
+            message = list(state.get("messages", []) or [])[-1]
             if (getattr(message, "response_metadata", None) or {}).get("finish_reason") == "length":
                 return _LENGTH_NUDGE
             content = message.content
             text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
             if not text.strip() or text.strip() in ("[]", '""'):
                 return _EMPTY_REPLY_NUDGE
+            open_items = _open_plan_items(list(state.get("plan", []) or []))
+            if open_items:
+                return (
+                    f"Your plan still has open items:\n{_render_plan(open_items)}\n"
+                    "Continue working on them, or mark the ones that no longer apply as completed with "
+                    f"{_PLAN_TOOL}; give the final answer only when the plan is done."
+                )
             if self._output_schema_json and "{" not in text:
                 return _UNFINISHED_NUDGE
             return ""
@@ -1050,15 +1202,17 @@ class LangGraphExecutor:
             if int(state.get("model_calls", 0) or 0) >= max(1, int(self._max_turns or 0)):
                 return END
             nudges = int(state.get("nudges", 0) or 0)
-            prompt = nudge_for(last)
-            # A prose answer is questioned once; after that it stands.
-            if prompt and nudges < (1 if prompt == _UNFINISHED_NUDGE else _MAX_NUDGES):
+            prompt = nudge_for(state)
+            # An answer with work apparently left is questioned once; after
+            # that it stands.
+            once = prompt not in (_EMPTY_REPLY_NUDGE, _LENGTH_NUDGE)
+            if prompt and nudges < (1 if once else _MAX_NUDGES):
                 return "nudge"
             return END
 
         def nudge(state: _GraphState) -> dict[str, Any]:
             last = list(state.get("messages", []) or [])[-1]
-            prompt = nudge_for(last)
+            prompt = nudge_for(state)
             # An empty assistant turn is dropped: some providers reject it
             # when it is sent back.
             dropped = [RemoveMessage(id=last.id)] if prompt == _EMPTY_REPLY_NUDGE and last.id else []
@@ -1212,6 +1366,13 @@ def build_executor(
         mcp_tools[name] = tool
         tool_schemas.append(_tool_to_openai_schema(tool))
 
+    plan_tool = (
+        _PLAN_TOOL not in function_tools and _PLAN_TOOL not in mcp_tools
+        and os.environ.get("CHACK_LANGGRAPH_PLAN_TOOL", "1").strip().lower() not in ("0", "false", "no")
+    )
+    if plan_tool:
+        tool_schemas.append(_PLAN_TOOL_SCHEMA)
+
     timeout = _to_int(os.environ.get("CHACK_LANGGRAPH_MODEL_TIMEOUT_SECONDS", "120"), 120)
     model_name = str(route.model_name or "gpt-5")
 
@@ -1255,6 +1416,7 @@ def build_executor(
             and has_task_steps_manager_tool
         ),
         _max_turns=max_turns,
+        _plan_tool=plan_tool,
         _summary_trigger_messages=memory_max_messages,
         _summary_keep_messages=memory_reset_to_messages,
         _summary_max_chars=max(
