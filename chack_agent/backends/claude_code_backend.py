@@ -1228,11 +1228,14 @@ class ClaudeCodeExecutor:
                 if event_type == "result":
                     result_event = event
                     result_text = str(event.get("result") or "").strip()
-                    if result_text:
-                        result_parts.append(result_text)
                     structured_output = event.get("structured_output")
                     if structured_output is not None:
+                        # The schema-validated object is the answer; the result
+                        # text may repeat it or add prose, and joining the two
+                        # yields text that is no longer one JSON document.
                         self._append_structured_output(result_parts, structured_output)
+                    elif result_text:
+                        result_parts.append(result_text)
                     return_seen = True
 
                     usage: dict[str, Any] = {}
