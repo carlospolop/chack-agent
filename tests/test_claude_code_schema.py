@@ -744,6 +744,24 @@ def test_claude_final_answer_is_not_repeated_from_the_result_event(monkeypatch, 
     assert output == "42"
 
 
+def test_claude_structured_output_is_the_whole_answer_when_the_result_text_also_carries_it(
+    monkeypatch, tmp_path
+) -> None:
+    answer = {"verdict": "confirmed", "items": [1, 2]}
+    for result_text in (json.dumps(answer), "Here is the report.\n" + json.dumps(answer)):
+        output = _run_claude_stream(
+            monkeypatch,
+            tmp_path,
+            [
+                _INIT_EVENT,
+                {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "s1", "name": "StructuredOutput", "input": answer}]}},
+                {"type": "result", "subtype": "success", "result": result_text, "structured_output": answer},
+            ],
+        )
+
+        assert json.loads(output) == answer
+
+
 def test_claude_streamed_text_is_the_answer_when_the_result_event_is_empty(monkeypatch, tmp_path) -> None:
     output = _run_claude_stream(
         monkeypatch,
