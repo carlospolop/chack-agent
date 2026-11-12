@@ -84,6 +84,10 @@ class _GraphState(TypedDict, total=False):
     usage_events: Annotated[list[dict[str, int]], add]
     has_task_steps_manager_init: bool
     non_task_tool_calls: int
+    # Per invoke: model calls made, recovery nudges sent, recent call keys.
+    model_calls: int
+    nudges: int
+    recent_calls: list[str]
 
 
 # Interleaved-thinking models (Kimi, MiniMax, GLM, DeepSeek; OpenRouter's
@@ -141,9 +145,57 @@ def _to_int(raw: str, default: int) -> int:
 
 def _recursion_limit_for(max_turns: int) -> int:
     # A turn is one model call, as in the Agents SDK backends. In the graph a
-    # call that uses tools takes two steps (llm_call, then tool_node), so the
-    # step limit is twice the turn budget.
-    return 2 * max(1, int(max_turns or 0))
+    # call takes two steps (llm_call, then tool_node or a nudge); the graph
+    # itself ends the run on the last turn, so this is only a backstop.
+    return 2 * max(1, int(max_turns or 0)) + 2
+
+
+# Recovery turns: a reply that is empty, cut off, or neither a tool call nor
+# the required answer is not taken as final, as the CLIs retry or continue it.
+_MAX_NUDGES = 2
+_EMPTY_REPLY_NUDGE = (
+    "Your last reply was empty. Continue the task: call a tool, or give your final answer if the work is done."
+)
+_LENGTH_NUDGE = (
+    "Your last reply hit the output token limit. Continue from where it stopped, without repeating "
+    "yourself, and break large outputs into smaller pieces."
+)
+_UNFINISHED_NUDGE = (
+    "Your last reply had no tool call, so it would end the run, but it is not the required final answer. "
+    "If work remains, continue it with tool calls now; otherwise reply with only the final answer in the "
+    "required format."
+)
+_FINAL_TURN_PROMPT = (
+    "This is the last turn of this run: tools are no longer available. Give your final answer now from the "
+    "evidence gathered so far, in the required format, and state what remains unverified."
+)
+_MASKED_OUTPUT = "[Earlier output of this tool call was cleared to save context; call the tool again if you need it.]"
+# Tool results kept in full when older ones are cleared.
+_KEEP_RECENT_TOOL_RESULTS = 5
+_REPEAT_WINDOW = 30
+_SUMMARY_SOURCE_CLIP = 2000
+
+
+def _clip_middle(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}\n[... {len(text) - limit} characters omitted ...]\n{text[-half:]}"
+
+
+def _call_key(name: str, args: Any) -> str:
+    try:
+        return f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+    except Exception:
+        return f"{name}:{args!r}"
+
+
+def _is_context_overflow(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in (
+        "context_length_exceeded", "maximum context length", "context window", "prompt is too long",
+        "input is too long", "too many tokens", "context length",
+    ))
 
 
 def _run_coro_sync(coro):
@@ -196,12 +248,21 @@ class LangGraphExecutor:
     _output_schema_strict: bool
     _max_turns: int = 0
     _pending_resume_summary: str = ""
+    # Set when a run ended near the context limit: the next run compacts first.
+    _compact_before_next_run: bool = False
+    _compact_before_next_run_tokens: int = 0
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
         user_input = str(payload.get("input", "") or "")
         if not user_input.strip():
             return {"output": "", "intermediate_steps": [], "raw_result": _RawResult(raw_responses=[])}
+
+        if self._compact_before_next_run:
+            # Deferred from the previous run, so a run that is never
+            # continued does not pay for a summary.
+            self._compact_before_next_run = False
+            self._compact_for_threshold(latest_input_tokens=self._compact_before_next_run_tokens)
 
         config = {
             "configurable": {"thread_id": self._thread_id},
@@ -219,8 +280,10 @@ class LangGraphExecutor:
         except Exception:
             pass
 
+        fresh_run = {"model_calls": 0, "nudges": 0, "recent_calls": []}
         graph_input: dict[str, Any] = {
-            "messages": [HumanMessage(content=user_input)]
+            "messages": [HumanMessage(content=user_input)],
+            **fresh_run,
         }
         if self._pending_resume_summary:
             graph_input["summary"] = self._pending_resume_summary
@@ -237,7 +300,11 @@ class LangGraphExecutor:
                 # answer in prose. Give it one turn to fix the answer.
                 _LOGGER.warning("LangGraph answer did not match the output schema; asking for a repair: %s", schema_error)
                 result_state = self._invoke_graph(
-                    {"messages": [HumanMessage(content=self._schema_repair_prompt(schema_error))]},
+                    {
+                        "messages": [HumanMessage(content=self._schema_repair_prompt(schema_error))],
+                        # The repair prompt already says what is wrong.
+                        **fresh_run, "nudges": _MAX_NUDGES,
+                    },
                     config,
                 )
                 state_values = dict(result_state or {})
@@ -312,37 +379,41 @@ class LangGraphExecutor:
             default=0,
         )
         if threshold_tokens > 0 and latest_input_tokens >= threshold_tokens:
-            log_event(
-                "agent_compaction_triggered",
-                payload={
-                    "backend": "langgraph",
-                    "input_tokens": latest_input_tokens,
-                    "threshold_tokens": threshold_tokens,
-                    "max_context_tokens": self._max_context_tokens,
-                },
-                task_session_id=current_session_id() or "",
-                run_label=current_run_label() or "",
-            )
-            compacted = self.compact_for_resume()
-            raw_responses.extend(compacted.raw_responses)
-            log_event(
-                "agent_compaction_completed" if compacted.succeeded else "agent_compaction_failed",
-                payload={
-                    "backend": "langgraph",
-                    "method": compacted.method,
-                    "input_tokens": latest_input_tokens,
-                    "threshold_tokens": threshold_tokens,
-                    "error": compacted.error[:500],
-                },
-                task_session_id=current_session_id() or "",
-                run_label=current_run_label() or "",
-            )
+            self._compact_before_next_run = True
+            self._compact_before_next_run_tokens = latest_input_tokens
 
         return {
             "output": output,
             "intermediate_steps": steps,
             "raw_result": _RawResult(raw_responses=raw_responses),
         }
+
+    def _compact_for_threshold(self, *, latest_input_tokens: int) -> None:
+        threshold_tokens = int(self._max_context_tokens * self._compaction_threshold_ratio)
+        log_event(
+            "agent_compaction_triggered",
+            payload={
+                "backend": "langgraph",
+                "input_tokens": latest_input_tokens,
+                "threshold_tokens": threshold_tokens,
+                "max_context_tokens": self._max_context_tokens,
+            },
+            task_session_id=current_session_id() or "",
+            run_label=current_run_label() or "",
+        )
+        compacted = self.compact_for_resume()
+        log_event(
+            "agent_compaction_completed" if compacted.succeeded else "agent_compaction_failed",
+            payload={
+                "backend": "langgraph",
+                "method": compacted.method,
+                "input_tokens": latest_input_tokens,
+                "threshold_tokens": threshold_tokens,
+                "error": compacted.error[:500],
+            },
+            task_session_id=current_session_id() or "",
+            run_label=current_run_label() or "",
+        )
 
     def _invoke_graph(self, graph_input: dict[str, Any], config: dict[str, Any]) -> Any:
         graph_errors = importlib.import_module("langgraph.errors")
@@ -487,7 +558,14 @@ class LangGraphExecutor:
             elif isinstance(message, ToolMessage):
                 role = "tool"
             content = getattr(message, "content", "")
-            rendered.append(f"[{role}] {content}")
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False, default=str)
+            calls = "".join(
+                f" -> {call.get('name')}({json.dumps(call.get('args'), ensure_ascii=False, default=str)})"
+                for call in (getattr(message, "tool_calls", None) or [])
+            )
+            # Raw tool output can be huge; its head and tail carry what matters.
+            rendered.append(f"[{role}] {_clip_middle(content, _SUMMARY_SOURCE_CLIP)}{calls}")
         chunk = "\n".join(rendered)
         previous_summary_chars = len(previous_summary or "")
         source_messages_count = len(messages)
@@ -505,7 +583,8 @@ class LangGraphExecutor:
         prompt = (
             "Write a checkpoint so you can continue this task after the messages below are removed. "
             "Keep: the progress so far and key decisions; every finding and fact with its exact identifiers, "
-            "versions, URLs, paths and commands; leads ruled out and why; and the concrete next steps.\n\n"
+            "versions, URLs, paths and commands; leads ruled out and why; and the concrete next steps."
+            f"{f' Stay within {self._summary_max_chars} characters.' if self._summary_max_chars > 0 else ''}\n\n"
             f"{earlier}Messages:\n{chunk}{focus_block}"
         )
 
@@ -520,7 +599,7 @@ class LangGraphExecutor:
         else:
             summary = str(content or previous_summary).strip() or previous_summary
         if self._summary_max_chars > 0 and len(summary) > self._summary_max_chars:
-            summary = summary[-self._summary_max_chars :]
+            summary = summary[: self._summary_max_chars]
             did_truncate = True
 
         _LOGGER.info(
@@ -567,9 +646,10 @@ class LangGraphExecutor:
         )
         return summary
 
-    def _system_prompt(self, summary: str) -> str:
-        # Stays byte-identical across the turns of a run so the provider can
-        # cache it; the shrinking tool budget is reported on tool results.
+    def _system_prompt(self) -> str:
+        # Stays byte-identical for the whole run so the provider can cache it:
+        # the tool budget is reported on tool results and the checkpoint
+        # summary is sent as a message.
         base = str(self._base_system_prompt or "").strip()
         policy_lines: list[str] = []
         if self._require_task_steps_manager_init_first:
@@ -580,6 +660,16 @@ class LangGraphExecutor:
             policy_lines.append(
                 f"- Do not exceed {self._max_non_task_tools} non-task tool calls."
             )
+        # The CLIs' persistence rules; many models do not know a reply
+        # without a tool call ends their run.
+        policy_lines.append(
+            "- Keep working until the task is completely done: when a tool call fails or a lead runs dry, "
+            "try another approach instead of stopping, and do not end at a plan or a partial result."
+        )
+        policy_lines.append(
+            "- A reply without a tool call ends the run and is taken as your final answer; "
+            "send one only when the work is done."
+        )
         available_tools = (*self._function_tools_by_name, *self._mcp_tools_by_name)
         if any("web" in name.lower() or "fetch" in name.lower() for name in available_tools):
             policy_lines.append(
@@ -590,9 +680,6 @@ class LangGraphExecutor:
         if policy_lines:
             policy_block = "\n\n### TOOL USAGE POLICY\n" + "\n".join(policy_lines)
 
-        summary_block = ""
-        if summary:
-            summary_block = f"\n\n### MEMORY SUMMARY\n{summary}"
         output_schema_block = ""
         if self._output_schema_json:
             schema_name = str(self._output_schema_name or "output_schema").strip() or "output_schema"
@@ -606,7 +693,7 @@ class LangGraphExecutor:
                 f"Schema:\n{self._output_schema_json}"
             )
 
-        return f"{base}{policy_block}{output_schema_block}{summary_block}".strip()
+        return f"{base}{policy_block}{output_schema_block}".strip()
 
     def build_graph(self) -> None:
         checkpoint_mod = importlib.import_module("langgraph.checkpoint.memory")
@@ -618,10 +705,75 @@ class LangGraphExecutor:
 
         tool_map = self._function_tools_by_name
 
+        def compact(
+            messages: list[AnyMessage], summary: str, *, latest_input_tokens: int, threshold_tokens: int,
+            by_messages: bool, by_tokens: bool,
+        ) -> tuple[list[AnyMessage], list[AnyMessage], list[AnyMessage], str]:
+            """Return (removed, replaced, kept, summary) for a context that must shrink."""
+            if by_tokens:
+                # Clearing old tool outputs first, as Claude Code and opencode
+                # do, keeps every call and reasoning step the agent made; a
+                # summary rewrites them all.
+                results = [i for i, m in enumerate(messages) if isinstance(m, ToolMessage)]
+                old = results[:-_KEEP_RECENT_TOOL_RESULTS] if _KEEP_RECENT_TOOL_RESULTS else results
+                masked = [
+                    ToolMessage(content=_MASKED_OUTPUT, id=messages[i].id, tool_call_id=messages[i].tool_call_id,
+                                name=messages[i].name)
+                    for i in old
+                    if isinstance(messages[i].content, str) and len(messages[i].content) > 4 * len(_MASKED_OUTPUT)
+                ]
+                if masked:
+                    by_id = {m.id: m for m in masked}
+                    _LOGGER.info("LangGraph cleared %s old tool outputs: trigger_input_tokens=%s threshold_tokens=%s",
+                                 len(masked), latest_input_tokens, threshold_tokens)
+                    return [], masked, [by_id.get(m.id, m) for m in messages], summary
+            # Keep the current request even when the configured tail size
+            # is zero. Never start the retained tail with a tool result:
+            # its matching assistant tool call must remain beside it.
+            keep = max(1, self._summary_keep_messages)
+            start = max(0, len(messages) - keep)
+            while start > 0 and isinstance(messages[start], ToolMessage):
+                start -= 1
+            # The request that started this run stays verbatim: a summary
+            # of it loses the details the agent must still act on.
+            request = next((m for m in reversed(messages[:start]) if isinstance(m, HumanMessage)), None)
+            if request is not None and any(isinstance(m, HumanMessage) for m in messages[start:]):
+                request = None
+            older = [m for m in messages[:start] if m is not request]
+            if not older:
+                return [], [], messages, summary
+            new_summary = self._summarize_messages(
+                summary,
+                older,
+                trigger_input_tokens=latest_input_tokens,
+                threshold_tokens=threshold_tokens,
+                messages_before=len(messages),
+                messages_after_keep=len(messages) - start,
+                triggered_by_messages=by_messages,
+                triggered_by_tokens=by_tokens,
+            )
+            return older, [], ([request] if request is not None else []) + messages[start:], new_summary
+
+        def call_model(prompt_messages: list[AnyMessage], final_turn: bool) -> Any:
+            raise_if_cancelled()
+            if not final_turn:
+                return self._model_with_tools.invoke(prompt_messages)
+            # The last allowed call answers without tools, as opencode ends
+            # at its step limit, instead of the run failing with no answer.
+            prompt_messages = [*prompt_messages, HumanMessage(content=_FINAL_TURN_PROMPT)]
+            try:
+                response = self._model_with_tools.bind(tool_choice="none").invoke(prompt_messages)
+            except Exception as exc:
+                if _is_context_overflow(exc):
+                    raise
+                response = self._summary_model.invoke(prompt_messages)
+            kwargs = {k: v for k, v in (response.additional_kwargs or {}).items() if k != "tool_calls"}
+            return response.model_copy(update={"tool_calls": [], "invalid_tool_calls": [], "additional_kwargs": kwargs})
+
         def llm_call(state: _GraphState) -> dict[str, Any]:
             messages = list(state.get("messages", []) or [])
             summary = str(state.get("summary", "") or "")
-            maybe_new_summary = summary
+            model_calls = int(state.get("model_calls", 0) or 0)
             usage_events = list(state.get("usage_events", []) or [])
             latest_input_tokens = 0
             if usage_events:
@@ -646,42 +798,45 @@ class LangGraphExecutor:
                 threshold_tokens > 0 and latest_input_tokens >= threshold_tokens
             )
 
-            older: list[AnyMessage] = []
-            kept: list[AnyMessage] = messages
+            removed: list[AnyMessage] = []
+            replaced: list[AnyMessage] = []
+            new_summary = summary
             if should_summarize_by_messages or should_summarize_by_tokens:
-                # Keep the current request even when the configured tail size
-                # is zero. Never start the retained tail with a tool result:
-                # its matching assistant tool call must remain beside it.
-                keep = max(1, self._summary_keep_messages)
-                start = max(0, len(messages) - keep)
-                while start > 0 and isinstance(messages[start], ToolMessage):
-                    start -= 1
-                # The request that started this run stays verbatim: a summary
-                # of it loses the details the agent must still act on.
-                request = next((m for m in reversed(messages[:start]) if isinstance(m, HumanMessage)), None)
-                if request is not None and any(isinstance(m, HumanMessage) for m in messages[start:]):
-                    request = None
-                older = [m for m in messages[:start] if m is not request]
-                kept = ([request] if request is not None else []) + messages[start:]
-                maybe_new_summary = self._summarize_messages(
-                    summary,
-                    older,
-                    trigger_input_tokens=latest_input_tokens,
-                    threshold_tokens=threshold_tokens,
-                    messages_before=len(messages),
-                    messages_after_keep=len(messages) - start,
-                    triggered_by_messages=should_summarize_by_messages,
-                    triggered_by_tokens=should_summarize_by_tokens,
+                removed, replaced, messages, new_summary = compact(
+                    messages, summary, latest_input_tokens=latest_input_tokens, threshold_tokens=threshold_tokens,
+                    by_messages=should_summarize_by_messages, by_tokens=should_summarize_by_tokens,
                 )
 
-            prompt_messages: list[AnyMessage] = [SystemMessage(content=self._system_prompt(maybe_new_summary))]
-            # Until a summary exists, every message is still part of the live
-            # conversation. Silently keeping only the tail here discards facts
-            # before the configured compaction threshold is reached.
-            prompt_messages.extend(kept if maybe_new_summary else messages)
+            final_turn = model_calls + 1 >= max(1, int(self._max_turns or 0))
 
-            raise_if_cancelled()
-            response = self._model_with_tools.invoke(prompt_messages)
+            def prompt_for(conversation: list[AnyMessage], checkpoint: str) -> list[AnyMessage]:
+                # The checkpoint is a message, not part of the system prompt,
+                # so the system prompt stays cached across compactions.
+                head: list[AnyMessage] = [SystemMessage(content=self._system_prompt())]
+                if checkpoint:
+                    head.append(HumanMessage(
+                        content=f"Checkpoint of your earlier work in this conversation, whose messages were removed:\n{checkpoint}"
+                    ))
+                return head + conversation
+
+            try:
+                response = call_model(prompt_for(messages, new_summary), final_turn)
+            except Exception as exc:
+                if not _is_context_overflow(exc):
+                    raise
+                # The window was smaller than configured or one result was
+                # huge: shrink now and retry once, as the CLIs do.
+                _LOGGER.warning("LangGraph context overflow; compacting and retrying: %s", str(exc)[:300])
+                more_removed, more_replaced, messages, new_summary = compact(
+                    messages, new_summary, latest_input_tokens=latest_input_tokens, threshold_tokens=threshold_tokens,
+                    by_messages=False, by_tokens=True,
+                )
+                if not more_removed and not more_replaced:
+                    raise
+                removed += more_removed
+                replaced = list({m.id: m for m in [*replaced, *more_replaced]}.values())
+                response = call_model(prompt_for(messages, new_summary), final_turn)
+
             usage = getattr(response, "usage_metadata", None) or {}
             usage_event = {
                 "input_tokens": int(usage.get("input_tokens", 0) or 0),
@@ -700,11 +855,12 @@ class LangGraphExecutor:
             if finish_reason == "content_filter":
                 raise ProviderContentFilterError()
             payload: dict[str, Any] = {
-                "messages": [RemoveMessage(id=m.id) for m in older] + [response] if older else [response],
+                "messages": [RemoveMessage(id=m.id) for m in removed] + replaced + [response],
                 "usage_events": [usage_event],
+                "model_calls": model_calls + 1,
             }
-            if maybe_new_summary != summary:
-                payload["summary"] = maybe_new_summary
+            if new_summary != summary:
+                payload["summary"] = new_summary
             return payload
 
         def tool_node(state: _GraphState) -> dict[str, Any]:
@@ -717,8 +873,27 @@ class LangGraphExecutor:
             non_task_count = int(state.get("non_task_tool_calls", 0) or 0)
             configured_max_non_task_tools = int(current_max_tools_used() or self._max_non_task_tools or 0)
 
+            recent_calls = list(state.get("recent_calls", []) or [])
+
             outputs: list[ToolMessage] = []
             events: list[dict[str, Any]] = []
+
+            # Calls whose arguments were not valid JSON would otherwise end
+            # the run as if they were a final answer; tell the model instead.
+            for bad_call in getattr(last_message, "invalid_tool_calls", None) or []:
+                call_name = str(bad_call.get("name", "") or "tool")
+                received = str(bad_call.get("args", "") or "")[:500]
+                outputs.append(
+                    ToolMessage(
+                        content=(
+                            f"ERROR: The arguments for {call_name} could not be parsed as JSON, so the call was not "
+                            f"executed. Reissue the call with valid JSON arguments. Received: {received}"
+                        ),
+                        tool_call_id=str(bad_call.get("id", "") or ""),
+                        name=call_name,
+                    )
+                )
+                events.append({"tool": call_name, "tool_input": received, "status": "error", "reason": "invalid_arguments"})
 
             for tool_call in tool_calls:
                 call_name = str(tool_call.get("name", "") or "").strip()
@@ -787,7 +962,10 @@ class LangGraphExecutor:
                 if tool is None and mcp_tool is None:
                     outputs.append(
                         ToolMessage(
-                            content=f"ERROR: Unknown tool '{call_name}'.",
+                            content=(
+                                f"ERROR: Unknown tool '{call_name}'. Available tools: "
+                                f"{', '.join(sorted({*tool_map, *self._mcp_tools_by_name}))}."
+                            ),
                             tool_call_id=call_id,
                             name=call_name,
                         )
@@ -819,6 +997,16 @@ class LangGraphExecutor:
                     non_task_count += 1
                     if configured_max_non_task_tools > 0:
                         result = f"{result}{_tool_budget_note(configured_max_non_task_tools - non_task_count, configured_max_non_task_tools)}"
+                # Models stuck in a loop repeat the same call; Gemini CLI
+                # detects this. Point it out so the agent changes approach.
+                key = _call_key(call_name, args)
+                repeats = recent_calls.count(key) + 1
+                recent_calls = [*recent_calls, key][-_REPEAT_WINDOW:]
+                if repeats >= 3:
+                    result = (
+                        f"{result}\n\n[Repeated call: this exact call was made {repeats} times in this run. "
+                        "Reuse its earlier result or change approach instead of repeating it.]"
+                    )
 
                 outputs.append(ToolMessage(content=result, tool_call_id=call_id, name=call_name))
                 events.append(
@@ -834,24 +1022,60 @@ class LangGraphExecutor:
                 "tool_events": events,
                 "has_task_steps_manager_init": has_init,
                 "non_task_tool_calls": non_task_count,
+                "recent_calls": recent_calls,
             }
             return payload
+
+        def nudge_for(message: Any) -> str:
+            """The recovery prompt for a reply that must not end the run, or ''."""
+            if (getattr(message, "response_metadata", None) or {}).get("finish_reason") == "length":
+                return _LENGTH_NUDGE
+            content = message.content
+            text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+            if not text.strip() or text.strip() in ("[]", '""'):
+                return _EMPTY_REPLY_NUDGE
+            if self._output_schema_json and "{" not in text:
+                return _UNFINISHED_NUDGE
+            return ""
 
         def should_continue(state: _GraphState):
             messages = list(state.get("messages", []) or [])
             if not messages:
                 return END
             last = messages[-1]
-            if isinstance(last, AIMessage) and (getattr(last, "tool_calls", None) or []):
+            if not isinstance(last, AIMessage):
+                return END
+            if getattr(last, "tool_calls", None) or getattr(last, "invalid_tool_calls", None):
                 return "tool_node"
+            if int(state.get("model_calls", 0) or 0) >= max(1, int(self._max_turns or 0)):
+                return END
+            nudges = int(state.get("nudges", 0) or 0)
+            prompt = nudge_for(last)
+            # A prose answer is questioned once; after that it stands.
+            if prompt and nudges < (1 if prompt == _UNFINISHED_NUDGE else _MAX_NUDGES):
+                return "nudge"
             return END
+
+        def nudge(state: _GraphState) -> dict[str, Any]:
+            last = list(state.get("messages", []) or [])[-1]
+            prompt = nudge_for(last)
+            # An empty assistant turn is dropped: some providers reject it
+            # when it is sent back.
+            dropped = [RemoveMessage(id=last.id)] if prompt == _EMPTY_REPLY_NUDGE and last.id else []
+            _LOGGER.info("LangGraph reply would end the run unfinished; nudging: %s", prompt[:60])
+            return {
+                "messages": [*dropped, HumanMessage(content=prompt)],
+                "nudges": int(state.get("nudges", 0) or 0) + 1,
+            }
 
         builder = StateGraph(_GraphState)
         builder.add_node("llm_call", llm_call)
         builder.add_node("tool_node", tool_node)
+        builder.add_node("nudge", nudge)
         builder.add_edge(START, "llm_call")
-        builder.add_conditional_edges("llm_call", should_continue, ["tool_node", END])
+        builder.add_conditional_edges("llm_call", should_continue, ["tool_node", "nudge", END])
         builder.add_edge("tool_node", "llm_call")
+        builder.add_edge("nudge", "llm_call")
 
         self._graph = builder.compile(checkpointer=InMemorySaver())
 

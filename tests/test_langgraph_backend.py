@@ -2,7 +2,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from agents import MaxTurnsExceeded
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from chack_agent.backends.langgraph_backend import LangGraphExecutor, _with_reasoning_passthrough
@@ -14,10 +13,17 @@ class _ScriptedModel:
     def __init__(self, replies):
         self._replies = list(replies)
         self.prompts = []
+        self.bound = []
+
+    def bind(self, **kwargs):
+        self.bound.append((len(self.prompts), kwargs))
+        return self
 
     def invoke(self, messages):
         self.prompts.append(list(messages))
         reply = self._replies.pop(0) if len(self._replies) > 1 else self._replies[0]
+        if isinstance(reply, Exception):
+            raise reply
         # Real model calls return distinct messages. LangGraph's message
         # reducer uses IDs to replace edits to an existing message.
         return reply.model_copy(deep=True, update={"id": None})
@@ -32,6 +38,10 @@ def _tool_call(index=0, input_tokens=0):
 
 async def _noop(_ctx, _raw_args):
     return "ok"
+
+
+async def _long_output(_ctx, _raw_args):
+    return "x" * 1000
 
 
 _NOOP_TOOLS = {"noop": SimpleNamespace(name="noop", on_invoke_tool=_noop)}
@@ -77,13 +87,20 @@ def test_max_turns_counts_model_calls_not_graph_steps():
     assert len(model.prompts) == 5
 
 
-def test_running_out_of_turns_ends_the_run_as_max_turns_exceeded():
-    model = _ScriptedModel([_tool_call()])
+def test_the_last_allowed_turn_answers_without_tools_from_the_evidence_gathered():
+    # The model keeps calling tools; its third and last call may not, and
+    # whatever it says then is the run's answer instead of a lost run.
+    last = AIMessage(content="Partial: host A is vulnerable; host B unverified.",
+                     tool_calls=[{"name": "noop", "args": {}, "id": "call_9"}])
+    model = _ScriptedModel([_tool_call(1), _tool_call(2), last])
 
-    with pytest.raises(MaxTurnsExceeded, match=r"Max turns \(3\) exceeded"):
-        _executor(model, max_turns=3).invoke({"input": "go"})
+    result = _executor(model, max_turns=3, function_tools=_NOOP_TOOLS).invoke({"input": "go"})
 
+    assert result["output"] == "Partial: host A is vulnerable; host B unverified."
     assert len(model.prompts) == 3
+    assert model.bound == [(2, {"tool_choice": "none"})]
+    assert "tools are no longer available" in model.prompts[-1][-1].content
+    assert len(result["intermediate_steps"]) == 2
 
 
 _SCHEMA = {
@@ -95,13 +112,17 @@ _SCHEMA = {
 
 
 def test_schema_invalid_answer_gets_one_repair_turn():
-    model = _ScriptedModel([AIMessage(content="The finding reproduces."), AIMessage(content='{"verdict": "valid"}')])
+    model = _ScriptedModel([
+        AIMessage(content="The finding reproduces."), AIMessage(content="It reproduces on 2.1."),
+        AIMessage(content='{"verdict": "valid"}'),
+    ])
 
     result = _executor(model, output_schema=_SCHEMA).invoke({"input": "review"})
 
     assert json.loads(result["output"]) == {"verdict": "valid"}
-    assert len(model.prompts) == 2
-    repair = model.prompts[1][-1]
+    assert len(model.prompts) == 3
+    assert "not the required final answer" in model.prompts[1][-1].content
+    repair = model.prompts[2][-1]
     assert isinstance(repair, HumanMessage)
     assert "answer" in repair.content and "Invalid JSON output" in repair.content
 
@@ -121,7 +142,8 @@ def test_answer_still_invalid_after_the_repair_turn_is_returned_as_given():
     result = _executor(model, output_schema=_SCHEMA).invoke({"input": "review"})
 
     assert result["output"] == "second prose"
-    assert len(model.prompts) == 2
+    # One nudge to continue, then one repair turn; neither is repeated.
+    assert len(model.prompts) == 3
 
 
 def test_content_filter_stop_ends_the_run_with_an_explicit_error():
@@ -151,7 +173,7 @@ def test_summary_prunes_checkpoint_messages_and_keeps_current_request():
     assert result["output"] == "three"
     state = executor._graph.get_state({"configurable": {"thread_id": executor._thread_id}}).values
     assert [message.content for message in state["messages"]] == ["Third", "three"]
-    assert "The first two turns are complete." in model.prompts[-1][0].content
+    assert "The first two turns are complete." in model.prompts[-1][1].content
     assert model.prompts[-1][-1].content == "Third"
 
 
@@ -168,10 +190,12 @@ def test_context_near_the_limit_is_summarized_but_keeps_the_task_and_tool_pairs(
     assert executor.invoke({"input": "Audit host A for CVE-1"})["output"] == "done"
 
     last_prompt = model.prompts[-1]
-    assert "Rounds one and two found nothing." in last_prompt[0].content
-    assert [type(m).__name__ for m in last_prompt[1:]] == ["HumanMessage", "AIMessage", "ToolMessage"]
-    assert last_prompt[1].content == "Audit host A for CVE-1"
-    assert last_prompt[2].tool_calls[0]["id"] == last_prompt[3].tool_call_id == "call_3"
+    assert "Rounds one and two found nothing." in last_prompt[1].content
+    assert [type(m).__name__ for m in last_prompt[2:]] == ["HumanMessage", "AIMessage", "ToolMessage"]
+    assert last_prompt[2].content == "Audit host A for CVE-1"
+    assert last_prompt[3].tool_calls[0]["id"] == last_prompt[4].tool_call_id == "call_3"
+    # The checkpoint is a message, so the cached system prompt is unchanged.
+    assert len({prompt[0].content for prompt in model.prompts}) == 1
 
 
 def test_long_tool_loops_are_not_summarized_by_message_count():
@@ -250,3 +274,107 @@ def test_web_verification_guidance_only_when_web_tool_is_available():
     )
     with_web.invoke({"input": "Check the docs"})
     assert "use an available web tool" in model.prompts[-1][0].content
+
+
+def test_a_tool_call_with_unparseable_arguments_is_answered_and_the_run_continues():
+    broken = AIMessage(content="", invalid_tool_calls=[
+        {"name": "noop", "args": '{"path": "/etc/pas', "id": "call_1", "error": "bad json", "type": "invalid_tool_call"},
+    ])
+    model = _ScriptedModel([broken, AIMessage(content="done")])
+
+    result = _executor(model, function_tools=_NOOP_TOOLS).invoke({"input": "go"})
+
+    assert result["output"] == "done"
+    error = model.prompts[1][-1]
+    assert isinstance(error, ToolMessage) and error.tool_call_id == "call_1"
+    assert "could not be parsed as JSON" in error.content and '{"path": "/etc/pas' in error.content
+
+
+def test_an_empty_reply_is_dropped_and_the_model_asked_to_continue():
+    model = _ScriptedModel([_tool_call(1), AIMessage(content=""), AIMessage(content="done")])
+
+    result = _executor(model, function_tools=_NOOP_TOOLS).invoke({"input": "go"})
+
+    assert result["output"] == "done"
+    retry = model.prompts[2]
+    assert "was empty" in retry[-1].content
+    assert not any(isinstance(m, AIMessage) and not m.tool_calls for m in retry)
+
+
+def test_a_reply_cut_at_the_token_limit_is_continued():
+    cut = AIMessage(content="Findings: 1. CVE-1 on host", response_metadata={"finish_reason": "length"})
+    model = _ScriptedModel([cut, AIMessage(content=" A; 2. none else.")])
+
+    result = _executor(model).invoke({"input": "go"})
+
+    assert result["output"] == " A; 2. none else."
+    assert model.prompts[1][-2].content == "Findings: 1. CVE-1 on host"
+    assert "output token limit" in model.prompts[1][-1].content
+
+
+def test_recovery_prompts_stop_after_two_and_the_run_ends():
+    model = _ScriptedModel([AIMessage(content="")])
+
+    result = _executor(model).invoke({"input": "go"})
+
+    assert result["output"] == ""
+    assert len(model.prompts) == 3
+
+
+def test_a_call_repeated_a_third_time_is_flagged():
+    model = _ScriptedModel([_tool_call(1), _tool_call(2), _tool_call(3), AIMessage(content="done")])
+
+    _executor(model, function_tools=_NOOP_TOOLS).invoke({"input": "go"})
+
+    results = [m.content for m in model.prompts[-1] if isinstance(m, ToolMessage)]
+    assert results[:2] == ["ok", "ok"]
+    assert "made 3 times" in results[2]
+
+
+def test_an_unknown_tool_error_names_the_tools_that_exist():
+    model = _ScriptedModel([
+        AIMessage(content="", tool_calls=[{"name": "nop", "args": {}, "id": "call_1"}]), AIMessage(content="done"),
+    ])
+
+    _executor(model, function_tools=_NOOP_TOOLS).invoke({"input": "go"})
+
+    assert model.prompts[1][-1].content == "ERROR: Unknown tool 'nop'. Available tools: noop."
+
+
+def _long_tool_call(index, input_tokens=0):
+    return AIMessage(
+        content="", tool_calls=[{"name": "dump", "args": {"page": index}, "id": f"call_{index}"}],
+        usage_metadata={"input_tokens": input_tokens, "output_tokens": 1, "total_tokens": input_tokens + 1},
+    )
+
+
+_DUMP_TOOLS = {"dump": SimpleNamespace(name="dump", on_invoke_tool=_long_output)}
+
+
+def test_near_the_limit_old_tool_outputs_are_cleared_before_anything_is_summarized():
+    # Seven results, the last call reporting 900 of 1000 tokens: the two
+    # oldest outputs are cleared, the newest five and every call stay.
+    model = _ScriptedModel([*(_long_tool_call(i, 100) for i in range(6)), _long_tool_call(6, 900),
+                            AIMessage(content="done")])
+    summary_model = _ScriptedModel([AIMessage(content="unused")])
+    executor = _executor(model, summary_model=summary_model, function_tools=_DUMP_TOOLS, max_context_tokens=1000)
+
+    assert executor.invoke({"input": "Read every page"})["output"] == "done"
+
+    assert summary_model.prompts == []
+    last_prompt = model.prompts[-1]
+    results = [m for m in last_prompt if isinstance(m, ToolMessage)]
+    assert [m.tool_call_id for m in results] == [f"call_{i}" for i in range(7)]
+    assert ["cleared" in m.content for m in results] == [True, True, False, False, False, False, False]
+    assert sum(isinstance(m, AIMessage) for m in last_prompt) == 7
+
+
+def test_a_context_overflow_error_shrinks_the_context_and_retries_once():
+    overflow = RuntimeError("Error code: 400 - This model's maximum context length is 1000 tokens")
+    model = _ScriptedModel([*(_long_tool_call(i) for i in range(7)), overflow, AIMessage(content="done")])
+    executor = _executor(model, function_tools=_DUMP_TOOLS, max_context_tokens=100_000)
+
+    assert executor.invoke({"input": "Read every page"})["output"] == "done"
+
+    retried = [m.content for m in model.prompts[-1] if isinstance(m, ToolMessage)]
+    assert sum("cleared" in content for content in retried) == 2
