@@ -11,7 +11,7 @@ import pytest
 from scripts.benchmark_backends import _uses_tool_family, build_tasks
 from scripts import benchmark_model_backend_matrix
 from scripts.benchmark_model_backend_matrix import DEFAULT_BACKENDS
-from scripts.render_backend_model_failures import render as render_failures, rescore_official_source
+from scripts.render_backend_model_failures import render as render_failures, render_compact, rescore_official_source
 from chack_agent.runtime_capabilities import get_supported_backends
 
 
@@ -111,6 +111,27 @@ def test_failure_matrix_distinguishes_failed_unrun_and_unsupported_cases():
         tasks=["repair_allocator", "reconcile_ledger", "join_report"],
     )
     assert "| example | L:answer+tools, J:unrun | R:route, L:unrun, J:unrun |" in table
+
+
+def test_compact_matrix_shows_failed_task_names_and_route_status():
+    rows = [
+        {"model": "bakkt/example", "backend": "codex", "task": "repair_allocator", "passed": False,
+         "reason": "answer"},
+        {"model": "bakkt/example", "backend": "codex", "task": "reconcile_ledger", "passed": True},
+        {"model": "bakkt/example", "backend": "codex", "task": "join_report", "passed": True},
+        *(
+            {"model": "bakkt/example", "backend": "openrouter", "task": task,
+             "passed": False, "reason": "route"}
+            for task in ("repair_allocator", "reconcile_ledger", "join_report")
+        ),
+    ]
+    table = render_compact(
+        rows, models=["bakkt/example"], backends=["codex", "openrouter"],
+        tasks=["repair_allocator", "reconcile_ledger", "join_report"],
+    )
+    assert "| example | Repair |" in table
+    assert "| example | N/A |" in table
+    assert "answer" not in table
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"), reason="POSIX alarm required")

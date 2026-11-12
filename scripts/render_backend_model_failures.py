@@ -20,6 +20,93 @@ TASK_CODE = {
     "join_report": "J",
 }
 
+TASK_LABEL = {
+    "repair_allocator": "Repair",
+    "reconcile_ledger": "Ledger",
+    "join_report": "Web",
+}
+
+BACKEND_GROUPS = (
+    ("CLI backends", ("codex", "claude", "gemini", "kimi", "qwen", "opencode")),
+    ("API and LangGraph", ("openai", "gateway", "copilot", "langgraph", "openrouter")),
+)
+
+BACKEND_LABEL = {
+    "codex": "Codex", "claude": "Claude Code", "gemini": "Gemini CLI",
+    "kimi": "Kimi Code", "qwen": "Qwen Code", "opencode": "OpenCode",
+    "openai": "OpenAI*", "gateway": "Gateway", "copilot": "Copilot*",
+    "langgraph": "LangGraph", "openrouter": "OpenRouter",
+}
+
+MODEL_LABEL = {
+    "bakkt/kimi-k3.1": "Kimi K3.1",
+    "bakkt/glm-5.2": "GLM 5.2",
+    "bakkt/minimax-m2.5": "MiniMax M2.5",
+    "bakkt/deepseek-v4.1-flash": "DeepSeek V4.1 Flash",
+    "bakkt/kimi-k2.5": "Kimi K2.5",
+    "bakkt/qwen3-coder-480b-a35b-instruct": "Qwen3 Coder 480B",
+    "bakkt/gemini-3.5-flash": "Gemini 3.5 Flash",
+    "bakkt/gemini-3.1-pro-preview": "Gemini 3.1 Pro",
+    "bakkt/claude-opus-4.8": "Claude Opus 4.8",
+    "bakkt/claude-sonnet-5.5": "Claude Sonnet 5.5",
+}
+
+
+def _indexed(rows: list[dict]) -> dict[tuple[str, str], dict]:
+    indexed = {}
+    for row in rows:
+        target = row.get("target") or f"{row['backend']}:{row['model']}:gateway"
+        indexed[(target, row["task"])] = rescore_official_source(row)
+    return indexed
+
+
+def render_compact(rows: list[dict], *, models: list[str], backends: list[str], tasks: list[str]) -> str:
+    """Show only failed task names, with unavailable routes kept distinct."""
+    indexed = _indexed(rows)
+    unavailable = set()
+    for model in models:
+        cases = [
+            row for (target, _), row in indexed.items()
+            if target.split(":")[1] == model and row.get("status") != "unsupported_route"
+            and row.get("reason") != "route"
+        ]
+        if cases and all(not row.get("passed") for row in cases) and any(
+            row.get("reason") == "upstream404"
+            or "404" in (str(row.get("error") or "") + str(row.get("output") or ""))
+            for row in cases
+        ):
+            unavailable.add(model)
+
+    sections = []
+    for title, members in BACKEND_GROUPS:
+        selected = [backend for backend in members if backend in backends]
+        if not selected:
+            continue
+        lines = [f"### {title}", ""]
+        lines.append("| Model | " + " | ".join(BACKEND_LABEL[name] for name in selected) + " |")
+        lines.append("| --- | " + " | ".join("---" for _ in selected) + " |")
+        for model in models:
+            cells = []
+            for backend in selected:
+                target = f"{backend}:{model}:gateway"
+                cases = [indexed.get((target, task)) for task in tasks]
+                if all(row is not None and (
+                    row.get("status") == "unsupported_route" or row.get("reason") == "route"
+                ) for row in cases):
+                    cells.append("N/A")
+                elif model in unavailable:
+                    cells.append("404")
+                else:
+                    failed = [
+                        TASK_LABEL.get(task, task)
+                        for task, row in zip(tasks, cases)
+                        if row is None or not row.get("passed")
+                    ]
+                    cells.append(", ".join(failed) if failed else "✓")
+            lines.append("| " + MODEL_LABEL.get(model, model.removeprefix("bakkt/")) + " | " + " | ".join(cells) + " |")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
 
 def _reason(row: dict) -> str:
     if row.get("status") == "unsupported_route":
@@ -41,7 +128,7 @@ def _reason(row: dict) -> str:
 
 
 def render(rows: list[dict], *, models: list[str], backends: list[str], tasks: list[str]) -> str:
-    indexed = {(row["target"], row["task"]): rescore_official_source(row) for row in rows}
+    indexed = _indexed(rows)
     header = "| Model | " + " | ".join(backends) + " |"
     lines = [header, "| --- | " + " | ".join("---" for _ in backends) + " |"]
     for model in models:
@@ -79,9 +166,14 @@ def main() -> None:
     parser.add_argument("--models", required=True)
     parser.add_argument("--backends", default=",".join(DEFAULT_BACKENDS))
     parser.add_argument("--tasks", default=",".join(DEFAULT_TASKS))
+    parser.add_argument("--compact", action="store_true", help="split backends into two readable tables")
     args = parser.parse_args()
-    rows = [json.loads(line) for line in args.jsonl.read_text(encoding="utf-8").splitlines() if line]
-    print(render(
+    source = args.jsonl.read_text(encoding="utf-8")
+    rows = json.loads(source) if source.lstrip().startswith("[") else [
+        json.loads(line) for line in source.splitlines() if line
+    ]
+    renderer = render_compact if args.compact else render
+    print(renderer(
         rows,
         models=[part.strip() for part in args.models.split(",") if part.strip()],
         backends=[part.strip() for part in args.backends.split(",") if part.strip()],

@@ -1,98 +1,111 @@
-# Bakkt model and Chack backend failure matrix
+# Bakkt model and Chack backend comparison
 
-This comparison uses the Bakkt LiteLLM gateway configuration assigned to
-Naxus user `carlospolop`, accessed with AWS profile `naxusai-admin` on
-2026-11-12. No private key or account configuration is stored here. The ten
-model IDs below were advertised by the gateway model catalog. Claude Opus 4.8
-replaces the earlier Opus 5.5 smoke sample. No GPT model is included.
+## What the results say
 
-## Protocol
+**For the five reachable Chinese models, start with Qwen Code.** It passed all
+15 task runs. LangGraph passed 14/15 and OpenCode passed 13/15. Kimi K3.1 was
+the most portable Chinese model: 28/30 runs passed across the ten backends
+that accept Bakkt credentials. Claude Opus 4.8 and Sonnet 5.5 each passed
+30/30. These are results from three tasks run once per pairing, so use them
+as compatibility evidence rather than a general model ranking.
 
-Every case runs in a new Chack session with fresh temporary local files.
-Results count only when the answer is correct, the task actually calls the
-required tool family, and it stays within its tool budget. A JSON answer
-without inspecting the files fails. No task scans or probes an external
-target. Resumed matrix cases have a 150-second wall-clock limit; the few
-baseline cases completed before that limit was introduced are identified in
-the raw results by their recorded durations.
+**Qwen3 Coder 480B could not be evaluated.** Bakkt advertised it, but its
+upstream route returned 404 before the model could attempt the tasks.
 
-| Code | Task | Check | Tool budget |
-| --- | --- | --- | --- |
-| `R` | `repair_allocator` | Repair a local Python cents allocator with two bugs, preserve its API, run tests, and pass hidden behavior cases | 12 calls |
-| `L` | `reconcile_ledger` | Join posted invoices, payments, and refunds in three local CSVs; exclude void and unknown payments; calculate the top customer, balance, open invoice count, and ignored payment total | 12 calls |
-| `J` | `join_report` | Join two local CSVs, apply adjustments and a stable tie break, and verify Python's dictionary order guarantee from official documentation | 8 calls |
+## How to read the tables
 
-The prompts state the work and desired output without naming a specific tool
-or prescribing a sequence. `R` and `L` need local file access; `J` needs both
-local file and web access. `R` is checked by executing hidden functional cases
-against the resulting module, not by trusting the model's claim that it fixed
-the bug. `L` and `J` require exact JSON fields and values. The source check
-for `J` accepts official docs.python.org pages. Tool calls are counted from
-Chack's run result. Times are wall clock under concurrent load and are useful
-only as rough observations. The [Python data model reference](https://docs.python.org/3/reference/datamodel.html)
-also documents the Python 3.7 insertion-order guarantee; it was added to the
-source allowlist after a valid LangGraph answer exposed that omission. Saved
-JSON answers are rescored with the corrected allowlist in the table below.
+Each cell lists **only the tasks that failed**. **✓** means all three passed.
+**404** means the model route was unavailable. **N/A** means OpenRouter cannot
+use the Bakkt gateway credential; no model run was attempted there.
 
-Cells list failed tests and the reason: `answer` means wrong result,
-`tools` means required local or web evidence was not used, `budget` means too
-many calls, `timeout` means the case exceeded its CLI limit, and `error`
-means the route failed. `route` means the Bakkt gateway credential is not
-supported by that backend. An em dash means all three tasks passed. `unrun`
-would mean a case was not completed. These are single attempts unless a rerun
-is explicitly noted; they do not establish statistical rankings.
+| Task shown in a cell | What the agent had to do |
+| --- | --- |
+| **Repair** | Find and fix two bugs in a local Python allocator, run its tests, and pass hidden behavior checks. |
+| **Ledger** | Reconcile invoices, payments, and refunds across three CSV files, including void and unknown payments. |
+| **Web** | Join two CSV files, break a tie correctly, and verify a Python fact from official documentation online. |
 
-## Failures by model and backend
+### CLI backends
 
-| Model | openai | openrouter | gateway | codex | claude | gemini | kimi | qwen | copilot | opencode | langgraph |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| kimi-k3.1 | — | R:route, L:route, J:route | — | L:error, J:answer+tools | — | — | — | — | — | — | — |
-| glm-5.2 | L:answer+tools, J:answer+tools | R:route, L:route, J:route | L:answer+tools, J:answer+tools | L:answer+tools, J:answer+tools | — | — | — | — | L:answer+tools, J:answer+tools | R:timeout | — |
-| minimax-m2.5 | L:answer+tools, J:answer+tools | R:route, L:route, J:route | L:answer+tools, J:answer+tools | L:answer+tools, J:answer+tools | — | J:timeout | J:timeout | — | L:answer+tools, J:answer+tools | L:answer | L:answer |
-| deepseek-v4.1-flash | L:answer+tools, J:answer+tools | R:route, L:route, J:route | L:answer+tools, J:answer+tools | L:answer+tools, J:answer+tools | J:error | — | — | — | R:error, L:answer+tools, J:answer+tools | — | — |
-| kimi-k2.5 | L:answer+tools, J:answer+tools | R:route, L:route, J:route | L:answer+tools, J:answer+tools | L:answer+tools, J:answer+tools | R:answer+tools, J:error | R:answer, L:answer, J:answer+tools | R:timeout, L:answer, J:answer | — | L:answer+tools, J:answer+tools | — | — |
-| qwen3-coder-480b-a35b-instruct | R:error, L:error, J:error | R:route, L:route, J:route | R:error, L:error, J:error | R:error, L:error, J:error | R:error, L:error, J:error | R:error, L:error, J:error | R:error, L:error, J:error | R:error, L:error, J:error | R:error, L:error, J:error | R:error, L:error, J:error | R:error, L:error, J:error |
-| gemini-3.5-flash | R:error | R:route, L:route, J:route | R:error, J:error | — | — | J:budget | R:error, L:error, J:error | — | — | L:answer, J:answer+tools | — |
-| gemini-3.1-pro-preview | — | R:route, L:route, J:route | — | — | — | J:budget | R:error, L:error, J:error | J:error | J:tools | R:budget, J:error | — |
-| claude-opus-4.8 | — | R:route, L:route, J:route | — | — | — | — | — | — | — | — | — |
-| claude-sonnet-5.5 | — | R:route, L:route, J:route | — | — | — | — | — | — | — | — | — |
+| Model | Codex | Claude Code | Gemini CLI | Kimi Code | Qwen Code | OpenCode |
+| --- | --- | --- | --- | --- | --- | --- |
+| Kimi K3.1 | Ledger, Web | ✓ | ✓ | ✓ | ✓ | ✓ |
+| GLM 5.2 | Ledger, Web | ✓ | ✓ | ✓ | ✓ | Repair |
+| MiniMax M2.5 | Ledger, Web | ✓ | Web | Web | ✓ | Ledger |
+| DeepSeek V4.1 Flash | Ledger, Web | Web | ✓ | ✓ | ✓ | ✓ |
+| Kimi K2.5 | Ledger, Web | Repair, Web | Repair, Ledger, Web | Repair, Ledger, Web | ✓ | ✓ |
+| Qwen3 Coder 480B | 404 | 404 | 404 | 404 | 404 | 404 |
+| Gemini 3.5 Flash | ✓ | ✓ | Web | Repair, Ledger, Web | ✓ | Ledger, Web |
+| Gemini 3.1 Pro | ✓ | ✓ | Web | Repair, Ledger, Web | Web | Repair, Web |
+| Claude Opus 4.8 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Claude Sonnet 5.5 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-## Route and cost interpretation
+### API and LangGraph
 
-Across the five reachable Chinese models, Qwen Code passed **15/15** cases,
-LangGraph **14/15**, and OpenCode **13/15**. Kimi K3.1 had the broadest model
-coverage at **28/30** gateway-compatible cases after the Gemini relay fix;
-the two remaining failures were Codex CLI tool-call/verification cases.
-Claude Opus 4.8 and Sonnet 5.5 each passed **30/30** compatible cases in this
-single-run sample. These counts describe these three tasks and gateway routes,
-not general model quality. The Qwen3 Coder 480B model could not be assessed:
-the advertised route returned an upstream Vertex publisher-model 404 across
-the tested backends.
+| Model | OpenAI* | Gateway | Copilot* | LangGraph | OpenRouter |
+| --- | --- | --- | --- | --- | --- |
+| Kimi K3.1 | ✓ | ✓ | ✓ | ✓ | N/A |
+| GLM 5.2 | Ledger, Web | Ledger, Web | Ledger, Web | ✓ | N/A |
+| MiniMax M2.5 | Ledger, Web | Ledger, Web | Ledger, Web | Ledger | N/A |
+| DeepSeek V4.1 Flash | Ledger, Web | Ledger, Web | Repair, Ledger, Web | ✓ | N/A |
+| Kimi K2.5 | Ledger, Web | Ledger, Web | Ledger, Web | ✓ | N/A |
+| Qwen3 Coder 480B | 404 | 404 | 404 | 404 | N/A |
+| Gemini 3.5 Flash | Repair | Repair, Web | ✓ | ✓ | N/A |
+| Gemini 3.1 Pro | ✓ | ✓ | Web | ✓ | N/A |
+| Claude Opus 4.8 | ✓ | ✓ | ✓ | ✓ | N/A |
+| Claude Sonnet 5.5 | ✓ | ✓ | ✓ | ✓ | N/A |
 
-The generic LangGraph loop passed all three tasks with K3.1, GLM 5.2,
-DeepSeek V4.1 Flash, and K2.5. Its MiniMax ledger failure was a wrong open
-invoice count after reading the files, not a missing tool. That result did not
-justify an additional loop change beyond the checkpoint and tool-guidance
-work already in this branch. Gemini CLI initially failed all K3.1 cases
-because the gateway rejected its generation fields. The relay now retries
-only explicitly rejected fields, and the three post-fix K3.1 reruns passed.
+**Note:** With Bakkt credentials, Chack routes the **OpenAI** and **Copilot** columns
+through its Gateway Responses runtime. They are additional gateway trials,
+not independent OpenAI or Copilot model transports.
 
-The `openai` and `copilot` providers redirect to Chack's Gateway Responses
-runtime with custom gateway credentials, so their columns are repeated
-gateway-runtime trials rather than independent OpenAI or Copilot transports.
-`openrouter` does not accept the Bakkt gateway credential and cannot be
-compared with these Bakkt model IDs through this configuration. Kimi CLI's
-current JSONL output can omit token usage; a zero recorded cost for those
-cases is unknown cost. The gateway catalog can advertise a model whose
-upstream publisher route is unavailable; the failed cases identify that
-separately from model reasoning errors.
+## What caused the important failures
 
-The reproducible harness is
-[`scripts/benchmark_model_backend_matrix.py`](../scripts/benchmark_model_backend_matrix.py),
-using the tasks in [`scripts/benchmark_backends.py`](../scripts/benchmark_backends.py).
-[`scripts/render_backend_model_failures.py`](../scripts/render_backend_model_failures.py)
-formats the JSONL case results into the table above. The private JSONL and
-gateway key stay outside the repository. The sanitized
-[`backend-model-matrix-results.json`](backend-model-matrix-results.json)
-records every case's pass state, reason, time, and tool count without raw
-model output or credentials.
+- **Kimi K3.1 + Codex:** the ledger case produced a malformed tool call; the
+  web case answered without completing the required tool checks. The other
+  nine compatible backends passed all three tasks with K3.1 after the Gemini
+  relay fix.
+- **Gemini models + Kimi Code:** tool continuation hit Bakkt's
+  `thought_signature` rejection. This is a gateway/CLI compatibility failure.
+- **Gemini CLI + Gemini models:** the web task produced the right answer but
+  exceeded its eight-call tool budget.
+- **MiniMax + LangGraph:** the agent read the ledger files but counted one
+  extra open invoice. This did not indicate a missing tool or a broken loop.
+- **Qwen3 Coder 480B:** an upstream Vertex publisher-model 404 prevented
+  inference on every compatible backend.
+
+The Gemini CLI initially failed all three Kimi K3.1 tasks because Bakkt
+rejected generation fields. Chack now removes a field only after that exact
+rejection; all three post-fix reruns passed. A valid citation to the
+[official Python data model reference](https://docs.python.org/3/reference/datamodel.html)
+was also added to the scorer before the final table was generated.
+
+## How the comparison was run
+
+The Bakkt LiteLLM configuration assigned to Naxus user `carlospolop` was
+accessed with AWS profile `naxusai-admin` on 2026-11-12. The ten model IDs
+were in Bakkt's catalog. Claude Opus **4.8** replaces the earlier 5.5 smoke
+sample; no GPT model was included. The matrix contains **330 task cases**
+(10 models × 11 backends × 3 tasks): **204/300 executable cases passed**;
+the other 30 cases are OpenRouter credential incompatibilities.
+
+Every executable case got a fresh Chack session and temporary local files.
+A pass required the correct answer, actual calls to the needed local or web
+tools, and at most 12 tool calls for Repair/Ledger or eight for Web. The code
+repair was checked against the resulting module, not the model's claim that it
+was fixed. The resumed cases had a 150-second wall-clock limit; a few earlier
+baseline cases ran before that limit was added. There was one baseline attempt
+per case, with the three Gemini CLI K3.1 cases rerun after the relay fix.
+Latency under concurrent load and pass rates are not statistical rankings.
+No external target was scanned or probed.
+
+The [sanitized per-case results](backend-model-matrix-results.json) contain
+pass state, failure reason, time, and tool count without raw model output or
+credentials. The
+[table renderer](../scripts/render_backend_model_failures.py) accepts this
+JSON file with `--compact` and a comma-separated `--models` list to regenerate
+the tables. The
+[benchmark runner](../scripts/benchmark_model_backend_matrix.py) and
+[task definitions](../scripts/benchmark_backends.py) allow new runs. Kimi
+CLI may omit usage from its JSONL output, so a recorded zero cost means
+unknown cost. The private key, raw result files, and benchmark session homes
+were removed after testing.
