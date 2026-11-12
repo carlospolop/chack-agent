@@ -3,9 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 from agents import MaxTurnsExceeded
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from chack_agent.backends.langgraph_backend import LangGraphExecutor
+from chack_agent.backends.langgraph_backend import LangGraphExecutor, _with_reasoning_passthrough
 
 
 class _ScriptedModel:
@@ -23,13 +23,23 @@ class _ScriptedModel:
         return reply.model_copy(deep=True, update={"id": None})
 
 
-def _tool_call(index=0):
-    return AIMessage(content="", tool_calls=[{"name": "noop", "args": {}, "id": f"call_{index}"}])
+def _tool_call(index=0, input_tokens=0):
+    return AIMessage(
+        content="", tool_calls=[{"name": "noop", "args": {}, "id": f"call_{index}"}],
+        usage_metadata={"input_tokens": input_tokens, "output_tokens": 1, "total_tokens": input_tokens + 1},
+    )
+
+
+async def _noop(_ctx, _raw_args):
+    return "ok"
+
+
+_NOOP_TOOLS = {"noop": SimpleNamespace(name="noop", on_invoke_tool=_noop)}
 
 
 def _executor(model, *, max_turns=50, output_schema=None, summary_model=None,
               summary_trigger_messages=1000, summary_keep_messages=0,
-              max_non_task_tools=0, function_tools=None):
+              max_non_task_tools=0, function_tools=None, max_context_tokens=0):
     executor = LangGraphExecutor(
         _graph=None,
         _model_with_tools=model,
@@ -48,7 +58,7 @@ def _executor(model, *, max_turns=50, output_schema=None, summary_model=None,
         _summary_keep_messages=summary_keep_messages,
         _summary_max_chars=0,
         _compaction_threshold_ratio=0.75,
-        _max_context_tokens=0,
+        _max_context_tokens=max_context_tokens,
         _output_schema_json=json.dumps(output_schema) if output_schema else "",
         _output_schema_name="answer",
         _output_schema_strict=True,
@@ -145,34 +155,85 @@ def test_summary_prunes_checkpoint_messages_and_keeps_current_request():
     assert model.prompts[-1][-1].content == "Third"
 
 
-def test_summary_keeps_tool_call_with_its_result():
-    model = _ScriptedModel([_tool_call(1), _tool_call(2), AIMessage(content="done")])
-    summary_model = _ScriptedModel([AIMessage(content="First tool round completed.")])
+def test_context_near_the_limit_is_summarized_but_keeps_the_task_and_tool_pairs():
+    # The third call reports 900 input tokens against a 1000-token window
+    # compacting at 75%, so the fourth prompt carries a summary instead.
+    model = _ScriptedModel([_tool_call(1, 100), _tool_call(2, 200), _tool_call(3, 900), AIMessage(content="done")])
+    summary_model = _ScriptedModel([AIMessage(content="Rounds one and two found nothing.")])
     executor = _executor(
-        model, summary_model=summary_model,
-        summary_trigger_messages=1, summary_keep_messages=1,
+        model, summary_model=summary_model, summary_keep_messages=1,
+        function_tools=_NOOP_TOOLS, max_context_tokens=1000,
     )
 
-    assert executor.invoke({"input": "Run two tools"})["output"] == "done"
-    state = executor._graph.get_state({"configurable": {"thread_id": executor._thread_id}}).values
-    assert len(state["messages"]) == 3
-    assert state["messages"][0].tool_calls[0]["id"] == "call_2"
-    assert state["messages"][1].tool_call_id == "call_2"
-    assert state["messages"][2].content == "done"
+    assert executor.invoke({"input": "Audit host A for CVE-1"})["output"] == "done"
+
+    last_prompt = model.prompts[-1]
+    assert "Rounds one and two found nothing." in last_prompt[0].content
+    assert [type(m).__name__ for m in last_prompt[1:]] == ["HumanMessage", "AIMessage", "ToolMessage"]
+    assert last_prompt[1].content == "Audit host A for CVE-1"
+    assert last_prompt[2].tool_calls[0]["id"] == last_prompt[3].tool_call_id == "call_3"
 
 
-def test_tool_budget_remaining_is_shown_to_model_after_tool_call():
-    async def noop(_ctx, _raw_args):
-        return "ok"
+def test_long_tool_loops_are_not_summarized_by_message_count():
+    # Sixty tool rounds are 121 messages but one conversation turn: without
+    # token pressure, the agent keeps its full history.
+    model = _ScriptedModel([*(_tool_call(i, 50) for i in range(60)), AIMessage(content="done")])
+    summary_model = _ScriptedModel([AIMessage(content="unused")])
+    executor = _executor(
+        model, summary_model=summary_model, summary_trigger_messages=50, summary_keep_messages=20,
+        function_tools=_NOOP_TOOLS, max_context_tokens=100_000, max_turns=100,
+    )
 
+    assert executor.invoke({"input": "Research deeply"})["output"] == "done"
+    assert summary_model.prompts == []
+    assert len(model.prompts[-1]) == 1 + 1 + 2 * 60
+
+
+def test_system_prompt_stays_identical_while_the_tool_budget_runs_out():
+    model = _ScriptedModel([_tool_call(1), _tool_call(2), _tool_call(3), AIMessage(content="done")])
+    executor = _executor(model, max_non_task_tools=2, function_tools=_NOOP_TOOLS)
+
+    assert executor.invoke({"input": "Use the tool"})["output"] == "done"
+
+    assert len({prompt[0].content for prompt in model.prompts}) == 1
+    results = [m.content for m in model.prompts[-1] if isinstance(m, ToolMessage)]
+    assert "1 of 2 non-task tool calls remain" in results[0]
+    assert "all 2 non-task tool calls are used" in results[1]
+    assert results[2].startswith("ERROR: Tool budget reached (2)")
+
+
+def test_tool_results_carry_no_budget_note_while_the_budget_is_ample():
     model = _ScriptedModel([_tool_call(1), AIMessage(content="done")])
-    executor = _executor(
-        model, max_non_task_tools=1,
-        function_tools={"noop": SimpleNamespace(name="noop", on_invoke_tool=noop)},
-    )
-    assert executor.invoke({"input": "Use the tool once"})["output"] == "done"
-    assert "1 non-task tool calls remain" in model.prompts[0][0].content
-    assert "tool-call budget is exhausted" in model.prompts[1][0].content
+    executor = _executor(model, max_non_task_tools=300, function_tools=_NOOP_TOOLS)
+
+    executor.invoke({"input": "Use the tool"})
+
+    assert [m.content for m in model.prompts[-1] if isinstance(m, ToolMessage)] == ["ok"]
+
+
+@pytest.mark.parametrize("field, value", [
+    ("reasoning_content", "Plan: probe the login page next."),
+    ("reasoning_details", [{"type": "reasoning.text", "text": "Plan: probe next."}]),
+])
+def test_reasoning_returned_by_the_model_is_sent_back_on_its_tool_call_turn(field, value):
+    from langchain_openai import ChatOpenAI
+
+    model = _with_reasoning_passthrough(ChatOpenAI)(model="m", api_key="k", base_url="http://gateway.invalid/v1")
+    reply = model._create_chat_result({
+        "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": "", field: value,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "noop", "arguments": "{}"}}],
+        }}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }).generations[0].message
+
+    payload = model._get_request_payload([
+        HumanMessage(content="go"), reply, ToolMessage(content="ok", tool_call_id="c1"),
+    ])
+
+    assistant = payload["messages"][1]
+    assert assistant["role"] == "assistant" and assistant[field] == value
+    assert all(field not in m for i, m in enumerate(payload["messages"]) if i != 1)
 
 
 def test_web_verification_guidance_only_when_web_tool_is_available():

@@ -170,7 +170,7 @@ For native-planning CLI backends, Chack maps the task-manager requirement to the
 
 Calls with the same session ID can continue provider conversation state. `agent.idle_reset_minutes` and `agent.max_age_minutes` rotate stale sessions when nonzero. `reset_session(session_id)` clears a session and, by default, finalizes its long-term memory first.
 
-Automatic compaction uses `agent.max_context_tokens` and `agent.compaction_threshold_ratio`. `memory_max_messages` and `memory_reset_to_messages` bound local or summary-backed history where applicable. File-backed long-term summaries are controlled by `long_term_memory_enabled`, `long_term_memory_dir`, and `long_term_memory_max_chars`.
+Automatic compaction uses `agent.max_context_tokens` and `agent.compaction_threshold_ratio`. `memory_max_messages` and `memory_reset_to_messages` bound local or summary-backed history where applicable. On the LangGraph backend they count conversation turns, not tool rounds; a long tool loop compacts only near the context limit (`CHACK_LANGGRAPH_CONTEXT_TOKENS`, default 200,000, when the window is not configured) and keeps the request verbatim. File-backed long-term summaries are controlled by `long_term_memory_enabled`, `long_term_memory_dir`, and `long_term_memory_max_chars`.
 
 To compact an existing provider conversation before a specific continuation, opt in on that call:
 

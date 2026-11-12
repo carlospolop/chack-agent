@@ -86,6 +86,52 @@ class _GraphState(TypedDict, total=False):
     non_task_tool_calls: int
 
 
+# Interleaved-thinking models (Kimi, MiniMax, GLM, DeepSeek; OpenRouter's
+# reasoning_details) expect their reasoning back on each assistant tool-call
+# turn, as opencode sends it. Without it they forget their plan every step.
+_REASONING_FIELDS = ("reasoning_content", "reasoning_details")
+
+# Window assumed when the model's context size is not configured.
+_DEFAULT_CONTEXT_TOKENS = 200_000
+
+
+def _with_reasoning_passthrough(chat_cls: type) -> type:
+    """Subclass a langchain ChatOpenAI so reasoning survives the round trip."""
+
+    class _ReasoningChatOpenAI(chat_cls):  # type: ignore[misc, valid-type]
+        def _create_chat_result(self, response: Any, generation_info: Optional[dict] = None) -> Any:
+            result = super()._create_chat_result(response, generation_info)
+            response_dict = response if isinstance(response, dict) else response.model_dump()
+            for generation, choice in zip(result.generations, response_dict.get("choices") or []):
+                message = (choice or {}).get("message") or {}
+                for field in _REASONING_FIELDS:
+                    if message.get(field):
+                        generation.message.additional_kwargs[field] = message[field]
+            return result
+
+        def _get_request_payload(self, input_: Any, *, stop: Optional[list[str]] = None, **kwargs: Any) -> dict:
+            payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+            if "messages" in payload:
+                messages = self._convert_input(input_).to_messages()
+                for message, entry in zip(messages, payload["messages"]):
+                    if isinstance(message, AIMessage) and entry.get("role") == "assistant":
+                        for field in _REASONING_FIELDS:
+                            if message.additional_kwargs.get(field):
+                                entry[field] = message.additional_kwargs[field]
+            return payload
+
+    return _ReasoningChatOpenAI
+
+
+def _tool_budget_note(remaining: int, limit: int) -> str:
+    """A note for a tool result once the budget runs low, else nothing."""
+    if remaining <= 0:
+        return f"\n\n[Tool budget: all {limit} non-task tool calls are used. Answer from the evidence already gathered.]"
+    if remaining <= max(3, limit // 10):
+        return f"\n\n[Tool budget: {remaining} of {limit} non-task tool calls remain. Spend them on the checks that still matter.]"
+    return ""
+
+
 def _to_int(raw: str, default: int) -> int:
     try:
         return int(str(raw or "").strip())
@@ -453,21 +499,15 @@ class LangGraphExecutor:
             if str(focus_instructions or "").strip()
             else ""
         )
-        if previous_summary:
-            prompt = (
-                "You maintain compact conversation memory.\n"
-                "Existing summary:\n"
-                f"{previous_summary}\n\n"
-                "New messages:\n"
-                f"{chunk}\n\n"
-                "Return an updated concise summary preserving key facts, decisions, and constraints."
-                f"{focus_block}"
-            )
-        else:
-            prompt = (
-                "Summarize the following conversation history concisely, preserving key facts, decisions, and constraints:\n"
-                f"{chunk}{focus_block}"
-            )
+        # A handoff for the same agent to keep working, as Codex compacts:
+        # what is done and found, with the exact identifiers, and what is left.
+        earlier = f"Earlier checkpoint:\n{previous_summary}\n\n" if previous_summary else ""
+        prompt = (
+            "Write a checkpoint so you can continue this task after the messages below are removed. "
+            "Keep: the progress so far and key decisions; every finding and fact with its exact identifiers, "
+            "versions, URLs, paths and commands; leads ruled out and why; and the concrete next steps.\n\n"
+            f"{earlier}Messages:\n{chunk}{focus_block}"
+        )
 
         raise_if_cancelled()
         response = self._summary_model.invoke([HumanMessage(content=prompt)])
@@ -527,7 +567,9 @@ class LangGraphExecutor:
         )
         return summary
 
-    def _system_prompt(self, summary: str, *, remaining_tools: int | None = None) -> str:
+    def _system_prompt(self, summary: str) -> str:
+        # Stays byte-identical across the turns of a run so the provider can
+        # cache it; the shrinking tool budget is reported on tool results.
         base = str(self._base_system_prompt or "").strip()
         policy_lines: list[str] = []
         if self._require_task_steps_manager_init_first:
@@ -538,13 +580,6 @@ class LangGraphExecutor:
             policy_lines.append(
                 f"- Do not exceed {self._max_non_task_tools} non-task tool calls."
             )
-        if remaining_tools is not None:
-            if remaining_tools == 0:
-                policy_lines.append("- The tool-call budget is exhausted. Answer from the evidence already gathered; do not call another tool.")
-            else:
-                policy_lines.append(
-                    f"- {remaining_tools} non-task tool calls remain. Combine related checks and do not repeat a successful lookup."
-                )
         available_tools = (*self._function_tools_by_name, *self._mcp_tools_by_name)
         if any("web" in name.lower() or "fetch" in name.lower() for name in available_tools):
             policy_lines.append(
@@ -571,7 +606,7 @@ class LangGraphExecutor:
                 f"Schema:\n{self._output_schema_json}"
             )
 
-        return f"{base}{policy_block}{summary_block}{output_schema_block}".strip()
+        return f"{base}{policy_block}{output_schema_block}{summary_block}".strip()
 
     def build_graph(self) -> None:
         checkpoint_mod = importlib.import_module("langgraph.checkpoint.memory")
@@ -597,15 +632,22 @@ class LangGraphExecutor:
             if self._max_context_tokens > 0 and self._compaction_threshold_ratio > 0:
                 threshold_tokens = int(self._compaction_threshold_ratio * self._max_context_tokens)
 
+            # The message limit counts conversation turns, as on the other
+            # backends; tool rounds inside one run only compact on tokens,
+            # near the context limit, like Codex, Claude Code and opencode.
+            turns = sum(
+                1 for m in messages
+                if isinstance(m, HumanMessage) or (isinstance(m, AIMessage) and not m.tool_calls)
+            )
             should_summarize_by_messages = (
-                len(messages) > max(self._summary_trigger_messages, self._summary_keep_messages + 2)
+                turns > max(self._summary_trigger_messages, self._summary_keep_messages + 2)
             )
             should_summarize_by_tokens = bool(
                 threshold_tokens > 0 and latest_input_tokens >= threshold_tokens
             )
 
             older: list[AnyMessage] = []
-            start = 0
+            kept: list[AnyMessage] = messages
             if should_summarize_by_messages or should_summarize_by_tokens:
                 # Keep the current request even when the configured tail size
                 # is zero. Never start the retained tail with a tool result:
@@ -614,7 +656,13 @@ class LangGraphExecutor:
                 start = max(0, len(messages) - keep)
                 while start > 0 and isinstance(messages[start], ToolMessage):
                     start -= 1
-                older = messages[:start]
+                # The request that started this run stays verbatim: a summary
+                # of it loses the details the agent must still act on.
+                request = next((m for m in reversed(messages[:start]) if isinstance(m, HumanMessage)), None)
+                if request is not None and any(isinstance(m, HumanMessage) for m in messages[start:]):
+                    request = None
+                older = [m for m in messages[:start] if m is not request]
+                kept = ([request] if request is not None else []) + messages[start:]
                 maybe_new_summary = self._summarize_messages(
                     summary,
                     older,
@@ -626,18 +674,11 @@ class LangGraphExecutor:
                     triggered_by_tokens=should_summarize_by_tokens,
                 )
 
-            tool_limit = int(current_max_tools_used() or self._max_non_task_tools or 0)
-            remaining = max(0, tool_limit - int(state.get("non_task_tool_calls", 0) or 0)) if tool_limit > 0 else None
-            prompt_messages: list[AnyMessage] = [
-                SystemMessage(content=self._system_prompt(maybe_new_summary, remaining_tools=remaining))
-            ]
+            prompt_messages: list[AnyMessage] = [SystemMessage(content=self._system_prompt(maybe_new_summary))]
             # Until a summary exists, every message is still part of the live
             # conversation. Silently keeping only the tail here discards facts
             # before the configured compaction threshold is reached.
-            if maybe_new_summary:
-                prompt_messages.extend(messages[start:] if older else messages)
-            else:
-                prompt_messages.extend(messages)
+            prompt_messages.extend(kept if maybe_new_summary else messages)
 
             raise_if_cancelled()
             response = self._model_with_tools.invoke(prompt_messages)
@@ -776,6 +817,8 @@ class LangGraphExecutor:
                     has_init = True
                 if is_non_task:
                     non_task_count += 1
+                    if configured_max_non_task_tools > 0:
+                        result = f"{result}{_tool_budget_note(configured_max_non_task_tools - non_task_count, configured_max_non_task_tools)}"
 
                 outputs.append(ToolMessage(content=result, tool_call_id=call_id, name=call_name))
                 events.append(
@@ -867,7 +910,7 @@ def build_executor(
     tools_append: Optional[list[Any]] = None,
 ) -> LangGraphExecutor:
     try:
-        ChatOpenAI = getattr(importlib.import_module("langchain_openai"), "ChatOpenAI")
+        ChatOpenAI = _with_reasoning_passthrough(getattr(importlib.import_module("langchain_openai"), "ChatOpenAI"))
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(
             "langgraph backend requires langchain-openai and langgraph packages installed"
@@ -997,7 +1040,8 @@ def build_executor(
             else _to_int(os.environ.get("CHACK_LANGGRAPH_SUMMARY_MAX_CHARS", "6000"), 6000),
         ),
         _compaction_threshold_ratio=float(getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75),
-        _max_context_tokens=int(config.model.max_context_tokens or 0),
+        _max_context_tokens=int(config.model.max_context_tokens or 0)
+        or _to_int(os.environ.get("CHACK_LANGGRAPH_CONTEXT_TOKENS", ""), _DEFAULT_CONTEXT_TOKENS),
         _output_schema_json=(
             json.dumps(getattr(config.agent, "output_schema_json", None), ensure_ascii=False, indent=2)
             if getattr(config.agent, "output_schema_json", None)
