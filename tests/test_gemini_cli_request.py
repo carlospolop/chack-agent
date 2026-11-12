@@ -30,7 +30,9 @@ _GEMINI = shutil.which(os.environ.get("GEMINI_CLI_PATH", "") or "gemini")
 pytestmark = pytest.mark.skipif(_GEMINI is None, reason="Gemini CLI not installed")
 
 
-def _capture_first_request(tmp_path, monkeypatch, prompt="Run printf alpha", run_backend=False, **tools) -> dict:
+def _capture_first_request(
+    tmp_path, monkeypatch, prompt="Run printf alpha", run_backend=False, tools_append=None, **tools
+) -> dict:
     requests: list[dict] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -71,7 +73,12 @@ def _capture_first_request(tmp_path, monkeypatch, prompt="Run printf alpha", run
             env={},
         )
         executor = build_executor(
-            config, system_prompt="system", max_turns=2, memory_max_messages=10, memory_reset_to_messages=5
+            config,
+            system_prompt="system",
+            max_turns=2,
+            memory_max_messages=10,
+            memory_reset_to_messages=5,
+            tools_append=tools_append,
         )
         executor._ensure_gemini_home_and_config()
         executor._write_gemini_settings(executor._gemini_home, tools_cwd=str(workdir))
@@ -194,3 +201,20 @@ def test_a_prompt_larger_than_one_argv_string_reaches_the_model(tmp_path, monkey
     sent = json.dumps(request.get("contents") or [])
     assert "END-OF-PROMPT-MARKER" in sent
     assert sent.count("x" * 1000) >= 300
+
+
+def test_a_tool_larger_than_one_environment_string_reaches_the_model(tmp_path, monkeypatch):
+    # Tools travel to the MCP server serialized; Linux rejects any single
+    # environment string above 128 KiB with E2BIG, and macOS caps the total.
+    from agents import function_tool
+
+    reference = "r" * 1_500_000
+
+    @function_tool(name_override="lookup_reference")
+    def lookup_reference(offset: int) -> str:
+        """Return a slice of the bundled reference."""
+        return reference[offset : offset + 10]
+
+    request = _capture_first_request(tmp_path, monkeypatch, run_backend=True, tools_append=[lookup_reference])
+
+    assert "mcp_chack_tools_lookup_reference" in _tool_names(request)
