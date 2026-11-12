@@ -155,8 +155,26 @@ def test_content_filter_stop_ends_the_run_with_an_explicit_error():
     with pytest.raises(RuntimeError, match="content_filter"):
         _executor(model, output_schema=_SCHEMA).invoke({"input": "review"})
 
-    # A filtered response is a refusal, not an answer to repair.
-    assert len(model.prompts) == 1
+    # A filtered response is a refusal, not an answer to repair: the same
+    # request is asked again a bounded number of times, then the run fails.
+    assert len(model.prompts) == 3
+    assert all(prompt == model.prompts[0] for prompt in model.prompts)
+
+
+def test_a_response_filtered_once_is_asked_again_and_the_run_continues_with_its_work():
+    model = _ScriptedModel([
+        _tool_call(0),
+        AIMessage(content="", response_metadata={"finish_reason": "content_filter"}),
+        AIMessage(content='{"verdict": "valid"}'),
+    ])
+
+    result = _executor(model, output_schema=_SCHEMA).invoke({"input": "review"})
+
+    assert json.loads(result["output"]) == {"verdict": "valid"}
+    assert len(model.prompts) == 3
+    # The retry carries the tool round already done, not a fresh start.
+    assert model.prompts[2] == model.prompts[1]
+    assert any(isinstance(m, ToolMessage) for m in model.prompts[2])
 
 
 def test_summary_prunes_checkpoint_messages_and_keeps_current_request():
@@ -392,6 +410,28 @@ def test_near_the_limit_old_tool_outputs_are_cleared_before_anything_is_summariz
     assert [m.tool_call_id for m in results] == [f"call_{i}" for i in range(7)]
     assert ["cleared" in m.content for m in results] == [True, True, False, False, False, False, False]
     assert sum(isinstance(m, AIMessage) for m in last_prompt) == 7
+
+
+def test_cleared_outputs_reach_the_summary_whole_in_chunks_folded_into_one_checkpoint():
+    # Two cleared 70k-character outputs, each with a fact in its middle:
+    # they do not fit one chunk, so the second chunk is summarized on top of
+    # the first checkpoint and neither fact is clipped away.
+    async def _big_page(_ctx, raw_args):
+        page = json.loads(raw_args)["page"]
+        return f"{'x' * 35_000} GHSA-PAGE-{page} {'y' * 35_000}"
+
+    model = _ScriptedModel([*(_long_tool_call(i, 100) for i in range(6)), _long_tool_call(6, 900),
+                            AIMessage(content="done")])
+    summary_model = _ScriptedModel([AIMessage(content="Checkpoint A."), AIMessage(content="Checkpoint B.")])
+    executor = _executor(model, summary_model=summary_model, max_context_tokens=1000,
+                         function_tools={"dump": SimpleNamespace(name="dump", on_invoke_tool=_big_page)})
+
+    assert executor.invoke({"input": "Read every page"})["output"] == "done"
+
+    first, second = (prompt[0].content for prompt in summary_model.prompts)
+    assert "GHSA-PAGE-0" in first and "GHSA-PAGE-1" not in first
+    assert "GHSA-PAGE-1" in second and "Earlier checkpoint:\nCheckpoint A." in second
+    assert "Checkpoint B." in model.prompts[-1][1].content
 
 
 def test_a_context_overflow_error_shrinks_the_context_and_retries_once():

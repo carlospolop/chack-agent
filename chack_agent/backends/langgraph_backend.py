@@ -238,7 +238,13 @@ _MASKED_OUTPUT = "[Earlier output of this tool call was cleared to save context;
 # Tool results kept in full when older ones are cleared.
 _KEEP_RECENT_TOOL_RESULTS = 5
 _REPEAT_WINDOW = 30
-_SUMMARY_SOURCE_CLIP = 2000
+# Messages to summarize are read in chunks of about 30k tokens, each folded
+# into the running checkpoint, so a long tool output reaches the summarizer
+# whole instead of losing its middle.
+_SUMMARY_CHUNK_CHARS = 120_000
+# Provider content filters stop the same request only some of the time:
+# asking again keeps the run's work, where a refusal restarts it from zero.
+_CONTENT_FILTER_RETRIES = 2
 
 
 def _clip_middle(text: str, limit: int) -> str:
@@ -663,12 +669,16 @@ class LangGraphExecutor:
                 f" -> {call.get('name')}({json.dumps(call.get('args'), ensure_ascii=False, default=str)})"
                 for call in (getattr(message, "tool_calls", None) or [])
             )
-            # Raw tool output can be huge; its head and tail carry what matters.
-            rendered.append(f"[{role}] {_clip_middle(content, _SUMMARY_SOURCE_CLIP)}{calls}")
-        chunk = "\n".join(rendered)
+            rendered.append(f"[{role}] {_clip_middle(content, _SUMMARY_CHUNK_CHARS)}{calls}")
+        chunks: list[str] = []
+        for entry in rendered:
+            if chunks and len(chunks[-1]) + len(entry) < _SUMMARY_CHUNK_CHARS:
+                chunks[-1] = f"{chunks[-1]}\n{entry}"
+            else:
+                chunks.append(entry)
         previous_summary_chars = len(previous_summary or "")
         source_messages_count = len(messages)
-        source_chars = len(chunk)
+        source_chars = sum(len(chunk) for chunk in chunks)
         did_truncate = False
 
         focus_block = (
@@ -676,27 +686,26 @@ class LangGraphExecutor:
             if str(focus_instructions or "").strip()
             else ""
         )
-        # A handoff for the same agent to keep working, as Codex compacts:
-        # what is done and found, with the exact identifiers, and what is left.
-        earlier = f"Earlier checkpoint:\n{previous_summary}\n\n" if previous_summary else ""
-        prompt = (
-            "Write a checkpoint so you can continue this task after the messages below are removed. "
-            "Keep: the progress so far and key decisions; every finding and fact with its exact identifiers, "
-            "versions, URLs, paths and commands; leads ruled out and why; and the concrete next steps."
-            f"{f' Stay within {self._summary_max_chars} characters.' if self._summary_max_chars > 0 else ''}\n\n"
-            f"{earlier}Messages:\n{chunk}{focus_block}"
-        )
+        summary = previous_summary
+        for chunk in chunks:
+            # A handoff for the same agent to keep working, as Codex compacts:
+            # what is done and found, with the exact identifiers, and what is left.
+            earlier = f"Earlier checkpoint:\n{summary}\n\n" if summary else ""
+            prompt = (
+                "Write a checkpoint so you can continue this task after the messages below are removed. "
+                "Keep: the progress so far and key decisions; every finding and fact with its exact identifiers, "
+                "versions, URLs, paths and commands; leads ruled out and why; and the concrete next steps."
+                f"{f' Stay within {self._summary_max_chars} characters.' if self._summary_max_chars > 0 else ''}\n\n"
+                f"{earlier}Messages:\n{chunk}{focus_block}"
+            )
 
-        raise_if_cancelled()
-        response = self._summary_model.invoke([HumanMessage(content=prompt)])
-        _report_message_usage(self._summary_model, response)
-        content = getattr(response, "content", "")
-        if isinstance(content, str):
-            summary = content.strip() or previous_summary
-        elif isinstance(content, list):
-            summary = "\n".join(str(part) for part in content).strip() or previous_summary
-        else:
-            summary = str(content or previous_summary).strip() or previous_summary
+            raise_if_cancelled()
+            response = self._summary_model.invoke([HumanMessage(content=prompt)])
+            _report_message_usage(self._summary_model, response)
+            content = getattr(response, "content", "")
+            if isinstance(content, list):
+                content = "\n".join(str(part) for part in content)
+            summary = str(content or "").strip() or summary
         if self._summary_max_chars > 0 and len(summary) > self._summary_max_chars:
             summary = summary[: self._summary_max_chars]
             did_truncate = True
@@ -949,6 +958,13 @@ class LangGraphExecutor:
                     raise
                 removed += more_removed
                 replaced = list({m.id: m for m in [*replaced, *more_replaced]}.values())
+                response = call_model(prompt_for(messages, new_summary), final_turn)
+
+            for _ in range(_CONTENT_FILTER_RETRIES):
+                if (getattr(response, "response_metadata", None) or {}).get("finish_reason") != "content_filter":
+                    break
+                _LOGGER.warning("LangGraph response stopped by the provider content filter; asking again")
+                _report_message_usage(self._summary_model, response)
                 response = call_model(prompt_for(messages, new_summary), final_turn)
 
             usage = getattr(response, "usage_metadata", None) or {}
