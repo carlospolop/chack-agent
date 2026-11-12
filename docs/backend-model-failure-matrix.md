@@ -1,16 +1,28 @@
 # Bakkt model and Chack backend comparison
 
-## What the results say
+## Top three backends per model
 
-**For the five reachable Chinese models, start with Qwen Code.** It passed all
-15 task runs. LangGraph passed 14/15 and OpenCode passed 13/15. Kimi K3.1 was
-the most portable Chinese model: 28/30 runs passed across the ten backends
-that accept Bakkt credentials. Claude Opus 4.8 and Sonnet 5.5 each passed
-30/30. These are results from three tasks run once per pairing, so use them
-as compatibility evidence rather than a general model ranking.
+Ranked by tasks passed, then observed total time across the three tasks.
+Each pairing was run once; tied pass counts and timings are provisional.
+The OpenAI and Copilot columns below use Chack's Gateway runtime with this
+Bakkt credential, so they are excluded from this independent-backend ranking.
 
-**Qwen3 Coder 480B could not be evaluated.** Bakkt advertised it, but its
-upstream route returned 404 before the model could attempt the tasks.
+| Model | 1 | 2 | 3 |
+| --- | --- | --- | --- |
+| Kimi K3.1 | OpenCode 3/3 | LangGraph 3/3 | Gateway 3/3 |
+| GLM 5.2 | Qwen Code 3/3 | Gemini CLI 3/3 | Kimi Code 3/3 |
+| MiniMax M2.5 | Qwen Code 3/3 | Claude Code 3/3 | LangGraph 2/3 |
+| DeepSeek V4.1 Flash | LangGraph 3/3 | Gemini CLI 3/3 | OpenCode 3/3 |
+| Kimi K2.5 | LangGraph 3/3 | Qwen Code 3/3 | OpenCode 3/3 |
+| Qwen3 Coder 480B | Unavailable: Bakkt route returned 404 | — | — |
+| Gemini 3.5 Flash | Claude Code 3/3 | Qwen Code 3/3 | Codex 3/3 |
+| Gemini 3.1 Pro | Claude Code 3/3 | Codex 3/3 | Gateway 3/3 |
+| Claude Opus 4.8 | LangGraph 3/3 | Kimi Code 3/3 | Codex 3/3 |
+| Claude Sonnet 5.5 | OpenCode 3/3 | LangGraph 3/3 | Gateway 3/3 |
+
+Across the five reachable Chinese models, Qwen Code passed 15/15 tasks,
+LangGraph 14/15, and OpenCode 13/15. The table below shows the failures behind
+each result.
 
 ## How to read the tables
 
@@ -58,33 +70,18 @@ use the Bakkt gateway credential; no model run was attempted there.
 through its Gateway Responses runtime. They are additional gateway trials,
 not independent OpenAI or Copilot model transports.
 
-## What caused the important failures
+## Important compatibility limits
 
-- **Kimi K3.1 + Codex:** the ledger case produced a malformed tool call; the
-  web case answered without completing the required tool checks. The other
-  nine compatible backends passed all three tasks with K3.1 after the Gemini
-  relay fix.
-- **Gemini models + Kimi Code:** tool continuation hit Bakkt's
-  `thought_signature` rejection. This is a gateway/CLI compatibility failure.
-- **Gemini CLI + Gemini models:** the web task produced the right answer but
-  exceeded its eight-call tool budget.
-- **MiniMax + LangGraph:** the agent read the ledger files but counted one
-  extra open invoice. This did not indicate a missing tool or a broken loop.
-- **Qwen3 Coder 480B:** an upstream Vertex publisher-model 404 prevented
-  inference on every compatible backend.
-
-The Gemini CLI initially failed all three Kimi K3.1 tasks because Bakkt
-rejected generation fields. Chack now removes a field only after that exact
-rejection; all three post-fix reruns passed. A valid citation to the
-[official Python data model reference](https://docs.python.org/3/reference/datamodel.html)
-was also added to the scorer before the final table was generated.
+- Kimi Code with Gemini models hit Bakkt's `thought_signature` rejection on
+  tool continuation.
+- Gemini CLI with Gemini models exceeded the eight-call budget on the Web
+  task, despite correct answers.
+- Qwen3 Coder 480B returned an upstream 404 before inference.
 
 ## How the comparison was run
 
 The Bakkt LiteLLM configuration assigned to Naxus user `carlospolop` was
-accessed with AWS profile `naxusai-admin` on 2026-11-12. The ten model IDs
-were in Bakkt's catalog. Claude Opus **4.8** replaces the earlier 5.5 smoke
-sample; no GPT model was included. The matrix contains **330 task cases**
+used on 2026-11-12. No GPT model was included. The matrix contains **330 task cases**
 (10 models × 11 backends × 3 tasks): **204/300 executable cases passed**;
 the other 30 cases are OpenRouter credential incompatibilities.
 
@@ -98,14 +95,8 @@ per case, with the three Gemini CLI K3.1 cases rerun after the relay fix.
 Latency under concurrent load and pass rates are not statistical rankings.
 No external target was scanned or probed.
 
-The [sanitized per-case results](backend-model-matrix-results.json) contain
-pass state, failure reason, time, and tool count without raw model output or
-credentials. The
-[table renderer](../scripts/render_backend_model_failures.py) accepts this
-JSON file with `--compact` and a comma-separated `--models` list to regenerate
-the tables. The
-[benchmark runner](../scripts/benchmark_model_backend_matrix.py) and
-[task definitions](../scripts/benchmark_backends.py) allow new runs. Kimi
-CLI may omit usage from its JSONL output, so a recorded zero cost means
-unknown cost. The private key, raw result files, and benchmark session homes
-were removed after testing.
+The [sanitized per-case results](backend-model-matrix-results.json) include
+pass state, failure reason, time, and tool count. The
+[table renderer](../scripts/render_backend_model_failures.py) and
+[benchmark runner](../scripts/benchmark_model_backend_matrix.py) reproduce the
+comparison. Kimi CLI may omit usage, so recorded zero cost means unknown cost.

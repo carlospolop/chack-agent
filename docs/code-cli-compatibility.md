@@ -24,7 +24,7 @@ unavailable for that turn.
 Qwen's OpenAI-style reasoning setting is omitted for Claude model routes:
 Bakkt's Claude Vertex route rejects that request field. Kimi and Qwen both
 retain the configured reasoning setting for other compatible models. See
-[the Bakkt smoke matrix](model-compatibility-smoke.md) for measured route and
+[the Bakkt backend matrix](backend-model-failure-matrix.md) for measured route and
 tool-use differences.
 
 ## Execution tool compatibility
