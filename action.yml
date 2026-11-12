@@ -2,7 +2,7 @@ name: "chack-agent"
 description: "Run the chack agent with a prompt and parameters."
 inputs:
   provider:
-    description: "Model provider/backend: DEFAULT_BACKEND, openai, openrouter, codex, gemini, claude, opencode, or langgraph"
+    description: "Model provider/backend: DEFAULT_BACKEND, openai, openrouter, codex, gemini, claude, kimi, qwen, opencode, or langgraph"
     required: false
     default: "DEFAULT_BACKEND"
   model_primary:
@@ -137,6 +137,22 @@ inputs:
     description: "Anthropic API key alias (optional, prefer env CLAUDE_API_KEY)"
     required: false
     default: ""
+  kimi_api_key:
+    description: "Kimi API key (optional, prefer env KIMI_API_KEY)"
+    required: false
+    default: ""
+  qwen_api_key:
+    description: "Qwen OpenAI-compatible API key (optional, prefer env QWEN_API_KEY)"
+    required: false
+    default: ""
+  qwen_base_url:
+    description: "Qwen OpenAI-compatible base URL (required with QWEN_API_KEY)"
+    required: false
+    default: ""
+  kimi_base_url:
+    description: "Optional Kimi OpenAI-compatible base URL"
+    required: false
+    default: ""
 outputs:
   final-message:
     description: "Agent output"
@@ -191,6 +207,10 @@ runs:
         INPUT_GOOGLE_API_KEY: ${{ inputs.google_api_key }}
         INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         INPUT_CLAUDE_API_KEY: ${{ inputs.claude_api_key }}
+        INPUT_KIMI_API_KEY: ${{ inputs.kimi_api_key }}
+        INPUT_QWEN_API_KEY: ${{ inputs.qwen_api_key }}
+        INPUT_QWEN_BASE_URL: ${{ inputs.qwen_base_url }}
+        INPUT_KIMI_BASE_URL: ${{ inputs.kimi_base_url }}
       working-directory: ${{ github.workspace }}
       run: |
         python -m chack_agent.github_action

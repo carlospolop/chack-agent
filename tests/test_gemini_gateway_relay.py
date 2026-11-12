@@ -116,6 +116,60 @@ def test_gateway_errors_keep_their_status_and_body(gateway, method):
     assert body == error
 
 
+def test_unsupported_generation_fields_are_removed_only_after_explicit_rejections():
+    seen = []
+
+    class Gateway(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["content-length"]))
+            data = json.loads(body)
+            seen.append(data)
+            if "temperature" in data.get("generationConfig", {}):
+                status = 400
+                answer = {"error": {"message": "This model doesn't support the temperature field. Remove temperature and try again."}}
+            elif "topP" in data.get("generationConfig", {}):
+                status = 400
+                answer = {"error": {"message": "This model doesn't support the topP field. Remove topP and try again."}}
+            else:
+                status = 200
+                answer = ANSWER
+            payload = json.dumps(answer).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Gateway)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        body = json.dumps({
+            "contents": [{"parts": [{"text": "hi"}]}],
+            "generationConfig": {"temperature": 1, "topP": 0.95, "maxOutputTokens": 128},
+        }).encode()
+        with GeminiGatewayRelay(f"http://127.0.0.1:{server.server_address[1]}") as relay:
+            status, headers, response = _post(
+                f"{relay.base_url}/v1beta/models/bakkt/kimi-k3.1:streamGenerateContent?alt=sse",
+                body,
+            )
+            usage = relay.take_usage()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    assert headers["Content-Type"] == "text/event-stream"
+    assert json.loads(response[len(b"data: "):].strip()) == ANSWER
+    assert len(seen) == 3
+    assert seen[1]["generationConfig"] == {"topP": 0.95, "maxOutputTokens": 128}
+    assert seen[2]["generationConfig"] == {"maxOutputTokens": 128}
+    assert seen[2]["contents"] == seen[0]["contents"]
+    assert usage == [{"input_tokens": 120, "output_tokens": 30, "cached_tokens": 0}]
+
+
 def test_the_relay_stops_listening_when_closed(gateway):
     base_url, _, _ = gateway
     relay = GeminiGatewayRelay(base_url).start()

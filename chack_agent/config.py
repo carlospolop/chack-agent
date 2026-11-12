@@ -19,6 +19,7 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 # 250k tokens: if the yaml configures a smaller (non-zero) window, bump it up.
 CLI_BACKEND_MIN_CONTEXT_TOKENS = 250_000
 OPENCODE_PROVIDERS = frozenset({"opencode", "opencode-cli", "opencode_cli"})
+CODE_CLI_PROVIDERS = frozenset({"kimi", "kimi-code", "kimi_code", "qwen", "qwen-code", "qwen_code"})
 _MIN_CONTEXT_TOKEN_PROVIDERS = frozenset(
     {"codex", "claude", "claude-code", "claude_code", "anthropic", *OPENCODE_PROVIDERS}
 )
@@ -209,6 +210,8 @@ class CredentialsConfig:
     llm_gateway_headers: Dict[str, str] = field(default_factory=dict)
     llm_gateway_model_map: Dict[str, str] = field(default_factory=dict)
     gemini_api_key: str = ""
+    kimi_api_key: str = ""
+    qwen_api_key: str = ""
     aws_profile: str = ""
     aws_credentials_file: str = ""
     copilot_github_token: str = ""
@@ -260,6 +263,8 @@ def resolve_api_key_type(config: ChackConfig) -> str:
         "litellm": "gateway",
         "gemini": "gemini",
         "gemini_api": "gemini",
+        "kimi": "kimi",
+        "qwen": "qwen",
     }
     if explicit_api_key_type:
         return explicit_aliases.get(explicit_api_key_type, explicit_api_key_type)
@@ -313,6 +318,10 @@ def resolve_api_key_type(config: ChackConfig) -> str:
             return "openrouter"
     if provider == "gateway":
         return "gateway"
+    if provider in {"kimi", "kimi-code", "kimi_code"}:
+        return "gateway" if str(getattr(credentials, "llm_gateway_api_key", "") or os.environ.get("LLM_GATEWAY_API_KEY", "")).strip() else "kimi"
+    if provider in {"qwen", "qwen-code", "qwen_code"}:
+        return "gateway" if str(getattr(credentials, "llm_gateway_api_key", "") or os.environ.get("LLM_GATEWAY_API_KEY", "")).strip() else "qwen"
     if provider in OPENCODE_PROVIDERS:
         # opencode needs an API key; it cannot use a Codex or Claude
         # subscription token.
@@ -358,6 +367,10 @@ def resolve_backend_type(config: ChackConfig) -> str:
         return "openai_compaction"
     if provider == "gemini":
         return "gemini"
+    if provider in {"kimi", "kimi-code", "kimi_code"}:
+        return "kimi"
+    if provider in {"qwen", "qwen-code", "qwen_code"}:
+        return "qwen"
     if provider in {"claude", "claude-code", "claude_code", "anthropic"}:
         return "claude"
     if provider in {"copilot", "copilot-cli", "copilot_cli", "gh-copilot", "gh_copilot"}:
@@ -532,12 +545,27 @@ def resolve_config_aliases(config: ChackConfig) -> ChackConfig:
         if 0 < configured_context < CLI_BACKEND_MIN_CONTEXT_TOKENS:
             model_cfg.max_context_tokens = CLI_BACKEND_MIN_CONTEXT_TOKENS
     requested_primary = str(model_cfg.primary or "").strip()
+    if provider in CODE_CLI_PROVIDERS:
+        generic_aliases = {"BEST_QUALITY", "CHEAP_BUT_QUALITY", "BEST_CHEAPEST"}
+        if requested_primary in generic_aliases:
+            raise ValueError(f"{provider} requires an explicit agent.primary model name")
     model_cfg.primary = resolve_model_alias(
         model_cfg.primary,
         provider=provider,
         credentials=credentials,
     )
     _remember_primary_alias(model_cfg, requested_primary)
+    if provider in CODE_CLI_PROVIDERS:
+        # A direct Kimi/Qwen key has no cross-provider quality tiers. Role
+        # defaults must use the same available model, not OpenAI's aliases.
+        for role in (
+            "social_network", "scientific", "websearcher", "business",
+            "product", "travel", "legal", "data_statistics", "news_media",
+            "knowledge_graph", "religious", "cli", "subchack",
+            "researcher_administrator",
+        ):
+            if str(getattr(model_cfg, role, "") or "").strip() in generic_aliases:
+                setattr(model_cfg, role, model_cfg.primary)
     if not str(model_cfg.social_network or "").strip():
         model_cfg.social_network = "CHEAP_BUT_QUALITY"
     if not str(model_cfg.scientific or "").strip():

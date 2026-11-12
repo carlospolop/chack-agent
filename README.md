@@ -1,6 +1,6 @@
 # chack-agent
 
-`chack-agent` is the shared agent runtime used by Naxus. It provides one Python API over OpenAI, OpenRouter, Codex CLI, Claude Code, Gemini CLI, GitHub Copilot CLI, and LangGraph, with configurable tools, sessions, budgets, structured output, and usage accounting.
+`chack-agent` is the shared agent runtime used by Naxus. It provides one Python API over OpenAI, OpenRouter, Codex CLI, Claude Code, Gemini CLI, Kimi Code CLI, Qwen Code CLI, GitHub Copilot CLI, and LangGraph, with configurable tools, sessions, budgets, structured output, and usage accounting.
 
 AISecurityAuditor and Dynamic-AIgent install the `master` branch directly. Keep `master` compatible and green because downstream runs receive merged changes without advancing a version pin.
 
@@ -12,7 +12,7 @@ pip install chack-agent
 
 Python 3.10 or newer is required.
 
-CLI backends also require their provider command on `PATH`: `codex`, `claude`, `gemini`, `copilot`, or `opencode`. Pin the Gemini CLI and opencode versions Chack is tested with: `npm i -g @google/gemini-cli@0.67.0` (set `GEMINI_CLI_PATH` when it is not on `PATH`) and `npm i -g opencode-ai@1.19.5` (set `OPENCODE_CLI_PATH` when it is not on `PATH`). The Python package includes Playwright, but browser-backed tools require an installed Chromium binary:
+CLI backends also require their provider command on `PATH`: `codex`, `claude`, `gemini`, `kimi`, `qwen`, `copilot`, or `opencode`. Pin the Gemini CLI and opencode versions Chack is tested with: `npm i -g @google/gemini-cli@0.67.0` (set `GEMINI_CLI_PATH` when it is not on `PATH`) and `npm i -g opencode-ai@1.19.5` (set `OPENCODE_CLI_PATH` when it is not on `PATH`). Kimi Code 2.5.3 and Qwen Code 0.27.2 were exercised with `npm i -g @moonshot-ai/kimi-code@2.5.3 @qwen-code/qwen-code@0.27.2`; both require Node.js 22.19 or newer. The Python package includes Playwright, but browser-backed tools require an installed Chromium binary:
 
 ```bash
 python -m playwright install chromium
@@ -89,6 +89,8 @@ Set `agent.provider` to one of these values:
 | `gemini` | Gemini CLI | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or `LLM_GATEWAY_API_KEY` for a gateway that serves the Gemini API |
 | `copilot` | GitHub Copilot CLI | `COPILOT_GITHUB_TOKEN` or existing CLI authentication |
 | `opencode` | opencode CLI (`opencode run`) with the model from any key type | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, or `LLM_GATEWAY_API_KEY` |
+| `kimi` | Current Kimi Code CLI (`kimi -p`), not the older Python `kimi-cli` | `KIMI_API_KEY` or `LLM_GATEWAY_API_KEY` |
+| `qwen` | Qwen Code CLI (`qwen -p`) | `QWEN_API_KEY` plus `QWEN_BASE_URL`, or `LLM_GATEWAY_API_KEY` |
 | `langgraph` | LangGraph with an OpenRouter or gateway `ChatOpenAI` transport | `OPENROUTER_API_KEY` or `LLM_GATEWAY_API_KEY` |
 | `gateway` | Responses API of a custom LLM gateway through `openai-agents` | `LLM_GATEWAY_API_KEY` |
 
@@ -97,6 +99,8 @@ Aliases are normalized when configuration loads. Unsupported providers and unsup
 `api_key_type` picks the key a backend uses. With `api_key_type: openrouter`, `codex` and `claude` still run their CLIs, against OpenRouter with `OPENROUTER_API_KEY`: Codex through a Responses model provider, Claude Code through `ANTHROPIC_BASE_URL=https://openrouter.ai/api`. Model names are mapped to OpenRouter IDs (`claude-sonnet-5-5` becomes `anthropic/claude-sonnet-5.5`) and priced from the OpenRouter table.
 
 `opencode` runs the opencode CLI with a private config per session: OpenAI keys use the Responses API, Anthropic keys the Messages API, OpenRouter its own provider, and a gateway the Messages API for Claude models, the Responses API for OpenAI models and Chat Completions for the rest. `agent.thinking_effort` becomes the model's reasoning effort or adaptive thinking. Chack tools run over MCP next to opencode's file, search, edit and (with `exec_enabled`) shell tools; opencode's question, sub-agent, skill and todo tools are denied. opencode cannot use Codex or Claude Code subscription tokens. opencode 2 runs `opencode run` on one background service shared by every run, so Chack passes `--standalone` (a private server per run) to each opencode that offers it in `opencode run --help`; opencode 1 always uses a private server.
+
+`kimi` and `qwen` use private CLI homes and empty launch workspaces. Their native shell and file tools are removed; Chack tools are provided over MCP, and `tools.exec_enabled` controls the only host shell. Both resume saved CLI sessions. Kimi uses its API key directly or a gateway's OpenAI-compatible API; Qwen needs an explicit OpenAI-compatible `QWEN_BASE_URL` with its direct key. For either CLI, set `api_key_type: gateway`, `LLM_GATEWAY_BASE_URL`, and `LLM_GATEWAY_API_KEY` to use a gateway model. CLI paths can be overridden with `KIMI_CLI_PATH` and `QWEN_CLI_PATH`. See [the CLI compatibility guide](docs/code-cli-compatibility.md).
 
 See [the backend guide](chack_agent/backends/README.md) for transport, memory, compaction, and guardrail differences.
 

@@ -1,11 +1,11 @@
 """Run the same small, verifiable tasks on several backends and compare them.
 
 Each target is ``provider:model`` with an optional ``:api_key_type`` (for
-example ``codex:gpt-6-sol:gateway`` or ``langgraph:gpt-6-sol:gateway``).
+example ``kimi:bakkt/glm-5.2:gateway`` or ``qwen:bakkt/kimi-k3.1:gateway``).
 Every task has one checkable answer, so the table shows correctness next to
 time, tokens, cache use and cost:
 
-    python scripts/benchmark_backends.py codex:gpt-6-sol:gateway claude:claude-sonnet-5-5:gateway
+    python scripts/benchmark_backends.py kimi:bakkt/glm-5.2:gateway qwen:bakkt/kimi-k3.1:gateway
 
 Credentials come from the usual environment variables (``LLM_GATEWAY_*``,
 ``OPENROUTER_API_KEY``, CLI logins...).
@@ -14,7 +14,11 @@ Credentials come from the usual environment variables (``LLM_GATEWAY_*``,
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import os
+import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -34,8 +38,10 @@ from chack_agent.config import (  # noqa: E402
     LoggingConfig,
     ModelConfig,
     SessionConfig,
+    ToolsConfig,
 )
-from chack_tools.config import ToolsConfig  # noqa: E402
+
+_MAX_TOOL_CALLS = 8
 
 
 @dataclass
@@ -44,7 +50,10 @@ class Task:
     prompt: str
     check: Callable[[str], bool]
     needs_shell: bool = False
+    needs_web: bool = False
+    required_tool_families: tuple[str, ...] = ()
     output_schema: Optional[dict[str, Any]] = None
+    max_tool_calls: int = _MAX_TOOL_CALLS
 
 
 def _exact(expected: str) -> Callable[[str], bool]:
@@ -54,30 +63,249 @@ def _exact(expected: str) -> Callable[[str], bool]:
 def _json_field(field: str, expected: str) -> Callable[[str], bool]:
     def _check(output: str) -> bool:
         try:
-            return str(json.loads(output).get(field, "")).strip().lower() == expected.lower()
+            return str(_parse_json_object(output).get(field, "")).strip().lower() == expected.lower()
         except (ValueError, AttributeError):
             return False
 
     return _check
 
 
+def _parse_json_object(output: str) -> dict[str, Any]:
+    # The run wrapper may append a budget notice after a valid final JSON
+    # object. Score the object, while leaving the notice visible in the row.
+    start = output.find("{")
+    if start < 0:
+        raise ValueError("no JSON object")
+    value, _ = json.JSONDecoder().raw_decode(output[start:])
+    if not isinstance(value, dict):
+        raise ValueError("JSON output was not an object")
+    return value
+
+
+_DICT_ORDER_SOURCE_PREFIXES = (
+    "https://docs.python.org/3/whatsnew/3.7.html",
+    "https://docs.python.org/3/library/stdtypes.html",
+    "https://docs.python.org/3/builtins/stdtypes.html",
+    "https://docs.python.org/3/reference/datamodel.html",
+)
+
+
+def _has_dict_order_source(text: str) -> bool:
+    return any(prefix in text for prefix in _DICT_ORDER_SOURCE_PREFIXES)
+
+
+def _report(expected_total: int, expected_users: int) -> Callable[[str], bool]:
+    def _check(output: str) -> bool:
+        try:
+            data = _parse_json_object(output)
+            return (
+                int(data.get("active_total")) == expected_total
+                and int(data.get("unique_active_users")) == expected_users
+                and bool(re.fullmatch(r"(?i)(?:python\s*)?v?3\.7", str(data.get("dict_order_guaranteed_since", "")).strip()))
+                and _has_dict_order_source(str(data.get("source_url", "")))
+            )
+        except (ValueError, TypeError, AttributeError):
+            return False
+    return _check
+
+
+def _uses_tool_family(names: list[str], family: str) -> bool:
+    for name in names:
+        simple = name.lower().split("__")[-1]
+        if family == "exec" and simple == "exec":
+            return True
+        if family == "local" and simple in {"exec", "read", "read_file", "view_file"}:
+            return True
+        if family == "web" and any(part in simple for part in ("web", "fetch", "search")):
+            return True
+    return False
+
+
+_REPORT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "active_total": {"type": "integer"},
+        "unique_active_users": {"type": "integer"},
+        "dict_order_guaranteed_since": {"type": "string"},
+        "source_url": {"type": "string"},
+    },
+    "required": ["active_total", "unique_active_users", "dict_order_guaranteed_since", "source_url"],
+    "additionalProperties": False,
+}
+
+_JOIN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "winner": {"type": "string"},
+        "adjusted_score": {"type": "integer"},
+        "tied_with": {"type": "array", "items": {"type": "string"}},
+        "dict_order_guaranteed_since": {"type": "string"},
+        "source_url": {"type": "string"},
+    },
+    "required": ["winner", "adjusted_score", "tied_with", "dict_order_guaranteed_since", "source_url"],
+    "additionalProperties": False,
+}
+
+_RECONCILE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "customer": {"type": "string"},
+        "outstanding_cents": {"type": "integer"},
+        "open_invoice_count": {"type": "integer"},
+        "ignored_payment_cents": {"type": "integer"},
+    },
+    "required": ["customer", "outstanding_cents", "open_invoice_count", "ignored_payment_cents"],
+    "additionalProperties": False,
+}
+
+
+def _reconcile_report(output: str) -> bool:
+    try:
+        data = _parse_json_object(output)
+        return data == {
+            "customer": "bob", "outstanding_cents": 1000,
+            "open_invoice_count": 3, "ignored_payment_cents": 1299,
+        }
+    except ValueError:
+        return False
+
+
+def _repaired_allocator(module_path: Path) -> Callable[[str], bool]:
+    def _check(output: str) -> bool:
+        if not output.strip():
+            return False
+        probe = (
+            "import importlib.util,sys;"
+            "s=importlib.util.spec_from_file_location('allocator',sys.argv[1]);"
+            "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+            "assert m.allocate_cents(7,[1,2,1])==[2,3,2];"
+            "assert m.allocate_cents(5,[0,3,2])==[0,3,2];"
+            "assert m.allocate_cents(2,[1,1,1])==[1,1,0];"
+            "assert m.allocate_cents(101,[2,3,5])==[20,30,51];"
+            "assert m.allocate_cents(0,[1,2])==[0,0];"
+            "assert m.allocate_cents(3,[1])==[3];"
+            "assert sum(m.allocate_cents(10001,[3,7,11]))==10001;"
+            "\nfor weights in ([],[0,0],[-1,2]):\n"
+            " try: m.allocate_cents(1,weights)\n"
+            " except ValueError: pass\n"
+            " else: raise AssertionError(weights)\n"
+        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", probe, str(module_path)],
+                capture_output=True, timeout=10, check=False, text=True,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+    return _check
+
+
+def _join_report(output: str) -> bool:
+    try:
+        data = _parse_json_object(output)
+        return (
+            data.get("winner") == "iris"
+            and int(data.get("adjusted_score")) == 21
+            and data.get("tied_with") == ["maple"]
+            and bool(re.fullmatch(r"(?i)(?:python\s*)?v?3\.7", str(data.get("dict_order_guaranteed_since", "")).strip()))
+            and _has_dict_order_source(str(data.get("source_url", "")))
+        )
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def build_tasks(workdir: Path) -> list[Task]:
     lines = [f"row {i}: {i * 7919 % 100003:05d}" for i in range(1, 201)]
     data_file = workdir / "rows.txt"
     data_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    records = [
+        ("iris", 8, "yes"), ("cedar", 13, "no"),
+        ("iris", 11, "yes"), ("maple", 17, "yes"),
+        ("elm", 5, "no"), ("cedar", 19, "yes"),
+    ]
+    report_file = workdir / "orders.csv"
+    with report_file.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("user", "score", "active"))
+        writer.writerows(records)
+    adjustment_file = workdir / "adjustments.csv"
+    with adjustment_file.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("user", "delta"))
+        writer.writerows((
+            ("iris", 2), ("cedar", -3), ("maple", 4), ("elm", 9),
+        ))
+    allocator_file = workdir / "allocator.py"
+    allocator_file.write_text(
+        '"""Allocate whole cents in proportion to nonnegative weights.\n\n'
+        'Remainder cents go to the largest fractional shares; ties use input order.\n'
+        'Reject empty, all-zero, or negative weights with ValueError.\n"""\n\n'
+        'def allocate_cents(amount_cents: int, weights: list[int]) -> list[int]:\n'
+        '    if amount_cents < 0 or any(weight < 0 for weight in weights):\n'
+        '        raise ValueError("negative amount or weight")\n'
+        '    total = sum(weights)\n'
+        '    shares = [amount_cents * weight // total for weight in weights]\n'
+        '    for index in range(amount_cents - sum(shares)):\n'
+        '        shares[index] += 1\n'
+        '    return shares\n', encoding="utf-8",
+    )
+    allocator_test = workdir / "test_allocator.py"
+    allocator_test.write_text(
+        'import unittest\nfrom allocator import allocate_cents\n\n'
+        'class AllocatorTests(unittest.TestCase):\n'
+        '    def test_largest_remainder(self):\n'
+        '        self.assertEqual(allocate_cents(7, [1, 2, 1]), [2, 3, 2])\n'
+        '    def test_tie_break(self):\n'
+        '        self.assertEqual(allocate_cents(2, [1, 1, 1]), [1, 1, 0])\n'
+        '    def test_invalid_weights(self):\n'
+        '        for weights in ([], [0, 0], [-1, 2]):\n'
+        '            with self.assertRaises(ValueError):\n'
+        '                allocate_cents(1, weights)\n'
+        '    def test_conservation(self):\n'
+        '        self.assertEqual(sum(allocate_cents(101, [2, 3, 5])), 101)\n',
+        encoding="utf-8",
+    )
+    invoice_file = workdir / "invoices.csv"
+    invoice_file.write_text(
+        "invoice,customer,cents,status\n"
+        "a,ada,1250,posted\nb,bob,1800,posted\nc,ada,700,void\n"
+        "d,cy,900,posted\ne,bob,300,posted\n", encoding="utf-8",
+    )
+    payment_file = workdir / "payments.csv"
+    payment_file.write_text(
+        "invoice,cents\na,800\na,200\nb,1200\nc,300\nd,900\ne,100\nx,999\n",
+        encoding="utf-8",
+    )
+    refund_file = workdir / "refunds.csv"
+    refund_file.write_text("invoice,cents\na,100\nb,150\ne,50\n", encoding="utf-8")
     return [
         Task("answer", "What is 17 * 23? Reply with only the number.", _exact("391")),
         Task(
+            "code_reasoning",
+            "What does this Python program print? Reply with only the integer.\n"
+            "def f(xs):\n"
+            "    seen=set(); out=[]\n"
+            "    for n in xs:\n"
+            "        if n not in seen:\n"
+            "            seen.add(n); out.append(n*n if n%2 else n+3)\n"
+            "    return sum(out)\n"
+            "print(f([3,2,3,5,2,4,5,-1]))",
+            _exact("47"),
+        ),
+        Task(
             "shell",
-            "Run `printf 'chack-%s' $((6*7))` with your shell tool and reply with only its output.",
+            "Run `printf 'chack-%s' $((6*7))` with Chack's exec tool and reply with only its output.",
             _exact("chack-42"),
             needs_shell=True,
+            required_tool_families=("exec",),
         ),
         Task(
             "file",
             f"Read line 137 of {data_file} and reply with only that line's text.",
             _exact(lines[136]),
             needs_shell=True,
+            required_tool_families=("local",),
         ),
         Task(
             "structured",
@@ -90,13 +318,83 @@ def build_tasks(workdir: Path) -> list[Task]:
                 "additionalProperties": False,
             },
         ),
+        Task(
+            "public_web",
+            "Check the current official Python documentation and report the Python version in which "
+            "dictionary insertion order became a language guarantee. Reply with just the version "
+            "and an official docs.python.org URL on the next line.",
+            lambda output: "3.7" in output and _has_dict_order_source(output),
+            needs_web=True,
+            required_tool_families=("web",),
+        ),
+        Task(
+            "combined_report",
+            f"Prepare a concise report from the local file {report_file} and the current official "
+            "Python documentation. Include the sum of scores for active rows, the number of distinct "
+            "active users, the Python version that first guaranteed dictionary insertion order, and "
+            "an official source URL. Return one JSON object with fields active_total, "
+            "unique_active_users, dict_order_guaranteed_since, and source_url. Check both the file "
+            "and documentation before answering.",
+            _report(55, 3),
+            needs_shell=True,
+            needs_web=True,
+            required_tool_families=("local", "web"),
+            output_schema=_REPORT_SCHEMA,
+        ),
+        Task(
+            "join_report",
+            f"Prepare a verified report from {report_file}, {adjustment_file}, and the current official "
+            "Python documentation. Sum each user's active scores from orders.csv, then apply that user's "
+            "adjustment once. Name the highest scoring user; if tied, choose the user whose first active "
+            "row appears earlier in orders.csv and list the other tied users. Also report the Python "
+            "version that first guaranteed dictionary insertion order and a supporting official URL. "
+            "Return one JSON object with fields winner, adjusted_score, tied_with, "
+            "dict_order_guaranteed_since, and source_url. Verify the files and documentation.",
+            _join_report,
+            needs_shell=True,
+            needs_web=True,
+            required_tool_families=("local", "web"),
+            output_schema=_JOIN_SCHEMA,
+        ),
+        Task(
+            "repair_allocator",
+            f"A payout allocator at {allocator_file} is failing its stated contract. "
+            f"Inspect the module and the local test file {allocator_test}, fix the implementation "
+            "without changing the test file or public function signature, and run the test suite. "
+            "The allocation must conserve cents, give remainders to the largest fractional shares "
+            "with stable ties, and reject invalid weights. Briefly report what you fixed.",
+            _repaired_allocator(allocator_file),
+            needs_shell=True,
+            required_tool_families=("exec",),
+            max_tool_calls=12,
+        ),
+        Task(
+            "reconcile_ledger",
+            f"Investigate the local ledger files {invoice_file}, {payment_file}, and {refund_file}. "
+            "For posted invoices, outstanding cents are invoice cents minus payments plus refunds. "
+            "Ignore payments linked to void or unknown invoices, but report their combined cents. "
+            "Determine which customer has the highest total outstanding balance, that balance, "
+            "and how many posted invoices across all customers remain open. Return one JSON object "
+            "with customer, outstanding_cents, open_invoice_count, and ignored_payment_cents. "
+            "Check the underlying files before deciding how to calculate the answer.",
+            _reconcile_report,
+            needs_shell=True,
+            required_tool_families=("local",),
+            output_schema=_RECONCILE_SCHEMA,
+            max_tool_calls=12,
+        ),
     ]
 
 
 def _config(provider: str, model: str, api_key_type: str, task: Task, max_turns: int) -> ChackConfig:
-    tools = ToolsConfig(task_steps_manager_enabled=False, exec_enabled=task.needs_shell)
+    tools = ToolsConfig(
+        task_steps_manager_enabled=False, exec_enabled=task.needs_shell,
+        native_web_search_enabled=task.needs_web,
+        keyless_web_search_enabled=task.needs_web,
+        max_tools_used=task.max_tool_calls,
+    )
     agent = AgentConfig(
-        thinking_effort="low",
+        thinking_effort="high",
         main_action="benchmark",
         sub_action=task.name,
         output_schema_json=task.output_schema,
@@ -131,17 +429,26 @@ def run_one(target: str, task: Task, max_turns: int) -> dict[str, Any]:
         row["seconds"] = round(time.monotonic() - started, 1)
         return row
     output = str(result.output or "")
+    tool_names = sorted(str(name) for name in result.tool_counts)
+    tools_ok = all(_uses_tool_family(tool_names, family) for family in task.required_tool_families)
+    answer_ok = bool(task.check(output))
+    tool_calls = sum(result.tool_counts.values())
+    budget_ok = tool_calls <= task.max_tool_calls
     row.update(
-        passed=bool(task.check(output)) and not result.error,
+        passed=answer_ok and tools_ok and budget_ok and not result.error,
+        answer_ok=answer_ok,
+        tools_ok=tools_ok,
+        budget_ok=budget_ok,
         seconds=round(time.monotonic() - started, 1),
         prompt_tokens=result.prompt_tokens,
         cached_prompt_tokens=result.cached_prompt_tokens,
         completion_tokens=result.completion_tokens,
         cache_hit_rate=result.cache_hit_rate,
         cost_usd=result.total_cost,
-        tool_calls=sum(result.tool_counts.values()),
+        tool_calls=tool_calls,
+        tool_names=tool_names,
         error=result.error,
-        output=output[:120],
+        output=output[:500],
     )
     return row
 
@@ -156,8 +463,8 @@ def _cell(value: Any) -> str:
 
 def render(rows: list[dict[str, Any]]) -> str:
     columns = [
-        "target", "task", "passed", "seconds", "prompt_tokens", "cached_prompt_tokens",
-        "completion_tokens", "cache_hit_rate", "cost_usd", "tool_calls", "error",
+        "target", "task", "passed", "answer_ok", "tools_ok", "budget_ok", "seconds", "prompt_tokens", "cached_prompt_tokens",
+        "completion_tokens", "cache_hit_rate", "cost_usd", "tool_calls", "tool_names", "error",
     ]
     lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
     for row in rows:
@@ -182,17 +489,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--json", dest="json_path", default="", help="also write the rows to this file")
     args = parser.parse_args(argv)
 
-    with tempfile.TemporaryDirectory(prefix="chack-benchmark-") as tmp:
-        tasks = build_tasks(Path(tmp))
-        wanted = {name.strip() for name in args.tasks.split(",") if name.strip()}
-        if wanted:
-            tasks = [task for task in tasks if task.name in wanted]
-        rows = []
-        for target in args.targets:
-            for task in tasks:
-                row = run_one(target, task, args.max_turns)
-                print(json.dumps(row, default=str), file=sys.stderr, flush=True)
-                rows.append(row)
+    with tempfile.TemporaryDirectory(prefix="chack-benchmark-list-") as tmp:
+        task_names = [task.name for task in build_tasks(Path(tmp))]
+    wanted = {name.strip() for name in args.tasks.split(",") if name.strip()}
+    if wanted:
+        unknown = wanted.difference(task_names)
+        if unknown:
+            parser.error(f"unknown tasks: {', '.join(sorted(unknown))}")
+        task_names = [name for name in task_names if name in wanted]
+    rows = []
+    for target in args.targets:
+        for task_name in task_names:
+            with tempfile.TemporaryDirectory(prefix="chack-benchmark-case-") as tmp:
+                task = next(task for task in build_tasks(Path(tmp)) if task.name == task_name)
+                original_cwd = Path.cwd()
+                try:
+                    os.chdir(tmp)
+                    row = run_one(target, task, args.max_turns)
+                finally:
+                    os.chdir(original_cwd)
+            print(json.dumps(row, default=str), file=sys.stderr, flush=True)
+            rows.append(row)
 
     print(render(rows))
     if args.json_path:

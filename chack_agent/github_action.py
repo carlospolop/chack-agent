@@ -140,6 +140,10 @@ def main() -> None:
     gemini_api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get(
         "INPUT_GEMINI_API_KEY", ""
     )
+    kimi_api_key = os.environ.get("KIMI_API_KEY", "") or os.environ.get("INPUT_KIMI_API_KEY", "")
+    qwen_api_key = os.environ.get("QWEN_API_KEY", "") or os.environ.get("INPUT_QWEN_API_KEY", "")
+    for name in ("KIMI_BASE_URL", "QWEN_BASE_URL"):
+        os.environ.setdefault(name, os.environ.get(f"INPUT_{name}", ""))
     google_api_key = os.environ.get("GOOGLE_API_KEY", "") or os.environ.get(
         "INPUT_GOOGLE_API_KEY", ""
     )
@@ -292,6 +296,8 @@ def main() -> None:
             openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", "")
             or os.environ.get("INPUT_OPENROUTER_BASE_URL", ""),
             gemini_api_key=gemini_api_key or google_api_key,
+            kimi_api_key=kimi_api_key,
+            qwen_api_key=qwen_api_key,
         ),
         logging=LoggingConfig(level=os.environ.get("INPUT_LOGGING_LEVEL", "INFO")),
         system_prompt=os.environ.get(
