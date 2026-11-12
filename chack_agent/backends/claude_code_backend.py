@@ -1263,6 +1263,13 @@ class ClaudeCodeExecutor:
                         str(event.get("subtype") or "").strip().lower() == "error"
                         or bool(event.get("is_error"))
                     ):
+                        recovered = self._recovered_structured_output(event, tool_calls)
+                        if recovered is not None:
+                            return recovered, steps, _RawResult(
+                                raw_responses=raw_responses,
+                                time_to_first_token_seconds=time_to_first_token_seconds,
+                                time_to_first_token_source="claude_first_response_event",
+                            )
                         diagnostic: dict[str, Any] = {}
                         for key in (
                             "subtype",
@@ -1423,6 +1430,32 @@ class ClaudeCodeExecutor:
     def _raw_lines_have_missing_resume_session(raw_lines: list[str]) -> bool:
         text = "\n".join(str(line or "") for line in raw_lines).lower()
         return "no conversation found with session id" in text
+
+    def _recovered_structured_output(
+        self,
+        result_event: dict[str, Any],
+        tool_calls: dict[str, tuple[str, Any]],
+    ) -> str | None:
+        """The last StructuredOutput attempt when the CLI gave up on it but chack's schema check accepts it.
+
+        Claude Code validates StructuredOutput strictly, so an attempt that only
+        sends a nested object as a JSON string is rejected until its retries run
+        out; chack's own validation parses such values back.
+        """
+        if str(result_event.get("subtype") or "").strip().lower() != "error_max_structured_output_retries":
+            return None
+        if not str(self._output_schema_json or "").strip():
+            return None
+        attempts = [tool_input for name, tool_input in tool_calls.values() if name == "StructuredOutput"]
+        if not attempts or not isinstance(attempts[-1], dict) or not attempts[-1]:
+            return None
+        recovered = self._validated_schema_output(json.dumps(attempts[-1], ensure_ascii=False))
+        if recovered is not None:
+            _LOGGER.warning(
+                "Claude gave up on structured output for model %s; using its last attempt, which matches the schema once typed.",
+                self._model_name,
+            )
+        return recovered
 
     @staticmethod
     def _append_structured_output(output_parts: list[str], value: Any) -> None:

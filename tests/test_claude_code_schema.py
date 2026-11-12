@@ -935,3 +935,80 @@ def test_claude_save_retry_failure_keeps_the_answer_already_given(monkeypatch) -
     monkeypatch.setattr(executor, "_steps_contain_analysis", lambda _steps: True)
 
     assert executor.invoke({"input": "review"})["output"] == "found an injection"
+
+
+_ENHANCEMENT_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "enhancements": {
+                "type": "object",
+                "properties": {"v001": {"type": "object", "properties": {"verdict": {"type": "string"}}, "required": ["verdict"]}},
+                "required": ["v001"],
+            }
+        },
+        "required": ["enhancements"],
+    }
+)
+
+
+def _gave_up_on_structured_output(*attempt_inputs: dict) -> list[dict]:
+    attempts = [
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": f"s{index}", "name": "StructuredOutput", "input": attempt}]}}
+        for index, attempt in enumerate(attempt_inputs)
+    ]
+    return [
+        _INIT_EVENT,
+        *attempts,
+        {
+            "type": "result",
+            "subtype": "error_max_structured_output_retries",
+            "is_error": True,
+            "errors": ["Output does not match required schema: /enhancements: must be object"],
+        },
+    ]
+
+
+def test_claude_uses_a_given_up_structured_answer_that_only_sent_an_object_as_a_string(monkeypatch, tmp_path) -> None:
+    enhancements = {"v001": {"verdict": "true_positive"}}
+    output = _run_claude_stream(
+        monkeypatch,
+        tmp_path,
+        _gave_up_on_structured_output(
+            {"enhancements": "not json"},
+            {"enhancements": json.dumps(enhancements)},
+        ),
+        output_schema_json=_ENHANCEMENT_SCHEMA,
+    )
+
+    assert json.loads(output) == {"enhancements": enhancements}
+
+
+@pytest.mark.parametrize(
+    "last_attempt",
+    [
+        {"enhancements": json.dumps({"v001": {}})},
+        {"enhancements": "not json"},
+        {"report": "free text"},
+    ],
+)
+def test_claude_still_fails_when_its_last_structured_attempt_does_not_match_the_schema(
+    monkeypatch, tmp_path, last_attempt
+) -> None:
+    output = _run_claude_stream(
+        monkeypatch,
+        tmp_path,
+        _gave_up_on_structured_output({"enhancements": {"v001": {"verdict": "ok"}}}, last_attempt),
+        output_schema_json=_ENHANCEMENT_SCHEMA,
+    )
+
+    assert output.startswith("ERROR: Claude returned an error in final result event.")
+    assert "error_max_structured_output_retries" in output
+
+
+def test_claude_other_result_errors_are_not_replaced_by_a_structured_attempt(monkeypatch, tmp_path) -> None:
+    events = _gave_up_on_structured_output({"enhancements": {"v001": {"verdict": "ok"}}})
+    events[-1] = {"type": "result", "subtype": "error_max_turns", "is_error": True}
+    output = _run_claude_stream(monkeypatch, tmp_path, events, output_schema_json=_ENHANCEMENT_SCHEMA)
+
+    assert output.startswith("ERROR: Claude returned an error in final result event.")
