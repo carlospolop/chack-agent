@@ -49,7 +49,7 @@ _NOOP_TOOLS = {"noop": SimpleNamespace(name="noop", on_invoke_tool=_noop)}
 
 def _executor(model, *, max_turns=50, output_schema=None, summary_model=None,
               summary_trigger_messages=1000, summary_keep_messages=0,
-              max_non_task_tools=0, function_tools=None, max_context_tokens=0):
+              max_non_task_tools=0, function_tools=None, max_context_tokens=0, plan_tool=False):
     executor = LangGraphExecutor(
         _graph=None,
         _model_with_tools=model,
@@ -64,6 +64,7 @@ def _executor(model, *, max_turns=50, output_schema=None, summary_model=None,
         _max_non_task_tools=max_non_task_tools,
         _require_task_steps_manager_init_first=False,
         _max_turns=max_turns,
+        _plan_tool=plan_tool,
         _summary_trigger_messages=summary_trigger_messages,
         _summary_keep_messages=summary_keep_messages,
         _summary_max_chars=0,
@@ -307,7 +308,7 @@ def test_a_reply_cut_at_the_token_limit_is_continued():
 
     result = _executor(model).invoke({"input": "go"})
 
-    assert result["output"] == " A; 2. none else."
+    assert result["output"] == "Findings: 1. CVE-1 on host A; 2. none else."
     assert model.prompts[1][-2].content == "Findings: 1. CVE-1 on host"
     assert "output token limit" in model.prompts[1][-1].content
 
@@ -341,6 +342,27 @@ def test_an_unknown_tool_error_names_the_tools_that_exist():
     assert model.prompts[1][-1].content == "ERROR: Unknown tool 'nop'. Available tools: noop."
 
 
+def test_tool_call_markup_left_in_an_argument_by_the_gateway_is_not_executed():
+    received = []
+
+    async def _record(_ctx, raw_args):
+        received.append(json.loads(raw_args))
+        return "ok"
+
+    leaked = {
+        "command": "sleep 40; tail -3 /tmp/run.log</\uff5cDSML\uff5c parameter>\n<parameter name=",
+        "env": ["A=1 <\uff5ctool\u2581call\u2581end\uff5c>"],
+        "cwd": "/tmp/a|b",
+    }
+    model = _ScriptedModel([
+        AIMessage(content="", tool_calls=[{"name": "exec", "args": leaked, "id": "call_1"}]), AIMessage(content="done"),
+    ])
+
+    _executor(model, function_tools={"exec": SimpleNamespace(name="exec", on_invoke_tool=_record)}).invoke({"input": "go"})
+
+    assert received == [{"command": "sleep 40; tail -3 /tmp/run.log", "env": ["A=1"], "cwd": "/tmp/a|b"}]
+
+
 def _long_tool_call(index, input_tokens=0):
     return AIMessage(
         content="", tool_calls=[{"name": "dump", "args": {"page": index}, "id": f"call_{index}"}],
@@ -356,13 +378,16 @@ def test_near_the_limit_old_tool_outputs_are_cleared_before_anything_is_summariz
     # oldest outputs are cleared, the newest five and every call stay.
     model = _ScriptedModel([*(_long_tool_call(i, 100) for i in range(6)), _long_tool_call(6, 900),
                             AIMessage(content="done")])
-    summary_model = _ScriptedModel([AIMessage(content="unused")])
+    summary_model = _ScriptedModel([AIMessage(content="Pages 0 and 1 list CVE-7.")])
     executor = _executor(model, summary_model=summary_model, function_tools=_DUMP_TOOLS, max_context_tokens=1000)
 
     assert executor.invoke({"input": "Read every page"})["output"] == "done"
 
-    assert summary_model.prompts == []
+    # Only the two cleared outputs are condensed, into the checkpoint.
+    assert len(summary_model.prompts) == 1
+    assert summary_model.prompts[0][0].content.count("[tool dump]") == 2
     last_prompt = model.prompts[-1]
+    assert "Pages 0 and 1 list CVE-7." in last_prompt[1].content
     results = [m for m in last_prompt if isinstance(m, ToolMessage)]
     assert [m.tool_call_id for m in results] == [f"call_{i}" for i in range(7)]
     assert ["cleared" in m.content for m in results] == [True, True, False, False, False, False, False]
@@ -372,9 +397,58 @@ def test_near_the_limit_old_tool_outputs_are_cleared_before_anything_is_summariz
 def test_a_context_overflow_error_shrinks_the_context_and_retries_once():
     overflow = RuntimeError("Error code: 400 - This model's maximum context length is 1000 tokens")
     model = _ScriptedModel([*(_long_tool_call(i) for i in range(7)), overflow, AIMessage(content="done")])
-    executor = _executor(model, function_tools=_DUMP_TOOLS, max_context_tokens=100_000)
+    summary_model = _ScriptedModel([AIMessage(content="Pages 0 and 1 are blank.")])
+    executor = _executor(model, summary_model=summary_model, function_tools=_DUMP_TOOLS, max_context_tokens=100_000)
 
     assert executor.invoke({"input": "Read every page"})["output"] == "done"
 
     retried = [m.content for m in model.prompts[-1] if isinstance(m, ToolMessage)]
     assert sum("cleared" in content for content in retried) == 2
+
+
+def _plan_call(index, *statuses):
+    todos = [{"content": f"step {n}", "status": status} for n, status in enumerate(statuses, 1)]
+    return AIMessage(content="", tool_calls=[{"name": "todo_write", "args": {"todos": todos}, "id": f"plan_{index}"}])
+
+
+def test_an_answer_with_open_plan_items_is_sent_back_once():
+    model = _ScriptedModel([
+        _plan_call(1, "completed", "pending"), AIMessage(content="done early"), AIMessage(content="done anyway"),
+    ])
+
+    result = _executor(model, plan_tool=True).invoke({"input": "go"})
+
+    assert result["output"] == "done anyway"
+    assert len(model.prompts) == 3
+    nudge = model.prompts[2][-1].content
+    assert "[ ] step 2" in nudge and "step 1" not in nudge
+
+
+def test_a_finished_plan_lets_the_answer_through():
+    model = _ScriptedModel([_plan_call(1, "pending"), _plan_call(2, "completed"), AIMessage(content="done")])
+
+    result = _executor(model, plan_tool=True).invoke({"input": "go"})
+
+    assert result["output"] == "done"
+    assert len(model.prompts) == 3
+
+
+def test_open_plan_items_are_recalled_after_ten_calls_without_an_update():
+    model = _ScriptedModel([_plan_call(0, "in_progress"), *(_tool_call(i) for i in range(1, 13)),
+                            _plan_call(13, "completed"), AIMessage(content="done")])
+
+    _executor(model, plan_tool=True, function_tools=_NOOP_TOOLS).invoke({"input": "go"})
+
+    results = [m.content for m in model.prompts[-1] if isinstance(m, ToolMessage)]
+    reminded = [i for i, content in enumerate(results) if "Plan reminder" in content]
+    assert reminded == [10]
+    assert "[~] step 1" in results[10]
+
+
+def test_plan_updates_do_not_use_the_tool_budget():
+    model = _ScriptedModel([_plan_call(1, "pending"), _tool_call(2), _plan_call(3, "completed"), AIMessage(content="done")])
+
+    _executor(model, plan_tool=True, max_non_task_tools=1, function_tools=_NOOP_TOOLS).invoke({"input": "go"})
+
+    results = [m.content for m in model.prompts[-1] if isinstance(m, ToolMessage)]
+    assert results[1].startswith("ok") and not any(r.startswith("ERROR") for r in results)
