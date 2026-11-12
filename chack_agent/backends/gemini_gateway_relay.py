@@ -5,10 +5,12 @@ streams (``:streamGenerateContent``) a model that is not Gemini its
 ``usageMetadata`` is all zeros, so a run's tokens and cost are lost. The same
 request without streaming (``:generateContent``) reports the real usage.
 
-The relay listens on 127.0.0.1 and forwards every request to the gateway
-unchanged, except that a streaming request is sent as ``:generateContent`` and
-its JSON answer is returned to the CLI as one server-sent event. Gateway errors
-pass through with their status and body.
+The relay listens on 127.0.0.1 and forwards requests to the gateway. A
+streaming request is sent as ``:generateContent`` and its JSON answer is
+returned to the CLI as one server-sent event. If a gateway explicitly rejects
+one of the Gemini CLI's temperature, topP, or topK fields for a model, a
+bounded retry omits that field.
+Other gateway errors pass through with their status and body.
 
 The relay also keeps the token usage of every answer it relays, so a run that
 is stopped before the CLI prints its closing stats still counts the calls it
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import urllib.error
 import urllib.parse
@@ -98,6 +101,30 @@ def _sse_event(body: bytes) -> bytes:
     # must not span lines.
     payload = json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"))
     return b"data: " + payload.encode("utf-8") + b"\r\n\r\n"
+
+
+_RETRYABLE_GENERATION_FIELDS = frozenset({"temperature", "topP", "topK"})
+
+
+def _without_rejected_generation_field(request_body: bytes | None, error_body: bytes) -> bytes | None:
+    """Only remove a named generation field after its explicit rejection."""
+    match = re.search(rb"doesn't support the ([A-Za-z][A-Za-z0-9]*) field", error_body, re.I)
+    if not request_body or match is None:
+        return None
+    field = match.group(1).decode("ascii")
+    if field not in _RETRYABLE_GENERATION_FIELDS:
+        return None
+    try:
+        data = json.loads(request_body)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    generation = data.get("generationConfig")
+    if not isinstance(generation, dict) or field not in generation:
+        return None
+    data["generationConfig"] = {key: value for key, value in generation.items() if key != field}
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 class GeminiGatewayRelay:
@@ -201,6 +228,32 @@ class GeminiGatewayRelay:
             error = {"error": {"code": 502, "status": "UNAVAILABLE", "message": f"gateway unreachable: {exc}"}}
             self._send(handler, 502, {"Content-Type": "application/json"}, json.dumps(error).encode("utf-8"))
             return
+        for _ in range(len(_RETRYABLE_GENERATION_FIELDS)):
+            if not isinstance(response, urllib.error.HTTPError) or response.code != 400:
+                break
+            error_body = response.read()
+            retry_body = _without_rejected_generation_field(body, error_body)
+            if retry_body is None:
+                response_headers = {
+                    name: value for name, value in response.headers.items()
+                    if name.lower() not in _HOP_HEADERS
+                }
+                response.close()
+                self._send(handler, 400, response_headers, error_body)
+                return
+            response.close()
+            _LOGGER.info("Retrying Gemini gateway request without unsupported generation field")
+            body = retry_body
+            retry = urllib.request.Request(url, data=retry_body, headers=headers, method=handler.command)
+            try:
+                response = self._opener.open(retry, timeout=self._timeout_seconds)
+            except urllib.error.HTTPError as exc:
+                response = exc
+            except Exception as exc:
+                _LOGGER.warning("Gemini gateway relay retry could not reach %s: %s", url, exc)
+                error = {"error": {"code": 502, "status": "UNAVAILABLE", "message": f"gateway unreachable: {exc}"}}
+                self._send(handler, 502, {"Content-Type": "application/json"}, json.dumps(error).encode("utf-8"))
+                return
         with response:
             status = int(response.status if hasattr(response, "status") else response.code)
             response_headers = {

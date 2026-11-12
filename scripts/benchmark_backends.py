@@ -16,7 +16,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -51,6 +53,7 @@ class Task:
     needs_web: bool = False
     required_tool_families: tuple[str, ...] = ()
     output_schema: Optional[dict[str, Any]] = None
+    max_tool_calls: int = _MAX_TOOL_CALLS
 
 
 def _exact(expected: str) -> Callable[[str], bool]:
@@ -83,6 +86,7 @@ _DICT_ORDER_SOURCE_PREFIXES = (
     "https://docs.python.org/3/whatsnew/3.7.html",
     "https://docs.python.org/3/library/stdtypes.html",
     "https://docs.python.org/3/builtins/stdtypes.html",
+    "https://docs.python.org/3/reference/datamodel.html",
 )
 
 
@@ -142,6 +146,60 @@ _JOIN_SCHEMA = {
     "additionalProperties": False,
 }
 
+_RECONCILE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "customer": {"type": "string"},
+        "outstanding_cents": {"type": "integer"},
+        "open_invoice_count": {"type": "integer"},
+        "ignored_payment_cents": {"type": "integer"},
+    },
+    "required": ["customer", "outstanding_cents", "open_invoice_count", "ignored_payment_cents"],
+    "additionalProperties": False,
+}
+
+
+def _reconcile_report(output: str) -> bool:
+    try:
+        data = _parse_json_object(output)
+        return data == {
+            "customer": "bob", "outstanding_cents": 1000,
+            "open_invoice_count": 3, "ignored_payment_cents": 1299,
+        }
+    except ValueError:
+        return False
+
+
+def _repaired_allocator(module_path: Path) -> Callable[[str], bool]:
+    def _check(output: str) -> bool:
+        if not output.strip():
+            return False
+        probe = (
+            "import importlib.util,sys;"
+            "s=importlib.util.spec_from_file_location('allocator',sys.argv[1]);"
+            "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+            "assert m.allocate_cents(7,[1,2,1])==[2,3,2];"
+            "assert m.allocate_cents(5,[0,3,2])==[0,3,2];"
+            "assert m.allocate_cents(2,[1,1,1])==[1,1,0];"
+            "assert m.allocate_cents(101,[2,3,5])==[20,30,51];"
+            "assert m.allocate_cents(0,[1,2])==[0,0];"
+            "assert m.allocate_cents(3,[1])==[3];"
+            "assert sum(m.allocate_cents(10001,[3,7,11]))==10001;"
+            "\nfor weights in ([],[0,0],[-1,2]):\n"
+            " try: m.allocate_cents(1,weights)\n"
+            " except ValueError: pass\n"
+            " else: raise AssertionError(weights)\n"
+        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", probe, str(module_path)],
+                capture_output=True, timeout=10, check=False, text=True,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+    return _check
+
 
 def _join_report(output: str) -> bool:
     try:
@@ -178,6 +236,49 @@ def build_tasks(workdir: Path) -> list[Task]:
         writer.writerows((
             ("iris", 2), ("cedar", -3), ("maple", 4), ("elm", 9),
         ))
+    allocator_file = workdir / "allocator.py"
+    allocator_file.write_text(
+        '"""Allocate whole cents in proportion to nonnegative weights.\n\n'
+        'Remainder cents go to the largest fractional shares; ties use input order.\n'
+        'Reject empty, all-zero, or negative weights with ValueError.\n"""\n\n'
+        'def allocate_cents(amount_cents: int, weights: list[int]) -> list[int]:\n'
+        '    if amount_cents < 0 or any(weight < 0 for weight in weights):\n'
+        '        raise ValueError("negative amount or weight")\n'
+        '    total = sum(weights)\n'
+        '    shares = [amount_cents * weight // total for weight in weights]\n'
+        '    for index in range(amount_cents - sum(shares)):\n'
+        '        shares[index] += 1\n'
+        '    return shares\n', encoding="utf-8",
+    )
+    allocator_test = workdir / "test_allocator.py"
+    allocator_test.write_text(
+        'import unittest\nfrom allocator import allocate_cents\n\n'
+        'class AllocatorTests(unittest.TestCase):\n'
+        '    def test_largest_remainder(self):\n'
+        '        self.assertEqual(allocate_cents(7, [1, 2, 1]), [2, 3, 2])\n'
+        '    def test_tie_break(self):\n'
+        '        self.assertEqual(allocate_cents(2, [1, 1, 1]), [1, 1, 0])\n'
+        '    def test_invalid_weights(self):\n'
+        '        for weights in ([], [0, 0], [-1, 2]):\n'
+        '            with self.assertRaises(ValueError):\n'
+        '                allocate_cents(1, weights)\n'
+        '    def test_conservation(self):\n'
+        '        self.assertEqual(sum(allocate_cents(101, [2, 3, 5])), 101)\n',
+        encoding="utf-8",
+    )
+    invoice_file = workdir / "invoices.csv"
+    invoice_file.write_text(
+        "invoice,customer,cents,status\n"
+        "a,ada,1250,posted\nb,bob,1800,posted\nc,ada,700,void\n"
+        "d,cy,900,posted\ne,bob,300,posted\n", encoding="utf-8",
+    )
+    payment_file = workdir / "payments.csv"
+    payment_file.write_text(
+        "invoice,cents\na,800\na,200\nb,1200\nc,300\nd,900\ne,100\nx,999\n",
+        encoding="utf-8",
+    )
+    refund_file = workdir / "refunds.csv"
+    refund_file.write_text("invoice,cents\na,100\nb,150\ne,50\n", encoding="utf-8")
     return [
         Task("answer", "What is 17 * 23? Reply with only the number.", _exact("391")),
         Task(
@@ -255,6 +356,33 @@ def build_tasks(workdir: Path) -> list[Task]:
             required_tool_families=("local", "web"),
             output_schema=_JOIN_SCHEMA,
         ),
+        Task(
+            "repair_allocator",
+            f"A payout allocator at {allocator_file} is failing its stated contract. "
+            f"Inspect the module and the local test file {allocator_test}, fix the implementation "
+            "without changing the test file or public function signature, and run the test suite. "
+            "The allocation must conserve cents, give remainders to the largest fractional shares "
+            "with stable ties, and reject invalid weights. Briefly report what you fixed.",
+            _repaired_allocator(allocator_file),
+            needs_shell=True,
+            required_tool_families=("exec",),
+            max_tool_calls=12,
+        ),
+        Task(
+            "reconcile_ledger",
+            f"Investigate the local ledger files {invoice_file}, {payment_file}, and {refund_file}. "
+            "For posted invoices, outstanding cents are invoice cents minus payments plus refunds. "
+            "Ignore payments linked to void or unknown invoices, but report their combined cents. "
+            "Determine which customer has the highest total outstanding balance, that balance, "
+            "and how many posted invoices across all customers remain open. Return one JSON object "
+            "with customer, outstanding_cents, open_invoice_count, and ignored_payment_cents. "
+            "Check the underlying files before deciding how to calculate the answer.",
+            _reconcile_report,
+            needs_shell=True,
+            required_tool_families=("local",),
+            output_schema=_RECONCILE_SCHEMA,
+            max_tool_calls=12,
+        ),
     ]
 
 
@@ -263,7 +391,7 @@ def _config(provider: str, model: str, api_key_type: str, task: Task, max_turns:
         task_steps_manager_enabled=False, exec_enabled=task.needs_shell,
         native_web_search_enabled=task.needs_web,
         keyless_web_search_enabled=task.needs_web,
-        max_tools_used=_MAX_TOOL_CALLS,
+        max_tools_used=task.max_tool_calls,
     )
     agent = AgentConfig(
         thinking_effort="high",
@@ -305,7 +433,7 @@ def run_one(target: str, task: Task, max_turns: int) -> dict[str, Any]:
     tools_ok = all(_uses_tool_family(tool_names, family) for family in task.required_tool_families)
     answer_ok = bool(task.check(output))
     tool_calls = sum(result.tool_counts.values())
-    budget_ok = tool_calls <= _MAX_TOOL_CALLS
+    budget_ok = tool_calls <= task.max_tool_calls
     row.update(
         passed=answer_ok and tools_ok and budget_ok and not result.error,
         answer_ok=answer_ok,
@@ -361,17 +489,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--json", dest="json_path", default="", help="also write the rows to this file")
     args = parser.parse_args(argv)
 
-    with tempfile.TemporaryDirectory(prefix="chack-benchmark-") as tmp:
-        tasks = build_tasks(Path(tmp))
-        wanted = {name.strip() for name in args.tasks.split(",") if name.strip()}
-        if wanted:
-            tasks = [task for task in tasks if task.name in wanted]
-        rows = []
-        for target in args.targets:
-            for task in tasks:
-                row = run_one(target, task, args.max_turns)
-                print(json.dumps(row, default=str), file=sys.stderr, flush=True)
-                rows.append(row)
+    with tempfile.TemporaryDirectory(prefix="chack-benchmark-list-") as tmp:
+        task_names = [task.name for task in build_tasks(Path(tmp))]
+    wanted = {name.strip() for name in args.tasks.split(",") if name.strip()}
+    if wanted:
+        unknown = wanted.difference(task_names)
+        if unknown:
+            parser.error(f"unknown tasks: {', '.join(sorted(unknown))}")
+        task_names = [name for name in task_names if name in wanted]
+    rows = []
+    for target in args.targets:
+        for task_name in task_names:
+            with tempfile.TemporaryDirectory(prefix="chack-benchmark-case-") as tmp:
+                task = next(task for task in build_tasks(Path(tmp)) if task.name == task_name)
+                original_cwd = Path.cwd()
+                try:
+                    os.chdir(tmp)
+                    row = run_one(target, task, args.max_turns)
+                finally:
+                    os.chdir(original_cwd)
+            print(json.dumps(row, default=str), file=sys.stderr, flush=True)
+            rows.append(row)
 
     print(render(rows))
     if args.json_path:

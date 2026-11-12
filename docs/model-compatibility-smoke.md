@@ -1,5 +1,10 @@
 # Bakkt model and backend functional matrix
 
+For the full ten-model, eleven-backend comparison with Claude Opus 4.8 and
+harder repair, ledger, and verified web tasks, see the
+[failure matrix](backend-model-failure-matrix.md). This page preserves the
+earlier exploratory smoke observations, including the separate Opus 5.5 sample.
+
 Tested on 2026-11-11 and 2026-11-12 with the Bakkt gateway configuration for Naxus user `carlospolop`. The private API key is not stored in this repository. Kimi Code 2.5.3 and Qwen Code 0.27.2 were run with Node.js 22.20. The gateway model IDs were passed through unchanged. These are small functional samples, not statistically reliable quality rankings.
 
 Run more samples with `scripts/benchmark_backends.py` and `LLM_GATEWAY_BASE_URL`, `LLM_GATEWAY_API_KEY`, and `LLM_GATEWAY_TYPE=litellm` in the environment. Targets use `backend:gateway-model:gateway`, for example `kimi:bakkt/kimi-k3.1:gateway`. The harness writes temporary local fixtures and checks answers, actual tool calls, latency, reported usage, and an eight-call tool budget. It never scans an external target.

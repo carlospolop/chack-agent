@@ -220,22 +220,19 @@ def test_a_custom_gateway_serves_the_cli_on_the_gemini_api_it_names(captured, mo
     assert captured.sent[0]["path"].startswith("/google/v1beta/models/corp/gemini-3.5-flash:")
 
 def test_a_gateway_answer_without_token_usage_is_reported(monkeypatch, tmp_path, caplog):
-    """LiteLLM releases that translate the Gemini API for other models stream
-    usageMetadata of zeros; the run must say its cost is not counted."""
+    """A translated Gemini API answer with zero usage must report unknown cost."""
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             self.rfile.read(int(self.headers.get("content-length") or 0))
-            chunks = [
-                {"candidates": [{"content": {"parts": [{"text": "hello"}], "role": "model"}, "index": 0}]},
-                {
-                    "candidates": [{"content": {"parts": [], "role": "model"}, "finishReason": "STOP", "index": 0}],
-                    "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0},
-                },
-            ]
-            body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks).encode()
+            answer = {
+                "candidates": [{"content": {"parts": [{"text": "hello"}], "role": "model"},
+                                "finishReason": "STOP", "index": 0}],
+                "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0},
+            }
+            body = json.dumps(answer).encode()
             self.send_response(200)
-            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
