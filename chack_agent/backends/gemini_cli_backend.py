@@ -25,6 +25,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
+from ..output_schema import repair_schema_output
 from ..resume_compaction import ResumeCompactionResult
 from ..llm_gateway import (
     LLM_GATEWAY_ENV_GEMINI_BASE_URL,
@@ -210,6 +211,19 @@ class GeminiCliExecutor:
         user_input = str(payload.get("input", "") or "")
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_gemini(prompt)
+        # The schema is only a prompt contract here. A drifting answer gets one
+        # repair turn in the resumed session.
+        output, repair_steps, repair_raw = repair_schema_output(
+            output,
+            schema=self._output_schema_json,
+            name=self._output_schema_name,
+            strict=self._output_schema_strict,
+            resumable=bool(self._gemini_session_id),
+            run_turn=self._run_gemini,
+            label="gemini",
+        )
+        steps.extend(repair_steps)
+        raw_result.raw_responses.extend(repair_raw)
 
         if user_input:
             self._conversation.append({"role": "user", "content": user_input})

@@ -17,7 +17,8 @@ model name unchanged to the CLI.
 Each Chack session has a private CLI home and an empty launch directory. The
 CLI session ID is saved for the next invocation; compact_for_resume() sends
 Kimi /compact or Qwen /compress to that session. The configured output
-schema is included in the prompt. Qwen's result event supplies usage; Kimi's
+schema is included in the prompt; an answer that does not match it gets one
+repair turn in the resumed session. Qwen's result event supplies usage; Kimi's
 current print-mode JSONL may omit usage, in which case token cost is
 unavailable for that turn.
 

@@ -32,6 +32,10 @@ def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         " f.write(json.dumps({'args':sys.argv[1:], 'cwd':os.getcwd(),"
         " 'allowed':json.loads(os.environ['CHACK_ALLOWED_TOOLS_JSON'])})+'\\n')\n"
         "def emit(value): print(json.dumps(value), flush=True)\n"
+        "if os.environ.get('FAKE_CONTENTS'):\n"
+        " answers = json.loads(os.environ['FAKE_CONTENTS'])\n"
+        " n = len(open(os.environ['FAKE_CALLS']).read().splitlines())\n"
+        " os.environ['FAKE_CONTENT'] = answers[min(n, len(answers)) - 1]\n"
         "if os.environ.get('FAKE_FAIL'):\n"
         " print('diagnostic from stderr', file=sys.stderr, flush=True); sys.exit(2)\n"
         "if os.environ['FAKE_KIND']=='kimi':\n"
@@ -208,6 +212,94 @@ def test_schema_output_is_validated_and_normalized(
     )
     result = executor.invoke({"input": "Return JSON."})
     assert json.loads(result["output"]) == {"answer": 47}
+
+
+_REPAIR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "result": {
+            "type": "object",
+            "properties": {"service_id": {"type": "string"}, "assessment": {"type": "string"}},
+            "required": ["service_id", "assessment"],
+            "additionalProperties": False,
+        }
+    },
+    "required": ["result"],
+    "additionalProperties": False,
+}
+_VALID = {"result": {"service_id": "svc-1", "assessment": "exploitable"}}
+_DRIFTED = {"result": {"service_id": "nginx 1.18"}, "findings": [{"observation": "open"}]}
+
+
+def _schema_executor(backend: str):
+    cfg = config(backend)
+    cfg.agent.output_schema_json = _REPAIR_SCHEMA
+    return build_executor(
+        cfg, system_prompt="System.", max_turns=2,
+        memory_max_messages=4, memory_reset_to_messages=2,
+    )
+
+
+def _calls(fake_cli: Path) -> list[dict]:
+    return [json.loads(x) for x in (fake_cli.parent / "calls.jsonl").read_text().splitlines()]
+
+
+@pytest.mark.parametrize("backend", ["kimi", "qwen"])
+def test_drifted_schema_answer_is_repaired_in_the_resumed_session(
+    fake_cli: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    monkeypatch.setenv("FAKE_KIND", backend)
+    monkeypatch.setenv("FAKE_CONTENTS", json.dumps([json.dumps(_DRIFTED), json.dumps(_VALID)]))
+
+    result = _schema_executor(backend).invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == _VALID
+    calls = _calls(fake_cli)
+    assert len(calls) == 2
+    resume = ["--session", "session_test"] if backend == "kimi" else ["--resume", "qwen-test"]
+    assert calls[1]["args"][-2:] == resume
+    # Both turns' tool calls and usage are counted.
+    assert [step[0].tool for step in result["intermediate_steps"]] == ["exec", "exec"]
+    assert len(result["raw_result"].raw_responses) == 2
+
+
+@pytest.mark.parametrize("backend", ["kimi", "qwen"])
+def test_valid_schema_answer_gets_no_repair_turn(
+    fake_cli: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    monkeypatch.setenv("FAKE_KIND", backend)
+    monkeypatch.setenv("FAKE_CONTENT", "Result: " + json.dumps(_VALID))
+
+    result = _schema_executor(backend).invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == _VALID
+    assert len(_calls(fake_cli)) == 1
+
+
+@pytest.mark.parametrize("backend", ["kimi", "qwen"])
+def test_schema_answer_still_drifting_after_repair_is_returned_as_given(
+    fake_cli: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    monkeypatch.setenv("FAKE_KIND", backend)
+    monkeypatch.setenv("FAKE_CONTENTS", json.dumps([json.dumps(_DRIFTED), "still prose"]))
+
+    result = _schema_executor(backend).invoke({"input": "Assess the service."})
+
+    assert result["output"] == "still prose"
+    assert len(_calls(fake_cli)) == 2
+
+
+@pytest.mark.parametrize("backend", ["kimi", "qwen"])
+def test_backend_error_gets_no_schema_repair(
+    fake_cli: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    monkeypatch.setenv("FAKE_KIND", backend)
+    monkeypatch.setenv("FAKE_FAIL", "1")
+
+    result = _schema_executor(backend).invoke({"input": "Assess the service."})
+
+    assert result["output"].startswith("ERROR:")
+    assert len(_calls(fake_cli)) == 1
 
 
 @pytest.mark.parametrize("backend", ["kimi", "qwen"])

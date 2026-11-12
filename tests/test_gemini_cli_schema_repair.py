@@ -1,0 +1,183 @@
+"""Gemini CLI answers that drift from the output schema get one repair turn.
+
+A fake ``gemini`` executable records its arguments and replays a scripted
+stream-json run per call, so the real subprocess path is exercised.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import textwrap
+
+import pytest
+
+from chack_agent.backends import gemini_cli_backend
+from chack_agent.config import (
+    AgentConfig,
+    ChackConfig,
+    CredentialsConfig,
+    LoggingConfig,
+    ModelConfig,
+    SessionConfig,
+    ToolsConfig,
+)
+
+FAKE_GEMINI = textwrap.dedent(
+    """
+    import json, os, sys
+    record = os.environ["FAKE_GEMINI_RECORD"]
+    calls = []
+    if os.path.exists(record):
+        with open(record) as handle:
+            calls = json.load(handle)
+    calls.append(sys.argv[1:])
+    with open(record, "w") as handle:
+        json.dump(calls, handle)
+    with open(os.environ["FAKE_GEMINI_SCENARIO"]) as handle:
+        runs = json.load(handle)
+    run = runs[min(len(calls), len(runs)) - 1]
+    for event in run.get("events", []):
+        print(json.dumps(event), flush=True)
+    sys.exit(run.get("exit", 0))
+    """
+)
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "result": {
+            "type": "object",
+            "properties": {"service_id": {"type": "string"}, "assessment": {"type": "string"}},
+            "required": ["service_id", "assessment"],
+            "additionalProperties": False,
+        }
+    },
+    "required": ["result"],
+    "additionalProperties": False,
+}
+VALID = {"result": {"service_id": "svc-1", "assessment": "exploitable"}}
+DRIFTED = {"findings": [{"observation": "open port"}], "summary": "done"}
+
+
+def _run(answer, *, session="gem-1", tool_id="t1", input_tokens=100, output_tokens=10):
+    return {
+        "events": [
+            {"type": "init", "session_id": session},
+            {"type": "tool_use", "tool_id": tool_id, "tool_name": "exec", "parameters": {"command": "id"}},
+            {"type": "tool_result", "tool_id": tool_id, "status": "success", "output": "uid=0"},
+            {"type": "message", "role": "assistant", "content": answer},
+            {
+                "type": "result",
+                "status": "success",
+                "stats": {"input_tokens": input_tokens, "output_tokens": output_tokens, "cached": 0},
+            },
+        ]
+    }
+
+
+@pytest.fixture
+def fake_gemini(tmp_path, monkeypatch):
+    script = tmp_path / "gemini"
+    script.write_text(f"#!{sys.executable}\n{FAKE_GEMINI}", encoding="utf-8")
+    script.chmod(0o755)
+    record = tmp_path / "calls.json"
+    scenario = tmp_path / "scenario.json"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CHACK_GEMINI_HOME", str(tmp_path / "gemini-homes"))
+    monkeypatch.setenv("GEMINI_CLI_PATH", str(script))
+    monkeypatch.setenv("FAKE_GEMINI_RECORD", str(record))
+    monkeypatch.setenv("FAKE_GEMINI_SCENARIO", str(scenario))
+    for name in ("GOOGLE_GEMINI_BASE_URL", "CHACK_GEMINI_EXEC_TIMEOUT_SECONDS"):
+        monkeypatch.delenv(name, raising=False)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+
+    class Fake:
+        def script(self, runs):
+            scenario.write_text(json.dumps(runs), encoding="utf-8")
+
+        @property
+        def calls(self):
+            return json.loads(record.read_text(encoding="utf-8")) if record.exists() else []
+
+    return Fake()
+
+
+def _executor(schema=SCHEMA):
+    config = ChackConfig(
+        model=ModelConfig(primary="gemini-3-flash", provider="gemini"),
+        agent=AgentConfig(main_action="test", sub_action="test", output_schema_json=schema, output_schema_name="answer"),
+        session=SessionConfig(max_turns=4),
+        tools=ToolsConfig(exec_enabled=True, task_steps_manager_enabled=False, native_web_search_enabled=False),
+        credentials=CredentialsConfig(gemini_api_key="fake-key"),
+        logging=LoggingConfig(),
+        system_prompt="system",
+        env={},
+    )
+    return gemini_cli_backend.build_executor(
+        config, system_prompt="system", max_turns=4, memory_max_messages=10, memory_reset_to_messages=5
+    )
+
+
+def test_drifted_answer_is_repaired_in_the_same_session_and_both_turns_are_counted(fake_gemini):
+    fake_gemini.script([
+        _run(json.dumps(DRIFTED), input_tokens=1000, output_tokens=50),
+        _run(json.dumps(VALID), tool_id="t2", input_tokens=1100, output_tokens=20),
+    ])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == VALID
+    first, second = fake_gemini.calls
+    assert "-r" not in first
+    assert second[second.index("-r") + 1] == "gem-1"
+    usage = [response["usage"] for response in result["raw_result"].raw_responses]
+    assert sum(item["input_tokens"] for item in usage) == 2100
+    assert sum(item["output_tokens"] for item in usage) == 70
+    assert [step[0].tool_input["tool_id"] for step in result["intermediate_steps"]] == ["t1", "t2"]
+
+
+def test_valid_answer_is_not_repaired(fake_gemini):
+    fake_gemini.script([_run("Done:\n```json\n" + json.dumps(VALID) + "\n```")])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == VALID
+    assert len(fake_gemini.calls) == 1
+
+
+def test_answer_still_drifting_after_the_repair_is_returned_as_given(fake_gemini):
+    fake_gemini.script([_run(json.dumps(DRIFTED)), _run("still prose")])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert result["output"] == "still prose"
+    assert len(fake_gemini.calls) == 2
+
+
+def test_backend_error_is_not_repaired(fake_gemini):
+    fake_gemini.script([{"events": [{"type": "init", "session_id": "gem-1"}], "exit": 3}])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert result["output"].startswith("ERROR: Gemini exec failed (exit=3)")
+    assert len(fake_gemini.calls) == 1
+
+
+def test_without_a_session_to_resume_the_answer_is_returned_unrepaired(fake_gemini):
+    fake_gemini.script([_run(json.dumps(DRIFTED), session="")])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == DRIFTED
+    assert len(fake_gemini.calls) == 1
+
+
+def test_without_a_schema_any_answer_is_final(fake_gemini):
+    fake_gemini.script([_run("plain prose")])
+
+    result = _executor(schema=None).invoke({"input": "Say something."})
+
+    assert result["output"] == "plain prose"
+    assert len(fake_gemini.calls) == 1

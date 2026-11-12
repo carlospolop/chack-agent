@@ -44,7 +44,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 from ..config import ChackConfig, resolve_api_key_type
 from ..live_cost_state import report_live_usage
 from ..llm_gateway import GatewayRoute, gateway_subprocess_env, get_gateway_route
-from ..output_schema import JsonSchemaOutput
+from ..output_schema import repair_schema_output
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import (
     OPENCODE_SDK_ANTHROPIC,
@@ -299,25 +299,6 @@ def _sanitize_session_id(session_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", _clean(session_id)) or "default"
 
 
-def _extract_embedded_json(output: str) -> Any | None:
-    text = str(output or "")
-    decoder = json.JSONDecoder()
-    idx = 0
-    candidates: list[Any] = []
-    while idx < len(text):
-        starts = [pos for pos in (text.find("{", idx), text.find("[", idx)) if pos >= 0]
-        if not starts:
-            break
-        start = min(starts)
-        try:
-            parsed, end = decoder.raw_decode(text[start:])
-            candidates.append(parsed)
-            idx = start + max(end, 1)
-        except ValueError:
-            idx = start + 1
-    return candidates[-1] if candidates else None
-
-
 def _usage_from_tokens(tokens: Any) -> dict[str, Any] | None:
     """Chack usage for one opencode step.
 
@@ -420,7 +401,20 @@ class OpencodeCliExecutor:
         user_input = str(payload.get("input", "") or "")
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_opencode(prompt)
-        output = self._normalize_schema_output(output)
+        # The schema is only a prompt contract here. A drifting answer gets one
+        # repair turn in the same session; the agent prompt stays unchanged,
+        # so the provider's prompt cache still applies.
+        output, repair_steps, repair_raw = repair_schema_output(
+            output,
+            schema=self._output_schema_json,
+            name=self._output_schema_name,
+            strict=self._output_schema_strict,
+            resumable=bool(self._session_id),
+            run_turn=self._run_opencode,
+            label="opencode",
+        )
+        steps.extend(repair_steps)
+        raw_result.raw_responses.extend(repair_raw)
 
         if user_input:
             self._conversation.append({"role": "user", "content": user_input})
@@ -510,27 +504,6 @@ class OpencodeCliExecutor:
             if part and part.strip()
         )
         return user_message
-
-    def _normalize_schema_output(self, output: str) -> str:
-        if not self._output_schema_json or _clean(output).lower().startswith("error:"):
-            return output
-        try:
-            schema = json.loads(self._output_schema_json)
-        except json.JSONDecodeError:
-            return output
-        if not isinstance(schema, dict):
-            return output
-        validator = JsonSchemaOutput(schema, name=self._output_schema_name, strict=self._output_schema_strict)
-        for candidate in (output or "", _extract_embedded_json(output or "")):
-            if candidate is None:
-                continue
-            try:
-                text = candidate if isinstance(candidate, str) else json.dumps(candidate, ensure_ascii=False)
-                return json.dumps(validator.validate_json(text), ensure_ascii=False)
-            except Exception:
-                continue
-        _LOGGER.warning("opencode output did not match the output schema; returning it unchanged")
-        return output
 
     # ------------------------------------------------------------------
     # Files and environment

@@ -15,7 +15,6 @@ from typing import Annotated, Any, Optional
 from typing_extensions import TypedDict
 
 from agents import MaxTurnsExceeded
-from agents.exceptions import ModelBehaviorError
 from agents.tool_context import ToolContext
 from agents.usage import Usage
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
@@ -36,7 +35,7 @@ from ..limit_event_state import emit_limit_reached
 from chack_tools.cancellation import raise_if_cancelled
 
 from ..live_cost_state import report_live_usage
-from ..output_schema import JsonSchemaOutput
+from ..output_schema import schema_repair_prompt, validate_schema_output
 from ..resume_compaction import ResumeCompactionResult
 from .content_filter import ProviderContentFilterError
 from .hosted_web_search import WebToolPlan, plan_web_tools
@@ -308,22 +307,18 @@ class LangGraphExecutor:
 
     def _validate_schema_output(self, output: str) -> tuple[str, str]:
         """Return the answer as schema-shaped JSON, or as given with the reason it fails."""
-        validator = JsonSchemaOutput(
-            json.loads(self._output_schema_json),
+        return validate_schema_output(
+            output,
+            self._output_schema_json,
             name=str(self._output_schema_name or "output_schema"),
             strict=bool(self._output_schema_strict),
         )
-        try:
-            return json.dumps(validator.validate_json(output or ""), ensure_ascii=False), ""
-        except ModelBehaviorError as exc:
-            return output, str(exc)
 
     def _schema_repair_prompt(self, schema_error: str) -> str:
-        schema_name = str(self._output_schema_name or "output_schema").strip() or "output_schema"
-        return (
-            f"Your final answer does not match the required output schema `{schema_name}`: {schema_error}\n"
-            "Reply again with only the final answer as one JSON object that matches the schema, "
-            "with no text before or after it."
+        return schema_repair_prompt(
+            schema_error,
+            self._output_schema_json,
+            name=str(self._output_schema_name or "output_schema"),
         )
 
     async def aget_memory_messages(self) -> list[Any]:

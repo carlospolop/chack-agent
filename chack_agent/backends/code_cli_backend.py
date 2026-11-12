@@ -27,7 +27,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..llm_gateway import clone_config_for_gateway, gateway_subprocess_env, get_gateway_route
-from ..output_schema import JsonSchemaOutput
+from ..output_schema import repair_schema_output
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import normalize_thinking_effort
 from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds
@@ -154,7 +154,18 @@ class CodeCliExecutor:
         user_input = _clean(payload.get("input"))
         prompt = self._compose_prompt(user_input)
         output, steps, raw = self._run(prompt)
-        output = self._normalize_schema_output(output)
+        # A drifting answer gets one repair turn in the resumed session.
+        output, repair_steps, repair_raw = repair_schema_output(
+            output,
+            schema=self._output_schema,
+            name=self._output_schema_name,
+            strict=self._output_schema_strict,
+            resumable=bool(self._session_id),
+            run_turn=self._run,
+            label=self.backend,
+        )
+        steps.extend(repair_steps)
+        raw.raw_responses.extend(repair_raw)
         if user_input:
             self._conversation.append({"role": "user", "content": user_input})
         if output:
@@ -162,19 +173,6 @@ class CodeCliExecutor:
         if self._memory_limit and len(self._conversation) > self._memory_limit:
             self._conversation = self._conversation[-max(1, min(self._memory_limit, self._memory_reset_to or self._memory_limit)):]
         return {"output": output, "intermediate_steps": steps, "raw_result": raw}
-
-    def _normalize_schema_output(self, output: str) -> str:
-        if not self._output_schema or output.lower().startswith("error:"):
-            return output
-        try:
-            validator = JsonSchemaOutput(
-                self._output_schema, name=self._output_schema_name,
-                strict=self._output_schema_strict,
-            )
-            return json.dumps(validator.validate_json(output), ensure_ascii=False)
-        except Exception as exc:
-            _LOG.warning("%s output did not match its schema: %s", self.backend, exc)
-            return output
 
     async def aget_memory_messages(self) -> list[Any]:
         return list(self._conversation)
