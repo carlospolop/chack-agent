@@ -1073,6 +1073,8 @@ class ClaudeCodeExecutor:
             prompt,
             resume_compaction=resume_compaction,
         )
+        # Without tools the CLI starts no MCP server, so no receipt is written.
+        mcp_configured = "--mcp-config" in command
         env = self._build_env()
         exec_cwd = str(env.get("CHACK_EXEC_CWD", "") or os.environ.get("CHACK_EXEC_CWD", "") or "").strip() or None
         bash_vulns_dir = self._bash_vuln_fallback_dir(exec_cwd)
@@ -1316,7 +1318,8 @@ class ClaudeCodeExecutor:
                     continue
         finally:
             unregister_process(cancel_registration)
-            self._log_mcp_startup_status(startup_status_path)
+            if mcp_configured:
+                self._log_mcp_startup_status(startup_status_path)
             try:
                 if process.stdout is not None:
                     process.stdout.close()

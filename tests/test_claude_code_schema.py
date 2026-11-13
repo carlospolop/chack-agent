@@ -1,3 +1,4 @@
+import logging
 import json
 import io
 import os
@@ -1012,3 +1013,35 @@ def test_claude_other_result_errors_are_not_replaced_by_a_structured_attempt(mon
     output = _run_claude_stream(monkeypatch, tmp_path, events, output_schema_json=_ENHANCEMENT_SCHEMA)
 
     assert output.startswith("ERROR: Claude returned an error in final result event.")
+
+
+def test_claude_reports_a_missing_mcp_receipt_only_when_mcp_was_configured(monkeypatch, tmp_path, caplog) -> None:
+    events = json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "{}"}) + "\n"
+
+    class _FakeProcess:
+        pid = 999999
+
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(events)
+
+        def poll(self):
+            return 0 if self.stdout.tell() >= len(events) else None
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        "chack_agent.backends.claude_code_backend.subprocess.Popen",
+        lambda *args, **kwargs: _FakeProcess(),
+    )
+    for has_tools in (False, True):
+        executor = _build_executor("")
+        executor._claude_home = str(tmp_path)
+        monkeypatch.setattr(executor, "_has_configured_tools", lambda has_tools=has_tools: has_tools)
+        monkeypatch.setattr(executor, "_playwright_mcp_enabled", lambda: False)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="chack_agent.backends.claude_code_backend"):
+            executor._run_claude_once("prompt")
+        missing = [r for r in caplog.records if "startup receipt was not written" in r.getMessage()]
+        assert bool(missing) is has_tools
