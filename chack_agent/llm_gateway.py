@@ -407,9 +407,9 @@ def _http_get(url: str, *, headers: Mapping[str, str], timeout: float) -> Any:
 
 def _catalog_timeout_seconds() -> float:
     try:
-        return max(0.5, float(os.environ.get("LLM_GATEWAY_CATALOG_TIMEOUT_SECONDS", "5")))
+        return max(0.5, float(os.environ.get("LLM_GATEWAY_CATALOG_TIMEOUT_SECONDS", "15")))
     except ValueError:
-        return 5.0
+        return 15.0
 
 
 def gateway_catalog(
@@ -422,8 +422,10 @@ def gateway_catalog(
 
     LiteLLM's ``/model/info`` adds upstream IDs, context windows and prices;
     other gateways are read through the OpenAI-compatible ``/models`` list.
-    Failures return an empty catalog (model names are then used as given and
-    cannot be checked) and are retried after a short back-off.
+    A failed refresh keeps the last catalog read from the gateway (its prices
+    and context windows are still right); with none, it returns an empty
+    catalog (model names are then used as given and cannot be checked).
+    Either way the read is retried after a short back-off.
     """
 
     root = _clean(base_url).rstrip("/")
@@ -434,6 +436,7 @@ def gateway_catalog(
         cached = _CATALOG_CACHE.get(cache_key)
         if cached is not None and cached[0] > now:
             return cached[1]
+    last_read = cached[1] if cached is not None else {}
     request_headers = dict(headers or {})
     request_headers["Authorization"] = f"Bearer {api_key}"
     try:
@@ -447,8 +450,13 @@ def gateway_catalog(
         catalog = parse(response.json())
         expires_at = now + _CATALOG_TTL_SECONDS
     except Exception as exc:
-        _LOGGER.warning("Could not read the model list of gateway %s: %s", root, exc)
-        catalog = {}
+        _LOGGER.warning(
+            "Could not read the model list of gateway %s%s: %s",
+            root,
+            "; keeping the last one read" if last_read else "",
+            exc,
+        )
+        catalog = last_read
         expires_at = now + _CATALOG_FAILURE_TTL_SECONDS
     with _CATALOG_LOCK:
         _CATALOG_CACHE[cache_key] = (expires_at, catalog)
