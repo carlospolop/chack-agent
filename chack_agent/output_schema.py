@@ -356,6 +356,14 @@ SCHEMA_ERROR_MAX_CHARS = 1000
 # Models that fix one named error often break another; naming all of them
 # (bounded) lets one repair turn fix the answer.
 _SCHEMA_ERRORS_LISTED = 6
+_BOUND_UNITS = {
+    "maxLength": ("above the maximum", "character"),
+    "minLength": ("below the minimum", "character"),
+    "maxItems": ("above the maximum", "item"),
+    "minItems": ("below the minimum", "item"),
+    "maxProperties": ("above the maximum", "property"),
+    "minProperties": ("below the minimum", "property"),
+}
 _SCHEMA_ERROR_EACH_MAX_CHARS = 400
 _SCHEMA_ERROR_MESSAGE_MAX_CHARS = 300
 _SCHEMA_ERROR_INSTANCE_MAX_CHARS = 80
@@ -402,6 +410,16 @@ def _validation_error_text(error: Any) -> str:
     path = getattr(error, "absolute_path", None)
     if not isinstance(message, str) or path is None:
         return ""
+    bound = _BOUND_UNITS.get(str(getattr(error, "validator", "") or ""))
+    instance = getattr(error, "instance", None)
+    if bound and isinstance(instance, (str, list, dict)):
+        # The bare "... is too long" leaves the model guessing how much to cut.
+        direction, unit = bound
+        return _clip(
+            f"{unit} count {len(instance)} is {direction} {getattr(error, 'validator_value', '?')} "
+            f"(at {_json_path(path)})",
+            _SCHEMA_ERROR_EACH_MAX_CHARS,
+        )
     # Messages quote the failing value ("[...] is not of type 'string'");
     # a short excerpt of it keeps the reason itself visible.
     try:
