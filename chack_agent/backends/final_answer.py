@@ -33,6 +33,16 @@ _PLACEHOLDERS = frozenset(
 )
 
 
+# A CLI run that reaches its turn limit ends with an error instead of an
+# answer. Backends resume the session once with this prompt and a short turn
+# budget of its own: the answer, plus one tool call the model may still make.
+FINAL_ANSWER_TURNS = 2
+FINAL_ANSWER_PROMPT = (
+    "You have used all the turns of this run. Do not call any more tools: give your final answer now from "
+    "the evidence gathered so far, in the required format, and state what remains unverified."
+)
+
+
 def tool_argument_shapes(tools: list[Any]) -> dict[str, dict[str, list[str]]]:
     """Each tool's argument names and required arguments, by tool name."""
     shapes: dict[str, dict[str, list[str]]] = {}

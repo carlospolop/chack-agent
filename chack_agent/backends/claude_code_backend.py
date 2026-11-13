@@ -30,6 +30,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..resume_compaction import ResumeCompactionResult
+from .final_answer import FINAL_ANSWER_PROMPT, FINAL_ANSWER_TURNS
 from ..llm_gateway import (
     GatewayRoute,
     clone_config_for_gateway,
@@ -74,6 +75,11 @@ from .prompt_cache import (
 
 
 _LOGGER = logging.getLogger("chack.claude_code_backend")
+
+# Claude Code ends a run that reaches --max-turns with an error result of this
+# subtype instead of an answer. It counts turns per invocation, so the resumed
+# run asking for the answer gets its own short budget.
+_TURN_LIMIT_SUBTYPE = '"subtype": "error_max_turns"'
 
 CLAUDE_EXEC_TIMEOUT_ENV = "CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS"
 _MCP_STARTUP_STATUS_PATH_ENV = "CHACK_MCP_STARTUP_STATUS_PATH"
@@ -497,6 +503,7 @@ class ClaudeCodeExecutor:
     _gateway_refusal_env_json: str = ""
     _claude_home: str | None = None
     _claude_session_id: str | None = None
+    _turn_budget_override: int = 0
     _output_schema: str | None = None
     _prompt_only_next_invocation: bool = False
     _thinking_effort: str = "high"
@@ -524,6 +531,10 @@ class ClaudeCodeExecutor:
         user_input = str(payload.get("input", "") or "")
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_claude(prompt)
+        if _TURN_LIMIT_SUBTYPE in output and self._claude_session_id:
+            output, final_steps, final_raw = self._run_final_answer_turn()
+            steps.extend(final_steps)
+            raw_result = _RawResult(raw_responses=raw_result.raw_responses + final_raw.raw_responses)
         output = self._normalize_schema_output(output)
 
         # Save-or-retry: if save_discovered_vulnerability is available but was never called,
@@ -930,6 +941,18 @@ class ClaudeCodeExecutor:
             self._prompt_cache_enabled
             and self._prompt_cache_route() not in _PROMPT_CACHE_REJECTED
         )
+
+    def _run_final_answer_turn(self) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        _LOGGER.warning(
+            "Claude Code reached its turn limit (%s) without an answer; resuming session %s for the final answer",
+            self._max_turns,
+            self._claude_session_id,
+        )
+        self._turn_budget_override = FINAL_ANSWER_TURNS
+        try:
+            return self._run_claude(FINAL_ANSWER_PROMPT)
+        finally:
+            self._turn_budget_override = 0
 
     def _run_claude(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._refresh_provider_credentials()
@@ -1798,8 +1821,8 @@ PYEOF
 
         if resume_compaction:
             args.extend(["--max-turns", "1"])
-        elif self._max_turns > 0:
-            args.extend(["--max-turns", str(self._max_turns)])
+        elif self._turn_budget_override or self._max_turns > 0:
+            args.extend(["--max-turns", str(self._turn_budget_override or self._max_turns)])
         args.extend(
             [
                 "--effort",
