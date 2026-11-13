@@ -226,3 +226,22 @@ def test_listed_schema_errors_stay_bounded():
     assert "'branch_id' is a required property" in error
     assert len(error) <= SCHEMA_ERROR_MAX_CHARS
     assert error.count("is a required property") <= 6
+
+
+def test_length_errors_state_the_bound_and_the_actual_size():
+    schema = {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string", "maxLength": 50},
+            "tags": {"type": "array", "items": {"type": "string"}, "minItems": 2},
+        },
+        "required": ["summary", "tags"],
+        "additionalProperties": False,
+    }
+    answer = json.dumps({"summary": "y" * 1834, "tags": ["one"]})
+
+    _output, error = validate_schema_output(answer, schema, strict=False)
+
+    assert "character count 1834 is above the maximum 50 (at summary)" in error
+    assert "item count 1 is below the minimum 2 (at tags)" in error
+    assert "y" * 100 not in error
