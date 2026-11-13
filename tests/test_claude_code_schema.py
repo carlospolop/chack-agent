@@ -8,6 +8,7 @@ import tempfile
 import pytest
 from datetime import datetime, timezone
 
+from chack_agent.output_schema import final_answer_rejection
 from chack_agent.backends.claude_code_backend import (
     ClaudeCodeExecutor,
     _normalized_claude_usage,
@@ -993,7 +994,7 @@ def test_claude_uses_a_given_up_structured_answer_that_only_sent_an_object_as_a_
         {"report": "free text"},
     ],
 )
-def test_claude_still_fails_when_its_last_structured_attempt_does_not_match_the_schema(
+def test_claude_returns_its_last_structured_attempt_for_repair_when_it_does_not_match(
     monkeypatch, tmp_path, last_attempt
 ) -> None:
     output = _run_claude_stream(
@@ -1002,6 +1003,18 @@ def test_claude_still_fails_when_its_last_structured_attempt_does_not_match_the_
         _gave_up_on_structured_output({"enhancements": {"v001": {"verdict": "ok"}}}, last_attempt),
         output_schema_json=_ENHANCEMENT_SCHEMA,
     )
+
+    assert json.loads(output) == last_attempt
+    # The answer is rejected, so the session gets the final-answer repair turns.
+    assert final_answer_rejection(output, schema=_ENHANCEMENT_SCHEMA)
+
+
+def test_claude_still_fails_on_a_mismatching_structured_attempt_without_a_session_to_resume(
+    monkeypatch, tmp_path
+) -> None:
+    events = _gave_up_on_structured_output({"report": "free text"})
+    events[0] = {**_INIT_EVENT, "session_id": ""}
+    output = _run_claude_stream(monkeypatch, tmp_path, events, output_schema_json=_ENHANCEMENT_SCHEMA)
 
     assert output.startswith("ERROR: Claude returned an error in final result event.")
     assert "error_max_structured_output_retries" in output
