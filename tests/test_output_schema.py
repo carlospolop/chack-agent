@@ -374,3 +374,34 @@ def test_short_lists_and_texts_get_no_word_budget():
 
     assert "item count 2 is above the maximum 1 (at tags)" in error
     assert "words" not in error
+
+
+# Over-long dedup reasons a model wrote, rewritten to the hinted word count.
+_TECHNICAL_REASONS = [
+    "Same unvalidated send_file traversal flaw on GET /path_traversal; v18 adds the str(e) path disclosure in 500 responses only",
+    "Same root-runtime least-privilege flaw: the Dockerfile has no USER directive so flask run executes as uid 0 inside the container",
+    "Both report pickle.loads on the base64url-decoded request.form['pickled'] body of POST /pickled reaching arbitrary code execution",
+    "Identical unpinned Flask/Werkzeug requirement resolution; the same version pin in requirements.txt removes both reports entirely",
+]
+
+
+def _rewrite_to_hint(text, error):
+    words = int(re.search(r"rewrite it in at most (\d+) words", error).group(1))
+    return " ".join(text.split()[:words])
+
+
+def test_an_answer_rewritten_to_the_hinted_word_count_fits_the_limit():
+    for limit in (100, 300):
+        schema = {
+            "type": "object",
+            "properties": {"reasoning": {"type": "string", "maxLength": limit}},
+            "required": ["reasoning"],
+            "additionalProperties": False,
+        }
+        for reason in _TECHNICAL_REASONS:
+            long_reason = " ".join([reason] * (limit // len(reason) + 1))
+            _, error = validate_schema_output(json.dumps({"reasoning": long_reason}), schema, strict=False)
+
+            rewritten = json.dumps({"reasoning": _rewrite_to_hint(long_reason, error)})
+
+            assert not validate_schema_output(rewritten, schema, strict=False)[1]

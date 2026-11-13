@@ -365,8 +365,10 @@ _BOUND_UNITS = {
     "minProperties": ("below the minimum", "property"),
 }
 # Models cannot count characters, so an over-long text also gets a word
-# budget that lands below the limit (English averages ~6 characters a word).
-_CHARACTERS_PER_WORD_TARGET = 8
+# budget that lands below the limit. Technical prose (identifiers, paths,
+# security terms) runs ~9 characters a word with its space, well above
+# plain English's ~6.
+_CHARACTERS_PER_WORD_TARGET = 10
 _SCHEMA_ERROR_EACH_MAX_CHARS = 400
 _SCHEMA_ERROR_MESSAGE_MAX_CHARS = 300
 _SCHEMA_ERROR_INSTANCE_MAX_CHARS = 80
