@@ -28,6 +28,8 @@ Provider aliases and credentials are resolved before this router runs. A configu
 
 Every executor exposes `invoke(payload, context=None)` and conversation-memory access. Backends also implement `compact_for_resume()` where their provider can compact or summarize active state.
 
+On Linux, every agent CLI (Codex, Claude Code, Gemini, opencode, Copilot, Kimi, Qwen) starts with a raised `oom_score_adj`, which the processes it starts inherit. When the machine runs out of memory, the kernel then kills one agent run instead of the process hosting all of them.
+
 Chack keeps immutable runtime instructions and the output contract in the provider's system or developer prefix where the transport permits it. Repeated prompts can place one `<!-- CHACK_PROMPT_CACHE_BREAKPOINT -->` marker between stable context and changing task data. Chack removes the marker and translates the split into the provider-specific cache boundary. Text before the marker must remain byte-identical for calls intended to share a cache; reported cache token counters are the evidence that reuse occurred.
 
 The Codex direct transport is limited to eligible no-tool GPT-5.6+ runs. Public OpenAI-key calls use explicit cache fields; subscription-token calls retain the first-party transport shape accepted by that endpoint. Failures retry within bounds and then fall back to the Codex CLI. Set `CHACK_CODEX_DIRECT_CACHE_TRANSPORT=off` only when diagnosing that route.

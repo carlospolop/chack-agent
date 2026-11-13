@@ -37,7 +37,7 @@ from ..llm_gateway import (
 )
 from ..thinking_effort import gemini_thinking_config, normalize_thinking_effort
 from .claude_code_backend import _terminate_process_tree
-from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds
+from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds, prefer_oom_kill
 from .final_answer import FINAL_ANSWER_PROMPT, FINAL_ANSWER_TURNS
 from .gemini_gateway_relay import GeminiGatewayRelay
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
@@ -480,6 +480,7 @@ class GeminiCliExecutor:
                 cwd=launch_cwd,
                 start_new_session=True,
             )
+            prefer_oom_kill(process.pid)
         except FileNotFoundError:
             return (
                 "ERROR: Gemini CLI executable was not found. "
