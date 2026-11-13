@@ -460,3 +460,22 @@ def test_a_first_answer_whose_items_are_the_error_is_not_restored():
     output = _repair_with({"checks": broken, "notes": "ok"}, {"checks": [], "notes": "ok"})
 
     assert json.loads(output) == {"checks": [], "notes": "ok"}
+
+
+def test_an_answer_followed_by_a_second_json_document_is_accepted():
+    answer = json.dumps({"results": [{"command": "id"}], "error": ""}) + '\n\n{"summary": "1 command verified"}'
+
+    output, error = validate_schema_output(answer, _COMMANDS_SCHEMA, strict=False)
+
+    assert error == ""
+    assert json.loads(output) == {"results": [{"command": "id"}], "error": ""}
+
+
+def test_a_wrong_answer_followed_by_a_note_reports_the_answers_error():
+    answer = json.dumps({"results": [{"command": "id"}] * 5}) + '\n{"note": "done"}'
+
+    output, error = validate_schema_output(answer, _COMMANDS_SCHEMA, strict=False)
+
+    assert output == answer
+    assert error.startswith("'error' is a required property (at the top level)")
+    assert "keys were: results" in error
