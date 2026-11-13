@@ -1,3 +1,4 @@
+import re
 import importlib.util
 import json
 from pathlib import Path
@@ -245,3 +246,38 @@ def test_length_errors_state_the_bound_and_the_actual_size():
     assert "character count 1834 is above the maximum 50 (at summary)" in error
     assert "item count 1 is below the minimum 2 (at tags)" in error
     assert "y" * 100 not in error
+
+
+def test_an_over_long_text_gets_a_word_budget_that_fits_its_limit():
+    schema = {
+        "type": "object",
+        "properties": {"summary": {"type": "string", "maxLength": 1200}},
+        "required": ["summary"],
+        "additionalProperties": False,
+    }
+    answer = json.dumps({"summary": "word " * 260})
+
+    _output, error = validate_schema_output(answer, schema, strict=False)
+
+    budget = int(re.search(r"rewrite it in at most (\d+) words", error).group(1))
+    # A text of that many typical words (6 characters and a space) fits the limit.
+    assert budget * 7 <= 1200
+    assert budget >= 100
+
+
+def test_short_lists_and_texts_get_no_word_budget():
+    schema = {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string", "minLength": 50},
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 1},
+        },
+        "required": ["summary", "tags"],
+        "additionalProperties": False,
+    }
+    answer = json.dumps({"summary": "short", "tags": ["a", "b"]})
+
+    _output, error = validate_schema_output(answer, schema, strict=False)
+
+    assert "item count 2 is above the maximum 1 (at tags)" in error
+    assert "words" not in error

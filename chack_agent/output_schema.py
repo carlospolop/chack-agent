@@ -364,6 +364,9 @@ _BOUND_UNITS = {
     "maxProperties": ("above the maximum", "property"),
     "minProperties": ("below the minimum", "property"),
 }
+# Models cannot count characters, so an over-long text also gets a word
+# budget that lands below the limit (English averages ~6 characters a word).
+_CHARACTERS_PER_WORD_TARGET = 8
 _SCHEMA_ERROR_EACH_MAX_CHARS = 400
 _SCHEMA_ERROR_MESSAGE_MAX_CHARS = 300
 _SCHEMA_ERROR_INSTANCE_MAX_CHARS = 80
@@ -415,11 +418,11 @@ def _validation_error_text(error: Any) -> str:
     if bound and isinstance(instance, (str, list, dict)):
         # The bare "... is too long" leaves the model guessing how much to cut.
         direction, unit = bound
-        return _clip(
-            f"{unit} count {len(instance)} is {direction} {getattr(error, 'validator_value', '?')} "
-            f"(at {_json_path(path)})",
-            _SCHEMA_ERROR_EACH_MAX_CHARS,
-        )
+        limit = getattr(error, "validator_value", "?")
+        text = f"{unit} count {len(instance)} is {direction} {limit} (at {_json_path(path)})"
+        if isinstance(instance, str) and direction == "above the maximum" and isinstance(limit, int):
+            text += f"; rewrite it in at most {max(1, limit // _CHARACTERS_PER_WORD_TARGET)} words"
+        return _clip(text, _SCHEMA_ERROR_EACH_MAX_CHARS)
     # Messages quote the failing value ("[...] is not of type 'string'");
     # a short excerpt of it keeps the reason itself visible.
     try:
