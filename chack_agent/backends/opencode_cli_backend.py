@@ -831,6 +831,7 @@ class OpencodeCliExecutor:
         cancel_registration = register_process(process, _terminate_process_tree)
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
+        text_lines: list[str] = []
         raw_responses: list[Any] = []
         step_texts: list[str] = []
         answer_texts: list[str] = []
@@ -874,6 +875,8 @@ class OpencodeCliExecutor:
                     raw_lines.append(raw_line)
                 event = self._parse_event_line(raw_line)
                 if not event:
+                    if raw_line:
+                        text_lines.append(raw_line)
                     continue
                 session_id = _clean(event.get("sessionID"))
                 if session_id:
@@ -943,8 +946,10 @@ class OpencodeCliExecutor:
                 _RawResult(raw_responses=raw_responses),
             )
         response = "".join(answer_texts).strip()
-        if not response and raw_lines:
-            response = "\n".join(raw_lines).strip()[-4000:]
+        if not response:
+            # The CLI's own events are not an answer: a turn that ended
+            # without one returns only what the CLI printed outside them.
+            response = "\n".join(text_lines).strip()[-4000:]
         return response, steps, _RawResult(
             raw_responses=raw_responses,
             time_to_first_token_seconds=time_to_first_token,

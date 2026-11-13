@@ -586,11 +586,11 @@ def schema_repair_prompt(schema_error: str, schema: Any, *, name: str = "output_
 
 
 def unfinished_task_prompt(schema_error: str, schema: Any, *, name: str = "output_schema") -> str:
-    """The user turn for a reply that is a JSON object with none of the answer's fields.
+    """The user turn for a reply that is empty or a JSON object with none of the answer's fields.
 
-    Such a reply is almost always a tool call written as text: the model
-    stopped before finishing, so asking it to reshape that reply would only
-    get the same object back.
+    Such a reply means the model stopped before answering (often after a tool
+    call, or writing one as text), so asking it to reshape that reply would
+    only get the same thing back.
     """
     loaded = _load_schema(schema)
     schema_text = (
@@ -609,6 +609,8 @@ def unfinished_task_prompt(schema_error: str, schema: Any, *, name: str = "outpu
 
 
 def _shares_no_answer_field(output: str, schema: Any) -> bool:
+    if not str(output or "").strip():
+        return True
     loaded = _load_schema(schema)
     fields = (loaded or {}).get("properties")
     answer = extract_last_json_value(output or "")
