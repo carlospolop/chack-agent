@@ -106,6 +106,69 @@ def test_json_embedded_in_prose_is_normalized():
     assert json.loads(output) == {"result": {"assessment": "ok", "severity": 2}}
 
 
+_COMMANDS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}, "proof": {"type": "object"}},
+                "required": ["command"],
+            },
+        },
+        "error": {"type": "string"},
+    },
+    "required": ["results", "error"],
+}
+
+
+def test_stray_backslashes_and_raw_newlines_are_read_as_the_model_meant_them():
+    answer = (
+        "Verified.\n```json\n"
+        '{"results": [{"command": "grep -E \'id=\\d+\' app\\.py\nexit", "proof": {"status": 200}}],'
+        ' "error": ""}\n```'
+    )
+
+    output, error = validate_schema_output(answer, _COMMANDS_SCHEMA, strict=False)
+
+    assert error == ""
+    assert json.loads(output) == {
+        "results": [{"command": "grep -E 'id=\\d+' app\\.py\nexit", "proof": {"status": 200}}],
+        "error": "",
+    }
+
+
+def test_valid_escapes_are_left_exactly_as_written():
+    value = {"results": [{"command": 'echo "a\\\\.b" \\ \t \u00e9'}], "error": ""}
+
+    output, error = validate_schema_output(json.dumps(value), _COMMANDS_SCHEMA, strict=False)
+
+    assert error == ""
+    assert json.loads(output) == value
+
+
+def test_a_broken_answer_reports_its_syntax_error_not_its_fragments_shape():
+    # The unescaped quotes break the whole answer; the nested proof object
+    # still parses but is not the answer, so its missing fields must not be
+    # what the model is asked to fix.
+    answer = '{"results": [{"command": "echo "hi"", "proof": {"status": 200}}], "error": ""}'
+
+    output, error = validate_schema_output(answer, _COMMANDS_SCHEMA, strict=False)
+
+    assert output == answer
+    assert error.startswith("Invalid JSON output: Expecting ',' delimiter")
+    assert "required property" not in error
+
+
+def test_a_complete_wrong_answer_after_broken_prose_keeps_its_schema_error():
+    answer = 'Draft: {"results": [oops\nFinal: {"results": []}'
+
+    _, error = validate_schema_output(answer, _COMMANDS_SCHEMA, strict=False)
+
+    assert error == "'error' is a required property (at the top level)"
+
+
 def test_without_a_schema_the_answer_is_left_alone():
     assert validate_schema_output("prose", "") == ("prose", "")
 

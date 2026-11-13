@@ -372,24 +372,59 @@ _SCHEMA_ERROR_MESSAGE_MAX_CHARS = 300
 _SCHEMA_ERROR_INSTANCE_MAX_CHARS = 80
 
 
-def extract_last_json_value(output: str) -> Any | None:
-    """The last complete JSON object or array embedded anywhere in ``output``."""
-    text = str(output or "")
-    decoder = json.JSONDecoder()
+# Read the way the model meant them: raw newlines inside strings, and
+# backslashes JSON does not define (a regex or shell command copied into a
+# string, "grep \.py") kept as literal backslashes. Valid JSON is unchanged.
+_LENIENT_DECODER = json.JSONDecoder(strict=False)
+_ESCAPE_PAIR = re.compile(r"\\(.)", re.DOTALL)
+_OBJECT_START = re.compile(r'\{\s*"')
+
+
+def _escape_stray_backslashes(text: str) -> str:
+    return _ESCAPE_PAIR.sub(
+        lambda match: match.group(0) if match.group(1) in '"\\/bfnrtu' else "\\" + match.group(0),
+        text,
+    )
+
+
+def _scan_json_values(output: str) -> tuple[Any | None, json.JSONDecodeError | None]:
+    """The last JSON value in ``output``, and why the object enclosing it did not parse.
+
+    The error is set only when that value sits inside an object that failed to
+    decode, i.e. the value is a fragment of a broken answer, not the answer.
+    """
+    text = _escape_stray_backslashes(str(output or ""))
     idx = 0
     found: Any | None = None
+    found_start = found_end = -1
+    broken: tuple[int, json.JSONDecodeError] | None = None
     while idx < len(text):
         starts = [pos for pos in (text.find("{", idx), text.find("[", idx)) if pos >= 0]
         if not starts:
             break
         start = min(starts)
         try:
-            parsed, end = decoder.raw_decode(text[start:])
-            found = parsed
+            parsed, end = _LENIENT_DECODER.raw_decode(text[start:])
+            found, found_start, found_end = parsed, start, start + end
             idx = start + max(end, 1)
-        except ValueError:
+        except json.JSONDecodeError as exc:
+            if broken is None and _OBJECT_START.match(text, start):
+                broken = (start, exc)
             idx = start + 1
-    return found
+    if broken is None or found_start < broken[0]:
+        return found, None
+    # Nested when the broken object is still open at the value and the text
+    # after the value closes it again (a truncated draft followed by a
+    # complete answer is not).
+    before, after = text[broken[0]:found_start], text[found_end:]
+    depth = before.count("{") + before.count("[") - before.count("}") - before.count("]")
+    nested = 0 < depth <= after.count("}") + after.count("]")
+    return found, broken[1] if nested else None
+
+
+def extract_last_json_value(output: str) -> Any | None:
+    """The last complete JSON object or array embedded anywhere in ``output``."""
+    return _scan_json_values(output)[0]
 
 
 def _json_path(path: Any) -> str:
@@ -482,7 +517,7 @@ def validate_schema_output(
         return output, ""
     validator = JsonSchemaOutput(loaded, name=name or "output_schema", strict=strict)
     errors: list[BaseException] = []
-    embedded = extract_last_json_value(output or "")
+    embedded, broken = _scan_json_values(output or "")
     candidates: list[str] = [output or ""]
     if embedded is not None:
         candidates.append(json.dumps(embedded, ensure_ascii=False))
@@ -491,6 +526,10 @@ def validate_schema_output(
             return json.dumps(validator.validate_json(candidate), ensure_ascii=False), ""
         except Exception as exc:
             errors.append(exc)
+    if broken is not None:
+        # The only parsable value is a fragment of the answer; its schema
+        # errors would send the model after fields it did write.
+        return output, short_schema_error(broken)
     # A schema mismatch says more than a parse error of the surrounding prose.
     for exc in reversed(errors):
         if not isinstance(exc.__cause__, json.JSONDecodeError):
