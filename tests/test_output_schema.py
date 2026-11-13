@@ -166,7 +166,37 @@ def test_a_complete_wrong_answer_after_broken_prose_keeps_its_schema_error():
 
     _, error = validate_schema_output(answer, _COMMANDS_SCHEMA, strict=False)
 
-    assert error == "'error' is a required property (at the top level)"
+    assert error.startswith("'error' is a required property (at the top level)")
+
+
+def test_an_answer_missing_its_top_level_fields_is_told_which_keys_it_had():
+    # One result item instead of the object that wraps it.
+    answer = '{"command": "curl /rce", "proof": {"status": 200}}'
+
+    output, error = validate_schema_output(answer, _COMMANDS_SCHEMA, strict=False)
+
+    assert output == answer
+    assert error.endswith("the answer's top-level keys were: command, proof")
+    assert "'results' is a required property (at the top level)" in error
+
+
+def test_an_answer_with_many_keys_names_only_a_bounded_few():
+    answer = json.dumps({f"field_{index}": index for index in range(50)})
+
+    _, error = validate_schema_output(answer, _COMMANDS_SCHEMA, strict=False)
+
+    shown = error.split("keys were: ", 1)[1]
+    assert shown.endswith(", ...")
+    assert shown.count("field_") == 8
+
+
+def test_nested_errors_do_not_list_the_answer_keys():
+    answer = '{"results": "none", "error": ""}'
+
+    _, error = validate_schema_output(answer, _COMMANDS_SCHEMA, strict=False)
+
+    assert "(at results" in error
+    assert "keys were" not in error
 
 
 def test_without_a_schema_the_answer_is_left_alone():
