@@ -61,6 +61,16 @@ _LOGGER = logging.getLogger("chack.gemini_cli_backend")
 
 GEMINI_EXEC_TIMEOUT_ENV = "CHACK_GEMINI_EXEC_TIMEOUT_SECONDS"
 GEMINI_CANCELLED_OUTPUT = "ERROR: Gemini execution cancelled."
+# Gemini CLI ends a run that reaches maxSessionTurns with this error instead
+# of an answer. The run is resumed once to ask for the answer; the CLI counts
+# turns per process, so that run gets a short budget of its own: the answer,
+# plus one tool call the model may still make.
+_TURN_LIMIT_ERROR = "ERROR: Gemini result error: Reached max session turns"
+_FINAL_ANSWER_TURNS = 2
+_FINAL_ANSWER_PROMPT = (
+    "You have used all the turns of this run. Do not call any more tools: give your final answer now from "
+    "the evidence gathered so far, in the required format, and state what remains unverified."
+)
 
 
 _GEMINI_CLI_DENYLIST_TOOLS = {
@@ -180,6 +190,8 @@ class GeminiCliExecutor:
         self._base_system_prompt = base_system_prompt
         self._model_name = str(model_name or "").strip()
         self._max_turns = int(max_turns or 0)
+        # Replaces max_turns for the run that asks for an answer after the limit.
+        self._turn_budget_override = 0
         self._gemini_cli_path = gemini_cli_path
         self._gemini_api_key = gemini_api_key
         # Set when the Gemini API is reached through an LLM gateway.
@@ -236,6 +248,10 @@ class GeminiCliExecutor:
         user_input = str(payload.get("input", "") or "")
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_gemini(prompt)
+        if output.startswith(_TURN_LIMIT_ERROR) and self._gemini_session_id:
+            output, final_steps, final_raw = self._run_final_answer_turn()
+            steps.extend(final_steps)
+            raw_result.raw_responses.extend(final_raw.raw_responses)
         # The schema is only a prompt contract here. A drifting answer gets one
         # repair turn in the resumed session.
         output, repair_steps, repair_raw = repair_schema_output(
@@ -378,6 +394,18 @@ class GeminiCliExecutor:
 
         prompt_parts = [p for p in (user_input, policy_block, schema_block) if p.strip()]
         return "\n".join(prompt_parts)
+
+    def _run_final_answer_turn(self) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        _LOGGER.warning(
+            "Gemini CLI reached its turn limit (%s) without an answer; resuming session %s for the final answer",
+            self._max_turns,
+            self._gemini_session_id,
+        )
+        self._turn_budget_override = _FINAL_ANSWER_TURNS
+        try:
+            return self._run_gemini(_FINAL_ANSWER_PROMPT)
+        finally:
+            self._turn_budget_override = 0
 
     def _run_gemini(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         timeout_seconds = cli_exec_timeout_seconds(GEMINI_EXEC_TIMEOUT_ENV)
@@ -783,7 +811,7 @@ class GeminiCliExecutor:
         settings_payload = {
             "model": {
                 "name": self._model_name,
-                "maxSessionTurns": self._max_turns if self._max_turns > 0 else -1,
+                "maxSessionTurns": self._turn_budget_override or (self._max_turns if self._max_turns > 0 else -1),
             },
             "modelConfigs": {
                 "overrides": [

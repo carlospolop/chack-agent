@@ -33,6 +33,13 @@ FAKE_GEMINI = textwrap.dedent(
     calls.append(sys.argv[1:])
     with open(record, "w") as handle:
         json.dump(calls, handle)
+    settings_path = os.path.join(os.environ["GEMINI_CLI_HOME"], ".gemini", "settings.json")
+    with open(settings_path) as handle:
+        turn_budget = json.load(handle)["model"]["maxSessionTurns"]
+    with open(record + ".turns", "a") as handle:
+        handle.write(f"{turn_budget}\\n")
+    with open(record + ".prompts", "a") as handle:
+        handle.write(json.dumps(sys.stdin.read()) + "\\n")
     with open(os.environ["FAKE_GEMINI_SCENARIO"]) as handle:
         runs = json.load(handle)
     run = runs[min(len(calls), len(runs)) - 1]
@@ -100,6 +107,17 @@ def fake_gemini(tmp_path, monkeypatch):
         @property
         def calls(self):
             return json.loads(record.read_text(encoding="utf-8")) if record.exists() else []
+
+        @property
+        def turn_budgets(self):
+            path = tmp_path / "calls.json.turns"
+            return [int(line) for line in path.read_text(encoding="utf-8").split()] if path.exists() else []
+
+        @property
+        def prompts(self):
+            path = tmp_path / "calls.json.prompts"
+            lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+            return [json.loads(line) for line in lines]
 
     return Fake()
 
@@ -180,4 +198,61 @@ def test_without_a_schema_any_answer_is_final(fake_gemini):
     result = _executor(schema=None).invoke({"input": "Say something."})
 
     assert result["output"] == "plain prose"
+    assert len(fake_gemini.calls) == 1
+
+
+def _turn_limit_run(session="gem-1"):
+    return {
+        "events": [
+            {"type": "init", "session_id": session},
+            {"type": "tool_use", "tool_id": "t1", "tool_name": "exec", "parameters": {"command": "id"}},
+            {"type": "tool_result", "tool_id": "t1", "status": "success", "output": "uid=0"},
+            {
+                "type": "result",
+                "status": "error",
+                "error": {"type": "FatalTurnLimitedError", "message": "Reached max session turns for this session."},
+                "stats": {"input_tokens": 500, "output_tokens": 5, "cached": 0},
+            },
+        ]
+    }
+
+
+def test_run_stopped_at_the_turn_limit_resumes_once_for_the_final_answer(fake_gemini):
+    fake_gemini.script([_turn_limit_run(), _run(json.dumps(VALID), tool_id="t2")])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == VALID
+    first, second = fake_gemini.calls
+    assert second[second.index("-r") + 1] == "gem-1"
+    assert fake_gemini.turn_budgets == [4, 2]
+    assert "final answer" in fake_gemini.prompts[1]
+    assert [step[0].tool_input["tool_id"] for step in result["intermediate_steps"]] == ["t1", "t2"]
+
+
+def test_next_request_gets_the_full_turn_budget_again(fake_gemini):
+    fake_gemini.script([_turn_limit_run(), _run(json.dumps(VALID)), _run(json.dumps(VALID))])
+    executor = _executor()
+
+    executor.invoke({"input": "Assess the service."})
+    executor.invoke({"input": "Assess another service."})
+
+    assert fake_gemini.turn_budgets == [4, 2, 4]
+
+
+def test_turn_limit_again_on_the_final_answer_run_is_reported(fake_gemini):
+    fake_gemini.script([_turn_limit_run(), _turn_limit_run()])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert result["output"].startswith("ERROR: Gemini result error: Reached max session turns")
+    assert len(fake_gemini.calls) == 2
+
+
+def test_turn_limit_without_a_session_to_resume_is_reported(fake_gemini):
+    fake_gemini.script([_turn_limit_run(session="")])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert result["output"].startswith("ERROR: Gemini result error: Reached max session turns")
     assert len(fake_gemini.calls) == 1
