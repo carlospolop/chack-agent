@@ -161,3 +161,68 @@ def test_bare_answer_is_not_wrapped_when_the_root_has_other_fields():
     _, error = MODULE.validate_schema_output(json.dumps({"group_id": "g1", "reasoning": "x"}), schema)
 
     assert "required property" in error
+
+
+_STEPS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "steps": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "branch_id": {"type": "string"},
+                            "flow_title": {"type": "string"},
+                        },
+                        "required": ["text", "branch_id", "flow_title"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+    },
+    "required": ["steps"],
+    "additionalProperties": False,
+}
+
+
+def test_repair_turn_names_every_schema_error_so_one_turn_can_fix_them_all():
+    answer = json.dumps({"steps": {"items": [
+        {"text": "a", "branch_id": "b1", "flow_title": "f"},
+        {"text": "b"},
+        {"text": 3, "branch_id": "b2", "flow_title": "f"},
+    ]}})
+    prompts = []
+
+    def run_turn(prompt):
+        prompts.append(prompt)
+        return json.dumps({"steps": {"items": [{"text": "b", "branch_id": "b1", "flow_title": "f"}]}}), [], None
+
+    output, _steps, _raw = repair_schema_output(
+        answer, schema=_STEPS_SCHEMA, strict=False, resumable=True, run_turn=run_turn
+    )
+
+    assert json.loads(output)["steps"]["items"][0]["branch_id"] == "b1"
+    assert len(prompts) == 1
+    for reported in (
+        "'branch_id' is a required property (at steps.items[1])",
+        "'flow_title' is a required property (at steps.items[1])",
+        "3 is not of type 'string' (at steps.items[2].text)",
+    ):
+        assert reported in prompts[0]
+
+
+def test_listed_schema_errors_stay_bounded():
+    answer = json.dumps({"steps": {"items": [{"text": "x" * 5000}] * 50}})
+
+    _output, error = validate_schema_output(answer, _STEPS_SCHEMA, strict=False)
+
+    assert "'branch_id' is a required property" in error
+    assert len(error) <= SCHEMA_ERROR_MAX_CHARS
+    assert error.count("is a required property") <= 6
