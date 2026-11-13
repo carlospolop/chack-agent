@@ -533,8 +533,26 @@ def validate_schema_output(
     # A schema mismatch says more than a parse error of the surrounding prose.
     for exc in reversed(errors):
         if not isinstance(exc.__cause__, json.JSONDecodeError):
-            return output, short_schema_error(exc)
+            return output, _with_answer_keys(short_schema_error(exc), embedded)
     return output, short_schema_error(errors[0])
+
+
+_ANSWER_KEYS_SHOWN = 8
+
+
+def _with_answer_keys(error: str, answer: Any) -> str:
+    """Name the keys the answer did have when its top-level fields are missing.
+
+    "'results' is a required property" alone does not tell a model that it
+    answered with one result item, or with a tool call, instead of the object.
+    """
+    if not isinstance(answer, dict) or "required property (at the top level)" not in error:
+        return error
+    keys = [str(key)[:40] for key in answer][:_ANSWER_KEYS_SHOWN]
+    shown = ", ".join(keys) if keys else "none"
+    if len(answer) > _ANSWER_KEYS_SHOWN:
+        shown += ", ..."
+    return f"{error}; the answer's top-level keys were: {shown}"
 
 
 def schema_repair_prompt(schema_error: str, schema: Any, *, name: str = "output_schema") -> str:
