@@ -1462,11 +1462,14 @@ class ClaudeCodeExecutor:
         result_event: dict[str, Any],
         tool_calls: dict[str, tuple[str, Any]],
     ) -> str | None:
-        """The last StructuredOutput attempt when the CLI gave up on it but chack's schema check accepts it.
+        """The last StructuredOutput attempt when the CLI gave up on it.
 
         Claude Code validates StructuredOutput strictly, so an attempt that only
         sends a nested object as a JSON string is rejected until its retries run
-        out; chack's own validation parses such values back.
+        out; chack's own validation parses such values back. An attempt that
+        still does not match is returned as the answer when the session can be
+        resumed, so the final-answer repair fixes it instead of the whole run
+        failing.
         """
         if str(result_event.get("subtype") or "").strip().lower() != "error_max_structured_output_retries":
             return None
@@ -1475,13 +1478,21 @@ class ClaudeCodeExecutor:
         attempts = [tool_input for name, tool_input in tool_calls.values() if name == "StructuredOutput"]
         if not attempts or not isinstance(attempts[-1], dict) or not attempts[-1]:
             return None
-        recovered = self._validated_schema_output(json.dumps(attempts[-1], ensure_ascii=False))
+        attempt = json.dumps(attempts[-1], ensure_ascii=False)
+        recovered = self._validated_schema_output(attempt)
         if recovered is not None:
             _LOGGER.warning(
                 "Claude gave up on structured output for model %s; using its last attempt, which matches the schema once typed.",
                 self._model_name,
             )
-        return recovered
+            return recovered
+        if not self._claude_session_id:
+            return None
+        _LOGGER.warning(
+            "Claude gave up on structured output for model %s; returning its last attempt for the answer repair.",
+            self._model_name,
+        )
+        return attempt
 
     @staticmethod
     def _append_structured_output(output_parts: list[str], value: Any) -> None:
