@@ -619,6 +619,32 @@ def _shares_no_answer_field(output: str, schema: Any) -> bool:
     )
 
 
+_EXCERPT_CHARS = 60
+
+
+def answer_excerpt(output: str) -> str:
+    """A bounded look at an unparsable answer: its size, start and the text around the JSON error.
+
+    The schema error alone ("Expecting value (line 1 column 2)") does not show
+    what the model wrote, so a recurring malformation cannot be told apart from
+    a truncated or empty reply.
+    """
+    text = str(output or "")
+    if not text.strip():
+        return "empty reply"
+    starts = [pos for pos in (text.find("{"), text.find("[")) if pos >= 0]
+    start = min(starts) if starts else 0
+    try:
+        _LENIENT_DECODER.decode(_escape_stray_backslashes(text[start:]))
+        position = None
+    except json.JSONDecodeError as exc:
+        position = start + exc.pos
+    excerpt = f"{len(text)} chars, starting {text[:_EXCERPT_CHARS]!r}"
+    if position is not None and position > _EXCERPT_CHARS:
+        excerpt += f", around the error {text[position - _EXCERPT_CHARS:position + _EXCERPT_CHARS]!r}"
+    return excerpt
+
+
 def is_backend_error_output(output: str) -> bool:
     return str(output or "").strip().lower().startswith("error:")
 
@@ -649,10 +675,12 @@ def repair_schema_output(
         _LOGGER.warning("%s answer did not match the output schema; no session to repair it in: %s", label, error)
         return output, [], []
     if _shares_no_answer_field(output, schema):
-        _LOGGER.warning("%s reply has none of the answer's fields; asking it to finish the task: %s", label, error)
+        _LOGGER.warning("%s reply has none of the answer's fields; asking it to finish the task: %s (answer: %s)",
+                        label, error, answer_excerpt(output))
         prompt = unfinished_task_prompt(error, schema, name=name)
     else:
-        _LOGGER.warning("%s answer did not match the output schema; asking for a repair: %s", label, error)
+        _LOGGER.warning("%s answer did not match the output schema; asking for a repair: %s (answer: %s)",
+                        label, error, answer_excerpt(output))
         prompt = schema_repair_prompt(error, schema, name=name)
     repaired, steps, raw = run_turn(prompt)
     raw_responses = list(getattr(raw, "raw_responses", None) or [])
@@ -664,7 +692,8 @@ def repair_schema_output(
         return restored, list(steps or []), raw_responses
     normalized, error = validate_schema_output(repaired, schema, name=name, strict=strict)
     if error:
-        _LOGGER.warning("%s answer still did not match the output schema after a repair turn: %s", label, error)
+        _LOGGER.warning("%s answer still did not match the output schema after a repair turn: %s (answer: %s)",
+                        label, error, answer_excerpt(repaired))
         return repaired, list(steps or []), raw_responses
     return normalized, list(steps or []), raw_responses
 
