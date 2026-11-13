@@ -946,10 +946,13 @@ class OpencodeCliExecutor:
                 _RawResult(raw_responses=raw_responses),
             )
         response = "".join(answer_texts).strip()
-        if not response:
-            # The CLI's own events are not an answer: a turn that ended
-            # without one returns only what the CLI printed outside them.
-            response = "\n".join(text_lines).strip()[-4000:]
+        if not response and text_lines:
+            # Neither the CLI's events nor its merged stderr (warnings, logs)
+            # are an answer: the turn ended without one.
+            _LOGGER.info(
+                "opencode turn ended without an answer; it printed: %s",
+                "\n".join(text_lines).strip()[-500:],
+            )
         return response, steps, _RawResult(
             raw_responses=raw_responses,
             time_to_first_token_seconds=time_to_first_token,
