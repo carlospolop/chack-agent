@@ -405,3 +405,58 @@ def test_an_answer_rewritten_to_the_hinted_word_count_fits_the_limit():
             rewritten = json.dumps({"reasoning": _rewrite_to_hint(long_reason, error)})
 
             assert not validate_schema_output(rewritten, schema, strict=False)[1]
+
+
+_CHECKS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "checks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "title": {"type": "string"}},
+                "required": ["id", "title"],
+                "additionalProperties": False,
+            },
+        },
+        "notes": {"type": "string", "maxLength": 40},
+    },
+    "required": ["checks", "notes"],
+    "additionalProperties": False,
+}
+_CHECKS = [{"id": "C1", "title": "eval on query"}, {"id": "C2", "title": "pickle loads"}]
+
+
+def _repair_with(first, repaired):
+    return repair_schema_output(
+        json.dumps(first),
+        schema=_CHECKS_SCHEMA,
+        resumable=True,
+        run_turn=lambda prompt: (json.dumps(repaired), [], SimpleNamespace(raw_responses=[])),
+    )[0]
+
+
+def test_a_repair_that_empties_the_answers_items_keeps_the_first_answers():
+    output = _repair_with({"checks": _CHECKS, "notes": "x" * 80}, {"checks": [], "notes": "short"})
+
+    assert json.loads(output) == {"checks": _CHECKS, "notes": "short"}
+
+
+def test_a_repair_that_leaves_a_list_out_keeps_the_first_answers():
+    output = _repair_with({"checks": _CHECKS, "notes": "x" * 80}, {"notes": "short"})
+
+    assert json.loads(output) == {"checks": _CHECKS, "notes": "short"}
+
+
+def test_a_repair_that_rewrites_the_items_is_kept_as_written():
+    fixed = [{"id": "C1", "title": "eval on query"}]
+    output = _repair_with({"checks": _CHECKS, "notes": "x" * 80}, {"checks": fixed, "notes": "short"})
+
+    assert json.loads(output)["checks"] == fixed
+
+
+def test_a_first_answer_whose_items_are_the_error_is_not_restored():
+    broken = [{"id": "C1"}]
+    output = _repair_with({"checks": broken, "notes": "ok"}, {"checks": [], "notes": "ok"})
+
+    assert json.loads(output) == {"checks": [], "notes": "ok"}
