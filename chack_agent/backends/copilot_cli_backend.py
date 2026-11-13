@@ -634,10 +634,13 @@ class CopilotCliExecutor:
             )
 
         response = "".join(output_parts).strip()
-        if not response:
-            # The CLI's own events are not an answer: a turn that ended
-            # without one returns only what the CLI printed outside them.
-            response = "\n".join(text_lines).strip()[-4000:]
+        if not response and text_lines:
+            # Neither the CLI's events nor its merged stderr (warnings, logs)
+            # are an answer: the turn ended without one.
+            _LOGGER.info(
+                "Copilot CLI turn ended without an answer; it printed: %s",
+                "\n".join(text_lines).strip()[-500:],
+            )
 
         return response, steps, _RawResult(
             raw_responses=raw_responses,

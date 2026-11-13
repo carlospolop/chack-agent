@@ -43,6 +43,8 @@ FAKE_GEMINI = textwrap.dedent(
     with open(os.environ["FAKE_GEMINI_SCENARIO"]) as handle:
         runs = json.load(handle)
     run = runs[min(len(calls), len(runs)) - 1]
+    for line in run.get("stderr", []):
+        print(line, file=sys.stderr, flush=True)
     for event in run.get("events", []):
         print(json.dumps(event), flush=True)
     sys.exit(run.get("exit", 0))
@@ -270,3 +272,17 @@ def test_turn_ending_without_an_answer_resumes_to_finish_instead_of_reshaping_cl
     assert second[second.index("-r") + 1] == "gem-1"
     assert "stats" not in fake_gemini.prompts[1] and "tool_id" not in fake_gemini.prompts[1]
 
+
+
+def test_cli_warnings_printed_on_a_turn_without_an_answer_are_not_taken_as_the_answer(fake_gemini):
+    no_answer = _run("")
+    no_answer["events"] = [event for event in no_answer["events"] if event["type"] != "message"]
+    no_answer["stderr"] = ["[WARN] Skipping unreadable directory: /proc/1/root", "Loaded cached credentials."]
+    fake_gemini.script([no_answer, _run(json.dumps(VALID), tool_id="t2")])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == VALID
+    assert len(fake_gemini.calls) == 2
+    # The model is asked to finish its task, not to reshape the CLI's warnings.
+    assert fake_gemini.prompts[1].startswith("Your reply is not the final answer")
