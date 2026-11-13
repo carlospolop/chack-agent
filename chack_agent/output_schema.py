@@ -569,7 +569,8 @@ def schema_repair_prompt(schema_error: str, schema: Any, *, name: str = "output_
     return (
         f"Your final answer does not match the required output schema `{schema_name}`: "
         f"{_clip(schema_error, SCHEMA_ERROR_MAX_CHARS)}\n"
-        "Reply again with only the final answer as one JSON object that matches this schema, "
+        "Reply again with only the complete final answer, keeping every item and field of your previous "
+        "answer and changing only what the error names, as one JSON object that matches this schema, "
         "with no text before or after it:\n"
         f"{schema_text}"
     )
@@ -610,11 +611,43 @@ def repair_schema_output(
     if is_backend_error_output(repaired):
         _LOGGER.warning("%s schema repair turn failed: %s", label, _clip(repaired, SCHEMA_ERROR_MAX_CHARS))
         return output, list(steps or []), raw_responses
+    restored = _restore_dropped_lists(output, repaired, schema, name=name, strict=strict, label=label)
+    if restored is not None:
+        return restored, list(steps or []), raw_responses
     normalized, error = validate_schema_output(repaired, schema, name=name, strict=strict)
     if error:
         _LOGGER.warning("%s answer still did not match the output schema after a repair turn: %s", label, error)
         return repaired, list(steps or []), raw_responses
     return normalized, list(steps or []), raw_responses
+
+
+def _restore_dropped_lists(
+    original: str, repaired: str, schema: Any, *, name: str, strict: bool, label: str
+) -> str | None:
+    """The repaired answer with the top-level lists it emptied or left out put back.
+
+    Asked to fix one field, some models resend only that field, or an empty
+    list for the rest, which discards the work of the whole run. A list the
+    first answer filled is kept when the merged answer validates; otherwise
+    (or when nothing was dropped) this returns None.
+    """
+    first = extract_last_json_value(original)
+    answer = extract_last_json_value(repaired)
+    if not isinstance(first, dict) or not isinstance(answer, dict):
+        return None
+    dropped = [key for key, value in first.items() if isinstance(value, list) and value and not answer.get(key)]
+    if not dropped:
+        return None
+    merged, error = validate_schema_output(
+        json.dumps({**answer, **{key: first[key] for key in dropped}}, ensure_ascii=False),
+        schema,
+        name=name,
+        strict=strict,
+    )
+    if error:
+        return None
+    _LOGGER.warning("%s repair turn dropped the items of %s; keeping the first answer's", label, ", ".join(dropped))
+    return merged
 
 
 def answer_repair_turns(model: str) -> int:
