@@ -1045,3 +1045,73 @@ def test_claude_reports_a_missing_mcp_receipt_only_when_mcp_was_configured(monke
             executor._run_claude_once("prompt")
         missing = [r for r in caplog.records if "startup receipt was not written" in r.getMessage()]
         assert bool(missing) is has_tools
+
+
+def _result_events(result_event: dict) -> str:
+    init = {"type": "system", "subtype": "init", "session_id": "session-1", "mcp_servers": []}
+    return json.dumps(init) + "\n" + json.dumps({"session_id": "session-1", **result_event}) + "\n"
+
+
+_TURN_LIMIT = {"type": "result", "subtype": "error_max_turns", "is_error": True, "stop_reason": "tool_use", "num_turns": 11}
+_ANSWER = {"type": "result", "subtype": "success", "result": "final answer"}
+
+
+def _fake_claude(monkeypatch, tmp_path, results):
+    """Run the executor against a CLI that answers with ``results`` in turn; returns the argv of each call."""
+    calls = []
+    pending = list(results)
+
+    class _FakeProcess:
+        pid = 999999
+
+        def __init__(self, argv):
+            calls.append(list(argv))
+            self.events = _result_events(pending.pop(0))
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(self.events)
+
+        def poll(self):
+            return 0 if self.stdout.tell() >= len(self.events) else None
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        "chack_agent.backends.claude_code_backend.subprocess.Popen",
+        lambda argv, *args, **kwargs: _FakeProcess(argv),
+    )
+    executor = _build_executor("")
+    executor._claude_home = str(tmp_path)
+    return executor, calls
+
+
+def _turn_budget(argv):
+    return int(argv[argv.index("--max-turns") + 1])
+
+
+def test_run_stopped_at_the_turn_limit_resumes_once_for_the_final_answer(monkeypatch, tmp_path) -> None:
+    executor, calls = _fake_claude(monkeypatch, tmp_path, [_TURN_LIMIT, _ANSWER])
+
+    output = executor.invoke({"input": "audit this"})["output"]
+
+    assert output == "final answer"
+    assert [_turn_budget(argv) for argv in calls] == [10, 2]
+    assert calls[1][calls[1].index("--resume") + 1] == "session-1"
+
+
+def test_next_request_gets_the_full_turn_budget_again(monkeypatch, tmp_path) -> None:
+    executor, calls = _fake_claude(monkeypatch, tmp_path, [_TURN_LIMIT, _ANSWER, _ANSWER])
+
+    executor.invoke({"input": "audit this"})
+    executor.invoke({"input": "and this"})
+
+    assert [_turn_budget(argv) for argv in calls] == [10, 2, 10]
+
+
+def test_turn_limit_again_on_the_final_answer_run_is_reported(monkeypatch, tmp_path) -> None:
+    executor, calls = _fake_claude(monkeypatch, tmp_path, [_TURN_LIMIT, _TURN_LIMIT])
+
+    output = executor.invoke({"input": "audit this"})["output"]
+
+    assert output.startswith("ERROR:") and "error_max_turns" in output
+    assert len(calls) == 2

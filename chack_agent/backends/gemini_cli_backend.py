@@ -38,6 +38,7 @@ from ..llm_gateway import (
 from ..thinking_effort import gemini_thinking_config, normalize_thinking_effort
 from .claude_code_backend import _terminate_process_tree
 from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds
+from .final_answer import FINAL_ANSWER_PROMPT, FINAL_ANSWER_TURNS
 from .gemini_gateway_relay import GeminiGatewayRelay
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -62,15 +63,9 @@ _LOGGER = logging.getLogger("chack.gemini_cli_backend")
 GEMINI_EXEC_TIMEOUT_ENV = "CHACK_GEMINI_EXEC_TIMEOUT_SECONDS"
 GEMINI_CANCELLED_OUTPUT = "ERROR: Gemini execution cancelled."
 # Gemini CLI ends a run that reaches maxSessionTurns with this error instead
-# of an answer. The run is resumed once to ask for the answer; the CLI counts
-# turns per process, so that run gets a short budget of its own: the answer,
-# plus one tool call the model may still make.
+# of an answer. It counts turns per process, so the resumed run asking for the
+# answer gets its own short budget.
 _TURN_LIMIT_ERROR = "ERROR: Gemini result error: Reached max session turns"
-_FINAL_ANSWER_TURNS = 2
-_FINAL_ANSWER_PROMPT = (
-    "You have used all the turns of this run. Do not call any more tools: give your final answer now from "
-    "the evidence gathered so far, in the required format, and state what remains unverified."
-)
 
 
 _GEMINI_CLI_DENYLIST_TOOLS = {
@@ -401,9 +396,9 @@ class GeminiCliExecutor:
             self._max_turns,
             self._gemini_session_id,
         )
-        self._turn_budget_override = _FINAL_ANSWER_TURNS
+        self._turn_budget_override = FINAL_ANSWER_TURNS
         try:
-            return self._run_gemini(_FINAL_ANSWER_PROMPT)
+            return self._run_gemini(FINAL_ANSWER_PROMPT)
         finally:
             self._turn_budget_override = 0
 
