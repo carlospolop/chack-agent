@@ -265,6 +265,20 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
     def is_strict_json_schema(self) -> bool:
         return self._strict
 
+    def _mismatch(self, exc: BaseException, data: Any) -> ModelBehaviorError:
+        """The schema error, carrying every error of ``data`` so one repair turn can fix them all."""
+        error = ModelBehaviorError(f"Output did not match schema: {exc}")
+        try:
+            import jsonschema  # type: ignore
+
+            validator = jsonschema.validators.validator_for(self._schema)(self._schema)
+            error.schema_errors = sorted(
+                validator.iter_errors(data), key=lambda e: [str(part) for part in e.absolute_path]
+            )[:_SCHEMA_ERRORS_LISTED]
+        except Exception:
+            pass
+        return error
+
     def validate_json(self, json_str: str) -> Any:
         # Thinking models (e.g. qwen3-*-thinking-*) wrap their reasoning in
         # <think>...</think> blocks before the actual JSON answer.  Strip those
@@ -305,9 +319,7 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
                     # Drop the offending items rather than failing entirely.
                     data = _filter_invalid_array_items(data, self._schema)
                 else:
-                    raise ModelBehaviorError(
-                        f"Output did not match schema: {exc}"
-                    ) from exc
+                    raise self._mismatch(exc, data) from exc
 
                 # Re-validate after the fix attempt.  If it still fails, raise.
                 try:
@@ -324,9 +336,7 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
                     try:
                         jsonschema.validate(instance=data, schema=self._schema)
                     except jsonschema.ValidationError as exc3:
-                        raise ModelBehaviorError(
-                            f"Output did not match schema: {exc3}"
-                        ) from exc3
+                        raise self._mismatch(exc3, data) from exc3
         except ModelBehaviorError:
             raise
         except ModuleNotFoundError:
@@ -342,7 +352,11 @@ class JsonSchemaOutput(AgentOutputSchemaBase):
 # Schema validation and the one-turn repair shared by the backends that only
 # state the schema in the prompt.
 
-SCHEMA_ERROR_MAX_CHARS = 400
+SCHEMA_ERROR_MAX_CHARS = 1000
+# Models that fix one named error often break another; naming all of them
+# (bounded) lets one repair turn fix the answer.
+_SCHEMA_ERRORS_LISTED = 6
+_SCHEMA_ERROR_EACH_MAX_CHARS = 400
 _SCHEMA_ERROR_MESSAGE_MAX_CHARS = 300
 _SCHEMA_ERROR_INSTANCE_MAX_CHARS = 80
 
@@ -382,6 +396,26 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: max(0, limit - 3)].rstrip() + "..."
 
 
+def _validation_error_text(error: Any) -> str:
+    """One jsonschema error as "<what failed> (at <path>)", or "" when it is not one."""
+    message = getattr(error, "message", None)
+    path = getattr(error, "absolute_path", None)
+    if not isinstance(message, str) or path is None:
+        return ""
+    # Messages quote the failing value ("[...] is not of type 'string'");
+    # a short excerpt of it keeps the reason itself visible.
+    try:
+        instance_text = repr(getattr(error, "instance"))
+    except Exception:
+        instance_text = ""
+    if len(instance_text) > _SCHEMA_ERROR_INSTANCE_MAX_CHARS and instance_text in message:
+        message = message.replace(instance_text, _clip(instance_text, _SCHEMA_ERROR_INSTANCE_MAX_CHARS))
+    return _clip(
+        f"{_clip(message, _SCHEMA_ERROR_MESSAGE_MAX_CHARS)} (at {_json_path(path)})",
+        _SCHEMA_ERROR_EACH_MAX_CHARS,
+    )
+
+
 def short_schema_error(exc: BaseException) -> str:
     """A short, bounded reason an answer failed the schema.
 
@@ -392,21 +426,12 @@ def short_schema_error(exc: BaseException) -> str:
     while cause is not None:
         if isinstance(cause, json.JSONDecodeError):
             return _clip(f"Invalid JSON output: {cause.msg} (line {cause.lineno} column {cause.colno})", SCHEMA_ERROR_MAX_CHARS)
-        message = getattr(cause, "message", None)
-        path = getattr(cause, "absolute_path", None)
-        if isinstance(message, str) and path is not None:
-            # Messages quote the failing value ("[...] is not of type 'string'");
-            # a short excerpt of it keeps the reason itself visible.
-            try:
-                instance_text = repr(getattr(cause, "instance"))
-            except Exception:
-                instance_text = ""
-            if len(instance_text) > _SCHEMA_ERROR_INSTANCE_MAX_CHARS and instance_text in message:
-                message = message.replace(instance_text, _clip(instance_text, _SCHEMA_ERROR_INSTANCE_MAX_CHARS))
-            return _clip(
-                f"{_clip(message, _SCHEMA_ERROR_MESSAGE_MAX_CHARS)} (at {_json_path(path)})",
-                SCHEMA_ERROR_MAX_CHARS,
-            )
+        listed = [text for text in map(_validation_error_text, getattr(cause, "schema_errors", None) or []) if text]
+        if len(listed) > 1:
+            return _clip("; ".join(listed), SCHEMA_ERROR_MAX_CHARS)
+        text = _validation_error_text(cause)
+        if text:
+            return text
         cause = cause.__cause__
     return _clip(str(exc), SCHEMA_ERROR_MAX_CHARS)
 
