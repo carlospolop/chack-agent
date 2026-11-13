@@ -510,3 +510,10 @@ def test_an_answer_with_some_of_its_fields_gets_the_reshape_repair():
     _normalized, error = validate_schema_output(answer, _FINDING_SCHEMA, strict=False)
 
     assert prompt == MODULE.schema_repair_prompt(error, _FINDING_SCHEMA)
+
+
+def test_an_empty_reply_is_sent_back_to_finish_the_task():
+    prompt = _first_turn_prompt("")
+    _normalized, error = validate_schema_output("", _FINDING_SCHEMA, strict=False)
+
+    assert prompt == MODULE.unfinished_task_prompt(error, _FINDING_SCHEMA)

@@ -497,6 +497,7 @@ class GeminiCliExecutor:
         output_parts: list[str] = []
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
+        text_lines: list[str] = []
         raw_responses: list[Any] = []
         relay_input_tokens = 0
         started_at = time.monotonic()
@@ -530,6 +531,8 @@ class GeminiCliExecutor:
                     raw_lines.append(line)
                 event = self._parse_event_line(line)
                 if not event:
+                    if line:
+                        text_lines.append(line)
                     continue
 
                 event_type = str(event.get("type") or "").strip()
@@ -663,10 +666,10 @@ class GeminiCliExecutor:
             )
 
         response = "".join(output_parts).strip()
-        if not response and raw_lines:
-            response = "\n".join(raw_lines).strip()
-            if response:
-                response = response[-4000:]
+        if not response:
+            # The CLI's own events are not an answer: a turn that ended
+            # without one returns only what the CLI printed outside them.
+            response = "\n".join(text_lines).strip()[-4000:]
 
         return response, steps, _RawResult(
             raw_responses=raw_responses,

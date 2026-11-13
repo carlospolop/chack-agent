@@ -256,3 +256,17 @@ def test_turn_limit_without_a_session_to_resume_is_reported(fake_gemini):
 
     assert result["output"].startswith("ERROR: Gemini result error: Reached max session turns")
     assert len(fake_gemini.calls) == 1
+
+
+def test_turn_ending_without_an_answer_resumes_to_finish_instead_of_reshaping_cli_events(fake_gemini):
+    no_answer = _run("")
+    no_answer["events"] = [event for event in no_answer["events"] if event["type"] != "message"]
+    fake_gemini.script([no_answer, _run(json.dumps(VALID), tool_id="t2")])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == VALID
+    first, second = fake_gemini.calls
+    assert second[second.index("-r") + 1] == "gem-1"
+    assert "stats" not in fake_gemini.prompts[1] and "tool_id" not in fake_gemini.prompts[1]
+
