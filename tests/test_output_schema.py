@@ -479,3 +479,34 @@ def test_a_wrong_answer_followed_by_a_note_reports_the_answers_error():
     assert output == answer
     assert error.startswith("'error' is a required property (at the top level)")
     assert "keys were: results" in error
+
+
+def _first_turn_prompt(answer):
+    turns = []
+
+    def run_turn(prompt):
+        turns.append(prompt)
+        return json.dumps({"result": {"assessment": "done", "severity": 2}}), [], None
+
+    output, _steps, _raw = repair_schema_output(
+        answer, schema=_FINDING_SCHEMA, strict=False, resumable=True, run_turn=run_turn
+    )
+    assert json.loads(output) == {"result": {"assessment": "done", "severity": 2}}
+    return turns[0]
+
+
+def test_a_tool_call_written_as_text_is_sent_back_to_finish_the_task():
+    prompt = _first_turn_prompt('{"command": "node scripts/oracle.mjs", "wait_for_previous": true}')
+    _normalized, error = validate_schema_output(
+        '{"command": "node scripts/oracle.mjs", "wait_for_previous": true}', _FINDING_SCHEMA, strict=False
+    )
+
+    assert prompt == MODULE.unfinished_task_prompt(error, _FINDING_SCHEMA)
+
+
+def test_an_answer_with_some_of_its_fields_gets_the_reshape_repair():
+    answer = '{"result": {"assessment": "done"}}'
+    prompt = _first_turn_prompt(answer)
+    _normalized, error = validate_schema_output(answer, _FINDING_SCHEMA, strict=False)
+
+    assert prompt == MODULE.schema_repair_prompt(error, _FINDING_SCHEMA)
