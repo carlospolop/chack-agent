@@ -410,7 +410,11 @@ class GeminiCliExecutor:
         # stream, so the CLI reaches it through a relay that un-streams them.
         # The relay also counts each answer's usage as it lands, so a run that
         # is stopped before the CLI prints its stats still reports its calls.
-        with GeminiGatewayRelay(self._gemini_base_url, timeout_seconds=timeout_seconds) as relay:
+        # It also sends the CLI's helper calls (compression, loop detection,
+        # routing), which name Google models of their own, to the run's model.
+        with GeminiGatewayRelay(
+            self._gemini_base_url, model=self._model_name, timeout_seconds=timeout_seconds
+        ) as relay:
             return self._run_gemini_cli(prompt, timeout_seconds=timeout_seconds, relay=relay)
 
     def _count_relay_usage(self, relay: GeminiGatewayRelay | None, raw_responses: list[Any]) -> int:

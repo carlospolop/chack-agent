@@ -13,6 +13,10 @@ bounded retry omits that field. A connection the gateway drops or refuses is
 tried again a bounded number of times.
 Other gateway errors pass through with their status and body.
 
+The Gemini CLI also calls Google models of its own for helper work (chat
+compression, loop detection, routing, summaries), which a gateway may not
+serve or a profile never chose. The relay sends every call to the run's model.
+
 An unstreamed answer can take longer than the Gemini CLI waits for response
 headers, so a slow streaming call gets its event-stream headers early and
 blank keepalive lines until the answer, or the gateway's error, arrives.
@@ -67,12 +71,32 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _upstream_target(base_url: str, path: str) -> tuple[str, bool]:
-    """Gateway URL for a CLI request path, and whether it was a streaming call."""
+_MODELS_SEGMENT = "/models/"
+
+
+def _model_in_path(request_path: str) -> tuple[int, int] | None:
+    """Span of the model name in ``.../models/<model>:<method>``, if the path names one."""
+
+    start = request_path.find(_MODELS_SEGMENT)
+    if start < 0:
+        return None
+    start += len(_MODELS_SEGMENT)
+    end = request_path.rfind(":")
+    return (start, end) if end > start else None
+
+
+def _upstream_target(base_url: str, path: str, model: str = "") -> tuple[str, bool, str]:
+    """Gateway URL for a CLI request path, whether it was a streaming call, and
+    the other model the CLI asked for when the call is sent to ``model`` instead."""
 
     parsed = urllib.parse.urlsplit(path)
     request_path = parsed.path
     query = parsed.query
+    replaced = ""
+    span = _model_in_path(request_path) if model else None
+    if span is not None and request_path[span[0] : span[1]] != model:
+        replaced = request_path[span[0] : span[1]]
+        request_path = request_path[: span[0]] + model + request_path[span[1] :]
     streaming = request_path.endswith(_STREAM_METHOD)
     if streaming:
         request_path = request_path[: -len(_STREAM_METHOD)] + _UNARY_METHOD
@@ -86,7 +110,7 @@ def _upstream_target(base_url: str, path: str) -> tuple[str, bool]:
     url = base_url.rstrip("/") + request_path
     if query:
         url += "?" + query
-    return url, streaming
+    return url, streaming, replaced
 
 
 def _usage_of(answer: Any) -> dict[str, int] | None:
@@ -187,11 +211,14 @@ class GeminiGatewayRelay:
         self,
         upstream_base_url: str,
         *,
+        model: str = "",
         timeout_seconds: float | None = None,
         keepalive_after_seconds: float = 20.0,
         keepalive_every_seconds: float = 15.0,
     ) -> None:
         self._upstream_base_url = str(upstream_base_url or "").rstrip("/")
+        self._model = str(model or "").strip()
+        self._replaced_models: set[str] = set()
         self._timeout_seconds = timeout_seconds
         self._keepalive_after_seconds = keepalive_after_seconds
         self._keepalive_every_seconds = keepalive_every_seconds
@@ -331,7 +358,10 @@ class GeminiGatewayRelay:
         return _Reply(status, response_headers, event)
 
     def _forward(self, handler: BaseHTTPRequestHandler) -> None:
-        url, streaming = _upstream_target(self._upstream_base_url, handler.path)
+        url, streaming, replaced = _upstream_target(self._upstream_base_url, handler.path, self._model)
+        if replaced and replaced not in self._replaced_models:
+            self._replaced_models.add(replaced)
+            _LOGGER.info("Gemini CLI asked for %s; sending its calls to the run's model %s", replaced, self._model)
         length = int(handler.headers.get("content-length") or 0)
         body = handler.rfile.read(length) if length else None
         headers = {

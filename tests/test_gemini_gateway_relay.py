@@ -446,3 +446,27 @@ def test_an_unreachable_gateway_is_tried_a_bounded_number_of_times(monkeypatch):
     assert status == 502
     assert json.loads(body)["error"]["code"] == 502
     assert len(attempts) == relay_module._CONNECTION_ATTEMPTS
+
+
+def test_calls_naming_another_model_go_to_the_runs_model(gateway):
+    base_url, seen, _ = gateway
+    with GeminiGatewayRelay(base_url, model="bakkt/glm-5.2") as relay:
+        own = _post(f"{relay.base_url}/v1beta/models/bakkt/glm-5.2:streamGenerateContent?alt=sse")
+        compression = _post(f"{relay.base_url}/v1beta/models/gemini-3-pro-preview:generateContent")
+        loop_check = _post(f"{relay.base_url}/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse")
+
+    assert [reply[0] for reply in (own, compression, loop_check)] == [200, 200, 200]
+    assert json.loads(compression[2]) == ANSWER
+    assert [request["path"] for request in seen] == [
+        "/gemini/v1beta/models/bakkt/glm-5.2:generateContent",
+        "/gemini/v1beta/models/bakkt/glm-5.2:generateContent",
+        "/gemini/v1beta/models/bakkt/glm-5.2:generateContent",
+    ]
+
+
+def test_without_a_run_model_the_cli_model_is_kept(gateway):
+    base_url, seen, _ = gateway
+    with GeminiGatewayRelay(base_url) as relay:
+        _post(f"{relay.base_url}/v1beta/models/gemini-3-pro-preview:generateContent")
+
+    assert seen[0]["path"] == "/gemini/v1beta/models/gemini-3-pro-preview:generateContent"
