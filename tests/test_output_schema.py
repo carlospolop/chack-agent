@@ -517,3 +517,20 @@ def test_an_empty_reply_is_sent_back_to_finish_the_task():
     _normalized, error = validate_schema_output("", _FINDING_SCHEMA, strict=False)
 
     assert prompt == MODULE.unfinished_task_prompt(error, _FINDING_SCHEMA)
+
+
+def test_unrepaired_answer_logs_where_its_json_breaks(caplog):
+    # An unescaped quote deep in a long field: the log must show that spot, not only the start.
+    broken = '{"result": {"assessment": "' + "a" * 300 + ' the "admin" panel", "severity": 1}}'
+
+    with caplog.at_level("WARNING"):
+        output, _steps, _raw = repair_schema_output(
+            broken, schema=_FINDING_SCHEMA, strict=False, resumable=True, run_turn=lambda _prompt: ("", [], None)
+        )
+
+    assert output == ""
+    first, second = [record.getMessage() for record in caplog.records if "output schema" in record.getMessage()]
+    assert f"{len(broken)} chars" in first
+    assert "the \"admin\" panel" in first
+    assert len(first) < 600
+    assert second.endswith("(answer: empty reply)")
