@@ -585,6 +585,38 @@ def schema_repair_prompt(schema_error: str, schema: Any, *, name: str = "output_
     )
 
 
+def unfinished_task_prompt(schema_error: str, schema: Any, *, name: str = "output_schema") -> str:
+    """The user turn for a reply that is a JSON object with none of the answer's fields.
+
+    Such a reply is almost always a tool call written as text: the model
+    stopped before finishing, so asking it to reshape that reply would only
+    get the same object back.
+    """
+    loaded = _load_schema(schema)
+    schema_text = (
+        json.dumps(loaded, ensure_ascii=False, separators=(",", ":"))
+        if loaded is not None
+        else str(schema or "")
+    )
+    schema_name = str(name or "").strip() or "output_schema"
+    return (
+        f"Your reply is not the final answer `{schema_name}`: {_clip(schema_error, SCHEMA_ERROR_MAX_CHARS)}\n"
+        "A tool call written as text is not run. If the task is not finished, continue it by calling your "
+        "tools; when it is done, reply with only the complete final answer as one JSON object that matches "
+        "this schema, with no text before or after it:\n"
+        f"{schema_text}"
+    )
+
+
+def _shares_no_answer_field(output: str, schema: Any) -> bool:
+    loaded = _load_schema(schema)
+    fields = (loaded or {}).get("properties")
+    answer = extract_last_json_value(output or "")
+    return isinstance(fields, dict) and bool(fields) and isinstance(answer, dict) and bool(answer) and not (
+        set(answer) & set(fields)
+    )
+
+
 def is_backend_error_output(output: str) -> bool:
     return str(output or "").strip().lower().startswith("error:")
 
@@ -614,8 +646,13 @@ def repair_schema_output(
     if not resumable:
         _LOGGER.warning("%s answer did not match the output schema; no session to repair it in: %s", label, error)
         return output, [], []
-    _LOGGER.warning("%s answer did not match the output schema; asking for a repair: %s", label, error)
-    repaired, steps, raw = run_turn(schema_repair_prompt(error, schema, name=name))
+    if _shares_no_answer_field(output, schema):
+        _LOGGER.warning("%s reply has none of the answer's fields; asking it to finish the task: %s", label, error)
+        prompt = unfinished_task_prompt(error, schema, name=name)
+    else:
+        _LOGGER.warning("%s answer did not match the output schema; asking for a repair: %s", label, error)
+        prompt = schema_repair_prompt(error, schema, name=name)
+    repaired, steps, raw = run_turn(prompt)
     raw_responses = list(getattr(raw, "raw_responses", None) or [])
     if is_backend_error_output(repaired):
         _LOGGER.warning("%s schema repair turn failed: %s", label, _clip(repaired, SCHEMA_ERROR_MAX_CHARS))
