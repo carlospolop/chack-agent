@@ -55,7 +55,7 @@ from ..thinking_effort import (
     opencode_thinking_effort,
 )
 from .claude_code_backend import _terminate_process_tree
-from .cli_process import cli_exec_timeout_seconds
+from .cli_process import cli_exec_timeout_seconds, prefer_oom_kill
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .prompt_cache import split_prompt_cache_breakpoint
 from .tool_payloads import (
@@ -813,6 +813,7 @@ class OpencodeCliExecutor:
                 cwd=exec_cwd,
                 start_new_session=True,
             )
+            prefer_oom_kill(process.pid)
         except FileNotFoundError:
             return (
                 "ERROR: opencode CLI executable was not found. "

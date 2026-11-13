@@ -37,6 +37,7 @@ from ..live_cost_state import LiveCostLimitExceeded, report_live_usage
 from ..llm_gateway import GatewayRoute, gateway_subprocess_env, get_gateway_route
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import codex_thinking_effort, normalize_thinking_effort
+from .cli_process import prefer_oom_kill
 from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
 from . import codex_daybreak
@@ -1122,6 +1123,7 @@ class CodexExecutor:
             cwd=exec_cwd or None,
             start_new_session=True,
         )
+        prefer_oom_kill(process.pid)
         cancel_registration = register_process(process, _terminate_process_tree)
         deadline = time.monotonic() + timeout_seconds
         compaction_usage: dict[str, Any] = {}
@@ -2044,6 +2046,7 @@ class CodexExecutor:
                 cwd=exec_cwd or None,
                 start_new_session=True,
             )
+            prefer_oom_kill(process.pid)
         except FileNotFoundError:
             self._log_codex_failure(
                 "codex_cli_missing",

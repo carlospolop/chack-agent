@@ -28,7 +28,7 @@ from ..llm_gateway import clone_config_for_gateway, get_gateway_route
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import copilot_thinking_effort, normalize_thinking_effort
 from .claude_code_backend import _terminate_process_tree
-from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds
+from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds, prefer_oom_kill
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     configured_mcp_env_names,
@@ -404,6 +404,7 @@ class CopilotCliExecutor:
                 env=env,
                 start_new_session=True,
             )
+            prefer_oom_kill(process.pid)
         except FileNotFoundError:
             return (
                 "ERROR: Copilot CLI executable was not found. "

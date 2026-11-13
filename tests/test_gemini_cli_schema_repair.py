@@ -6,6 +6,7 @@ stream-json run per call, so the real subprocess path is exercised.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import textwrap
 
@@ -40,6 +41,16 @@ FAKE_GEMINI = textwrap.dedent(
         handle.write(f"{turn_budget}\\n")
     with open(record + ".prompts", "a") as handle:
         handle.write(json.dumps(sys.stdin.read()) + "\\n")
+    if os.path.exists("/proc/self/oom_score_adj"):
+        import subprocess
+        started = subprocess.run(
+            [sys.executable, "-c", "print(open('/proc/self/oom_score_adj').read().strip())"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        with open("/proc/self/oom_score_adj") as handle:
+            own = handle.read().strip()
+        with open(record + ".oom", "a") as handle:
+            handle.write(json.dumps({"cli": own, "started": started}) + "\\n")
     with open(os.environ["FAKE_GEMINI_SCENARIO"]) as handle:
         runs = json.load(handle)
     run = runs[min(len(calls), len(runs)) - 1]
@@ -114,6 +125,12 @@ def fake_gemini(tmp_path, monkeypatch):
         def turn_budgets(self):
             path = tmp_path / "calls.json.turns"
             return [int(line) for line in path.read_text(encoding="utf-8").split()] if path.exists() else []
+
+        @property
+        def oom_scores(self):
+            path = tmp_path / "calls.json.oom"
+            lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+            return [json.loads(line) for line in lines]
 
         @property
         def prompts(self):
@@ -286,3 +303,18 @@ def test_cli_warnings_printed_on_a_turn_without_an_answer_are_not_taken_as_the_a
     assert len(fake_gemini.calls) == 2
     # The model is asked to finish its task, not to reshape the CLI's warnings.
     assert fake_gemini.prompts[1].startswith("Your reply is not the final answer")
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/oom_score_adj"), reason="needs Linux /proc")
+def test_out_of_memory_kills_pick_the_cli_and_what_it_starts_before_the_host_process(fake_gemini):
+    fake_gemini.script([_run(json.dumps(VALID))])
+    with open("/proc/self/oom_score_adj") as handle:
+        host_score = handle.read().strip()
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == VALID
+    assert fake_gemini.oom_scores == [{"cli": "500", "started": "500"}]
+    with open("/proc/self/oom_score_adj") as handle:
+        assert handle.read().strip() == host_score
+
