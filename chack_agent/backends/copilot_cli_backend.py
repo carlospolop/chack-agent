@@ -28,7 +28,7 @@ from ..llm_gateway import clone_config_for_gateway, get_gateway_route
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import copilot_thinking_effort, normalize_thinking_effort
 from .claude_code_backend import _terminate_process_tree
-from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds
+from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds, prefer_oom_kill
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     configured_mcp_env_names,
@@ -404,6 +404,7 @@ class CopilotCliExecutor:
                 env=env,
                 start_new_session=True,
             )
+            prefer_oom_kill(process.pid)
         except FileNotFoundError:
             return (
                 "ERROR: Copilot CLI executable was not found. "
@@ -425,6 +426,7 @@ class CopilotCliExecutor:
         output_parts: list[str] = []
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
+        text_lines: list[str] = []
         raw_responses: list[Any] = []
         tool_calls: dict[str, tuple[str, Any]] = {}
         started_at = time.monotonic()
@@ -462,6 +464,8 @@ class CopilotCliExecutor:
 
                 event = self._parse_event_line(raw_line)
                 if not event:
+                    if raw_line:
+                        text_lines.append(raw_line)
                     continue
 
                 event_type = str(event.get("type") or "").strip()
@@ -631,10 +635,13 @@ class CopilotCliExecutor:
             )
 
         response = "".join(output_parts).strip()
-        if not response and raw_lines:
-            response = "\n".join(raw_lines).strip()
-            if response:
-                response = response[-4000:]
+        if not response and text_lines:
+            # Neither the CLI's events nor its merged stderr (warnings, logs)
+            # are an answer: the turn ended without one.
+            _LOGGER.info(
+                "Copilot CLI turn ended without an answer; it printed: %s",
+                "\n".join(text_lines).strip()[-500:],
+            )
 
         return response, steps, _RawResult(
             raw_responses=raw_responses,

@@ -55,7 +55,7 @@ from ..thinking_effort import (
     opencode_thinking_effort,
 )
 from .claude_code_backend import _terminate_process_tree
-from .cli_process import cli_exec_timeout_seconds
+from .cli_process import cli_exec_timeout_seconds, prefer_oom_kill
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .prompt_cache import split_prompt_cache_breakpoint
 from .tool_payloads import (
@@ -813,6 +813,7 @@ class OpencodeCliExecutor:
                 cwd=exec_cwd,
                 start_new_session=True,
             )
+            prefer_oom_kill(process.pid)
         except FileNotFoundError:
             return (
                 "ERROR: opencode CLI executable was not found. "
@@ -831,6 +832,7 @@ class OpencodeCliExecutor:
         cancel_registration = register_process(process, _terminate_process_tree)
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
+        text_lines: list[str] = []
         raw_responses: list[Any] = []
         step_texts: list[str] = []
         answer_texts: list[str] = []
@@ -874,6 +876,8 @@ class OpencodeCliExecutor:
                     raw_lines.append(raw_line)
                 event = self._parse_event_line(raw_line)
                 if not event:
+                    if raw_line:
+                        text_lines.append(raw_line)
                     continue
                 session_id = _clean(event.get("sessionID"))
                 if session_id:
@@ -943,8 +947,13 @@ class OpencodeCliExecutor:
                 _RawResult(raw_responses=raw_responses),
             )
         response = "".join(answer_texts).strip()
-        if not response and raw_lines:
-            response = "\n".join(raw_lines).strip()[-4000:]
+        if not response and text_lines:
+            # Neither the CLI's events nor its merged stderr (warnings, logs)
+            # are an answer: the turn ended without one.
+            _LOGGER.info(
+                "opencode turn ended without an answer; it printed: %s",
+                "\n".join(text_lines).strip()[-500:],
+            )
         return response, steps, _RawResult(
             raw_responses=raw_responses,
             time_to_first_token_seconds=time_to_first_token,

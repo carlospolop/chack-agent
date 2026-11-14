@@ -26,6 +26,26 @@ CLI_POLL_SECONDS = 0.2
 
 END_OF_OUTPUT = object()
 
+# When the machine runs out of memory, Linux kills the process with the highest
+# OOM score, normally the biggest. That is often the host process running every
+# agent, which loses all of them at once. A raised score makes the kernel pick an
+# agent CLI first: one run fails and can be retried. Processes the CLI starts
+# afterwards (MCP servers, tool commands) inherit the score.
+CLI_OOM_SCORE_ADJ = 500
+
+
+def prefer_oom_kill(pid: int) -> None:
+    """Have the kernel kill this child before its parent when memory runs out.
+
+    Raising a score needs no privilege. Where ``/proc`` is absent (macOS,
+    Windows) this does nothing.
+    """
+    try:
+        with open(f"/proc/{pid}/oom_score_adj", "w", encoding="ascii") as handle:
+            handle.write(str(CLI_OOM_SCORE_ADJ))
+    except OSError:
+        pass
+
 
 def cli_exec_timeout_seconds(timeout_env: str) -> int:
     """Wall-clock limit of one CLI run.

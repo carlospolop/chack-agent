@@ -364,29 +364,72 @@ _BOUND_UNITS = {
     "maxProperties": ("above the maximum", "property"),
     "minProperties": ("below the minimum", "property"),
 }
+# Models cannot count characters, so an over-long text also gets a word
+# budget that lands below the limit. Technical prose (identifiers, paths,
+# security terms) runs ~9 characters a word with its space, well above
+# plain English's ~6.
+_CHARACTERS_PER_WORD_TARGET = 10
 _SCHEMA_ERROR_EACH_MAX_CHARS = 400
 _SCHEMA_ERROR_MESSAGE_MAX_CHARS = 300
 _SCHEMA_ERROR_INSTANCE_MAX_CHARS = 80
 
 
-def extract_last_json_value(output: str) -> Any | None:
-    """The last complete JSON object or array embedded anywhere in ``output``."""
-    text = str(output or "")
-    decoder = json.JSONDecoder()
+# Read the way the model meant them: raw newlines inside strings, and
+# backslashes JSON does not define (a regex or shell command copied into a
+# string, "grep \.py") kept as literal backslashes. Valid JSON is unchanged.
+_LENIENT_DECODER = json.JSONDecoder(strict=False)
+_ESCAPE_PAIR = re.compile(r"\\(.)", re.DOTALL)
+_OBJECT_START = re.compile(r'\{\s*"')
+
+
+def _escape_stray_backslashes(text: str) -> str:
+    return _ESCAPE_PAIR.sub(
+        lambda match: match.group(0) if match.group(1) in '"\\/bfnrtu' else "\\" + match.group(0),
+        text,
+    )
+
+
+def _scan_json_values(output: str) -> tuple[list[Any], json.JSONDecodeError | None]:
+    """The complete JSON values in ``output`` in order, and why the object enclosing the last did not parse.
+
+    The error is set only when the last value sits inside an object that
+    failed to decode, i.e. the value is a fragment of a broken answer, not the
+    answer.
+    """
+    text = _escape_stray_backslashes(str(output or ""))
     idx = 0
-    found: Any | None = None
+    values: list[Any] = []
+    found_start = found_end = -1
+    broken: tuple[int, json.JSONDecodeError] | None = None
     while idx < len(text):
         starts = [pos for pos in (text.find("{", idx), text.find("[", idx)) if pos >= 0]
         if not starts:
             break
         start = min(starts)
         try:
-            parsed, end = decoder.raw_decode(text[start:])
-            found = parsed
+            parsed, end = _LENIENT_DECODER.raw_decode(text[start:])
+            values.append(parsed)
+            found_start, found_end = start, start + end
             idx = start + max(end, 1)
-        except ValueError:
+        except json.JSONDecodeError as exc:
+            if broken is None and _OBJECT_START.match(text, start):
+                broken = (start, exc)
             idx = start + 1
-    return found
+    if broken is None or found_start < broken[0]:
+        return values, None
+    # Nested when the broken object is still open at the value and the text
+    # after the value closes it again (a truncated draft followed by a
+    # complete answer is not).
+    before, after = text[broken[0]:found_start], text[found_end:]
+    depth = before.count("{") + before.count("[") - before.count("}") - before.count("]")
+    nested = 0 < depth <= after.count("}") + after.count("]")
+    return values, broken[1] if nested else None
+
+
+def extract_last_json_value(output: str) -> Any | None:
+    """The last complete JSON object or array embedded anywhere in ``output``."""
+    values = _scan_json_values(output)[0]
+    return values[-1] if values else None
 
 
 def _json_path(path: Any) -> str:
@@ -415,11 +458,11 @@ def _validation_error_text(error: Any) -> str:
     if bound and isinstance(instance, (str, list, dict)):
         # The bare "... is too long" leaves the model guessing how much to cut.
         direction, unit = bound
-        return _clip(
-            f"{unit} count {len(instance)} is {direction} {getattr(error, 'validator_value', '?')} "
-            f"(at {_json_path(path)})",
-            _SCHEMA_ERROR_EACH_MAX_CHARS,
-        )
+        limit = getattr(error, "validator_value", "?")
+        text = f"{unit} count {len(instance)} is {direction} {limit} (at {_json_path(path)})"
+        if isinstance(instance, str) and direction == "above the maximum" and isinstance(limit, int):
+            text += f"; rewrite it in at most {max(1, limit // _CHARACTERS_PER_WORD_TARGET)} words"
+        return _clip(text, _SCHEMA_ERROR_EACH_MAX_CHARS)
     # Messages quote the failing value ("[...] is not of type 'string'");
     # a short excerpt of it keeps the reason itself visible.
     try:
@@ -472,27 +515,55 @@ def validate_schema_output(
 ) -> tuple[str, str]:
     """Return ``(schema-shaped JSON text, "")`` or ``(output as given, short error)``.
 
-    The answer itself is tried first, then the last JSON value embedded in it.
+    The answer itself is tried first, then the JSON values embedded in it from
+    the last to the first: a model may follow its answer with a second, smaller
+    JSON document (a summary, a note, a tool call).
     """
     loaded = _load_schema(schema)
     if loaded is None:
         return output, ""
     validator = JsonSchemaOutput(loaded, name=name or "output_schema", strict=strict)
+    values, broken = _scan_json_values(output or "")
+    # Inside a broken answer only the last value is tried: the others are
+    # fragments of it.
+    embedded = values[-1:] if broken is not None else list(reversed(values))
+    candidates = [output or ""] + [json.dumps(value, ensure_ascii=False) for value in embedded]
     errors: list[BaseException] = []
-    embedded = extract_last_json_value(output or "")
-    candidates: list[str] = [output or ""]
-    if embedded is not None:
-        candidates.append(json.dumps(embedded, ensure_ascii=False))
     for candidate in candidates:
         try:
             return json.dumps(validator.validate_json(candidate), ensure_ascii=False), ""
         except Exception as exc:
             errors.append(exc)
-    # A schema mismatch says more than a parse error of the surrounding prose.
-    for exc in reversed(errors):
+    if broken is not None:
+        # The only parsable value is a fragment of the answer; its schema
+        # errors would send the model after fields it did write.
+        return output, short_schema_error(broken)
+    if embedded:
+        # A schema mismatch says more than a parse error of the surrounding
+        # prose, and the largest value is the answer the model meant.
+        largest = max(range(len(embedded)), key=lambda index: len(candidates[index + 1]))
+        exc = errors[largest + 1]
         if not isinstance(exc.__cause__, json.JSONDecodeError):
-            return output, short_schema_error(exc)
+            return output, _with_answer_keys(short_schema_error(exc), embedded[largest])
     return output, short_schema_error(errors[0])
+
+
+_ANSWER_KEYS_SHOWN = 8
+
+
+def _with_answer_keys(error: str, answer: Any) -> str:
+    """Name the keys the answer did have when its top-level fields are missing.
+
+    "'results' is a required property" alone does not tell a model that it
+    answered with one result item, or with a tool call, instead of the object.
+    """
+    if not isinstance(answer, dict) or "required property (at the top level)" not in error:
+        return error
+    keys = [str(key)[:40] for key in answer][:_ANSWER_KEYS_SHOWN]
+    shown = ", ".join(keys) if keys else "none"
+    if len(answer) > _ANSWER_KEYS_SHOWN:
+        shown += ", ..."
+    return f"{error}; the answer's top-level keys were: {shown}"
 
 
 def schema_repair_prompt(schema_error: str, schema: Any, *, name: str = "output_schema") -> str:
@@ -507,10 +578,71 @@ def schema_repair_prompt(schema_error: str, schema: Any, *, name: str = "output_
     return (
         f"Your final answer does not match the required output schema `{schema_name}`: "
         f"{_clip(schema_error, SCHEMA_ERROR_MAX_CHARS)}\n"
-        "Reply again with only the final answer as one JSON object that matches this schema, "
+        "Reply again with only the complete final answer, keeping every item and field of your previous "
+        "answer and changing only what the error names, as one JSON object that matches this schema, "
         "with no text before or after it:\n"
         f"{schema_text}"
     )
+
+
+def unfinished_task_prompt(schema_error: str, schema: Any, *, name: str = "output_schema") -> str:
+    """The user turn for a reply that is empty or a JSON object with none of the answer's fields.
+
+    Such a reply means the model stopped before answering (often after a tool
+    call, or writing one as text), so asking it to reshape that reply would
+    only get the same thing back.
+    """
+    loaded = _load_schema(schema)
+    schema_text = (
+        json.dumps(loaded, ensure_ascii=False, separators=(",", ":"))
+        if loaded is not None
+        else str(schema or "")
+    )
+    schema_name = str(name or "").strip() or "output_schema"
+    return (
+        f"Your reply is not the final answer `{schema_name}`: {_clip(schema_error, SCHEMA_ERROR_MAX_CHARS)}\n"
+        "A tool call written as text is not run. If the task is not finished, continue it by calling your "
+        "tools; when it is done, reply with only the complete final answer as one JSON object that matches "
+        "this schema, with no text before or after it:\n"
+        f"{schema_text}"
+    )
+
+
+def _shares_no_answer_field(output: str, schema: Any) -> bool:
+    if not str(output or "").strip():
+        return True
+    loaded = _load_schema(schema)
+    fields = (loaded or {}).get("properties")
+    answer = extract_last_json_value(output or "")
+    return isinstance(fields, dict) and bool(fields) and isinstance(answer, dict) and bool(answer) and not (
+        set(answer) & set(fields)
+    )
+
+
+_EXCERPT_CHARS = 60
+
+
+def answer_excerpt(output: str) -> str:
+    """A bounded look at an unparsable answer: its size, start and the text around the JSON error.
+
+    The schema error alone ("Expecting value (line 1 column 2)") does not show
+    what the model wrote, so a recurring malformation cannot be told apart from
+    a truncated or empty reply.
+    """
+    text = str(output or "")
+    if not text.strip():
+        return "empty reply"
+    starts = [pos for pos in (text.find("{"), text.find("[")) if pos >= 0]
+    start = min(starts) if starts else 0
+    try:
+        _LENIENT_DECODER.decode(_escape_stray_backslashes(text[start:]))
+        position = None
+    except json.JSONDecodeError as exc:
+        position = start + exc.pos
+    excerpt = f"{len(text)} chars, starting {text[:_EXCERPT_CHARS]!r}"
+    if position is not None and position > _EXCERPT_CHARS:
+        excerpt += f", around the error {text[position - _EXCERPT_CHARS:position + _EXCERPT_CHARS]!r}"
+    return excerpt
 
 
 def is_backend_error_output(output: str) -> bool:
@@ -542,17 +674,57 @@ def repair_schema_output(
     if not resumable:
         _LOGGER.warning("%s answer did not match the output schema; no session to repair it in: %s", label, error)
         return output, [], []
-    _LOGGER.warning("%s answer did not match the output schema; asking for a repair: %s", label, error)
-    repaired, steps, raw = run_turn(schema_repair_prompt(error, schema, name=name))
+    if _shares_no_answer_field(output, schema):
+        _LOGGER.warning("%s reply has none of the answer's fields; asking it to finish the task: %s (answer: %s)",
+                        label, error, answer_excerpt(output))
+        prompt = unfinished_task_prompt(error, schema, name=name)
+    else:
+        _LOGGER.warning("%s answer did not match the output schema; asking for a repair: %s (answer: %s)",
+                        label, error, answer_excerpt(output))
+        prompt = schema_repair_prompt(error, schema, name=name)
+    repaired, steps, raw = run_turn(prompt)
     raw_responses = list(getattr(raw, "raw_responses", None) or [])
     if is_backend_error_output(repaired):
         _LOGGER.warning("%s schema repair turn failed: %s", label, _clip(repaired, SCHEMA_ERROR_MAX_CHARS))
         return output, list(steps or []), raw_responses
+    restored = _restore_dropped_lists(output, repaired, schema, name=name, strict=strict, label=label)
+    if restored is not None:
+        return restored, list(steps or []), raw_responses
     normalized, error = validate_schema_output(repaired, schema, name=name, strict=strict)
     if error:
-        _LOGGER.warning("%s answer still did not match the output schema after a repair turn: %s", label, error)
+        _LOGGER.warning("%s answer still did not match the output schema after a repair turn: %s (answer: %s)",
+                        label, error, answer_excerpt(repaired))
         return repaired, list(steps or []), raw_responses
     return normalized, list(steps or []), raw_responses
+
+
+def _restore_dropped_lists(
+    original: str, repaired: str, schema: Any, *, name: str, strict: bool, label: str
+) -> str | None:
+    """The repaired answer with the top-level lists it emptied or left out put back.
+
+    Asked to fix one field, some models resend only that field, or an empty
+    list for the rest, which discards the work of the whole run. A list the
+    first answer filled is kept when the merged answer validates; otherwise
+    (or when nothing was dropped) this returns None.
+    """
+    first = extract_last_json_value(original)
+    answer = extract_last_json_value(repaired)
+    if not isinstance(first, dict) or not isinstance(answer, dict):
+        return None
+    dropped = [key for key, value in first.items() if isinstance(value, list) and value and not answer.get(key)]
+    if not dropped:
+        return None
+    merged, error = validate_schema_output(
+        json.dumps({**answer, **{key: first[key] for key in dropped}}, ensure_ascii=False),
+        schema,
+        name=name,
+        strict=strict,
+    )
+    if error:
+        return None
+    _LOGGER.warning("%s repair turn dropped the items of %s; keeping the first answer's", label, ", ".join(dropped))
+    return merged
 
 
 def answer_repair_turns(model: str) -> int:

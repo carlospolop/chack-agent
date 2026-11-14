@@ -30,7 +30,7 @@ from ..llm_gateway import clone_config_for_gateway, gateway_subprocess_env, get_
 from ..output_schema import repair_schema_output
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import normalize_thinking_effort
-from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds
+from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds, prefer_oom_kill
 from .claude_code_backend import _terminate_process_tree
 from .opencode_cli_backend import _role_env, _toolset_kwargs
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
@@ -415,6 +415,7 @@ class CodeCliExecutor:
                 env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, bufsize=1, start_new_session=True,
             )
+            prefer_oom_kill(process.pid)
         except FileNotFoundError:
             return (f"ERROR: {self.backend} CLI executable not found: {self._cli_path}",
                     [], RawResult([]))

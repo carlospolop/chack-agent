@@ -8,6 +8,7 @@ import tempfile
 import pytest
 from datetime import datetime, timezone
 
+from chack_agent.output_schema import final_answer_rejection
 from chack_agent.backends.claude_code_backend import (
     ClaudeCodeExecutor,
     _normalized_claude_usage,
@@ -993,7 +994,7 @@ def test_claude_uses_a_given_up_structured_answer_that_only_sent_an_object_as_a_
         {"report": "free text"},
     ],
 )
-def test_claude_still_fails_when_its_last_structured_attempt_does_not_match_the_schema(
+def test_claude_returns_its_last_structured_attempt_for_repair_when_it_does_not_match(
     monkeypatch, tmp_path, last_attempt
 ) -> None:
     output = _run_claude_stream(
@@ -1002,6 +1003,18 @@ def test_claude_still_fails_when_its_last_structured_attempt_does_not_match_the_
         _gave_up_on_structured_output({"enhancements": {"v001": {"verdict": "ok"}}}, last_attempt),
         output_schema_json=_ENHANCEMENT_SCHEMA,
     )
+
+    assert json.loads(output) == last_attempt
+    # The answer is rejected, so the session gets the final-answer repair turns.
+    assert final_answer_rejection(output, schema=_ENHANCEMENT_SCHEMA)
+
+
+def test_claude_still_fails_on_a_mismatching_structured_attempt_without_a_session_to_resume(
+    monkeypatch, tmp_path
+) -> None:
+    events = _gave_up_on_structured_output({"report": "free text"})
+    events[0] = {**_INIT_EVENT, "session_id": ""}
+    output = _run_claude_stream(monkeypatch, tmp_path, events, output_schema_json=_ENHANCEMENT_SCHEMA)
 
     assert output.startswith("ERROR: Claude returned an error in final result event.")
     assert "error_max_structured_output_retries" in output
@@ -1045,3 +1058,73 @@ def test_claude_reports_a_missing_mcp_receipt_only_when_mcp_was_configured(monke
             executor._run_claude_once("prompt")
         missing = [r for r in caplog.records if "startup receipt was not written" in r.getMessage()]
         assert bool(missing) is has_tools
+
+
+def _result_events(result_event: dict) -> str:
+    init = {"type": "system", "subtype": "init", "session_id": "session-1", "mcp_servers": []}
+    return json.dumps(init) + "\n" + json.dumps({"session_id": "session-1", **result_event}) + "\n"
+
+
+_TURN_LIMIT = {"type": "result", "subtype": "error_max_turns", "is_error": True, "stop_reason": "tool_use", "num_turns": 11}
+_ANSWER = {"type": "result", "subtype": "success", "result": "final answer"}
+
+
+def _fake_claude(monkeypatch, tmp_path, results):
+    """Run the executor against a CLI that answers with ``results`` in turn; returns the argv of each call."""
+    calls = []
+    pending = list(results)
+
+    class _FakeProcess:
+        pid = 999999
+
+        def __init__(self, argv):
+            calls.append(list(argv))
+            self.events = _result_events(pending.pop(0))
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(self.events)
+
+        def poll(self):
+            return 0 if self.stdout.tell() >= len(self.events) else None
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        "chack_agent.backends.claude_code_backend.subprocess.Popen",
+        lambda argv, *args, **kwargs: _FakeProcess(argv),
+    )
+    executor = _build_executor("")
+    executor._claude_home = str(tmp_path)
+    return executor, calls
+
+
+def _turn_budget(argv):
+    return int(argv[argv.index("--max-turns") + 1])
+
+
+def test_run_stopped_at_the_turn_limit_resumes_once_for_the_final_answer(monkeypatch, tmp_path) -> None:
+    executor, calls = _fake_claude(monkeypatch, tmp_path, [_TURN_LIMIT, _ANSWER])
+
+    output = executor.invoke({"input": "audit this"})["output"]
+
+    assert output == "final answer"
+    assert [_turn_budget(argv) for argv in calls] == [10, 2]
+    assert calls[1][calls[1].index("--resume") + 1] == "session-1"
+
+
+def test_next_request_gets_the_full_turn_budget_again(monkeypatch, tmp_path) -> None:
+    executor, calls = _fake_claude(monkeypatch, tmp_path, [_TURN_LIMIT, _ANSWER, _ANSWER])
+
+    executor.invoke({"input": "audit this"})
+    executor.invoke({"input": "and this"})
+
+    assert [_turn_budget(argv) for argv in calls] == [10, 2, 10]
+
+
+def test_turn_limit_again_on_the_final_answer_run_is_reported(monkeypatch, tmp_path) -> None:
+    executor, calls = _fake_claude(monkeypatch, tmp_path, [_TURN_LIMIT, _TURN_LIMIT])
+
+    output = executor.invoke({"input": "audit this"})["output"]
+
+    assert output.startswith("ERROR:") and "error_max_turns" in output
+    assert len(calls) == 2

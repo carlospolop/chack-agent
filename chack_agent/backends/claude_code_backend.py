@@ -30,6 +30,7 @@ from chack_tools.tool_usage_state import effective_max_tools_used
 from ..config import ChackConfig
 from ..live_cost_state import report_live_usage
 from ..resume_compaction import ResumeCompactionResult
+from .final_answer import FINAL_ANSWER_PROMPT, FINAL_ANSWER_TURNS
 from ..llm_gateway import (
     GatewayRoute,
     clone_config_for_gateway,
@@ -43,7 +44,7 @@ from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
 from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
-from .cli_process import cli_exec_timeout_seconds
+from .cli_process import cli_exec_timeout_seconds, prefer_oom_kill
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .web_search_fallback import (
     FALLBACK_WEB_MCP_SERVER,
@@ -74,6 +75,11 @@ from .prompt_cache import (
 
 
 _LOGGER = logging.getLogger("chack.claude_code_backend")
+
+# Claude Code ends a run that reaches --max-turns with an error result of this
+# subtype instead of an answer. It counts turns per invocation, so the resumed
+# run asking for the answer gets its own short budget.
+_TURN_LIMIT_SUBTYPE = '"subtype": "error_max_turns"'
 
 CLAUDE_EXEC_TIMEOUT_ENV = "CHACK_CLAUDE_EXEC_TIMEOUT_SECONDS"
 _MCP_STARTUP_STATUS_PATH_ENV = "CHACK_MCP_STARTUP_STATUS_PATH"
@@ -497,6 +503,7 @@ class ClaudeCodeExecutor:
     _gateway_refusal_env_json: str = ""
     _claude_home: str | None = None
     _claude_session_id: str | None = None
+    _turn_budget_override: int = 0
     _output_schema: str | None = None
     _prompt_only_next_invocation: bool = False
     _thinking_effort: str = "high"
@@ -524,6 +531,10 @@ class ClaudeCodeExecutor:
         user_input = str(payload.get("input", "") or "")
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_claude(prompt)
+        if _TURN_LIMIT_SUBTYPE in output and self._claude_session_id:
+            output, final_steps, final_raw = self._run_final_answer_turn()
+            steps.extend(final_steps)
+            raw_result = _RawResult(raw_responses=raw_result.raw_responses + final_raw.raw_responses)
         output = self._normalize_schema_output(output)
 
         # Save-or-retry: if save_discovered_vulnerability is available but was never called,
@@ -931,6 +942,18 @@ class ClaudeCodeExecutor:
             and self._prompt_cache_route() not in _PROMPT_CACHE_REJECTED
         )
 
+    def _run_final_answer_turn(self) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        _LOGGER.warning(
+            "Claude Code reached its turn limit (%s) without an answer; resuming session %s for the final answer",
+            self._max_turns,
+            self._claude_session_id,
+        )
+        self._turn_budget_override = FINAL_ANSWER_TURNS
+        try:
+            return self._run_claude(FINAL_ANSWER_PROMPT)
+        finally:
+            self._turn_budget_override = 0
+
     def _run_claude(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         self._refresh_provider_credentials()
         session_before = self._claude_session_id
@@ -1105,6 +1128,7 @@ class ClaudeCodeExecutor:
                 cwd=exec_cwd,
                 start_new_session=True,
             )
+            prefer_oom_kill(process.pid)
         except FileNotFoundError:
             return (
                 "ERROR: Claude CLI executable was not found. "
@@ -1439,11 +1463,14 @@ class ClaudeCodeExecutor:
         result_event: dict[str, Any],
         tool_calls: dict[str, tuple[str, Any]],
     ) -> str | None:
-        """The last StructuredOutput attempt when the CLI gave up on it but chack's schema check accepts it.
+        """The last StructuredOutput attempt when the CLI gave up on it.
 
         Claude Code validates StructuredOutput strictly, so an attempt that only
         sends a nested object as a JSON string is rejected until its retries run
-        out; chack's own validation parses such values back.
+        out; chack's own validation parses such values back. An attempt that
+        still does not match is returned as the answer when the session can be
+        resumed, so the final-answer repair fixes it instead of the whole run
+        failing.
         """
         if str(result_event.get("subtype") or "").strip().lower() != "error_max_structured_output_retries":
             return None
@@ -1452,13 +1479,21 @@ class ClaudeCodeExecutor:
         attempts = [tool_input for name, tool_input in tool_calls.values() if name == "StructuredOutput"]
         if not attempts or not isinstance(attempts[-1], dict) or not attempts[-1]:
             return None
-        recovered = self._validated_schema_output(json.dumps(attempts[-1], ensure_ascii=False))
+        attempt = json.dumps(attempts[-1], ensure_ascii=False)
+        recovered = self._validated_schema_output(attempt)
         if recovered is not None:
             _LOGGER.warning(
                 "Claude gave up on structured output for model %s; using its last attempt, which matches the schema once typed.",
                 self._model_name,
             )
-        return recovered
+            return recovered
+        if not self._claude_session_id:
+            return None
+        _LOGGER.warning(
+            "Claude gave up on structured output for model %s; returning its last attempt for the answer repair.",
+            self._model_name,
+        )
+        return attempt
 
     @staticmethod
     def _append_structured_output(output_parts: list[str], value: Any) -> None:
@@ -1798,8 +1833,8 @@ PYEOF
 
         if resume_compaction:
             args.extend(["--max-turns", "1"])
-        elif self._max_turns > 0:
-            args.extend(["--max-turns", str(self._max_turns)])
+        elif self._turn_budget_override or self._max_turns > 0:
+            args.extend(["--max-turns", str(self._turn_budget_override or self._max_turns)])
         args.extend(
             [
                 "--effort",

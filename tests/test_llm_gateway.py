@@ -1004,3 +1004,23 @@ def test_turning_off_keyless_search_keeps_the_models_own_search():
     config.tools.keyless_web_search_enabled = False
 
     assert "WebSearch" in _claude_builtins(_build(build_claude_executor, config)._build_command("prompt"))
+
+
+def test_failed_catalog_refresh_keeps_the_last_catalog_read(monkeypatch):
+    responses = [_FakeResponse(LITELLM_MODEL_INFO), _FakeResponse({"error": "timeout"}, status=504)]
+    calls = []
+
+    def _get(url, headers=None, timeout=None):
+        calls.append(url)
+        return responses[min(len(calls), len(responses)) - 1]
+
+    monkeypatch.setattr(llm_gateway, "_http_get", _get)
+    clock = [1000.0]
+    monkeypatch.setattr(llm_gateway.time, "monotonic", lambda: clock[0])
+
+    first = llm_gateway.gateway_catalog(llm_gateway.GATEWAY_KIND_LITELLM, GATEWAY_URL, GATEWAY_KEY)
+    clock[0] += llm_gateway._CATALOG_TTL_SECONDS + 1
+    refreshed = llm_gateway.gateway_catalog(llm_gateway.GATEWAY_KIND_LITELLM, GATEWAY_URL, GATEWAY_KEY)
+
+    assert first and refreshed == first
+    assert len(calls) == 2

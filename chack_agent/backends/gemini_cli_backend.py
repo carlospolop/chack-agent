@@ -37,7 +37,8 @@ from ..llm_gateway import (
 )
 from ..thinking_effort import gemini_thinking_config, normalize_thinking_effort
 from .claude_code_backend import _terminate_process_tree
-from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds
+from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds, prefer_oom_kill
+from .final_answer import FINAL_ANSWER_PROMPT, FINAL_ANSWER_TURNS
 from .gemini_gateway_relay import GeminiGatewayRelay
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
@@ -61,6 +62,10 @@ _LOGGER = logging.getLogger("chack.gemini_cli_backend")
 
 GEMINI_EXEC_TIMEOUT_ENV = "CHACK_GEMINI_EXEC_TIMEOUT_SECONDS"
 GEMINI_CANCELLED_OUTPUT = "ERROR: Gemini execution cancelled."
+# Gemini CLI ends a run that reaches maxSessionTurns with this error instead
+# of an answer. It counts turns per process, so the resumed run asking for the
+# answer gets its own short budget.
+_TURN_LIMIT_ERROR = "ERROR: Gemini result error: Reached max session turns"
 
 
 _GEMINI_CLI_DENYLIST_TOOLS = {
@@ -180,6 +185,8 @@ class GeminiCliExecutor:
         self._base_system_prompt = base_system_prompt
         self._model_name = str(model_name or "").strip()
         self._max_turns = int(max_turns or 0)
+        # Replaces max_turns for the run that asks for an answer after the limit.
+        self._turn_budget_override = 0
         self._gemini_cli_path = gemini_cli_path
         self._gemini_api_key = gemini_api_key
         # Set when the Gemini API is reached through an LLM gateway.
@@ -236,6 +243,10 @@ class GeminiCliExecutor:
         user_input = str(payload.get("input", "") or "")
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_gemini(prompt)
+        if output.startswith(_TURN_LIMIT_ERROR) and self._gemini_session_id:
+            output, final_steps, final_raw = self._run_final_answer_turn()
+            steps.extend(final_steps)
+            raw_result.raw_responses.extend(final_raw.raw_responses)
         # The schema is only a prompt contract here. A drifting answer gets one
         # repair turn in the resumed session.
         output, repair_steps, repair_raw = repair_schema_output(
@@ -379,6 +390,18 @@ class GeminiCliExecutor:
         prompt_parts = [p for p in (user_input, policy_block, schema_block) if p.strip()]
         return "\n".join(prompt_parts)
 
+    def _run_final_answer_turn(self) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        _LOGGER.warning(
+            "Gemini CLI reached its turn limit (%s) without an answer; resuming session %s for the final answer",
+            self._max_turns,
+            self._gemini_session_id,
+        )
+        self._turn_budget_override = FINAL_ANSWER_TURNS
+        try:
+            return self._run_gemini(FINAL_ANSWER_PROMPT)
+        finally:
+            self._turn_budget_override = 0
+
     def _run_gemini(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         timeout_seconds = cli_exec_timeout_seconds(GEMINI_EXEC_TIMEOUT_ENV)
         if not self._gemini_base_url:
@@ -387,7 +410,11 @@ class GeminiCliExecutor:
         # stream, so the CLI reaches it through a relay that un-streams them.
         # The relay also counts each answer's usage as it lands, so a run that
         # is stopped before the CLI prints its stats still reports its calls.
-        with GeminiGatewayRelay(self._gemini_base_url, timeout_seconds=timeout_seconds) as relay:
+        # It also sends the CLI's helper calls (compression, loop detection,
+        # routing), which name Google models of their own, to the run's model.
+        with GeminiGatewayRelay(
+            self._gemini_base_url, model=self._model_name, timeout_seconds=timeout_seconds
+        ) as relay:
             return self._run_gemini_cli(prompt, timeout_seconds=timeout_seconds, relay=relay)
 
     def _count_relay_usage(self, relay: GeminiGatewayRelay | None, raw_responses: list[Any]) -> int:
@@ -453,6 +480,7 @@ class GeminiCliExecutor:
                 cwd=launch_cwd,
                 start_new_session=True,
             )
+            prefer_oom_kill(process.pid)
         except FileNotFoundError:
             return (
                 "ERROR: Gemini CLI executable was not found. "
@@ -474,6 +502,7 @@ class GeminiCliExecutor:
         output_parts: list[str] = []
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
+        text_lines: list[str] = []
         raw_responses: list[Any] = []
         relay_input_tokens = 0
         started_at = time.monotonic()
@@ -507,6 +536,8 @@ class GeminiCliExecutor:
                     raw_lines.append(line)
                 event = self._parse_event_line(line)
                 if not event:
+                    if line:
+                        text_lines.append(line)
                     continue
 
                 event_type = str(event.get("type") or "").strip()
@@ -640,10 +671,13 @@ class GeminiCliExecutor:
             )
 
         response = "".join(output_parts).strip()
-        if not response and raw_lines:
-            response = "\n".join(raw_lines).strip()
-            if response:
-                response = response[-4000:]
+        if not response and text_lines:
+            # Neither the CLI's events nor its merged stderr (warnings, logs)
+            # are an answer: the turn ended without one.
+            _LOGGER.info(
+                "Gemini CLI turn ended without an answer; it printed: %s",
+                "\n".join(text_lines).strip()[-500:],
+            )
 
         return response, steps, _RawResult(
             raw_responses=raw_responses,
@@ -783,7 +817,7 @@ class GeminiCliExecutor:
         settings_payload = {
             "model": {
                 "name": self._model_name,
-                "maxSessionTurns": self._max_turns if self._max_turns > 0 else -1,
+                "maxSessionTurns": self._turn_budget_override or (self._max_turns if self._max_turns > 0 else -1),
             },
             "modelConfigs": {
                 "overrides": [
