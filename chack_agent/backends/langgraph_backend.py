@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import importlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -34,7 +35,7 @@ from ..llm_gateway import get_gateway_route
 from ..thinking_effort import normalize_thinking_effort
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
-from chack_tools.cancellation import raise_if_cancelled
+from chack_tools.cancellation import RunCancelled, raise_if_cancelled
 
 from ..live_cost_state import report_live_usage
 from ..output_schema import schema_repair_prompt, validate_schema_output
@@ -252,6 +253,15 @@ _CONTENT_FILTER_RETRIES = 2
 _PARALLEL_TOOLS_DEFAULT = 1
 _PARALLEL_TOOLS_MAX = 16
 
+# These calls coordinate shared state or wait for background jobs. Preserve
+# their issue order, including relative to other tools in the same turn.
+_ORDERED_TOOL_NAMES = frozenset({
+    _PLAN_TOOL, "task_steps_manager", "start_researchers_async",
+    "list_researcher_jobs", "get_researcher_task", "poll_researchers_async",
+    "get_researcher_result", "cancel_researcher_task", "retry_researcher_task",
+    "cancel_researchers_async", "researcher_queue_status",
+})
+
 
 def _parallel_tool_workers() -> int:
     raw = os.environ.get("CHACK_LANGGRAPH_PARALLEL_TOOLS", "").strip()
@@ -316,7 +326,8 @@ def _run_coro_sync(coro):
         except Exception as exc:  # pragma: no cover
             box["error"] = exc
 
-    t = threading.Thread(target=_target, daemon=True)
+    run_context = contextvars.copy_context()
+    t = threading.Thread(target=lambda: run_context.run(_target), daemon=True)
     t.start()
     t.join()
     if box["error"] is not None:
@@ -1041,21 +1052,32 @@ class LangGraphExecutor:
                 events.append({"tool": call_name, "tool_input": received, "status": "error", "reason": "invalid_arguments"})
 
             def _execute_tool(tool: Any, mcp_name: str, call_args: dict[str, Any]) -> tuple[str, str]:
-                # The slow part of a tool call (a shell command, an HTTP fetch).
-                # No shared mutable state, so several run safely at once.
+                # Workers inherit the run's cancellation/session/telemetry context.
+                # A queued call must not start once the run has been cancelled.
+                raise_if_cancelled()
                 try:
                     if tool is not None:
                         result = self._invoke_function_tool(tool, call_args)
                     else:
                         result = playwright_mcp_result_to_text(playwright_mcp_call_tool(mcp_name, call_args))
-                    return inject_budget_warning(result), "ok"
+                    return result, "ok"
+                except RunCancelled:
+                    raise
                 except Exception as exc:  # pragma: no cover
                     return f"ERROR: {type(exc).__name__}: {exc}", "error"
 
             workers = _parallel_tool_workers()
-            # The init-first gate reads the init call's result within the same
-            # turn, so that mode stays strictly serial (invoked in order below).
-            run_in_order = workers <= 1 or (self._require_task_steps_manager_init_first and not has_init)
+            # Browser state, plans and background-job management are ordered.
+            # Keeping the whole turn serial also preserves dependencies between
+            # a management call and any other calls around it. Tool authors may
+            # opt out of parallel execution with chack_parallel_safe=False.
+            call_names = [str(call.get("name", "") or "").strip() for call in tool_calls]
+            run_in_order = workers <= 1 or any(
+                name in _ORDERED_TOOL_NAMES
+                or name in self._mcp_tools_by_name
+                or getattr(tool_map.get(name), "chack_parallel_safe", None) is False
+                for name in call_names
+            ) or (self._require_task_steps_manager_init_first and not has_init)
 
             # Each processed call becomes an ordered slot, so the model sees its
             # outputs in the order it issued them even when invocations overlap.
@@ -1181,12 +1203,12 @@ class LangGraphExecutor:
                     "call_id": call_id,
                     "args": args,
                     "tool": tool,
-                    "is_non_task": is_non_task,
                     "budget_note": budget_note,
                     "repeat_note": repeat_note,
                 }
                 if run_in_order:
                     job["result"], job["status"] = _execute_tool(tool, call_name, args)
+                    job["result"] = inject_budget_warning(job["result"])
                     if call_name == "task_steps_manager" and str(args.get("action", "")).strip().lower() == "init" and str(job["result"]).startswith("SUCCESS:"):
                         has_init = True
                 slots.append(("job", job, None))
@@ -1194,10 +1216,23 @@ class LangGraphExecutor:
             pending = [job for kind, job, _ in slots if kind == "job" and "result" not in job]
             if pending:
                 with ThreadPoolExecutor(max_workers=min(workers, len(pending))) as pool:
-                    for job, (result, status) in zip(
-                        pending, pool.map(lambda j: _execute_tool(j["tool"], j["call_name"], j["args"]), pending)
-                    ):
-                        job["result"], job["status"] = result, status
+                    # Each invocation needs its own Context: entering the same
+                    # Context concurrently raises, and worker-local updates must
+                    # not leak into another call or a later turn.
+                    futures = [
+                        pool.submit(contextvars.copy_context().run, _execute_tool,
+                                    job["tool"], job["call_name"], job["args"])
+                        for job in pending
+                    ]
+                    try:
+                        for job, future in zip(pending, futures):
+                            job["result"], job["status"] = future.result()
+                            # Warning milestones belong to the parent context;
+                            # emit once, in issue order, rather than in workers.
+                            job["result"] = inject_budget_warning(job["result"])
+                    finally:
+                        for future in futures:
+                            future.cancel()
 
             for kind, payload, event in slots:
                 if kind == "ready":

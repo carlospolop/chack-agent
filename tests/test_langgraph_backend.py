@@ -494,63 +494,420 @@ def test_plan_updates_do_not_use_the_tool_budget():
     assert results[1].startswith("ok") and not any(r.startswith("ERROR") for r in results)
 
 
+def _batch_model(names):
+    return _ScriptedModel([
+        AIMessage(content="", tool_calls=[
+            {"name": name, "args": {}, "id": f"call_{index}"}
+            for index, name in enumerate(names)
+        ]),
+        AIMessage(content="done"),
+    ])
+
+
+def _tool_messages(model):
+    return [m for m in model.prompts[-1] if isinstance(m, ToolMessage)]
+
+
 def test_independent_tool_calls_in_one_turn_run_in_parallel_and_keep_order(monkeypatch):
-    # Two slow tools issued in one turn should overlap (total wall time near one
-    # tool's duration, not the sum), and their results must come back in the
-    # order the model issued them.
-    import time as _time
+    import threading
 
-    def _make(name, delay, payload):
-        async def _run(_ctx, _raw):
-            _time.sleep(delay)
-            return payload
-        return SimpleNamespace(name=name, on_invoke_tool=_run)
+    finished_second = threading.Event()
+    completion_order = []
 
-    tools = {"slow_a": _make("slow_a", 0.4, "RESULT_A"), "slow_b": _make("slow_b", 0.4, "RESULT_B")}
-    both = AIMessage(content="", tool_calls=[
-        {"name": "slow_a", "args": {}, "id": "call_a"},
-        {"name": "slow_b", "args": {}, "id": "call_b"},
-    ])
-    model = _ScriptedModel([both, AIMessage(content="done")])
+    async def first(_ctx, _raw):
+        assert finished_second.wait(5), "The second tool never ran concurrently"
+        completion_order.append("first")
+        return "RESULT_A"
 
+    async def second(_ctx, _raw):
+        completion_order.append("second")
+        finished_second.set()
+        return "RESULT_B"
+
+    tools = {name: SimpleNamespace(name=name, on_invoke_tool=fn)
+             for name, fn in [("first", first), ("second", second)]}
+    model = _batch_model(tools)
     monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", "4")
-    start = _time.perf_counter()
     result = _executor(model, function_tools=tools).invoke({"input": "go"})
-    elapsed = _time.perf_counter() - start
 
-    steps = result["intermediate_steps"]
-    # Results preserved and in issue order.
-    assert [s[0].tool for s in steps] == ["slow_a", "slow_b"]
-    # The tool messages are delivered back to the model on the next turn, in
-    # the order the calls were issued.
-    tool_msgs = [m for m in model.prompts[-1] if isinstance(m, ToolMessage)]
-    assert [m.name for m in tool_msgs] == ["slow_a", "slow_b"]
-    assert [m.content for m in tool_msgs] == ["RESULT_A", "RESULT_B"]
-    # Overlapped: well under the 0.8s a serial run would take.
-    assert elapsed < 0.7
+    assert completion_order == ["second", "first"]
+    assert [s[0].tool for s in result["intermediate_steps"]] == ["first", "second"]
+    assert [m.name for m in _tool_messages(model)] == ["first", "second"]
+    assert [m.content for m in _tool_messages(model)] == ["RESULT_A", "RESULT_B"]
 
 
-def test_serial_default_runs_tool_calls_one_at_a_time(monkeypatch):
-    import time as _time
+@pytest.mark.parametrize("workers", [None, "1"])
+def test_serial_default_runs_tool_calls_one_at_a_time(monkeypatch, workers):
+    import threading
 
-    def _make(name):
-        async def _run(_ctx, _raw):
-            _time.sleep(0.3)
-            return name
-        return SimpleNamespace(name=name, on_invoke_tool=_run)
+    second_started = threading.Event()
+    async def first(_ctx, _raw):
+        assert not second_started.wait(0.05)
+        return "first"
 
-    tools = {"a": _make("a"), "b": _make("b")}
-    both = AIMessage(content="", tool_calls=[
-        {"name": "a", "args": {}, "id": "ca"},
-        {"name": "b", "args": {}, "id": "cb"},
-    ])
-    model = _ScriptedModel([both, AIMessage(content="done")])
+    async def second(_ctx, _raw):
+        second_started.set()
+        return "second"
 
-    monkeypatch.delenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", raising=False)
-    start = _time.perf_counter()
-    result = _executor(model, function_tools=tools).invoke({"input": "go"})
-    elapsed = _time.perf_counter() - start
+    if workers is None:
+        monkeypatch.delenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", raising=False)
+    else:
+        monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", workers)
+    tools = {name: SimpleNamespace(name=name, on_invoke_tool=fn)
+             for name, fn in [("first", first), ("second", second)]}
+    model = _batch_model(tools)
+    _executor(model, function_tools=tools).invoke({"input": "go"})
+    assert [m.content for m in _tool_messages(model)] == ["first", "second"]
 
-    assert [s[0].tool for s in result["intermediate_steps"]] == ["a", "b"]
-    # Serial: both sleeps run end to end.
-    assert elapsed >= 0.6
+
+@pytest.mark.parametrize("raw, expected", [("", 1), ("garbage", 1), ("0", 1), ("-2", 1),
+                                          (" 4 ", 4), ("100", 16)])
+def test_parallel_worker_setting_is_bounded(monkeypatch, raw, expected):
+    from chack_agent.backends.langgraph_backend import _parallel_tool_workers
+    monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", raw)
+    assert _parallel_tool_workers() == expected
+
+
+def test_parallel_tools_inherit_run_context_without_leaking_updates(monkeypatch, tmp_path):
+    import contextvars
+    import threading
+    from chack_tools.cancellation import (current_cancellation_event, set_cancellation_event,
+                                          reset_cancellation_event)
+    from chack_tools.task_steps_manager_state import (set_active_context, reset_active_context,
+                                                     current_session_id, current_run_label)
+    from chack_tools.research_artifacts import research_artifact_context, research_artifacts_root
+    from chack_tools.telemetry.context import set_log_context, reset_log_context
+    from chack_tools.telemetry import run_with_tool_logging
+    from chack_tools.tool_usage_state import (set_active_usage_session, reset_active_usage_session,
+                                              current_usage_session_id)
+    from chack_agent.live_cost_state import (set_active_usage_sink, reset_active_usage_sink,
+                                             report_live_usage)
+
+    local = contextvars.ContextVar("parallel_test_local", default="parent")
+    cancel_event = threading.Event()
+    events = []
+    usage = []
+    barrier = threading.Barrier(2)
+    async def probe(_ctx, _raw):
+        assert current_session_id() == "parallel-session"
+        assert current_run_label() == "Run 7"
+        assert current_usage_session_id() == "parallel-session"
+        assert current_cancellation_event() is cancel_event
+        assert research_artifacts_root() == str(tmp_path)
+        assert local.get() == "parent"
+        local.set("worker")
+        barrier.wait(5)
+        report_live_usage("child-model", prompt_tokens=3, completion_tokens=2)
+        return run_with_tool_logging("probe", {}, lambda: "ok")
+
+    tokens = set_active_context("parallel-session", "Run 7")
+    cancel_token = set_cancellation_event(cancel_event)
+    usage_token = set_active_usage_session("parallel-session")
+    sink_token = set_active_usage_sink(lambda *values: usage.append(values))
+    log_token = set_log_context(_chack_tool_progress_callback=lambda kind, payload: events.append(kind))
+    monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", "2")
+    try:
+        with research_artifact_context(str(tmp_path), str(tmp_path)):
+            model = _batch_model(["probe", "probe"])
+            _executor(model, function_tools={"probe": SimpleNamespace(name="probe", on_invoke_tool=probe)}).invoke({"input": "go"})
+        assert [m.content for m in _tool_messages(model)] == ["ok", "ok"]
+        assert local.get() == "parent"
+        assert events.count("tool_started") == events.count("tool_executed") == 2
+        assert [row for row in usage if row[0] == "child-model"] == [("child-model", 3, 2, 0, 0)] * 2
+    finally:
+        reset_active_usage_sink(sink_token)
+        reset_log_context(log_token)
+        reset_active_usage_session(usage_token)
+        reset_cancellation_event(cancel_token)
+        reset_active_context(tokens)
+
+
+def test_parallel_budget_warnings_are_emitted_once_in_order(monkeypatch):
+    import time
+    from chack_agent.budget_warning_state import (set_budget_context, reset_budget_context,
+                                                 update_spent_usd)
+    tokens = set_budget_context(start_epoch=time.time() - 95, max_runtime_seconds=100,
+                               max_cost_usd=10)
+    update_spent_usd(9.5)
+    monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", "2")
+    model = _batch_model(["noop", "noop"])
+    try:
+        _executor(model, function_tools=_NOOP_TOOLS).invoke({"input": "go"})
+        results = [m.content for m in _tool_messages(model)]
+        assert "[BUDGET TIME WARNING]" in results[0]
+        assert "[BUDGET WARNING]" in results[0]
+        assert results[1] == "ok"
+    finally:
+        reset_budget_context(tokens)
+
+
+@pytest.mark.parametrize("ordered_name", ["task_steps_manager", "start_researchers_async",
+                                          "poll_researchers_async", "browser_navigate", "custom_stateful"])
+def test_stateful_calls_keep_issue_order(monkeypatch, ordered_name):
+    import time
+    import chack_agent.backends.langgraph_backend as backend
+    trace = []
+    async def ordered(_ctx, _raw):
+        trace.append("start")
+        time.sleep(0.03)
+        trace.append("end")
+        return "ready"
+
+    async def inspect(_ctx, _raw):
+        assert trace == ["start", "end"]
+        return "observed"
+
+    tools = {ordered_name: SimpleNamespace(name=ordered_name, on_invoke_tool=ordered),
+             "inspect": SimpleNamespace(name="inspect", on_invoke_tool=inspect)}
+    if ordered_name == "custom_stateful":
+        tools[ordered_name].chack_parallel_safe = False
+    model = _batch_model([ordered_name, "inspect"])
+    executor = _executor(model, function_tools=tools)
+    if ordered_name == "browser_navigate":
+        executor._function_tools_by_name.pop(ordered_name)
+        executor._mcp_tools_by_name[ordered_name] = object()
+        def mcp_call(name, args):
+            assert name == ordered_name
+            trace.append("start")
+            time.sleep(0.03)
+            trace.append("end")
+            return "ready"
+        monkeypatch.setattr(backend, "playwright_mcp_call_tool", mcp_call)
+        monkeypatch.setattr(backend, "playwright_mcp_result_to_text", lambda result: result)
+        executor.build_graph()
+    monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", "2")
+    executor.invoke({"input": "go"})
+    assert [m.content for m in _tool_messages(model)] == ["ready", "observed"]
+
+
+def test_parallel_tools_respect_budget_repeat_notes_and_errors(monkeypatch):
+    calls = []
+    async def record(_ctx, _raw):
+        calls.append("record")
+        return "ok"
+    monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", "2")
+    model = _batch_model(["missing", "record", "record", "record", "record"])
+    result = _executor(model, max_non_task_tools=3,
+                       function_tools={"record": SimpleNamespace(name="record", on_invoke_tool=record)}).invoke({"input": "go"})
+    assert calls == ["record"] * 3
+    messages = _tool_messages(model)
+    assert "Unknown tool" in messages[0].content
+    assert "2 of 3" in messages[1].content
+    assert "1 of 3" in messages[2].content
+    assert "Repeated call" in messages[3].content
+    assert "Tool budget reached" in messages[4].content
+    assert [s[0].tool for s in result["intermediate_steps"]] == ["missing", "record", "record", "record", "record"]
+
+
+def test_cancellation_stops_queued_parallel_calls(monkeypatch):
+    import threading
+    from chack_tools.cancellation import RunCancelled, set_cancellation_event, reset_cancellation_event
+    event = threading.Event()
+    running = threading.Barrier(2)
+    started = []
+    async def cancel(_ctx, _raw):
+        started.append("cancel")
+        running.wait(5)
+        event.set()
+        return "cancelled"
+    async def wait_for_cancel(_ctx, _raw):
+        started.append("wait")
+        running.wait(5)
+        assert event.wait(5)
+        return "stopped"
+    async def queued(_ctx, _raw):
+        started.append("queued")
+        return "should not run"
+    tools = {name: SimpleNamespace(name=name, on_invoke_tool=fn) for name, fn in
+             [("cancel", cancel), ("wait", wait_for_cancel), ("queued", queued)]}
+    model = _batch_model(tools)
+    monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", "2")
+    token = set_cancellation_event(event)
+    try:
+        with pytest.raises(RunCancelled):
+            _executor(model, function_tools=tools).invoke({"input": "go"})
+        assert sorted(started) == ["cancel", "wait"]
+        assert len(model.prompts) == 1
+    finally:
+        reset_cancellation_event(token)
+
+
+def test_tool_context_is_preserved_inside_an_existing_event_loop():
+    import asyncio
+    from chack_tools.task_steps_manager_state import set_active_context, reset_active_context, current_session_id
+    async def probe(_ctx, _raw):
+        return current_session_id()
+    async def run():
+        tokens = set_active_context("nested-session", "Run 1")
+        try:
+            return _executor(_ScriptedModel([]))._invoke_function_tool(
+                SimpleNamespace(name="probe", on_invoke_tool=probe), {})
+        finally:
+            reset_active_context(tokens)
+    assert asyncio.run(run()) == "nested-session"
+
+
+def test_parallel_worker_limit_and_tool_failure_isolation(monkeypatch):
+    import threading
+    import time
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+    active = peak = calls = 0
+    async def bounded(_ctx, _raw):
+        nonlocal active, peak, calls
+        with lock:
+            calls += 1
+            index = calls
+            active += 1
+            peak = max(peak, active)
+        try:
+            barrier.wait(5)
+            time.sleep(0.01)
+            if index == 1:
+                raise ValueError("test failure")
+            return "ok"
+        finally:
+            with lock:
+                active -= 1
+    model = _batch_model(["bounded"] * 6)
+    monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", "2")
+    _executor(model, function_tools={"bounded": SimpleNamespace(name="bounded", on_invoke_tool=bounded)}).invoke({"input": "go"})
+    messages = _tool_messages(model)
+    assert peak == 2 and active == 0 and calls == 6
+    assert sum("ERROR: ValueError: test failure" in m.content for m in messages) == 1
+    assert sum(m.content.startswith("ok") for m in messages) == 5
+
+
+@pytest.mark.parametrize("init_succeeds", [True, False])
+def test_init_first_gate_and_later_updates_stay_ordered(monkeypatch, init_succeeds):
+    import time
+    trace = []
+    async def manager(_ctx, raw):
+        action = json.loads(raw)["action"]
+        trace.append(action)
+        time.sleep(0.02)
+        trace.append(f"{action}-done")
+        return "SUCCESS: initialized" if init_succeeds else "ERROR: invalid plan"
+    async def inspect(_ctx, _raw):
+        assert trace[-1].endswith("-done")
+        trace.append("inspect")
+        return "ok"
+    model = _ScriptedModel([
+        AIMessage(content="", tool_calls=[
+            {"name": "inspect", "args": {}, "id": "before"},
+            {"name": "task_steps_manager", "args": {"action": "init"}, "id": "init"},
+            {"name": "inspect", "args": {}, "id": "after"}]),
+        AIMessage(content="", tool_calls=[
+            {"name": "task_steps_manager", "args": {"action": "update"}, "id": "update"},
+            {"name": "inspect", "args": {}, "id": "inspect"}]),
+        AIMessage(content="done")])
+    tools = {name: SimpleNamespace(name=name, on_invoke_tool=fn)
+             for name, fn in [("task_steps_manager", manager), ("inspect", inspect)]}
+    executor = _executor(model, function_tools=tools)
+    executor._require_task_steps_manager_init_first = True
+    executor.build_graph()
+    monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", "4")
+    executor.invoke({"input": "go"})
+    messages = _tool_messages(model)
+    assert "must call task_steps_manager" in messages[0].content
+    if init_succeeds:
+        assert trace == ["init", "init-done", "inspect", "update", "update-done", "inspect"]
+        assert messages[2].content == messages[-1].content == "ok"
+    else:
+        assert trace == ["init", "init-done"]
+        assert "must call task_steps_manager" in messages[2].content
+        assert "must call task_steps_manager" in messages[-1].content
+
+
+def test_background_research_can_be_monitored_while_parent_keeps_working(monkeypatch, tmp_path):
+    import threading
+    import chack_tools.researcher_administrator_agent as admin
+    from chack_tools.config import ToolsConfig
+
+    started, release = threading.Event(), threading.Event()
+    job_id = ""
+    task_id = ""
+    observed = []
+
+    def run_child(_tool, _args, **kwargs):
+        started.set()
+        kwargs["on_progress"]({"event": "tool_started", "tool": "web_search"})
+        assert release.wait(5), "Parent never finished its independent work"
+        return {"output": json.dumps({"research_worked": True,
+                                      "overall_summary": "background evidence",
+                                      "full_research_review": "background evidence"})}
+
+    monkeypatch.setattr(admin, "_warm_researcher_process_context", lambda: None)
+    monkeypatch.setattr(admin, "_run_researcher_in_process", run_child)
+    monkeypatch.setenv("CHACK_LANGGRAPH_PARALLEL_TOOLS", "4")
+    helper = admin.ResearcherAdministratorAgentTool(
+        ToolsConfig(researcher_administrator_enabled=True, scientific_enabled=True),
+        model_provider="openai", fallback_model="m", researchers=["scientific"])
+    tools = {tool.name: tool for tool in helper._build_async_tools(
+        {"scientific_research": SimpleNamespace(name="scientific_research")},
+        ["scientific"], artifact_root=str(tmp_path))}
+
+    async def other_work(_ctx, _raw):
+        assert started.wait(5)
+        assert not release.is_set()
+        return "other work completed"
+
+    async def finish(_ctx, _raw):
+        release.set()
+        return "released"
+
+    tools.update({name: SimpleNamespace(name=name, on_invoke_tool=fn)
+                  for name, fn in [("other_work", other_work), ("finish", finish)]})
+    model = _ScriptedModel([])
+
+    def respond(messages):
+        nonlocal job_id, task_id
+        model.prompts.append(list(messages))
+        step = len(model.prompts) - 1
+        results = [m for m in messages if isinstance(m, ToolMessage)]
+        if step == 0:
+            name, args = "start_researchers_async", {"requests_json": json.dumps([
+                {"researcher": "scientific", "prompt": "Research primary evidence and contradictions. " * 20}])}
+        elif step == 1:
+            launch = json.loads(results[-1].content)
+            assert launch["async_started"] is True
+            job_id, task_id = launch["job_id"], launch["tasks"][0]["task_id"]
+            name, args = "other_work", {}
+        elif step == 2:
+            assert results[-1].content == "other work completed"
+            name, args = "list_researcher_jobs", {}
+        elif step == 3:
+            assert job_id in results[-1].content
+            name, args = "get_researcher_task", {"job_id": job_id, "task_id": task_id}
+        elif step == 4:
+            assert "running" in results[-1].content
+            observed.append("running")
+            name, args = "poll_researchers_async", {"job_id": job_id, "wait_seconds": 0}
+        elif step == 5:
+            assert json.loads(results[-1].content)["complete"] is False
+            name, args = "finish", {}
+        elif step == 6:
+            name, args = "poll_researchers_async", {"job_id": job_id, "wait_seconds": 5}
+        elif step == 7:
+            assert json.loads(results[-1].content)["complete"] is True
+            observed.append("complete")
+            name, args = "get_researcher_result", {"job_id": job_id, "task_id": task_id, "view": "raw"}
+        else:
+            assert "background evidence" in results[-1].content
+            observed.append("result")
+            return AIMessage(content="done")
+        return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": f"call_{step}"}])
+
+    model.invoke = respond
+    try:
+        result = _executor(model, function_tools=tools).invoke({"input": "Research while continuing other work"})
+        assert result["output"] == "done"
+        assert observed == ["running", "complete", "result"]
+    finally:
+        release.set()
+        if job_id:
+            admin._async_wait_for_completion(job_id, 5)
+            with admin._ASYNC_RESEARCH_LOCK:
+                job = admin._ASYNC_RESEARCH_JOBS.pop(job_id, {})
+            for task in (job.get("tasks") or {}).values():
+                task["deadline_timer"].cancel()

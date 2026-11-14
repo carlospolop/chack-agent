@@ -29,7 +29,7 @@ jobs:
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build
+          pip install build pytest
 
       - name: Build distributions
         run: python -m build
@@ -42,3 +42,10 @@ jobs:
           tools = Toolset(ToolsConfig(), model_provider="openai").tools
           print(f"Loaded {len(tools)} tools")
           PY
+
+      - name: Test tool execution and background monitoring
+        run: >-
+          python -m pytest -q
+          tests/test_langgraph_backend.py
+          tests/test_budget_warnings.py
+          tests/test_tool_call_policy.py
