@@ -157,10 +157,6 @@ models:
     cache_read: 0.05
     cache_write: 1.25
     output: 5
-  apodex/apodex-1.1-mini:free:
-    input: 0
-    cache_read: 0
-    output: 0
   baidu/ernie-5.5-flash-preview:free:
     input: 0
     cache_read: 0
@@ -214,9 +210,9 @@ models:
     cache_read: 0
     output: 0
   deepseek/deepseek-chat:
-    input: 0.32
-    cache_read: 0.32
-    output: 0.89
+    input: 0.2574
+    cache_read: 0.2574
+    output: 1.0287
   deepseek/deepseek-chat-v3-0324:
     input: 0.29
     cache_read: 0.11
@@ -258,17 +254,17 @@ models:
     cache_read: 0.014
     output: 1.32
   deepseek/deepseek-v4-pro:
-    input: 0.95526
-    cache_read: 0.079605
-    output: 1.91052
+    input: 0.9
+    cache_read: 0.25
+    output: 1.5
   deepseek/deepseek-v4-pro-0813:
     input: 0.111
     cache_read: 0.097
     output: 4.44
   deepseek/deepseek-v4.1-flash:
-    input: 0.3
-    cache_read: 0.006
-    output: 1.2
+    input: 0.0507
+    cache_read: 0.001014
+    output: 0.2028
   deepseek/deepseek-v4.1-flash-1017:
     input: 0.038
     cache_read: 0.01
@@ -484,9 +480,9 @@ models:
     cache_read: 0.05
     output: 0.1
   google/gemma-4-26b-a4b-it:
-    input: 0.0765
-    cache_read: 0.0425
-    output: 0.255
+    input: 0.0675
+    cache_read: 0.0375
+    output: 0.225
   google/gemma-4-26b-a4b-it:free:
     input: 0
     cache_read: 0
@@ -514,19 +510,11 @@ models:
   ibm-granite/granite-4.2-8b:
     input: 0.06
     cache_read: 0.015
-    output: 0.15
+    output: 0.25
   inclusionai/ling-3.0-flash:
     input: 0.021
     cache_read: 0.0042
     output: 0.063
-  inclusionai/ling-3.0-flash-fin:
-    input: 0.042
-    cache_read: 0.0084
-    output: 0.1232
-  inclusionai/ling-3.0-flash-sante:
-    input: 0.042
-    cache_read: 0.0084
-    output: 0.1232
   inclusionai/ling-3.0-flash-vl:
     input: 0.06
     cache_read: 0.012
@@ -539,6 +527,10 @@ models:
     input: 0.045
     cache_read: 0.009
     output: 0.135
+  inclusionai/ling-3.2-flash:free:
+    input: 0
+    cache_read: 0
+    output: 0
   inference-net/schematron-v2-small:
     input: 0.05
     cache_read: 0.05
@@ -551,10 +543,6 @@ models:
     input: 0.2
     cache_read: 0.04
     output: 0.8
-  liquid/lfm-2.5-2.6b:free:
-    input: 0
-    cache_read: 0
-    output: 0
   liquid/lfm-2.5-24b-a2b:
     input: 0.05
     cache_read: 0.025
@@ -588,9 +576,9 @@ models:
     cache_read: 0.027
     output: 0.201
   meta-llama/llama-3.2-3b-instruct:
-    input: 0.05
-    cache_read: 0.05
-    output: 0.33
+    input: 0.0509
+    cache_read: 0.0509
+    output: 0.335
   meta-llama/llama-3.3-70b-instruct:
     input: 0.71
     cache_read: 0.71
@@ -646,8 +634,8 @@ models:
     output: 0.14
   minimax/minimax-m2.5:
     input: 0.27
-    cache_read: 0.027
-    output: 1.08
+    cache_read: 0.03
+    output: 0.95
   minimax/minimax-m2.7:
     input: 0.21
     cache_read: 0.042
@@ -785,9 +773,9 @@ models:
     cache_read: 0.182
     output: 16
   moonshotai/kimi-k3.1-pro:
-    input: 0.2375
+    input: 2
     cache_read: 0.2
-    output: 8.4114
+    output: 10
   moonshotai/kimi-k3.1-pro:batch:
     input: 0.7
     cache_read: 0.1
@@ -1375,9 +1363,9 @@ models:
     cache_read: 0.12
     output: 3.6
   qwen/qwen3.5-9b:
-    input: 0.078
-    cache_read: 0.07
-    output: 0.115
+    input: 0.123
+    cache_read: 0.111
+    output: 0.181
   qwen/qwen3.5-flash-02-23:
     input: 0.065
     cache_read: 0.065
@@ -1485,9 +1473,9 @@ models:
     cache_read: 1
     output: 3
   ricursiveai/ripple-65b-preview:
-    input: 0.2
-    cache_read: 0.05
-    output: 0.6
+    input: 0.1
+    cache_read: 0.025
+    output: 0.3
   sakana/fugu-max:
     input: 2
     cache_read: 0.25
