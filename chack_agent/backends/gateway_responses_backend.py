@@ -644,6 +644,13 @@ class ToolAction:
     tool_input: Any
 
 
+# Routes (base URL, model) that answered "previous_response_id is not supported".
+# Every later executor in this process starts unchained instead of paying a
+# rejected request and a retry to learn it again.
+_UNCHAINED_ROUTES: set[tuple[str, str]] = set()
+_UNCHAINED_ROUTES_LOCK = threading.Lock()
+
+
 @dataclass
 class AgentsExecutor:
     _config: ChackConfig
@@ -668,6 +675,7 @@ class AgentsExecutor:
     # API to another vendor rebuild earlier turns lossily, so they get the full
     # local transcript on every run instead.
     _chain_responses: bool = True
+    _chain_route: tuple[str, str] = ("", "")
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         user_input = payload.get("input", "")
@@ -725,6 +733,8 @@ class AgentsExecutor:
                 task_session_id=current_session_id() or "",
                 run_label=current_run_label() or "",
             )
+        if self._chain_responses and self._chain_route in _UNCHAINED_ROUTES:
+            self._chain_responses = False
         if self._chain_responses:
             if result.last_response_id:
                 self._previous_response_id = result.last_response_id
@@ -1001,6 +1011,8 @@ class AgentsExecutor:
                 raise
             if unsupported_chain:
                 self._chain_responses = False
+                with _UNCHAINED_ROUTES_LOCK:
+                    _UNCHAINED_ROUTES.add(self._chain_route)
             _LOGGER.warning(
                 "Runner rejected response chain with previous_response_id; retrying with fresh chain."
             )
@@ -1398,4 +1410,5 @@ def build_executor(
         _max_context_tokens=int(config.model.max_context_tokens or 0),
         _client_factory=client_factory,
         _chain_responses=route.is_openrouter,
+        _chain_route=(route.base_url, model_name),
     )
