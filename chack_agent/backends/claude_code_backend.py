@@ -493,6 +493,7 @@ class ClaudeCodeExecutor:
     _fallback_web_mcp_url: str = ""
     _anthropic_api_key: str = ""
     _claude_access_token: str = ""
+    _claude_credential_id: str = ""
     # Environment that points the Claude Code CLI (and the Chack MCP server it
     # starts) at the gateway; empty when Claude talks to Anthropic directly.
     _gateway_env_json: str = ""
@@ -923,14 +924,26 @@ class ClaudeCodeExecutor:
         credentials = run_provider_pre_launch_hook("claude")
         if credentials.get("clear_access_token", "").lower() == "true":
             self._claude_access_token = ""
+            self._claude_credential_id = ""
             self._claude_session_id = None
             return
         access_token = str(credentials.get("access_token", "") or "").strip()
+        credential_id = str(credentials.get("credential_id", "") or "").strip()
         if access_token and access_token != self._claude_access_token:
             self._claude_access_token = access_token
-            # Claude resume IDs are account-scoped; start a fresh session when
-            # the ordered credential pool advances.
-            self._claude_session_id = None
+            # A rotating access token for the same profile still belongs to
+            # the same Claude account. Keep its session; discard it only when
+            # the hook identifies a different credential, or cannot identify
+            # the account well enough to prove continuity.
+            same_credential = bool(
+                credential_id
+                and self._claude_credential_id
+                and credential_id == self._claude_credential_id
+            )
+            if not same_credential:
+                self._claude_session_id = None
+        if credential_id:
+            self._claude_credential_id = credential_id
 
     def _prompt_cache_route(self) -> tuple[str, str]:
         base_url = str(json.loads(self._gateway_env_json or "{}").get("ANTHROPIC_BASE_URL", "") or "")
@@ -996,6 +1009,9 @@ class ClaudeCodeExecutor:
                 "the next credential from CLAUDE_TOKEN_POOL_JSON."
             )
             self._claude_access_token = rotated_token
+            self._claude_credential_id = str(
+                rotated.get("credential_id", "") or ""
+            ).strip()
             self._claude_session_id = None
             result = self._run_claude_once(prompt)
         if self._should_retry_with_anthropic_api_key(result[0]):
@@ -1004,6 +1020,7 @@ class ClaudeCodeExecutor:
                 "Falling back to ANTHROPIC_API_KEY."
             )
             self._claude_access_token = ""
+            self._claude_credential_id = ""
             self._claude_session_id = None
             return self._run_claude_once(prompt)
 

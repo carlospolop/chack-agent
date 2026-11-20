@@ -51,7 +51,7 @@ def _load_entries(provider: str) -> list[dict[str, str]]:
             token = _clean(raw_entry.get("token"))
             if not token or token in seen:
                 continue
-            entry = {"access_token": token}
+            entry = {"access_token": token, "id": _clean(raw_entry.get("id"))}
         entries.append(entry)
         seen.add(token)
     return entries
@@ -108,7 +108,10 @@ def _activate(provider: str, entry: dict[str, str]) -> dict[str, str]:
             os.environ[name] = value
         else:
             os.environ.pop(name, None)
-    return {"access_token": token}
+    result = {"access_token": token}
+    if provider == "claude" and entry.get("id"):
+        result["credential_id"] = entry["id"]
+    return result
 
 
 def active_environment_credentials(provider: str) -> dict[str, str]:
