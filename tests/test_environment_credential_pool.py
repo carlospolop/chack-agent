@@ -55,12 +55,16 @@ def test_default_hook_uses_and_rotates_codex_environment_pool(monkeypatch):
 def test_exhausted_pool_does_not_immediately_cycle(monkeypatch):
     monkeypatch.setenv(
         "CLAUDE_TOKEN_POOL_JSON",
-        json.dumps([{"token": "claude-a"}, {"token": "claude-b"}]),
+        json.dumps([
+            {"id": "claude-a", "token": "claude-a"},
+            {"id": "claude-b", "token": "claude-b"},
+        ]),
     )
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude-a")
 
     assert rotate_environment_credentials("claude", "claude-a") == {
-        "access_token": "claude-b"
+        "access_token": "claude-b",
+        "credential_id": "claude-b",
     }
     assert rotate_environment_credentials("claude", "claude-b") == {}
 

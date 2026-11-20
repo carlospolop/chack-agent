@@ -70,6 +70,47 @@ def test_claude_executor_applies_only_claude_hook_and_starts_fresh_session(monke
     assert executor._claude_session_id is None
 
 
+def test_claude_access_token_rotation_for_same_profile_preserves_session(monkeypatch):
+    executor = object.__new__(ClaudeCodeExecutor)
+    executor._claude_access_token = "access-before-refresh"
+    executor._claude_credential_id = "profile-1"
+    executor._claude_session_id = "same-account-session"
+    monkeypatch.setattr(
+        claude_code_backend,
+        "run_provider_pre_launch_hook",
+        lambda _provider: {
+            "access_token": "access-after-refresh",
+            "credential_id": "profile-1",
+        },
+    )
+
+    executor._refresh_provider_credentials()
+
+    assert executor._claude_access_token == "access-after-refresh"
+    assert executor._claude_credential_id == "profile-1"
+    assert executor._claude_session_id == "same-account-session"
+
+
+def test_claude_profile_change_discards_previous_profile_session(monkeypatch):
+    executor = object.__new__(ClaudeCodeExecutor)
+    executor._claude_access_token = "profile-one-token"
+    executor._claude_credential_id = "profile-1"
+    executor._claude_session_id = "profile-one-session"
+    monkeypatch.setattr(
+        claude_code_backend,
+        "run_provider_pre_launch_hook",
+        lambda _provider: {
+            "access_token": "profile-two-token",
+            "credential_id": "profile-2",
+        },
+    )
+
+    executor._refresh_provider_credentials()
+
+    assert executor._claude_access_token == "profile-two-token"
+    assert executor._claude_session_id is None
+
+
 def test_codex_executor_discards_an_invalidated_oauth_token(monkeypatch):
     executor = object.__new__(CodexExecutor)
     executor._codex_access_token = "expired-codex"
