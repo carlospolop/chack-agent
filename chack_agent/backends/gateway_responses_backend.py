@@ -983,10 +983,15 @@ class AgentsExecutor:
             )
         except (BadRequestError, ModelBehaviorError) as exc:
             err = str(exc).lower()
+            # Some gateway routes store no responses ("previous_response_id is
+            # not supported on this proxy"); the local transcript carries the
+            # thread instead, for this run and every later one.
+            unsupported_chain = "previous_response_id" in err and "not supported" in err
             recoverable = (
                 self._previous_response_id is not None
                 and (
-                    "function response turn comes immediately after a function call turn" in err
+                    unsupported_chain
+                    or "function response turn comes immediately after a function call turn" in err
                     or ("invalid_argument" in err and "function call" in err and "function response" in err)
                     or "not found in agent chack" in err
                     or ("tool " in err and " not found in agent " in err)
@@ -994,6 +999,8 @@ class AgentsExecutor:
             )
             if not recoverable:
                 raise
+            if unsupported_chain:
+                self._chain_responses = False
             _LOGGER.warning(
                 "Runner rejected response chain with previous_response_id; retrying with fresh chain."
             )
