@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -99,3 +100,40 @@ def test_later_roles_on_a_route_that_rejected_chains_start_unchained():
     other.invoke({"input": "one"})
     other.invoke({"input": "two"})
     assert calls[-1][1] is not None
+
+
+def test_a_process_started_with_inherited_unchained_routes_never_sends_the_rejected_chain(monkeypatch):
+    request = httpx.Request("POST", "https://gateway.invalid/v1/responses")
+    rejected = BadRequestError("Error code: 400 - previous_response_id is not supported on this proxy.",
+                               response=httpx.Response(400, request=request), body=None)
+    calls = []
+
+    def make():
+        executor = _executor(("https://gateway.invalid/v1", "model"))
+
+        def run_agent(_agent, input_items, **kwargs):
+            calls.append(kwargs["previous_response_id"])
+            if kwargs["previous_response_id"]:
+                raise rejected
+            return _result([*input_items, {"role": "assistant", "content": "answer"}], f"resp-{len(calls)}")
+
+        executor._run_agent = run_agent
+        return executor
+
+    # A process learns the route the expensive way and reports it.
+    first = make()
+    first.invoke({"input": "one"})
+    first.invoke({"input": "two"})
+    assert calls == [None, "resp-1", None]
+    learned = gateway_responses_backend.unchained_routes()
+    assert learned == [["https://gateway.invalid/v1", "model"]]
+
+    # A new process started with what the earlier one learned sends no chain at all.
+    monkeypatch.setattr(gateway_responses_backend, "_UNCHAINED_ROUTES", set())
+    monkeypatch.setenv(gateway_responses_backend.UNCHAINED_ROUTES_ENV, json.dumps(learned))
+    calls.clear()
+    later = make()
+    later.invoke({"input": "one"})
+    later.invoke({"input": "two"})
+    later.invoke({"input": "three"})
+    assert calls == [None, None, None]
