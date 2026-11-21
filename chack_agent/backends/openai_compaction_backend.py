@@ -65,6 +65,7 @@ def _is_sequence_recoverable_error(exc: Exception) -> bool:
         or ("invalid_argument" in err and "function call" in err and "function response" in err)
         or "not found in agent chack" in err
         or ("tool " in err and " not found in agent " in err)
+        or ("previous_response_id" in err and "not supported" in err)
         or ("previous response with id" in err and "not found" in err)
         or ("response with id" in err and "not found" in err)
         or ("conversation with id" in err and "not found" in err)
@@ -341,6 +342,10 @@ class AgentsExecutor:
     _max_context_tokens: int
     _compaction_model: str
     _client_factory: Callable[[], AsyncOpenAI]
+    # False once the provider rejected a response chain (OpenRouter keeps no
+    # responses): later runs stop sending previous_response_id and carry the
+    # thread in the server-side conversation, or else the full local transcript.
+    _chain_responses: bool = True
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         user_input = payload.get("input", "")
@@ -364,7 +369,7 @@ class AgentsExecutor:
                 self._conversation.append({"role": "user", "content": user_input})
             if output:
                 self._conversation.append({"role": "assistant", "content": output})
-        if result.last_response_id:
+        if result.last_response_id and self._chain_responses:
             self._previous_response_id = result.last_response_id
         conversation_id = getattr(result, "_conversation_id", None)
         if isinstance(conversation_id, str) and conversation_id.strip():
@@ -415,8 +420,9 @@ class AgentsExecutor:
             await client.close()
 
     def _invoke_runner_with_recovery(self, user_input: str, context: Any) -> Any:
-        # For OpenAI, rely on server-side conversation state only.
-        include_history = False
+        # For OpenAI, rely on server-side conversation state only; a provider that
+        # keeps none gets the local transcript.
+        include_history = not self._chain_responses and not self._conversation_id
         input_items = self._build_runner_input(user_input, include_history=include_history)
         last_connection_error: Optional[APIConnectionError] = None
         for attempt in range(1, _OPENAI_RUNNER_MAX_RETRIES + 1):
@@ -452,10 +458,13 @@ class AgentsExecutor:
                     "Runner rejected response chain with previous_response_id; retrying with fresh chain."
                 )
                 # Keep OpenAI-managed conversation when available; only drop previous_response_id.
+                # Without one, the dropped chain was the only copy of the thread: continue
+                # from the local transcript. Either way, later runs do not chain again.
                 self._previous_response_id = None
+                self._chain_responses = False
                 retry_previous_response_id = None
                 retry_conversation_id = self._conversation_id
-                retry_input = self._build_runner_input(user_input, include_history=False)
+                retry_input = self._build_runner_input(user_input, include_history=not retry_conversation_id)
                 return self._run_agent(
                     self.agent,
                     retry_input,
