@@ -81,3 +81,71 @@ def unreported_responses(result: Any) -> list[Any]:
     """The result's model responses whose usage the hooks did not report."""
     reported = getattr(result, REPORTED_RESPONSES_ATTR, None) or set()
     return [response for response in (getattr(result, "raw_responses", None) or []) if id(response) not in reported]
+
+
+TERMINAL_FAILURE_STATUSES = frozenset({"failed", "incomplete"})
+
+
+def _output_text(response: Any) -> str:
+    """The text the model produced in a response: messages, reasoning, tool arguments."""
+    parts: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"text", "arguments"} and isinstance(item, str):
+                    parts.append(item)
+                else:
+                    collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    for item in getattr(response, "output", None) or []:
+        dump = getattr(item, "model_dump", None)
+        collect(dump() if callable(dump) else item)
+    return "\n".join(parts)
+
+
+def repetition_measures(text: str) -> tuple[float, float]:
+    """(compressed/raw size, share of non-blank lines that repeat the most common line).
+
+    A degenerate loop compresses far below ordinary prose (roughly 0.3) and
+    is dominated by one repeated line.
+    """
+    import zlib
+    from collections import Counter
+
+    raw = text.encode("utf-8", "replace")
+    ratio = len(zlib.compress(raw, 6)) / len(raw) if raw else 1.0
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    top_share = Counter(lines).most_common(1)[0][1] / len(lines) if lines else 0.0
+    return round(ratio, 3), round(top_share, 3)
+
+
+def observe_terminal_failure(model_name: str, response: Any, logger: Any) -> None:
+    """Log and charge a model response that ended failed or incomplete.
+
+    The SDK raises on such a response, so no run hook sees it: without this
+    its tokens go unreported and its cost unknown.
+    """
+    tokens = report_response(model_name, response)
+    usage = getattr(response, "usage", None)
+    reasoning = getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", None)
+    text = _output_text(response)
+    ratio, top_share = repetition_measures(text)
+    logger.warning(
+        "Model %s response ended %s (%s): usage input=%s output=%s reasoning=%s cached=%s; "
+        "partial output %s chars, compressed/raw=%s, top repeated line share=%s",
+        model_name,
+        getattr(response, "status", None),
+        getattr(getattr(response, "incomplete_details", None), "reason", None)
+        or getattr(response, "error", None),
+        tokens[0] if tokens else None,
+        tokens[1] if tokens else None,
+        reasoning,
+        tokens[2] if tokens else None,
+        len(text),
+        ratio,
+        top_share,
+    )

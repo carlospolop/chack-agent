@@ -33,7 +33,14 @@ from ..config import ChackConfig
 from ..llm_gateway import GatewayRoute, get_gateway_route
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
-from .sdk_run_hooks import LiveUsageHooks, mark_reported, report_response, unreported_responses
+from .sdk_run_hooks import (
+    TERMINAL_FAILURE_STATUSES,
+    LiveUsageHooks,
+    mark_reported,
+    observe_terminal_failure,
+    report_response,
+    unreported_responses,
+)
 from ..resume_compaction import ResumeCompactionResult
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import openai_thinking_effort
@@ -79,6 +86,36 @@ def _drop_provider_run_items(output: Any) -> None:
         output[:] = [item for item in output if ":" not in str(getattr(item, "type", "") or "")]
 
 
+class _TerminalResponseRecorder:
+    """A client view whose ``responses.create`` hands failed or incomplete responses to ``observe``.
+
+    The SDK raises on such a response before any run hook sees it, dropping
+    its usage and partial output.
+    """
+
+    def __init__(self, client: Any, observe: Callable[[Any], None]) -> None:
+        self._client = client
+        self.responses = _RecordingResponses(client.responses, observe)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
+class _RecordingResponses:
+    def __init__(self, responses: Any, observe: Callable[[Any], None]) -> None:
+        self._responses = responses
+        self._observe = observe
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._responses, name)
+
+    async def create(self, *args: Any, **kwargs: Any) -> Any:
+        response = await self._responses.create(*args, **kwargs)
+        if getattr(response, "status", None) in TERMINAL_FAILURE_STATUSES:
+            self._observe(response)
+        return response
+
+
 class _GatewayResponsesModel(OpenAIResponsesModel):
     def __init__(self, *args: Any, server_tools: tuple[dict, ...] = (), **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -90,6 +127,12 @@ class _GatewayResponsesModel(OpenAIResponsesModel):
         clone = copy.copy(self)
         clone._client = client
         return clone
+
+    def _get_client(self) -> Any:
+        return _TerminalResponseRecorder(super()._get_client(), self._observe_terminal_failure)
+
+    def _observe_terminal_failure(self, response: Any) -> None:
+        observe_terminal_failure(str(self.model), response, _LOGGER)
 
     async def _fetch_response(self, *args: Any, **kwargs: Any) -> Any:
         try:
@@ -103,6 +146,14 @@ class _GatewayResponsesModel(OpenAIResponsesModel):
         incomplete_details = getattr(response, "incomplete_details", None)
         if getattr(incomplete_details, "reason", None) == "content_filter":
             raise ProviderContentFilterError("incomplete_details.reason=content_filter")
+        status = getattr(response, "status", None)
+        if status in TERMINAL_FAILURE_STATUSES:
+            # Older SDKs return it; its usage is already charged, so stop
+            # here as newer SDKs do rather than report it again as a turn.
+            raise ModelBehaviorError(
+                f"Responses stream ended with terminal event `response.{status}`. "
+                f"status={status}; incomplete_details={incomplete_details}."
+            )
         return response
 
     def _build_response_create_kwargs(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -373,6 +424,10 @@ class _GatewayResponsesModel(OpenAIResponsesModel):
             conversation_id=conversation_id,
             prompt=prompt,
         ):
+            if getattr(event, "type", "") in {"response.incomplete", "response.failed"}:
+                terminal = getattr(event, "response", None)
+                if terminal is not None:
+                    self._observe_terminal_failure(terminal)
             if getattr(event, "type", "") == "response.completed":
                 _drop_provider_run_items(getattr(getattr(event, "response", None), "output", None))
             if tool_names and getattr(event, "type", "") == "response.completed":
