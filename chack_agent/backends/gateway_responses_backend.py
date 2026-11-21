@@ -701,9 +701,32 @@ class ToolAction:
 
 # Routes (base URL, model) that answered "previous_response_id is not supported".
 # Every later executor in this process starts unchained instead of paying a
-# rejected request and a retry to learn it again.
+# rejected request and a retry to learn it again. A parent that launches
+# separate processes passes the routes it learned from unchained_routes() in
+# UNCHAINED_ROUTES_ENV, so those processes start unchained too.
+UNCHAINED_ROUTES_ENV = "CHACK_UNCHAINED_ROUTES"
 _UNCHAINED_ROUTES: set[tuple[str, str]] = set()
 _UNCHAINED_ROUTES_LOCK = threading.Lock()
+
+
+def _inherited_unchained_routes() -> set[tuple[str, str]]:
+    try:
+        value = json.loads(os.environ.get(UNCHAINED_ROUTES_ENV) or "[]")
+    except ValueError:
+        return set()
+    if not isinstance(value, list):
+        return set()
+    return {
+        (item[0], item[1])
+        for item in value
+        if isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)
+    }
+
+
+def unchained_routes() -> list[list[str]]:
+    """Routes known to reject response chains, as JSON-ready [base_url, model] pairs."""
+    with _UNCHAINED_ROUTES_LOCK:
+        return sorted([list(route) for route in _UNCHAINED_ROUTES | _inherited_unchained_routes()])
 
 
 @dataclass
@@ -788,7 +811,9 @@ class AgentsExecutor:
                 task_session_id=current_session_id() or "",
                 run_label=current_run_label() or "",
             )
-        if self._chain_responses and self._chain_route in _UNCHAINED_ROUTES:
+        if self._chain_responses and (
+            self._chain_route in _UNCHAINED_ROUTES or self._chain_route in _inherited_unchained_routes()
+        ):
             self._chain_responses = False
         if self._chain_responses:
             if result.last_response_id:
