@@ -114,6 +114,8 @@ Chack reads the models the key may use from the gateway (`/models`, or `/model/i
 
 Claude Code marks the system prompt, tools and last message for prompt caching, and some gateway models reject the whole request for it (Vertex Gemini: "does not support explicit context caching"). Chack then runs the request again once without the markers (`DISABLE_PROMPT_CACHING`) and leaves them off for that model for the rest of the process; set `prompt_cache_enabled: false` in the config's `agent:` section (`ChackConfig.model.prompt_cache_enabled`) for such a model to skip the rejected request.
 
+On gateway and OpenRouter runs, requests that carry tools are sent without the output schema (`text.format`), since some upstream providers decode the whole reply under it and the model then cannot call tools or runs into `max_output_tokens`; the final answer is still validated against the schema.
+
 Some gateway models end a run without an answer: the provider breaks their tool calls (Kimi K2.5 tool names leaking `<|tool_call_argument_begin|>`), the model writes a tool call as text instead of calling it, or it fills the output schema with a placeholder such as `pending`. Chack does not return those as answers. The run fails with `error` `backend_failure_malformed_tool_call` or `backend_failure_no_answer`, both under the `backend_failure` prefix, so callers can retry or move to another model. Whether an agent had to use its tools is the agent's own rule: set `required_tool_names` for agents whose answer is only valid after a tool call, since a model may answer without calling any.
 
 ## Tools
