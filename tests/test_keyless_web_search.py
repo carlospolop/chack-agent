@@ -284,7 +284,8 @@ def test_openrouter_models_without_native_search_search_keylessly(model_server, 
 def test_openrouter_runs_with_an_output_schema_search_keylessly(model_server):
     base_url, seen, replies = model_server
     # OpenRouter drops the JSON schema format when a server tool is sent, so
-    # these runs must only send function tools for the web.
+    # these runs must only send function tools for the web. The schema itself
+    # stays off requests that carry tools; the answer is still validated.
     replies.append([
         {"type": "message", "id": "m1", "role": "assistant", "status": "completed",
          "content": [{"type": "output_text", "text": '{"decision": "comment"}', "annotations": []}]},
@@ -299,7 +300,7 @@ def test_openrouter_runs_with_an_output_schema_search_keylessly(model_server):
 
     assert json.loads(result["output"]) == {"decision": "comment"}
     sent = seen[0]
-    assert sent["body"]["text"]["format"]["type"] == "json_schema"
+    assert "format" not in (sent["body"].get("text") or {})
     assert not [t for t in _sent_tool_types(sent) if str(t).startswith("openrouter:")]
     assert _sent_function_names(sent) >= WEB
 

@@ -116,6 +116,21 @@ class _RecordingResponses:
         return response
 
 
+def _schema_for_request(output_schema: Any, tools: list[Any], handoffs: Any) -> Any:
+    """The output schema to send with one gateway request.
+
+    Gateways forward the Responses ``text.format`` JSON schema to upstream
+    providers, and some decode the whole reply under it: given tools too, the
+    model can never call one and writes a placeholder answer, or loops inside
+    a length-bounded string until ``max_output_tokens``. Requests that carry
+    tools or handoffs therefore go without it; the agent's output type still
+    validates the final answer.
+    """
+    if output_schema is not None and (tools or handoffs):
+        return None
+    return output_schema
+
+
 class _GatewayResponsesModel(OpenAIResponsesModel):
     def __init__(self, *args: Any, server_tools: tuple[dict, ...] = (), **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -332,6 +347,7 @@ class _GatewayResponsesModel(OpenAIResponsesModel):
         conversation_id: str | None = None,
         prompt=None,
     ):
+        output_schema = _schema_for_request(output_schema, tools, handoffs)
         prepared_input = self._prepare_input_items(input, previous_response_id)
         try:
             response = await self._get_response_with_retries(
@@ -411,6 +427,7 @@ class _GatewayResponsesModel(OpenAIResponsesModel):
         conversation_id: str | None = None,
         prompt=None,
     ):
+        output_schema = _schema_for_request(output_schema, tools, handoffs)
         tool_names = {getattr(tool, "name", "") for tool in tools if getattr(tool, "name", "")}
         async for event in super().stream_response(
             system_instructions,
