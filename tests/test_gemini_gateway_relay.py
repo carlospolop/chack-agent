@@ -470,3 +470,137 @@ def test_without_a_run_model_the_cli_model_is_kept(gateway):
         _post(f"{relay.base_url}/v1beta/models/gemini-3-pro-preview:generateContent")
 
     assert seen[0]["path"] == "/gemini/v1beta/models/gemini-3-pro-preview:generateContent"
+
+
+def _silent_gateway(answer_from_call):
+    """A gateway that never answers its first ``answer_from_call - 1`` model calls.
+
+    Returns the server, the calls it got, and an event that releases the silent ones.
+    """
+
+    calls = []
+    release = threading.Event()
+
+    class Silent(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            calls.append(self.path)
+            if len(calls) < answer_from_call:
+                release.wait(30)
+                return
+            answer = json.dumps(ANSWER).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Silent)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, calls, release
+
+
+def _stop(server, release):
+    release.set()
+    server.shutdown()
+    server.server_close()
+
+
+def test_a_model_call_the_gateway_never_answers_is_sent_again_and_its_answer_reaches_the_cli():
+    server, calls, release = _silent_gateway(answer_from_call=2)
+    try:
+        relay = GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            timeout_seconds=3840,
+            request_timeout_seconds=0.6,
+            keepalive_after_seconds=0.1,
+            keepalive_every_seconds=0.1,
+        )
+        with relay:
+            started = time.monotonic()
+            status, _, _, chunks = _stream_with_timing(relay.base_url)
+            elapsed = time.monotonic() - started
+            usage = relay.take_usage()
+    finally:
+        _stop(server, release)
+
+    assert status == 200
+    keepalive, _, event = b"".join(chunks).partition(b"data: ")
+    assert not keepalive.strip()
+    assert json.loads(event) == ANSWER
+    assert len(calls) == 2
+    assert elapsed < 3
+    assert usage == [{"input_tokens": 120, "output_tokens": 30, "cached_tokens": 0}]
+
+
+@pytest.mark.parametrize("keepalive_after", [0.1, 5.0])
+def test_a_gateway_that_never_answers_fails_the_cli_call_fast_with_a_deadline_error(keepalive_after):
+    server, calls, release = _silent_gateway(answer_from_call=99)
+    try:
+        relay = GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            timeout_seconds=3840,
+            request_timeout_seconds=0.4,
+            keepalive_after_seconds=keepalive_after,
+            keepalive_every_seconds=0.1,
+        )
+        with relay:
+            started = time.monotonic()
+            status, _, _, chunks = _stream_with_timing(relay.base_url)
+            elapsed = time.monotonic() - started
+    finally:
+        _stop(server, release)
+
+    # Two calls of at most 0.4 s each, not the run's 3840 s.
+    assert elapsed < 3
+    assert len(calls) == 2
+    error = json.loads(b"".join(chunks).strip())["error"]
+    assert error["code"] == 504
+    assert error["status"] == "DEADLINE_EXCEEDED"
+    # Once keepalives have gone out the CLI reads the error from the stream; otherwise from the status.
+    assert status == (200 if keepalive_after < 0.4 else 504)
+
+
+def test_the_call_limit_comes_from_the_environment_and_never_exceeds_the_runs(monkeypatch):
+    from chack_agent.backends import gemini_gateway_relay as relay_module
+
+    monkeypatch.setenv(relay_module.REQUEST_TIMEOUT_ENV, "0.3")
+    server, calls, release = _silent_gateway(answer_from_call=99)
+    try:
+        with GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}", timeout_seconds=3840
+        ) as relay:
+            started = time.monotonic()
+            status, _, body = _post(f"{relay.base_url}/v1beta/models/m:streamGenerateContent?alt=sse")
+            elapsed = time.monotonic() - started
+    finally:
+        _stop(server, release)
+    assert status == 504 and json.loads(body)["error"]["code"] == 504
+    assert elapsed < 3
+
+    monkeypatch.delenv(relay_module.REQUEST_TIMEOUT_ENV)
+    assert relay_module.gateway_call_timeout_seconds(3840) == relay_module.DEFAULT_REQUEST_TIMEOUT_SECONDS
+    assert relay_module.gateway_call_timeout_seconds(120) == 120
+
+
+def test_an_unanswered_unstreamed_call_fails_at_the_call_limit():
+    server, calls, release = _silent_gateway(answer_from_call=99)
+    try:
+        with GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            timeout_seconds=3840,
+            request_timeout_seconds=0.4,
+        ) as relay:
+            started = time.monotonic()
+            status, _, body = _post(f"{relay.base_url}/v1beta/models/m:countTokens")
+            elapsed = time.monotonic() - started
+    finally:
+        _stop(server, release)
+
+    assert status == 502
+    assert json.loads(body)["error"]["code"] == 502
+    assert elapsed < 3
