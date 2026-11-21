@@ -21,6 +21,7 @@ from agents import (
     WebSearchTool,
 )
 from agents.items import ToolCallItem
+from agents.models.interface import Model, ModelProvider
 from agents.models.multi_provider import MultiProvider
 from agents.run import RunConfig
 from agents.exceptions import ModelBehaviorError
@@ -104,6 +105,63 @@ def _configure_client_factory(config: ChackConfig) -> Callable[[], AsyncOpenAI]:
         )
 
     return _new_client
+
+
+class _ToolsBeforeSchemaModel(Model):
+    """Sends no JSON-schema response format in a request that offers tools.
+
+    OpenAI-compatible gateways (OpenRouter) pass the format to whichever upstream
+    provider they pick, and some decode it as a constraint on the whole reply: the
+    model can then only write the final JSON, never call a tool, and fills the
+    answer with what it meant to do next ("placeholder", "starting"). The agent
+    keeps its output type, so the final answer is still parsed and validated
+    against the schema, which the prompt already describes.
+    """
+
+    def __init__(self, model: Model) -> None:
+        self._model = model
+
+    @staticmethod
+    def _schema(output_schema: Any, tools: Any, handoffs: Any) -> Any:
+        return None if tools or handoffs else output_schema
+
+    async def get_response(self, system_instructions, input, model_settings, tools, output_schema, handoffs,
+                           tracing, **kwargs: Any) -> Any:
+        return await self._model.get_response(
+            system_instructions, input, model_settings, tools, self._schema(output_schema, tools, handoffs),
+            handoffs, tracing, **kwargs)
+
+    def stream_response(self, system_instructions, input, model_settings, tools, output_schema, handoffs,
+                        tracing, **kwargs: Any) -> Any:
+        return self._model.stream_response(
+            system_instructions, input, model_settings, tools, self._schema(output_schema, tools, handoffs),
+            handoffs, tracing, **kwargs)
+
+    def get_retry_advice(self, request: Any) -> Any:
+        return self._model.get_retry_advice(request)
+
+    async def close(self) -> None:
+        await self._model.close()
+
+    async def _cleanup_on_run_end(self, owner: object) -> None:
+        cleanup = getattr(self._model, "_cleanup_on_run_end", None)
+        if cleanup is not None:
+            await cleanup(owner)
+
+
+class _ToolsBeforeSchemaProvider(ModelProvider):
+    def __init__(self, provider: ModelProvider) -> None:
+        self._provider = provider
+
+    def get_model(self, model_name: str | None) -> Model:
+        return _ToolsBeforeSchemaModel(self._provider.get_model(model_name))
+
+    async def aclose(self) -> None:
+        await self._provider.aclose()
+
+
+def _is_openai_api(client: Any) -> bool:
+    return "api.openai.com" in str(getattr(client, "base_url", "") or "")
 
 
 def _web_tool_plan(config: ChackConfig) -> WebToolPlan:
@@ -411,7 +469,10 @@ class AgentsExecutor:
         # own, closed on its loop.
         client = self._client_factory()
         try:
-            run_config = RunConfig(model_provider=MultiProvider(openai_client=client))
+            provider: ModelProvider = MultiProvider(openai_client=client)
+            if not _is_openai_api(client):
+                provider = _ToolsBeforeSchemaProvider(provider)
+            run_config = RunConfig(model_provider=provider)
             hooks = LiveUsageHooks(str(self._config.model.primary or ""))
             result = await Runner.run(agent, input_items, run_config=run_config, hooks=hooks, **kwargs)
             mark_reported(result, hooks)
