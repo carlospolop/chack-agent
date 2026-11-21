@@ -189,6 +189,8 @@ Compaction is fail-open: its status and error are recorded in `RunResult`, and t
 
 `agent.max_runtime_minutes` and `agent.max_cost_usd` use `0` for unlimited. Warning and critical ratios can inject remaining-budget context before a hard limit. Self-critique is disabled by default and can be enabled with `self_critique_rounds` or per-run overrides.
 
+On the `gateway` Responses runtime, a model response that ends `incomplete` (for example `max_output_tokens`) or `failed` still reports its token usage to the run's live usage callbacks, so the run is charged what it used. Chack also logs a warning with that usage (including reasoning tokens), the partial output's length, its compressed/raw size ratio and the share of its most repeated line (`sdk_run_hooks.observe_terminal_failure`). A low ratio or a high share means the model looped rather than wrote a long answer. The run then fails as before.
+
 `RunResult` includes the output, provider steps, tool counts, token counts, rounds, estimated cost, timing, task session ID, compaction status, and any terminal error. A configured JSON schema is sent through the selected backend's structured-output mechanism when available and validated by Chack's CLI adapters where required.
 
 The synchronous `run()` and asynchronous `arun()` APIs support per-run tool limits, required tools, self-critique, callbacks, prompt variables, context, working directory, cancellation, output-schema override, compaction, and executor reuse. See [`Chack.run`](chack_agent/agent.py) for the exact signature and [`chack_agent/config.py`](chack_agent/config.py) for every configuration field.
