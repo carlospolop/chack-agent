@@ -21,6 +21,12 @@ An unstreamed answer can take longer than the Gemini CLI waits for response
 headers, so a slow streaming call gets its event-stream headers early and
 blank keepalive lines until the answer, or the gateway's error, arrives.
 
+Each gateway call has its own time limit (``CHACK_GEMINI_RELAY_REQUEST_TIMEOUT_SECONDS``,
+never more than the run's limit), well below a run's: a model call the gateway
+never answers is abandoned at that limit and sent once more, and if that one
+also gets no answer the CLI gets a 504 ``DEADLINE_EXCEEDED`` error instead of
+keepalives until the whole run times out.
+
 The relay also keeps the token usage of every answer it relays, so a run that
 is stopped before the CLI prints its closing stats still counts the calls it
 made. A CLI that goes away while the relay answers it (a cancelled or timed-out
@@ -30,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -161,6 +168,24 @@ def _without_rejected_generation_field(request_body: bytes | None, error_body: b
 _CONNECTION_ATTEMPTS = 3
 _RECONNECT_DELAY_SECONDS = 2.0
 
+REQUEST_TIMEOUT_ENV = "CHACK_GEMINI_RELAY_REQUEST_TIMEOUT_SECONDS"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
+# A model call that gets no answer within its time limit is sent this many times in all.
+_TIMED_OUT_CALL_ATTEMPTS = 2
+
+
+def gateway_call_timeout_seconds(run_timeout_seconds: float | None = None) -> float:
+    """Time limit of one gateway call: the configured limit, never above the run's own."""
+    try:
+        limit = float(os.environ.get(REQUEST_TIMEOUT_ENV) or DEFAULT_REQUEST_TIMEOUT_SECONDS)
+    except ValueError:
+        limit = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    if limit <= 0:
+        limit = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    if run_timeout_seconds and run_timeout_seconds > 0:
+        limit = min(limit, float(run_timeout_seconds))
+    return limit
+
 
 class _Reply(NamedTuple):
     """A whole answer for the CLI."""
@@ -213,13 +238,19 @@ class GeminiGatewayRelay:
         *,
         model: str = "",
         timeout_seconds: float | None = None,
+        request_timeout_seconds: float | None = None,
         keepalive_after_seconds: float = 20.0,
         keepalive_every_seconds: float = 15.0,
     ) -> None:
         self._upstream_base_url = str(upstream_base_url or "").rstrip("/")
         self._model = str(model or "").strip()
         self._replaced_models: set[str] = set()
-        self._timeout_seconds = timeout_seconds
+        # ``timeout_seconds`` is the run's limit; each gateway call gets its own, lower one.
+        self._timeout_seconds = (
+            min(request_timeout_seconds, timeout_seconds or request_timeout_seconds)
+            if request_timeout_seconds
+            else gateway_call_timeout_seconds(timeout_seconds)
+        )
         self._keepalive_after_seconds = keepalive_after_seconds
         self._keepalive_every_seconds = keepalive_every_seconds
         self._opener = urllib.request.build_opener(_NoRedirect())
@@ -299,7 +330,7 @@ class GeminiGatewayRelay:
         """The gateway's response, or a 502 ``_Reply`` when it cannot be reached.
 
         A connection the gateway drops or refuses is tried again a bounded
-        number of times; a timeout is not, as it is the run's own limit.
+        number of times; a timeout is not retried here (see ``_forward_stream``).
         """
         failure: Exception | None = None
         for attempt in range(_CONNECTION_ATTEMPTS):
@@ -402,33 +433,78 @@ class GeminiGatewayRelay:
         went out is sent as the Gemini API's error JSON, which the CLI raises
         with the error's status code.
         """
+        headers_sent = False
+        reply: _Reply | None = None
+        for attempt in range(1, _TIMED_OUT_CALL_ATTEMPTS + 1):
+            reply, headers_sent = self._wait_for_call(handler, url, body, headers, headers_sent)
+            if reply is not None:
+                break
+            _LOGGER.warning(
+                "Gemini gateway gave no answer to %s within %ss (attempt %d/%d)%s",
+                url,
+                self._timeout_seconds,
+                attempt,
+                _TIMED_OUT_CALL_ATTEMPTS,
+                "; retrying" if attempt < _TIMED_OUT_CALL_ATTEMPTS else "",
+            )
+        if reply is None:
+            reply = _error_reply(
+                504,
+                "DEADLINE_EXCEEDED",
+                f"gateway gave no answer within {self._timeout_seconds:g}s, "
+                f"{_TIMED_OUT_CALL_ATTEMPTS} attempts",
+            )
+        if not headers_sent:
+            self._send(handler, reply.status, reply.headers, reply.body)
+            return
+        _write_chunk(handler, reply.body if 200 <= reply.status < 300 else _error_chunk(reply))
+        handler.wfile.write(b"0\r\n\r\n")
+        handler.wfile.flush()
+
+    def _wait_for_call(
+        self,
+        handler: BaseHTTPRequestHandler,
+        url: str,
+        body: bytes | None,
+        headers: dict[str, str],
+        headers_sent: bool,
+    ) -> tuple["_Reply | None", bool]:
+        """One gateway call's answer, or None when it has none within the call's time limit.
+
+        Keeps the CLI's connection alive meanwhile, sending the event-stream
+        headers once the call has taken ``keepalive_after_seconds``. Returns
+        whether those headers have gone out.
+        """
         outcome: list[_Reply] = []
         done = threading.Event()
 
         def call() -> None:
             try:
                 outcome.append(self._stream_reply(url, body, headers, handler.command))
-            except Exception as exc:  # pragma: no cover - defensive: the CLI must get an answer
+            except Exception as exc:  # the CLI must get an answer
                 _LOGGER.warning("Gemini gateway relay failed on %s: %s", url, exc)
                 outcome.append(_error_reply(502, "UNAVAILABLE", f"gateway relay failed: {exc}"))
             finally:
                 done.set()
 
+        # An abandoned call ends at its socket timeout; nothing waits for it.
         threading.Thread(target=call, name="chack-gemini-gateway-call", daemon=True).start()
-        if done.wait(self._keepalive_after_seconds):
-            reply = outcome[0]
-            self._send(handler, reply.status, reply.headers, reply.body)
-            return
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream")
-        handler.send_header("Transfer-Encoding", "chunked")
-        handler.end_headers()
-        while not done.wait(self._keepalive_every_seconds):
-            _write_chunk(handler, b"\n")
-        reply = outcome[0]
-        _write_chunk(handler, reply.body if 200 <= reply.status < 300 else _error_chunk(reply))
-        handler.wfile.write(b"0\r\n\r\n")
-        handler.wfile.flush()
+        deadline = time.monotonic() + self._timeout_seconds
+        wait = self._keepalive_every_seconds if headers_sent else self._keepalive_after_seconds
+        while True:
+            if done.wait(max(0.0, min(wait, deadline - time.monotonic()))):
+                return outcome[0], headers_sent
+            if time.monotonic() >= deadline:
+                return None, headers_sent
+            if not headers_sent:
+                handler.send_response(200)
+                handler.send_header("Content-Type", "text/event-stream")
+                handler.send_header("Transfer-Encoding", "chunked")
+                handler.end_headers()
+                headers_sent = True
+            else:
+                _write_chunk(handler, b"\n")
+            wait = self._keepalive_every_seconds
 
     @staticmethod
     def _send(handler: BaseHTTPRequestHandler, status: int, headers: dict[str, str], body: bytes) -> None:
