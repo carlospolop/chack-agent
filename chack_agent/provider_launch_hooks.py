@@ -22,8 +22,13 @@ def set_provider_pre_launch_hook(
         _provider_pre_launch_hook = hook
 
 
-def run_provider_pre_launch_hook(provider: str) -> dict[str, str]:
-    """Run the hook without allowing monitoring failures to block a model call."""
+def run_provider_pre_launch_hook(provider: str, rejected_token: str = "") -> dict[str, str]:
+    """Run the hook without allowing monitoring failures to block a model call.
+
+    ``rejected_token`` is an access token the provider just refused; the hook
+    receives it as a keyword so it can renew that credential. Hooks that do not
+    accept it are called without it.
+    """
     normalized_provider = str(provider or "").strip().lower()
     if normalized_provider not in {"codex", "claude"}:
         return {}
@@ -33,8 +38,15 @@ def run_provider_pre_launch_hook(provider: str) -> dict[str, str]:
         from .environment_credential_pool import active_environment_credentials
 
         return active_environment_credentials(normalized_provider)
+    rejected_token = str(rejected_token or "").strip()
     try:
-        values = hook(normalized_provider)
+        if rejected_token:
+            try:
+                values = hook(normalized_provider, rejected_token=rejected_token)
+            except TypeError:
+                values = hook(normalized_provider)
+        else:
+            values = hook(normalized_provider)
     except Exception as exc:
         _LOGGER.warning(
             "Provider pre-launch hook failed for %s: %s",
