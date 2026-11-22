@@ -318,3 +318,19 @@ def test_out_of_memory_kills_pick_the_cli_and_what_it_starts_before_the_host_pro
     with open("/proc/self/oom_score_adj") as handle:
         assert handle.read().strip() == host_score
 
+
+
+def test_resuming_a_session_the_cli_did_not_keep_runs_the_turn_in_a_new_session_with_its_task(fake_gemini):
+    no_answer = _run("")
+    no_answer["events"] = [event for event in no_answer["events"] if event["type"] != "message"]
+    gone = {"stderr": ["Error resuming session: No previous sessions found for this project."], "exit": 42}
+    fake_gemini.script([no_answer, gone, _run(json.dumps(VALID), session="gem-2", tool_id="t2")])
+
+    result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == VALID
+    first, resumed, fresh = fake_gemini.calls
+    assert resumed[resumed.index("-r") + 1] == "gem-1"
+    assert "-r" not in fresh
+    assert fake_gemini.prompts[2].startswith(fake_gemini.prompts[0])
+    assert fake_gemini.prompts[2].endswith(fake_gemini.prompts[1])

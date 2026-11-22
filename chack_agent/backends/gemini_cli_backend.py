@@ -66,6 +66,10 @@ GEMINI_CANCELLED_OUTPUT = "ERROR: Gemini execution cancelled."
 # of an answer. It counts turns per process, so the resumed run asking for the
 # answer gets its own short budget.
 _TURN_LIMIT_ERROR = "ERROR: Gemini result error: Reached max session turns"
+# The CLI deletes a session that recorded nothing it can resume (a turn that
+# ended without text, tool calls or thoughts), yet its init event already gave
+# the id; resuming it then fails with one of these.
+_SESSION_GONE_ERRORS = ("No previous sessions found for this project", "Invalid session identifier")
 
 
 _GEMINI_CLI_DENYLIST_TOOLS = {
@@ -237,6 +241,7 @@ class GeminiCliExecutor:
 
         self._gemini_home: str | None = None
         self._gemini_session_id: str | None = None
+        self._session_prompt = ""
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
@@ -403,6 +408,32 @@ class GeminiCliExecutor:
             self._turn_budget_override = 0
 
     def _run_gemini(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
+        resuming = bool(self._gemini_session_id)
+        if not resuming:
+            self._session_prompt = prompt
+        output, steps, raw_result = self._run_gemini_turn(prompt)
+        if not (
+            resuming
+            and output.startswith("ERROR: Gemini exec failed")
+            and any(error in output for error in _SESSION_GONE_ERRORS)
+            and not prompt.startswith("/")
+        ):
+            return output, steps, raw_result
+        # Nothing was kept to resume, so the turn starts a new session that
+        # carries the task it continues.
+        _LOGGER.warning(
+            "Gemini CLI kept no session %s to resume; running the turn in a new session",
+            self._gemini_session_id,
+        )
+        self._gemini_session_id = None
+        fresh_prompt = "\n\n".join(part for part in (self._session_prompt, prompt) if part)
+        output, fresh_steps, fresh_raw = self._run_gemini_turn(fresh_prompt)
+        steps.extend(fresh_steps)
+        raw_result.raw_responses.extend(fresh_raw.raw_responses)
+        fresh_raw.raw_responses = raw_result.raw_responses
+        return output, steps, fresh_raw
+
+    def _run_gemini_turn(self, prompt: str) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         timeout_seconds = cli_exec_timeout_seconds(GEMINI_EXEC_TIMEOUT_ENV)
         if not self._gemini_base_url:
             return self._run_gemini_cli(prompt, timeout_seconds=timeout_seconds)
