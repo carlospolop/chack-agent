@@ -604,3 +604,72 @@ def test_an_unanswered_unstreamed_call_fails_at_the_call_limit():
     assert status == 502
     assert json.loads(body)["error"]["code"] == 502
     assert elapsed < 3
+
+
+def _conversation(turns, system="Follow the scan rules. " * 400):
+    contents = [{"role": "user", "parts": [{"text": "Start. " + "context " * 300}]}]
+    for turn in range(turns):
+        contents += [{"role": "model", "parts": [{"text": f"answer {turn}"}]},
+                     {"role": "user", "parts": [{"text": f"tool result {turn} " + "output " * 200}]}]
+    return json.dumps({"contents": contents, "systemInstruction": {"parts": [{"text": system}]},
+                       "tools": [{"functionDeclarations": [{"name": "exec"}]}]}).encode()
+
+
+def _answer(prompt_tokens, cached=None):
+    metadata = {"promptTokenCount": prompt_tokens, "candidatesTokenCount": 5}
+    if cached is not None:
+        metadata["cachedContentTokenCount"] = cached
+    return json.dumps({"candidates": [], "usageMetadata": metadata}).encode()
+
+
+def test_a_gateway_that_omits_cached_tokens_gets_them_estimated_from_repeated_prefixes(gateway):
+    base_url, seen, answers = gateway
+    url_path = "/v1beta/models/bakkt/deepseek:streamGenerateContent?alt=sse"
+    counted = []
+    with GeminiGatewayRelay(base_url, model="bakkt/deepseek") as relay:
+        for turn, tokens in enumerate((10_000, 11_500, 13_000)):
+            answers["generateContent"] = (200, _answer(tokens))
+            _post(relay.base_url + url_path, _conversation(turn))
+        # A different task's prompt shares nothing with the earlier ones.
+        answers["generateContent"] = (200, _answer(9_000))
+        _post(relay.base_url + url_path, _conversation(0, system="Unrelated instructions. " * 400))
+        counted = relay.take_usage()
+
+    cached = [usage["cached_tokens"] for usage in counted]
+    assert cached[0] == 0 and cached[3] == 0
+    # Each growing turn is cached up to the previous prompt, in whole 128-token blocks.
+    for earlier, usage in zip((10_000, 11_500), counted[1:3]):
+        assert earlier - 256 < usage["cached_tokens"] <= earlier and usage["cached_tokens"] % 128 == 0
+
+
+def test_a_gateway_that_reports_cached_tokens_is_trusted(gateway):
+    base_url, _, answers = gateway
+    url_path = "/v1beta/models/gemini-x:generateContent"
+    with GeminiGatewayRelay(base_url, model="gemini-x") as relay:
+        answers["generateContent"] = (200, _answer(10_000, cached=0))
+        _post(relay.base_url + url_path, _conversation(0))
+        answers["generateContent"] = (200, _answer(11_000, cached=4_096))
+        _post(relay.base_url + url_path, _conversation(1))
+        answers["generateContent"] = (200, _answer(12_000, cached=0))
+        _post(relay.base_url + url_path, _conversation(2))
+        counted = relay.take_usage()
+
+    assert [usage["cached_tokens"] for usage in counted] == [0, 4_096, 0]
+
+
+def test_prefix_cache_estimates_expire_and_skip_short_prompts():
+    from chack_agent.backends.gemini_gateway_relay import PrefixCacheEstimator, _prompt_text
+
+    now = [0.0]
+    estimator = PrefixCacheEstimator(clock=lambda: now[0])
+    key = ("https://gateway", "model")
+    # Instructions and tools come first in the prompt a model reads, whatever the request's key order.
+    first, second = _prompt_text(_conversation(0)), _prompt_text(_conversation(1))
+    assert estimator.estimate(key, first, 10_000) == 0
+    assert estimator.estimate(key, second, 11_000) > 9_000
+    # Another model's prompts never count.
+    assert estimator.estimate(("https://gateway", "other"), second, 11_000) == 0
+    now[0] = 3_600.0
+    assert estimator.estimate(key, second, 11_000) == 0
+    assert estimator.estimate(key, "short prompt", 500) == 0
+    assert estimator.estimate(key, "short prompt", 500) == 0
