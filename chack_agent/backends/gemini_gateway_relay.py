@@ -29,7 +29,12 @@ keepalives until the whole run times out.
 
 The relay also keeps the token usage of every answer it relays, so a run that
 is stopped before the CLI prints its closing stats still counts the calls it
-made. A CLI that goes away while the relay answers it (a cancelled or timed-out
+made. LiteLLM's Gemini API omits ``cachedContentTokenCount`` for models that are
+not Gemini even when the provider served most of the prompt from its prefix
+cache, so every token would be billed at the full input price. When an answer
+omits that field, the relay estimates the cached tokens from the longest prefix
+the request shares with a recent request to the same gateway and model
+(``PrefixCacheEstimator``); an answer that reports the field is trusted as is. A CLI that goes away while the relay answers it (a cancelled or timed-out
 run) is no error: the answer is dropped quietly.
 """
 from __future__ import annotations
@@ -121,16 +126,100 @@ def _upstream_target(base_url: str, path: str, model: str = "") -> tuple[str, bo
 
 
 def _usage_of(answer: Any) -> dict[str, int] | None:
-    """Token usage of one Gemini API answer, counted the way the Gemini CLI counts it."""
+    """Token usage of one Gemini API answer, counted the way the Gemini CLI counts it.
+
+    ``cached_tokens`` is None when the answer does not report it.
+    """
 
     metadata = answer.get("usageMetadata") if isinstance(answer, dict) else None
     if not isinstance(metadata, dict):
         return None
+    cached = metadata.get("cachedContentTokenCount")
     return {
         "input_tokens": int(metadata.get("promptTokenCount", 0) or 0),
         "output_tokens": int(metadata.get("candidatesTokenCount", 0) or 0),
-        "cached_tokens": int(metadata.get("cachedContentTokenCount", 0) or 0),
+        "cached_tokens": None if cached is None else int(cached or 0),
     }
+
+
+# Provider prefix caches store whole blocks of a recent request's tokens and
+# skip prompts too short to cache: measured on a LiteLLM gateway, the cached
+# count of each call was the previous request's prompt rounded down to a
+# 128-token block. Earlier requests count for a while, not forever.
+_CACHE_BLOCK_TOKENS = 128
+_CACHE_MARGIN_TOKENS = 64
+_CACHE_MIN_TOKENS = 1024
+_CACHE_HISTORY = 16
+_CACHE_TTL_SECONDS = 600.0
+
+
+def _prompt_text(request_body: bytes | None) -> str:
+    """The request in the order a model reads it: instructions, tools, then the conversation."""
+
+    if not request_body:
+        return ""
+    try:
+        payload = json.loads(request_body)
+    except ValueError:
+        return request_body.decode("utf-8", "replace")
+    if not isinstance(payload, dict):
+        return json.dumps(payload, separators=(",", ":"))
+    ordered = {
+        key: payload[key]
+        for key in ("systemInstruction", "tools", "toolConfig", "cachedContent", "contents")
+        if key in payload
+    }
+    return json.dumps(ordered, ensure_ascii=False, separators=(",", ":"))
+
+
+def _common_prefix_length(left: str, right: str) -> int:
+    limit = min(len(left), len(right))
+    low, high = 0, limit
+    # Binary search over slices compares in C instead of one character at a time.
+    while low < high:
+        middle = (low + high + 1) // 2
+        if left[:middle] == right[:middle]:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+class PrefixCacheEstimator:
+    """Estimates the prompt tokens a provider served from its prefix cache.
+
+    Keeps the last ``_CACHE_HISTORY`` prompts per gateway and model for
+    ``_CACHE_TTL_SECONDS``. A prompt's estimate is its share of characters
+    that repeat the longest-matching earlier prompt, applied to its token count,
+    never above that earlier prompt's own tokens, less a small margin and
+    rounded down to whole cache blocks; under ``_CACHE_MIN_TOKENS`` it is zero.
+    """
+
+    def __init__(self, clock: Any = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._history: dict[tuple[str, str], list[tuple[float, str, int]]] = {}
+
+    def estimate(self, key: tuple[str, str], text: str, prompt_tokens: int) -> int:
+        now = self._clock()
+        with self._lock:
+            recent = [
+                entry for entry in self._history.get(key, []) if now - entry[0] <= _CACHE_TTL_SECONDS
+            ]
+            cached = 0
+            if text and prompt_tokens > 0:
+                for _, earlier, earlier_tokens in recent:
+                    shared = _common_prefix_length(text, earlier)
+                    tokens = min(prompt_tokens * shared // len(text), earlier_tokens)
+                    tokens = (tokens - _CACHE_MARGIN_TOKENS) // _CACHE_BLOCK_TOKENS * _CACHE_BLOCK_TOKENS
+                    cached = max(cached, tokens)
+                recent.append((now, text, prompt_tokens))
+            self._history[key] = recent[-_CACHE_HISTORY:]
+        return cached if cached >= _CACHE_MIN_TOKENS else 0
+
+
+# Shared by every relay of a process, so each turn of a run sees the prompts of its earlier turns.
+_PREFIX_CACHE = PrefixCacheEstimator()
 
 
 def _sse_event(body: bytes) -> bytes:
@@ -258,6 +347,7 @@ class GeminiGatewayRelay:
         self._thread: threading.Thread | None = None
         self._usage_lock = threading.Lock()
         self._usage: list[dict[str, int]] = []
+        self._estimating = False
 
     def take_usage(self) -> list[dict[str, int]]:
         """Usage of the answers relayed since the last call, one entry per answer."""
@@ -265,13 +355,24 @@ class GeminiGatewayRelay:
             usage, self._usage = self._usage, []
         return usage
 
-    def _record_usage(self, body: bytes) -> None:
+    def _record_usage(self, body: bytes, request_body: bytes | None = None) -> None:
         try:
             usage = _usage_of(json.loads(body))
         except ValueError:
             return
         if usage is None:
             return
+        key = (self._upstream_base_url, self._model)
+        estimated = _PREFIX_CACHE.estimate(key, _prompt_text(request_body), usage["input_tokens"])
+        if usage["cached_tokens"] is None:
+            usage["cached_tokens"] = min(estimated, usage["input_tokens"])
+            if not self._estimating:
+                self._estimating = True
+                _LOGGER.info(
+                    "Gemini gateway %s reports no cached tokens for %s; estimating them from repeated prompt prefixes",
+                    self._upstream_base_url,
+                    self._model or "the requested model",
+                )
         with self._usage_lock:
             self._usage.append(usage)
 
@@ -376,7 +477,7 @@ class GeminiGatewayRelay:
             raw = response.read()
         if not 200 <= status < 300:
             return _Reply(status, response_headers, raw)
-        self._record_usage(raw)
+        self._record_usage(raw, body)
         try:
             event = _sse_event(raw)
         except ValueError:
@@ -415,7 +516,7 @@ class GeminiGatewayRelay:
             if urllib.parse.urlsplit(url).path.endswith(_UNARY_METHOD) and 200 <= status < 300:
                 # A model answer: read it whole to count its tokens before the CLI gets it.
                 raw = response.read()
-                self._record_usage(raw)
+                self._record_usage(raw, body)
                 self._send(handler, status, response_headers, raw)
                 return
             self._send_streamed(handler, status, response_headers, response)
