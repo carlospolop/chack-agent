@@ -493,6 +493,33 @@ def test_claude_cache_breakpoint_uses_system_prompt_without_tools() -> None:
     assert "changing checks" not in cached_prefix
 
 
+def test_claude_large_cached_prefix_is_passed_in_a_file_the_kernel_accepts(tmp_path) -> None:
+    import subprocess
+
+    from chack_agent.backends.prompt_cache import PROMPT_CACHE_BREAKPOINT
+
+    executor = _build_executor("")
+    executor._claude_home = str(tmp_path)
+    executor._base_system_prompt = "Compact the supplied context."
+    stable = "context line\n" * 20_000  # ~260 KB, over Linux's 128 KiB argument limit
+    prompt = executor._compose_prompt(f"{stable}{PROMPT_CACHE_BREAKPOINT}\nchanging task")
+    command = executor._build_command(prompt)
+
+    assert "--system-prompt" not in command
+    path = command[command.index("--system-prompt-file") + 1]
+    with open(path, encoding="utf-8") as handle:
+        assert handle.read() == executor._cacheable_system_prompt
+    assert stable.strip() in executor._cacheable_system_prompt
+    # The same arguments can be handed to exec (the prefix inline fails with E2BIG).
+    assert subprocess.run(["true", *command[1:]], check=False).returncode == 0
+    inline = [*command[1:command.index("--system-prompt-file")], "--system-prompt", executor._cacheable_system_prompt]
+    try:
+        subprocess.run(["true", *inline], check=False)
+        raise AssertionError("an inline 260 KB argument should exceed the kernel limit")
+    except OSError as exc:
+        assert exc.errno == 7
+
+
 def test_claude_unmarked_prompt_still_caches_shared_system_layer() -> None:
     executor = _build_executor("")
     executor._base_system_prompt = "Stable Naxus instructions."
