@@ -1067,10 +1067,13 @@ class ClaudeCodeExecutor:
             marker in text
             for marker in (
                 "authentication_error",
+                "failed to authenticate",
+                "api error: 401",
                 "unauthorized",
                 "invalid token",
                 "invalid oauth",
                 "oauth token",
+                "oauth access token",
                 "status code 401",
                 "http 401",
                 "invalid api key",

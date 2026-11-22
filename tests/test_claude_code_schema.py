@@ -1149,7 +1149,12 @@ def test_claude_rejected_oauth_token_is_renewed_by_the_host_and_keeps_the_sessio
     tokens = []
     results = iter(
         [
-            ("ERROR: Failed to authenticate. API Error: 401 OAuth token has expired", [], None),
+            (
+                "ERROR: Claude returned an error in final result event. "
+                "Failed to authenticate. API Error: 401 OAuth access token is invalid.",
+                [],
+                None,
+            ),
             ("model answer", [], None),
         ]
     )
