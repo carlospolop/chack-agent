@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -268,6 +270,8 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
 # Sonnet 4.6 can extend to 1M tokens, but only when the request carries the
 # `context-1m-2025-08-07` beta header, which the CLI exposes via `--betas`.
 # So whenever a larger context budget is configured we opt into that beta.
+# Below Linux's per-argument limit (MAX_ARG_STRLEN, 128 KiB).
+_CLAUDE_MAX_ARGV_PROMPT_BYTES = 100_000
 _CLAUDE_DEFAULT_CONTEXT_WINDOW = 200_000
 _CLAUDE_1M_CONTEXT_BETA = "context-1m-2025-08-07"
 # Built-in tools a Chack run keeps; the shell, web and planning tools are added
@@ -1923,9 +1927,19 @@ PYEOF
                 if has_cli_tools
                 else "--system-prompt"
             )
-            args.extend(
-                [system_prompt_flag, self._cacheable_system_prompt]
-            )
+            if len(self._cacheable_system_prompt.encode("utf-8")) > _CLAUDE_MAX_ARGV_PROMPT_BYTES:
+                # Linux refuses a single argument above 128 KiB (E2BIG): a
+                # large stable prefix travels in a file instead.
+                args.extend(
+                    [
+                        f"{system_prompt_flag}-file",
+                        self._write_system_prompt_file(self._cacheable_system_prompt),
+                    ]
+                )
+            else:
+                args.extend(
+                    [system_prompt_flag, self._cacheable_system_prompt]
+                )
         if self._claude_session_id:
             args.extend(["--resume", self._claude_session_id])
         if self._output_schema_json and not resume_compaction:
@@ -1937,6 +1951,22 @@ PYEOF
             )
 
         return args
+
+    def _write_system_prompt_file(self, system_prompt: str) -> str:
+        """Store a system prompt by content hash for ``--system-prompt-file``."""
+        directory = os.path.join(
+            str(self._claude_home or os.path.join(tempfile.gettempdir(), "chack-claude")),
+            "system-prompts",
+        )
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        digest = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:32]
+        path = os.path.join(directory, f"{digest}.txt")
+        if not os.path.isfile(path):
+            fd, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(system_prompt)
+            os.replace(temporary, path)
+        return path
 
     def _offered_tool_names(self) -> list[str]:
         try:
