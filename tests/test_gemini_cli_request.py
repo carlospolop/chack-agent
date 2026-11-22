@@ -203,6 +203,28 @@ def test_a_prompt_larger_than_one_argv_string_reaches_the_model(tmp_path, monkey
     assert sent.count("x" * 1000) >= 300
 
 
+def test_at_signs_in_the_prompt_are_text_not_file_includes(tmp_path, monkeypatch):
+    # Gemini CLI reads "@<path>" in a prompt as a file to inline. Prompt text is data: an email with a
+    # URL-encoded NUL ("a@tester%00") made the CLI fail before any request, and "@<file>" would inline a host file.
+    from chack_agent.backends import gemini_cli_backend
+
+    original = gemini_cli_backend.GeminiCliExecutor._gemini_workspace_dir
+
+    def workspace_with_secret(self):
+        directory = original(self)
+        with open(os.path.join(directory, "secret.txt"), "w") as handle:
+            handle.write("HOST-FILE-CONTENT")
+        return directory
+
+    monkeypatch.setattr(gemini_cli_backend.GeminiCliExecutor, "_gemini_workspace_dir", workspace_with_secret)
+    prompt = "Register a@tester%00 and user@example.com, then compare with @secret.txt END-OF-PROMPT-MARKER"
+    request = _capture_first_request(tmp_path, monkeypatch, prompt=prompt, run_backend=True)
+
+    sent = json.dumps(request.get("contents") or [])
+    assert "END-OF-PROMPT-MARKER" in sent and "tester%00" in sent and "example.com" in sent
+    assert "HOST-FILE-CONTENT" not in sent
+
+
 def test_a_tool_larger_than_one_environment_string_reaches_the_model(tmp_path, monkeypatch):
     # Tools travel to the MCP server serialized; Linux rejects any single
     # environment string above 128 KiB with E2BIG, and macOS caps the total.

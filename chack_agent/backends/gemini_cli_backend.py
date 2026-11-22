@@ -103,6 +103,17 @@ def _safe_settings_value(value: Any) -> str:
     return str(value)
 
 
+def _escape_at_commands(prompt: str) -> str:
+    """Make every "@" in the prompt plain text for Gemini CLI.
+
+    Gemini CLI reads "@<path>" in a prompt as a file to inline, and an "@"
+    preceded by a backslash as text. Prompts carry data (emails, parameter
+    names, target content): unescaped, "a@tester%00" stops the run on a NUL
+    path and "@<file>" would inline a host file the run must not read.
+    """
+    return re.sub(r"(?<!\\)@", r"\\@", prompt)
+
+
 def _send_prompt(process: subprocess.Popen, prompt: str) -> None:
     """Write the prompt to the CLI's stdin without blocking on the pipe buffer.
 
@@ -527,7 +538,7 @@ class GeminiCliExecutor:
                 _RawResult(raw_responses=[]),
             )
 
-        _send_prompt(process, prompt)
+        _send_prompt(process, _escape_at_commands(prompt))
         cancel_registration = register_process(process, _terminate_process_tree)
         reader = CliLineReader(process.stdout)
         output_parts: list[str] = []
