@@ -149,3 +149,15 @@ def test_claude_executor_discards_an_invalidated_oauth_token(monkeypatch):
 
     assert executor._claude_access_token == ""
     assert executor._claude_session_id is None
+
+
+def test_hook_receives_the_rejected_token_and_legacy_hooks_still_run():
+    received = []
+    set_provider_pre_launch_hook(
+        lambda provider, rejected_token="": received.append(rejected_token) or {"access_token": "new"}
+    )
+    assert run_provider_pre_launch_hook("claude", rejected_token="old") == {"access_token": "new"}
+    assert received == ["old"]
+
+    set_provider_pre_launch_hook(lambda provider: {"access_token": f"{provider}-plain"})
+    assert run_provider_pre_launch_hook("claude", rejected_token="old") == {"access_token": "claude-plain"}

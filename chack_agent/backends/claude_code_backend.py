@@ -999,6 +999,21 @@ class ClaudeCodeExecutor:
                 result = self._run_claude_once(prompt)
             finally:
                 self._model_name, self._gateway_env_json = model_name, env_json
+        if self._looks_like_token_rejection(result[0]):
+            # An expired or revoked OAuth access token: let the host renew the
+            # same credential before rotating to another one. The renewed token
+            # of the same credential keeps the Claude session.
+            rejected_token = self._claude_access_token
+            renewed = run_provider_pre_launch_hook("claude", rejected_token=rejected_token)
+            renewed_token = str(renewed.get("access_token", "") or "").strip()
+            if renewed_token and renewed_token != rejected_token:
+                credential_id = str(renewed.get("credential_id", "") or "").strip()
+                same_credential = bool(credential_id and credential_id == self._claude_credential_id)
+                _LOGGER.warning("Claude rejected the OAuth access token; retrying with the renewed token.")
+                self._claude_access_token = renewed_token
+                self._claude_credential_id = credential_id
+                self._claude_session_id = session_before if same_credential else None
+                result = self._run_claude_once(prompt)
         while self._looks_like_credential_failure(result[0]):
             rotated = rotate_environment_credentials("claude", self._claude_access_token)
             rotated_token = str(rotated.get("access_token", "") or "").strip()
@@ -1040,6 +1055,27 @@ class ClaudeCodeExecutor:
         time.sleep(wait_seconds)
         self._claude_session_id = None
         return self._run_claude_once(prompt)
+
+    def _looks_like_token_rejection(self, output: str) -> bool:
+        """An authentication failure (not a usage limit) on a Claude OAuth token."""
+        if self._uses_gateway_route or not self._claude_access_token:
+            return False
+        text = str(output or "").strip().lower()
+        if not text.startswith("error:"):
+            return False
+        return any(
+            marker in text
+            for marker in (
+                "authentication_error",
+                "unauthorized",
+                "invalid token",
+                "invalid oauth",
+                "oauth token",
+                "status code 401",
+                "http 401",
+                "invalid api key",
+            )
+        )
 
     def _looks_like_credential_failure(self, output: str) -> bool:
         if self._uses_gateway_route or not self._claude_access_token:

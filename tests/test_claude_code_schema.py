@@ -1128,3 +1128,62 @@ def test_turn_limit_again_on_the_final_answer_run_is_reported(monkeypatch, tmp_p
 
     assert output.startswith("ERROR:") and "error_max_turns" in output
     assert len(calls) == 2
+
+
+def test_claude_rejected_oauth_token_is_renewed_by_the_host_and_keeps_the_session(monkeypatch) -> None:
+    from chack_agent.provider_launch_hooks import set_provider_pre_launch_hook
+
+    executor = _build_executor("")
+    executor._claude_access_token = "expired-token"
+    executor._claude_credential_id = "profile-1"
+    executor._claude_session_id = "session-1"
+    hook_calls = []
+
+    def hook(provider, rejected_token=""):
+        hook_calls.append(rejected_token)
+        if rejected_token:
+            return {"access_token": "renewed-token", "credential_id": "profile-1"}
+        return {"access_token": "expired-token", "credential_id": "profile-1"}
+
+    set_provider_pre_launch_hook(hook)
+    tokens = []
+    results = iter(
+        [
+            ("ERROR: Failed to authenticate. API Error: 401 OAuth token has expired", [], None),
+            ("model answer", [], None),
+        ]
+    )
+
+    def _run_once(_prompt):
+        tokens.append((executor._claude_access_token, executor._claude_session_id))
+        return next(results)
+
+    monkeypatch.setattr(executor, "_run_claude_once", _run_once)
+    try:
+        output, _, _ = executor._run_claude("test")
+    finally:
+        set_provider_pre_launch_hook(None)
+
+    assert output == "model answer"
+    assert hook_calls == ["", "expired-token"]
+    assert tokens == [("expired-token", "session-1"), ("renewed-token", "session-1")]
+
+
+def test_claude_usage_limit_does_not_ask_the_host_to_renew_the_token(monkeypatch) -> None:
+    from chack_agent.provider_launch_hooks import set_provider_pre_launch_hook
+
+    executor = _build_executor("")
+    executor._claude_access_token = "valid-token"
+    hook_calls = []
+    set_provider_pre_launch_hook(
+        lambda provider, rejected_token="": hook_calls.append(rejected_token) or {"access_token": "valid-token"}
+    )
+    monkeypatch.setattr(
+        executor, "_run_claude_once", lambda _prompt: ("ERROR: You've hit your limit · resets 5pm", [], None)
+    )
+    try:
+        executor._run_claude("test")
+    finally:
+        set_provider_pre_launch_hook(None)
+
+    assert hook_calls == [""]
