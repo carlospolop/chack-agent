@@ -185,6 +185,38 @@ def _empty_answer_note(answer: Any, request_body: bytes | None) -> dict[str, Any
     }
 
 
+def _answer_shape(answer: Any) -> dict[str, Any]:
+    """What one model answer held, without its content: finish reasons, how many
+    parts of each kind (tool call, text, thought, empty) and its token counts."""
+
+    shape: dict[str, Any] = {"finish_reason": [], "function_call": 0, "text": 0, "thought": 0, "empty": 0}
+    candidates = answer.get("candidates") if isinstance(answer, dict) else None
+    for candidate in candidates if isinstance(candidates, list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        shape["finish_reason"].append(str(candidate.get("finishReason") or "none"))
+        content = candidate.get("content")
+        parts = content.get("parts") if isinstance(content, dict) else None
+        for part in parts if isinstance(parts, list) else []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("functionCall"):
+                shape["function_call"] += 1
+            elif part.get("thought"):
+                shape["thought"] += 1
+            elif str(part.get("text") or "").strip():
+                shape["text"] += 1
+            else:
+                shape["empty"] += 1
+    shape["finish_reason"] = ",".join(shape["finish_reason"]) or "no candidates"
+    metadata = answer.get("usageMetadata") if isinstance(answer, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    shape["input_tokens"] = int(metadata.get("promptTokenCount", 0) or 0)
+    shape["output_tokens"] = int(metadata.get("candidatesTokenCount", 0) or 0)
+    shape["thinking_tokens"] = int(metadata.get("thoughtsTokenCount", 0) or 0)
+    return shape
+
+
 # Provider prefix caches store whole blocks of a recent request's tokens and
 # skip prompts too short to cache: measured on a LiteLLM gateway, the cached
 # count of each call was the previous request's prompt rounded down to a
@@ -391,6 +423,10 @@ class GeminiGatewayRelay:
         self._usage_lock = threading.Lock()
         self._usage: list[dict[str, int]] = []
         self._estimating = False
+        # The last answer to a request offering tools (the agent's own turn), and
+        # how many answers to the CLI's helper calls (no tools) came after it.
+        self._last_turn: dict[str, Any] | None = None
+        self._helper_answers = 0
 
     def take_usage(self) -> list[dict[str, int]]:
         """Usage of the answers relayed since the last call, one entry per answer."""
@@ -398,11 +434,26 @@ class GeminiGatewayRelay:
             usage, self._usage = self._usage, []
         return usage
 
+    def last_answer_shape(self) -> dict[str, Any] | None:
+        """The shape (``_answer_shape``) of the last answer to an agent turn, with
+        the number of helper-call answers relayed after it; None before any."""
+
+        with self._usage_lock:
+            if self._last_turn is None:
+                return None
+            return {**self._last_turn, "helper_answers_after": self._helper_answers}
+
     def _record_usage(self, body: bytes, request_body: bytes | None = None) -> None:
         try:
             answer = json.loads(body)
         except ValueError:
             return
+        shape = _answer_shape(answer)
+        with self._usage_lock:
+            if request_body and b'"functionDeclarations"' in request_body:
+                self._last_turn, self._helper_answers = shape, 0
+            else:
+                self._helper_answers += 1
         empty = _empty_answer_note(answer, request_body)
         if empty is not None:
             _LOGGER.warning(

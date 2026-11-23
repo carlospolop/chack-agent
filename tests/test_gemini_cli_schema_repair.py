@@ -334,3 +334,39 @@ def test_resuming_a_session_the_cli_did_not_keep_runs_the_turn_in_a_new_session_
     assert "-r" not in fresh
     assert fake_gemini.prompts[2].startswith(fake_gemini.prompts[0])
     assert fake_gemini.prompts[2].endswith(fake_gemini.prompts[1])
+
+
+def test_a_turn_the_cli_stops_on_loop_detection_says_so_and_names_the_events_it_skipped(fake_gemini, caplog):
+    looped = _run("")
+    looped["events"] = [event for event in looped["events"] if event["type"] != "message"]
+    looped["events"][-1:-1] = [
+        {"type": "error", "severity": "warning", "message": "Loop detected, stopping execution"},
+        {"type": "thought_summary", "subject": "planning"},
+        {"type": "thought_summary", "subject": "planning"},
+    ]
+    fake_gemini.script([looped, _run(json.dumps(VALID), tool_id="t2")])
+
+    with caplog.at_level("WARNING", logger="chack.gemini_cli_backend"):
+        result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == VALID
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(m.startswith("Gemini CLI ended the turn on loop detection") for m in messages)
+    empty = [m for m in messages if m.startswith("Gemini CLI turn ended without an answer after 1 tool steps")]
+    assert len(empty) == 1
+    assert "Loop detected, stopping execution" in empty[0]
+    assert "'thought_summary': 2" in empty[0] and "last_model_answer=not relayed" in empty[0]
+
+
+def test_a_cli_error_event_on_an_answered_turn_is_logged_and_the_answer_kept(fake_gemini, caplog):
+    run = _run(json.dumps(VALID))
+    run["events"].insert(1, {"type": "error", "severity": "error", "message": "Invalid stream " + "x" * 1000})
+    fake_gemini.script([run])
+
+    with caplog.at_level("WARNING", logger="chack.gemini_cli_backend"):
+        result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == VALID
+    reported = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Gemini CLI reported error: Invalid")]
+    assert len(reported) == 1 and len(reported[0]) < 400
+    assert not any("without an answer" in r.getMessage() for r in caplog.records)
