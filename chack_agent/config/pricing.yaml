@@ -475,8 +475,8 @@ models:
     output: 0.15
   google/gemma-3-27b-it:
     input: 0.08
-    cache_read: 0.04
-    output: 0.45
+    cache_read: 0.08
+    output: 0.16
   google/gemma-3-4b-it:
     input: 0.04
     cache_read: 0.02
@@ -771,9 +771,9 @@ models:
     cache_read: 0.182
     output: 16
   moonshotai/kimi-k3.1-pro:
-    input: 0.253
-    cache_read: 0.18
-    output: 8.8
+    input: 0.2403
+    cache_read: 0.2
+    output: 8.4023
   moonshotai/kimi-k3.1-pro:batch:
     input: 0.372
     cache_read: 0.1
@@ -1207,17 +1207,17 @@ models:
     cache_read: 0.5
     output: 30
   openai/gpt-oss-120b:
-    input: 0.09
-    cache_read: 0.09
-    output: 0.36
+    input: 0.05
+    cache_read: 0.05
+    output: 0.25
   openai/gpt-oss-120b:batch:
     input: 0.0296
     cache_read: 0.0296
     output: 0.136
   openai/gpt-oss-20b:
-    input: 0.017
-    cache_read: 0.0085
-    output: 0.085
+    input: 0.03
+    cache_read: 0.03
+    output: 0.13
   openai/gpt-oss-20b:batch:
     input: 0.024
     cache_read: 0.024
@@ -1418,9 +1418,9 @@ models:
     cache_read: 0.32
     output: 3.2
   qwen/qwen3.6-35b-a3b:
-    input: 0.1
+    input: 0.05
     cache_read: 0.025
-    output: 0.9
+    output: 0.7
   qwen/qwen3.6-flash:
     input: 0.1875
     cache_read: 0.1875
@@ -1724,9 +1724,9 @@ models:
     cache_read: 0.055
     output: 0.9
   z-ai/glm-4.7:
-    input: 0.4
-    cache_read: 0.08
-    output: 1.75
+    input: 0.6
+    cache_read: 0.11
+    output: 2.2
   z-ai/glm-4.7-flash:
     input: 0.0605
     cache_read: 0.0605
@@ -1740,9 +1740,9 @@ models:
     cache_read: 0.24
     output: 4
   z-ai/glm-5.1:
-    input: 1.19
-    cache_read: 0.6
-    output: 3.74
+    input: 1.4
+    cache_read: 0.26
+    output: 4.4
   z-ai/glm-5.2:
     input: 0.62
     cache_read: 0.14
@@ -1808,9 +1808,9 @@ models:
     cache_read: 0.01
     output: 0.5
   ~deepseek/deepseek-pro-latest:
-    input: 0.0999
-    cache_read: 0.0999
-    output: 8
+    input: 0.1188
+    cache_read: 0.12
+    output: 5
   ~deepseek/deepseek-v4-flash-latest:
     input: 0.044
     cache_read: 0.0014
