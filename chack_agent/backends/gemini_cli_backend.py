@@ -896,6 +896,10 @@ class GeminiCliExecutor:
             "model": {
                 "name": self._model_name,
                 "maxSessionTurns": self._turn_budget_override or (self._max_turns if self._max_turns > 0 else -1),
+                # The CLI's loop detector ends turns that had already produced
+                # their answer, discarding it (seen on long web-audit turns).
+                # max_turns, tool and cost limits still bound real loops.
+                "disableLoopDetection": True,
             },
             "modelConfigs": {
                 "overrides": [
