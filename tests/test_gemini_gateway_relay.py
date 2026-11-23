@@ -709,3 +709,40 @@ def test_an_answer_without_text_or_tool_call_logs_why_without_its_content(gatewa
     assert "input_tokens=90000" in warnings[0] and "output_tokens=8192" in warnings[0]
     assert "thinking_tokens=8000" in warnings[0] and "max_output_tokens=8192" in warnings[0]
     assert "secret plan" not in caplog.text
+
+
+def test_the_last_agent_turn_answer_shape_is_kept_without_content_and_helper_calls_counted(gateway):
+    base_url, _, answers = gateway
+    url_path = "/v1beta/models/m:generateContent"
+    turn = json.dumps({"contents": [], "tools": [{"functionDeclarations": [{"name": "exec"}]}]}).encode()
+    helper = json.dumps({"contents": []}).encode()
+    tool_call = {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": "hidden reasoning", "thought": True}, {"functionCall": {"name": "exec", "args": {"c": "id"}}}]},
+                "finishReason": "STOP",
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 500, "candidatesTokenCount": 20, "thoughtsTokenCount": 7},
+    }
+    with GeminiGatewayRelay(base_url, model="m") as relay:
+        assert relay.last_answer_shape() is None
+        answers["generateContent"] = (200, json.dumps(tool_call).encode())
+        _post(relay.base_url + url_path, turn)
+        answers["generateContent"] = (200, json.dumps(ANSWER).encode())
+        _post(relay.base_url + url_path, helper)
+        _post(relay.base_url + url_path, helper)
+        shape = relay.last_answer_shape()
+
+    assert shape == {
+        "finish_reason": "STOP",
+        "function_call": 1,
+        "text": 0,
+        "thought": 1,
+        "empty": 0,
+        "input_tokens": 500,
+        "output_tokens": 20,
+        "thinking_tokens": 7,
+        "helper_answers_after": 2,
+    }
+    assert "hidden reasoning" not in json.dumps(shape) and "exec" not in json.dumps(shape)

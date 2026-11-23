@@ -70,6 +70,16 @@ _TURN_LIMIT_ERROR = "ERROR: Gemini result error: Reached max session turns"
 # ended without text, tool calls or thoughts), yet its init event already gave
 # the id; resuming it then fails with one of these.
 _SESSION_GONE_ERRORS = ("No previous sessions found for this project", "Invalid session identifier")
+# Headless stream-json reports what stopped a turn early (loop detection,
+# turn limits, invalid streams) as an "error" event, not in the result.
+_LOOP_DETECTED_NOTICE = "warning: Loop detected"
+_CLI_NOTICE_CHARS = 300
+
+
+def _cli_notice(event: dict) -> str:
+    severity = str(event.get("severity") or "error").strip()
+    message = str(event.get("message") or "").strip()
+    return f"{severity}: {message[:_CLI_NOTICE_CHARS]}"
 
 
 _GEMINI_CLI_DENYLIST_TOOLS = {
@@ -550,6 +560,11 @@ class GeminiCliExecutor:
         started_at = time.monotonic()
         time_to_first_token_seconds: float | None = None
         tool_calls: dict[str, tuple[str, dict[str, Any]]] = {}
+        # The CLI's own notices (loop detection, invalid streams, stops) and the
+        # stream-json event types Chack does not read, kept to explain a turn
+        # that ends without an answer.
+        cli_notices: list[str] = []
+        ignored_events: dict[str, int] = {}
 
         try:
             while True:
@@ -591,6 +606,15 @@ class GeminiCliExecutor:
                         0.0,
                         time.monotonic() - started_at,
                     )
+                if event_type == "error":
+                    notice = _cli_notice(event)
+                    cli_notices.append(notice)
+                    if notice.startswith(_LOOP_DETECTED_NOTICE):
+                        _LOGGER.warning("Gemini CLI ended the turn on loop detection: %s", notice)
+                    else:
+                        _LOGGER.warning("Gemini CLI reported %s", notice)
+                    continue
+
                 if event_type == "init":
                     session_id = str(event.get("session_id") or "").strip()
                     if session_id:
@@ -688,6 +712,9 @@ class GeminiCliExecutor:
                         )
                     break
 
+                if event_type:
+                    ignored_events[event_type] = ignored_events.get(event_type, 0) + 1
+
             return_code = process.wait()
         finally:
             unregister_process(cancel_registration)
@@ -719,6 +746,15 @@ class GeminiCliExecutor:
             _LOGGER.info(
                 "Gemini CLI turn ended without an answer; it printed: %s",
                 "\n".join(text_lines).strip()[-500:],
+            )
+        if not response:
+            _LOGGER.warning(
+                "Gemini CLI turn ended without an answer after %d tool steps: cli_notices=%s "
+                "ignored_events=%s last_model_answer=%s",
+                len(steps),
+                cli_notices[-5:] or None,
+                ignored_events or None,
+                relay.last_answer_shape() if relay is not None else "not relayed",
             )
 
         return response, steps, _RawResult(
