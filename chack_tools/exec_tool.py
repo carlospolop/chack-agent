@@ -10,7 +10,6 @@ except ImportError:
     function_tool = None
 
 from .config import ToolsConfig
-from .formatting import _truncate
 from .run_lifecycle import (
     active_task_session_id,
     register_process_group,
@@ -43,6 +42,27 @@ def _command_env() -> dict[str, str]:
     else:
         env.pop("PYTHONPATH", None)
     return env
+
+
+def _spill(output: str, max_chars: int) -> str:
+    """Output within max_chars, or its head and tail with the complete text saved to a file.
+
+    A truncated answer used to lose the rest, so reading it meant running the
+    command again (another request to a target, another model turn); the file
+    keeps it readable with grep/sed/jq instead.
+    """
+    if len(output) <= max_chars:
+        return output
+    handle, path = tempfile.mkstemp(prefix="exec-output-", suffix=".txt")
+    with os.fdopen(handle, "w", encoding="utf-8") as spill:
+        spill.write(output)
+    tail = max_chars // 4
+    head = max_chars - tail
+    return (
+        f"{output[:head]}\n[... {len(output) - head - tail} of {len(output)} characters omitted. "
+        f"The complete output is saved in {path}; read the part you need with grep, sed, jq, head or tail "
+        f"on that file instead of running the command again.]\n{output[len(output) - tail:]}"
+    )
 
 
 def _read_back(handle) -> str:
@@ -113,7 +133,7 @@ class ExecTool:
             stdout, stderr = _read_back(stdout_file), _read_back(stderr_file)
         output = (stdout or "") + (stderr or "")
         output = output.strip() or "(no output)"
-        return _truncate(output, max_chars)
+        return _spill(output, max_chars)
 
 
 def _build_exec_tool(helper: ExecTool, *, name: str):
@@ -125,7 +145,7 @@ def _build_exec_tool(helper: ExecTool, *, name: str):
         """Execute a shell command locally and return combined output.
 
         Use this to access local CLIs, curl/wget endpoints, and inspect files using tools like rg, find, ls, cat, head...
-        If the output is large or truncated, re-run with grep/jq/sed to narrow it.
+        Output larger than the limit returns its start and end plus the path of a file holding all of it.
         Ideal for gathering evidence or checking system state; avoid destructive commands unless asked.
         This synchronous command has a hard timeout from tools.exec_timeout_seconds (default 60s).
         For long-running processes, start them in the background with explicit log/output files,
@@ -137,7 +157,7 @@ def _build_exec_tool(helper: ExecTool, *, name: str):
                 `tools.exec_cwd`, then `CHACK_EXEC_CWD`.
 
         Output: Returns SUCCESS/ERROR-style text with the command exit code and combined stdout/stderr.
-        Large output may be truncated, so narrow follow-up commands with rg/jq/sed/head/tail when needed.
+        Large output is shortened to its start and end; the complete text is in the file the answer names.
         """
         tool_input = {"command": command, "cwd": cwd}
         return run_with_tool_logging(name, tool_input, lambda: helper.run(command, cwd=cwd))
@@ -146,7 +166,7 @@ def _build_exec_tool(helper: ExecTool, *, name: str):
         f"{exec_tool.description}\n\n"
         "Parameters: Provide command as the local shell command to run and cwd only when it should run from a specific directory.\n"
         "Timeout: Synchronous commands are limited by tools.exec_timeout_seconds (default 60s); run long processes in the background and monitor logs/files with short follow-up commands.\n"
-        "Output: Returns SUCCESS/ERROR-style text with the command exit code and combined stdout/stderr. Large output may be truncated; narrow follow-ups with rg/jq/sed/head/tail."
+        "Output: Returns SUCCESS/ERROR-style text with the command exit code and combined stdout/stderr. Large output is shortened to its start and end and saved whole to a file the answer names; read that file with rg/jq/sed/head/tail rather than re-running the command."
     )
     return exec_tool
 
