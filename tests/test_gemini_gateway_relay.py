@@ -673,3 +673,39 @@ def test_prefix_cache_estimates_expire_and_skip_short_prompts():
     assert estimator.estimate(key, second, 11_000) == 0
     assert estimator.estimate(key, "short prompt", 500) == 0
     assert estimator.estimate(key, "short prompt", 500) == 0
+
+
+def test_an_answer_without_text_or_tool_call_logs_why_without_its_content(gateway, caplog):
+    base_url, _, answers = gateway
+    url_path = "/v1beta/models/bakkt/deepseek:streamGenerateContent?alt=sse"
+    request = json.dumps({"contents": [], "generationConfig": {"maxOutputTokens": 8192}}).encode()
+    empty = {
+        "candidates": [
+            {
+                "content": {"role": "model", "parts": [{"text": "secret plan", "thought": True}, {"text": " "}]},
+                "finishReason": "MAX_TOKENS",
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 90_000, "candidatesTokenCount": 8_192, "thoughtsTokenCount": 8_000},
+    }
+    tool_call = {
+        "candidates": [{"content": {"parts": [{"functionCall": {"name": "exec", "args": {}}}]}, "finishReason": "STOP"}],
+        "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
+    }
+    with caplog.at_level("WARNING", logger="chack.gemini_gateway_relay"):
+        with GeminiGatewayRelay(base_url, model="bakkt/deepseek") as relay:
+            answers["generateContent"] = (200, json.dumps(empty).encode())
+            status, _, _ = _post(relay.base_url + url_path, request)
+            answers["generateContent"] = (200, json.dumps(tool_call).encode())
+            _post(relay.base_url + url_path, request)
+            answers["generateContent"] = (200, b"")
+            _post(relay.base_url + url_path, request)
+            counted = relay.take_usage()
+
+    assert status == 200 and len(counted) == 3
+    warnings = [record.getMessage() for record in caplog.records if "no text or tool call" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "finish_reason=MAX_TOKENS" in warnings[0]
+    assert "input_tokens=90000" in warnings[0] and "output_tokens=8192" in warnings[0]
+    assert "thinking_tokens=8000" in warnings[0] and "max_output_tokens=8192" in warnings[0]
+    assert "secret plan" not in caplog.text
