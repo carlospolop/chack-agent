@@ -142,6 +142,49 @@ def _usage_of(answer: Any) -> dict[str, int] | None:
     }
 
 
+def _empty_answer_note(answer: Any, request_body: bytes | None) -> dict[str, Any] | None:
+    """Why a model answer carried neither text nor a tool call, without its content.
+
+    Holds the finish reason, the answer's input/output/thinking tokens and the
+    request's output limit, so an output cutoff can be told from an answer the
+    model chose to leave empty. None when the answer has text or a tool call.
+    """
+
+    if not isinstance(answer, dict):
+        return None
+    candidates = answer.get("candidates")
+    candidates = candidates if isinstance(candidates, list) else []
+    reasons = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        parts = content.get("parts") if isinstance(content, dict) else None
+        for part in parts if isinstance(parts, list) else []:
+            if not isinstance(part, dict) or part.get("thought"):
+                continue
+            if part.get("functionCall") or str(part.get("text") or "").strip():
+                return None
+        reasons.append(str(candidate.get("finishReason") or "none"))
+    metadata = answer.get("usageMetadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    limit = None
+    try:
+        generation = json.loads(request_body or b"{}").get("generationConfig")
+        limit = generation.get("maxOutputTokens") if isinstance(generation, dict) else None
+    except (ValueError, AttributeError):
+        pass
+    feedback = answer.get("promptFeedback")
+    return {
+        "finish_reason": ",".join(reasons) or "no candidates",
+        "block_reason": feedback.get("blockReason") if isinstance(feedback, dict) else None,
+        "input_tokens": int(metadata.get("promptTokenCount", 0) or 0),
+        "output_tokens": int(metadata.get("candidatesTokenCount", 0) or 0),
+        "thinking_tokens": int(metadata.get("thoughtsTokenCount", 0) or 0),
+        "max_output_tokens": limit,
+    }
+
+
 # Provider prefix caches store whole blocks of a recent request's tokens and
 # skip prompts too short to cache: measured on a LiteLLM gateway, the cached
 # count of each call was the previous request's prompt rounded down to a
@@ -357,9 +400,23 @@ class GeminiGatewayRelay:
 
     def _record_usage(self, body: bytes, request_body: bytes | None = None) -> None:
         try:
-            usage = _usage_of(json.loads(body))
+            answer = json.loads(body)
         except ValueError:
             return
+        empty = _empty_answer_note(answer, request_body)
+        if empty is not None:
+            _LOGGER.warning(
+                "Gemini gateway answer for %s had no text or tool call: finish_reason=%s block_reason=%s "
+                "input_tokens=%s output_tokens=%s thinking_tokens=%s max_output_tokens=%s",
+                self._model or "the requested model",
+                empty["finish_reason"],
+                empty["block_reason"],
+                empty["input_tokens"],
+                empty["output_tokens"],
+                empty["thinking_tokens"],
+                empty["max_output_tokens"],
+            )
+        usage = _usage_of(answer)
         if usage is None:
             return
         key = (self._upstream_base_url, self._model)
