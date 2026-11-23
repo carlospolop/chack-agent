@@ -36,7 +36,8 @@ FAKE_GEMINI = textwrap.dedent(
         json.dump(calls, handle)
     settings_path = os.path.join(os.environ["GEMINI_CLI_HOME"], ".gemini", "settings.json")
     with open(settings_path) as handle:
-        turn_budget = json.load(handle)["model"]["maxSessionTurns"]
+        model_settings = json.load(handle)["model"]
+    turn_budget = model_settings["maxSessionTurns"]
     with open(record + ".turns", "a") as handle:
         handle.write(f"{turn_budget}\\n")
     with open(record + ".prompts", "a") as handle:
@@ -56,7 +57,12 @@ FAKE_GEMINI = textwrap.dedent(
     run = runs[min(len(calls), len(runs)) - 1]
     for line in run.get("stderr", []):
         print(line, file=sys.stderr, flush=True)
-    for event in run.get("events", []):
+    events = run.get("events", [])
+    if run.get("loop_detector_fires") and not model_settings.get("disableLoopDetection"):
+        # Like the real CLI: the loop stop drops the answer the turn produced.
+        events = [e for e in events if e["type"] != "message"]
+        events.insert(-1, {"type": "error", "severity": "warning", "message": "Loop detected, stopping execution"})
+    for event in events:
         print(json.dumps(event), flush=True)
     sys.exit(run.get("exit", 0))
     """
@@ -370,3 +376,16 @@ def test_a_cli_error_event_on_an_answered_turn_is_logged_and_the_answer_kept(fak
     reported = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Gemini CLI reported error: Invalid")]
     assert len(reported) == 1 and len(reported[0]) < 400
     assert not any("without an answer" in r.getMessage() for r in caplog.records)
+
+
+def test_a_turn_the_cli_loop_detector_would_stop_keeps_its_answer(fake_gemini, caplog):
+    run = _run(json.dumps(VALID))
+    run["loop_detector_fires"] = True
+    fake_gemini.script([run])
+
+    with caplog.at_level("WARNING", logger="chack.gemini_cli_backend"):
+        result = _executor().invoke({"input": "Assess the service."})
+
+    assert json.loads(result["output"]) == VALID
+    assert len(fake_gemini.calls) == 1
+    assert not any("loop detection" in r.getMessage() for r in caplog.records)
