@@ -123,3 +123,26 @@ def test_a_timed_out_command_returns_even_if_a_child_left_its_process_group():
 
     assert "partial" in (raised.value.output or "")
     assert time.monotonic() - started < 5
+
+
+def test_exec_output_over_the_limit_keeps_its_end_and_saves_everything(monkeypatch, tmp_path):
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    command = "seq 1 5000; echo 'exit status: last line'"
+
+    output = ExecTool(ToolsConfig(exec_enabled=True, exec_max_output_chars=400)).run(command)
+
+    saved = list(tmp_path.glob("exec-output-*.txt"))
+    assert len(saved) == 1 and str(saved[0]) in output
+    assert saved[0].read_text() == subprocess.run(command, shell=True, capture_output=True, text=True).stdout.strip()
+    assert output.startswith("1\n2\n3\n")
+    assert output.endswith("exit status: last line")
+    assert len(output) < 400 + 400
+
+
+def test_exec_output_within_the_limit_is_returned_whole_without_a_file(monkeypatch, tmp_path):
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+
+    output = ExecTool(ToolsConfig(exec_enabled=True, exec_max_output_chars=400)).run("seq 1 50")
+
+    assert output == "\n".join(str(n) for n in range(1, 51))
+    assert not list(tmp_path.glob("exec-output-*.txt"))
