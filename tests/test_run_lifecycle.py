@@ -1064,6 +1064,52 @@ def test_a_backend_failure_reports_the_usage_and_cost_it_spent(isolated_run_stat
     assert result.tools_used == 1
 
 
+class _SessionExecutor(_FailingAfterWorkExecutor):
+    """A CLI executor that reports its session and can adopt an earlier one."""
+
+    def __init__(self, usable=True):
+        super().__init__()
+        self.usable = usable
+        self.adopted = None
+
+    def adopt_cli_session(self, handle):
+        if not self.usable:
+            return False
+        self.adopted = handle
+        return True
+
+    def cli_session_handle(self):
+        return dict(self.adopted) if self.adopted else {"backend": "gemini", "session_id": "s-1", "home": "/h/1"}
+
+
+def test_a_failed_run_leaves_its_cli_session_and_a_later_run_resumes_it(isolated_run_state):
+    agent = _InjectedExecutorChack(_fallback_config())
+    agent.executor = _SessionExecutor()
+    agent.run("first", "do work", enable_self_critique=False, require_task_steps_manager_init_first=False)
+    handle = agent.last_cli_session
+
+    later = _InjectedExecutorChack(_fallback_config())
+    later.executor = _SessionExecutor()
+    later.run("second", "do work", enable_self_critique=False, require_task_steps_manager_init_first=False,
+              resume_cli_session=handle)
+
+    assert handle == {"backend": "gemini", "session_id": "s-1", "home": "/h/1"}
+    assert later.executor.adopted == handle
+    assert later.last_cli_session == handle
+
+
+def test_a_cli_session_the_backend_cannot_use_leaves_the_run_on_a_new_session(isolated_run_state, caplog):
+    agent = _InjectedExecutorChack(_fallback_config())
+    agent.executor = _SessionExecutor(usable=False)
+
+    with caplog.at_level("WARNING", logger="chack.agent"):
+        agent.run("run", "do work", enable_self_critique=False, require_task_steps_manager_init_first=False,
+                  resume_cli_session={"backend": "gemini", "session_id": "s-1", "home": "/missing"})
+
+    assert agent.executor.adopted is None
+    assert "cannot resume the given CLI session; starting a new one" in caplog.text
+
+
 def test_default_run_does_not_ask_for_more_tool_calls(isolated_run_state):
     config = _fallback_config()
     config.tools = ToolsConfig()

@@ -103,6 +103,10 @@ _GEMINI_CLI_DENYLIST_TOOLS = {
 }
 
 
+_CLI_SESSION_BACKEND = "gemini"
+_CLI_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
 def _sanitize_session_id(session_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", str(session_id or "").strip()).strip()
 
@@ -263,6 +267,34 @@ class GeminiCliExecutor:
         self._gemini_home: str | None = None
         self._gemini_session_id: str | None = None
         self._session_prompt = ""
+        # The home of an adopted earlier session (``adopt_cli_session``).
+        self._adopted_home: str | None = None
+
+    def cli_session_handle(self) -> dict[str, str] | None:
+        """What a later run needs to resume this CLI session: the CLI's session
+        id and the home holding it; None before the CLI reported a session."""
+
+        if not (self._gemini_session_id and self._gemini_home):
+            return None
+        return {"backend": _CLI_SESSION_BACKEND, "session_id": self._gemini_session_id, "home": self._gemini_home}
+
+    def adopt_cli_session(self, handle: Any) -> bool:
+        """Resume the session ``handle`` (from ``cli_session_handle``) on this
+        executor's first turn. Returns False, leaving a new session to start,
+        when the handle is not a Gemini one or its home is missing or not
+        usable; a session the CLI no longer has starts anew on that turn."""
+
+        if self._gemini_home or not isinstance(handle, dict) or handle.get("backend") != _CLI_SESSION_BACKEND:
+            return False
+        session_id = str(handle.get("session_id") or "")
+        home = str(handle.get("home") or "")
+        if not _CLI_SESSION_ID_RE.match(session_id) or not os.path.isabs(home):
+            return False
+        if not os.path.isdir(home) or not os.access(home, os.R_OK | os.W_OK | os.X_OK):
+            return False
+        self._adopted_home = home
+        self._gemini_session_id = session_id
+        return True
 
     def invoke(self, payload: dict[str, Any], context: Any = None) -> dict[str, Any]:
         del context
@@ -867,7 +899,7 @@ class GeminiCliExecutor:
         if self._gemini_home:
             return
         session = _sanitize_session_id(current_session_id() or "default")
-        base = os.path.join(
+        base = self._adopted_home or os.path.join(
             os.path.expanduser(os.environ.get("CHACK_GEMINI_HOME", os.path.expanduser("~/.gemini/chack")) or ""),
             session,
         )
