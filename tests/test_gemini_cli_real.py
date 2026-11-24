@@ -262,3 +262,111 @@ def test_a_gateway_answer_without_token_usage_is_reported(monkeypatch, tmp_path,
 
     assert "hello" in str(result.get("output"))
     assert "reported no token usage for corp/glm-5.2" in caplog.text
+
+
+def _session_gateway(after_tool_call):
+    """A LiteLLM-style Gemini API for one agent session: the first model call
+    asks for Chack's exec tool, later calls follow ``after_tool_call`` steps
+    (``(status, payload)``), whose last step repeats."""
+
+    calls: list[str] = []
+
+    def _usage(prompt):
+        return {"promptTokenCount": prompt, "candidatesTokenCount": 20, "totalTokenCount": prompt + 20}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+            calls.append(self.path)
+            declarations = [
+                declaration
+                for tool in request.get("tools") or []
+                for declaration in tool.get("functionDeclarations") or []
+            ]
+            if not declarations:
+                # A helper call of the CLI's own (routing, summaries): answer it plainly.
+                status, payload = 200, {"candidates": [{"content": {"role": "model", "parts": [{"text": "ok"}]},
+                                                        "finishReason": "STOP"}], "usageMetadata": _usage(10)}
+            elif not any(
+                part.get("functionResponse")
+                for content in request.get("contents") or []
+                for part in content.get("parts") or []
+            ):
+                exec_tool = next(d["name"] for d in declarations if d["name"].endswith("exec"))
+                status, payload = 200, {
+                    "candidates": [{"content": {"role": "model", "parts": [
+                        {"functionCall": {"name": exec_tool, "args": {"command": "echo tool-ran"}}}]},
+                        "finishReason": "STOP"}],
+                    "usageMetadata": _usage(1000),
+                }
+            else:
+                agent_calls = sum(1 for path in calls) - 1
+                status, payload = after_tool_call[min(agent_calls, len(after_tool_call)) - 1]
+            body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, calls
+
+
+_UPSTREAM_TIMEOUT = (504, b'{"error":{"message":"upstream request timeout","code":504}}')
+
+
+def _run_session(monkeypatch, tmp_path, after_tool_call):
+    from chack_agent.backends import transient_retry
+
+    monkeypatch.setattr(transient_retry, "BASE_DELAY_SECONDS", 0.05)
+    server, calls = _session_gateway(after_tool_call)
+    monkeypatch.setenv("GEMINI_CLI_PATH", GEMINI)
+    monkeypatch.setenv("CHACK_GEMINI_HOME", str(tmp_path / "gemini-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CHACK_EXEC_CWD", str(tmp_path))
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(name, raising=False)
+    _litellm_catalog(monkeypatch, "corp/flash", "openai/flash")
+    config = _litellm_config("corp/flash", f"http://127.0.0.1:{server.server_address[1]}", llm_gateway_type="litellm")
+    config.session.max_turns = 6
+    try:
+        result = build_executor(
+            config, system_prompt=SYSTEM_PROMPT, max_turns=6, memory_max_messages=10, memory_reset_to_messages=5
+        ).invoke({"input": "Run the check, then say finished."})
+    finally:
+        server.shutdown()
+        llm_gateway._CATALOG_CACHE.clear()
+    usage = [response["usage"] for response in result["raw_result"].raw_responses]
+    return result, usage, calls
+
+
+def test_a_gateway_504_mid_session_is_retried_and_the_session_finishes(monkeypatch, tmp_path):
+    finished = {"candidates": [{"content": {"role": "model", "parts": [{"text": "finished"}]},
+                                "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 1500, "candidatesTokenCount": 20}}
+    result, usage, _ = _run_session(monkeypatch, tmp_path, [_UPSTREAM_TIMEOUT, (200, finished)])
+
+    assert "finished" in result["output"]
+    assert any("exec" in step[0].tool for step in result["intermediate_steps"])
+    # Both answers the model gave are counted; the 504 is not.
+    assert sorted(entry["input_tokens"] for entry in usage if entry["input_tokens"] >= 1000) == [1000, 1500]
+
+
+def test_a_persistent_gateway_504_ends_the_session_with_its_usage_recorded(monkeypatch, tmp_path):
+    from chack_agent.backends import transient_retry
+
+    result, usage, calls = _run_session(monkeypatch, tmp_path, [_UPSTREAM_TIMEOUT])
+
+    assert result["output"].startswith("ERROR: Gemini")
+    assert "upstream request timeout" in result["output"]
+    # The tool-call answer before the failure was billed and is reported.
+    assert sum(entry["input_tokens"] for entry in usage) >= 1000
+    # After the tool call, the failing call got the relay's attempts; the CLI's
+    # own re-sends of it (three in Gemini CLI 0.67) got one attempt each.
+    failing_call_attempts = len(calls) - 1
+    assert transient_retry.DEFAULT_ATTEMPTS <= failing_call_attempts <= 2 * transient_retry.DEFAULT_ATTEMPTS

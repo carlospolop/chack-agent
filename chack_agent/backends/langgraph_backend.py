@@ -30,6 +30,7 @@ from chack_tools.tool_usage_state import current_max_tools_used, is_budget_exemp
 
 from ..config import ChackConfig
 from ..llm_gateway import get_gateway_route
+from .transient_retry import CLIENT_MAX_RETRIES, openai_async_http_client, openai_http_client
 from ..thinking_effort import normalize_thinking_effort
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
@@ -1397,6 +1398,11 @@ def build_executor(
         api_key=route.api_key,
         base_url=route.base_url,
         timeout=timeout,
+        # A 408/429/5xx answer or a dropped connection is retried a bounded
+        # number of times with jittered backoff; the hooks log each one.
+        max_retries=CLIENT_MAX_RETRIES,
+        http_client=openai_http_client(_LOGGER),
+        http_async_client=openai_async_http_client(_LOGGER),
         default_headers=dict(route.headers) or None,
         reasoning_effort=normalize_thinking_effort(config.agent.thinking_effort),
         # Server tools would otherwise switch langchain to the Responses API,

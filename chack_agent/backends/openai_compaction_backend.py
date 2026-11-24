@@ -34,6 +34,7 @@ from ..limit_event_state import emit_limit_reached
 from .sdk_run_hooks import LiveUsageHooks, mark_reported, report_response, response_usage, unreported_responses
 from ..resume_compaction import ResumeCompactionResult
 from ..llm_gateway import clone_config_for_gateway, get_gateway_route
+from .transient_retry import CLIENT_MAX_RETRIES, openai_async_http_client
 from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import openai_thinking_effort
 from chack_tools.agents_toolset import AgentsToolset
@@ -102,6 +103,8 @@ def _configure_client_factory(config: ChackConfig) -> Callable[[], AsyncOpenAI]:
             api_key=api_key or None,
             base_url=base_url,
             organization=organization,
+            max_retries=CLIENT_MAX_RETRIES,
+            http_client=openai_async_http_client(_LOGGER),
         )
 
     return _new_client

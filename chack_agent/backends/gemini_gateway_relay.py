@@ -9,9 +9,12 @@ The relay listens on 127.0.0.1 and forwards requests to the gateway. A
 streaming request is sent as ``:generateContent`` and its JSON answer is
 returned to the CLI as one server-sent event. If a gateway explicitly rejects
 one of the Gemini CLI's temperature, topP, or topK fields for a model, a
-bounded retry omits that field. A connection the gateway drops or refuses is
-tried again a bounded number of times.
-Other gateway errors pass through with their status and body.
+bounded retry omits that field. A transient gateway failure (a 502, 503 or
+504 answer such as an upstream timeout, or a connection dropped or refused
+before the answer was read) is sent again with jittered exponential backoff, a
+bounded number of times (``transient_retry.TransientRetry``); nothing of the
+answer has reached the CLI yet, so a retry is safe. Other gateway errors, and a
+transient one that outlasts the retries, pass through with their status and body.
 
 The Gemini CLI also calls Google models of its own for helper work (chat
 compression, loop detection, routing, summaries), which a gateway may not
@@ -39,6 +42,7 @@ run) is no error: the answer is dropped quietly.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -50,6 +54,8 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, NamedTuple
+
+from .transient_retry import TRANSIENT_STATUSES, TransientRetry, retry_after_seconds
 
 
 _LOGGER = logging.getLogger("chack.gemini_gateway_relay")
@@ -328,10 +334,6 @@ def _without_rejected_generation_field(request_body: bytes | None, error_body: b
     return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-# A gateway connection that is dropped or refused is tried this many times.
-_CONNECTION_ATTEMPTS = 3
-_RECONNECT_DELAY_SECONDS = 2.0
-
 REQUEST_TIMEOUT_ENV = "CHACK_GEMINI_RELAY_REQUEST_TIMEOUT_SECONDS"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
 # A model call that gets no answer within its time limit is sent this many times in all.
@@ -357,6 +359,8 @@ class _Reply(NamedTuple):
     status: int
     headers: dict[str, str]
     body: bytes
+    # The relay's own 502 for a gateway connection dropped or refused, which may be retried.
+    dropped: bool = False
 
 
 def _error_reply(code: int, status: str, message: str) -> _Reply:
@@ -381,7 +385,14 @@ def _error_chunk(reply: _Reply) -> bytes:
 
 def _dropped_connection(exc: BaseException) -> bool:
     reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-    return isinstance(reason, ConnectionError)
+    # A connection closed before or while its answer was read; a timeout is not one.
+    return isinstance(reason, (ConnectionError, http.client.RemoteDisconnected, http.client.IncompleteRead))
+
+
+def _status_of(response: Any) -> int:
+    if isinstance(response, _Reply):
+        return response.status
+    return int(response.status if hasattr(response, "status") else response.code)
 
 
 def _end_to_end(headers: Any) -> dict[str, str]:
@@ -427,6 +438,8 @@ class GeminiGatewayRelay:
         # how many answers to the CLI's helper calls (no tools) came after it.
         self._last_turn: dict[str, Any] | None = None
         self._helper_answers = 0
+        # Set once a call spent its retries on a transient failure, until the gateway answers again.
+        self._retries_spent = False
 
     def take_usage(self) -> list[dict[str, int]]:
         """Usage of the answers relayed since the last call, one entry per answer."""
@@ -443,11 +456,12 @@ class GeminiGatewayRelay:
                 return None
             return {**self._last_turn, "helper_answers_after": self._helper_answers}
 
-    def _record_usage(self, body: bytes, request_body: bytes | None = None) -> None:
+    def _record_usage(self, body: bytes, request_body: bytes | None = None) -> dict[str, Any] | None:
+        """Count one answer's usage; returns its ``_answer_shape`` (None if not JSON)."""
         try:
             answer = json.loads(body)
         except ValueError:
-            return
+            return None
         shape = _answer_shape(answer)
         with self._usage_lock:
             if request_body and b'"functionDeclarations"' in request_body:
@@ -469,7 +483,7 @@ class GeminiGatewayRelay:
             )
         usage = _usage_of(answer)
         if usage is None:
-            return
+            return shape
         key = (self._upstream_base_url, self._model)
         estimated = _PREFIX_CACHE.estimate(key, _prompt_text(request_body), usage["input_tokens"])
         if usage["cached_tokens"] is None:
@@ -483,6 +497,7 @@ class GeminiGatewayRelay:
                 )
         with self._usage_lock:
             self._usage.append(usage)
+        return shape
 
     @property
     def base_url(self) -> str:
@@ -538,64 +553,163 @@ class GeminiGatewayRelay:
     def _open(self, url: str, body: bytes | None, headers: dict[str, str], method: str) -> Any:
         """The gateway's response, or a 502 ``_Reply`` when it cannot be reached.
 
-        A connection the gateway drops or refuses is tried again a bounded
-        number of times; a timeout is not retried here (see ``_forward_stream``).
+        A timeout is not retried here (see ``_forward_stream``); a dropped or
+        refused connection is marked so ``_gateway_response`` may retry it.
         """
-        failure: Exception | None = None
-        for attempt in range(_CONNECTION_ATTEMPTS):
-            request = urllib.request.Request(url, data=body, headers=headers, method=method)
-            try:
-                return self._opener.open(request, timeout=self._timeout_seconds)
-            except urllib.error.HTTPError as exc:
-                return exc
-            except Exception as exc:
-                failure = exc
-                if not _dropped_connection(exc) or attempt + 1 == _CONNECTION_ATTEMPTS:
-                    break
-                _LOGGER.warning("Gemini gateway dropped the connection to %s (%s); retrying", url, exc)
-                time.sleep(_RECONNECT_DELAY_SECONDS * (attempt + 1))
-        _LOGGER.warning("Gemini gateway relay could not reach %s: %s", url, failure)
-        return _error_reply(502, "UNAVAILABLE", f"gateway unreachable: {failure}")
-
-    def _gateway_response(self, url: str, body: bytes | None, headers: dict[str, str], method: str) -> Any:
-        """The gateway's response once rejected generation fields are dropped, or a final ``_Reply``."""
-        response = self._open(url, body, headers, method)
-        for _ in range(len(_RETRYABLE_GENERATION_FIELDS)):
-            if not isinstance(response, urllib.error.HTTPError) or response.code != 400:
-                break
-            error_body = response.read()
-            retry_body = _without_rejected_generation_field(body, error_body)
-            response_headers = _end_to_end(response.headers)
-            response.close()
-            if retry_body is None:
-                return _Reply(400, response_headers, error_body)
-            _LOGGER.info("Retrying Gemini gateway request without unsupported generation field")
-            body = retry_body
-            response = self._open(url, body, headers, method)
-        return response
-
-    def _stream_reply(self, url: str, body: bytes | None, headers: dict[str, str], method: str) -> "_Reply":
-        """A streaming call's whole answer: one server-sent event, or the gateway's error."""
-        response = self._gateway_response(url, body, headers, method)
-        if isinstance(response, _Reply):
-            return response
-        with response:
-            status = int(response.status if hasattr(response, "status") else response.code)
-            response_headers = _end_to_end(response.headers)
-            raw = response.read()
-        if not 200 <= status < 300:
-            return _Reply(status, response_headers, raw)
-        self._record_usage(raw, body)
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            event = _sse_event(raw)
+            return self._opener.open(request, timeout=self._timeout_seconds)
+        except urllib.error.HTTPError as exc:
+            return exc
+        except Exception as exc:
+            _LOGGER.warning("Gemini gateway relay could not reach %s: %s", url, exc)
+            reply = _error_reply(502, "UNAVAILABLE", f"gateway unreachable: {exc}")
+            return reply._replace(dropped=_dropped_connection(exc))
+
+    def _retry(self, url: str, body: bytes | None, deadline: float | None = None) -> TransientRetry:
+        # The Gemini CLI re-sends a failed call a few times itself. Once a call
+        # spent the relay's retries, those re-sends get one attempt each until
+        # the gateway answers again, so the attempts do not multiply.
+        # The request's size goes in the log, to tell whether only the largest requests fail.
+        with self._usage_lock:
+            last_input = (self._last_turn or {}).get("input_tokens")
+        size = f"{len(body or b'')} request bytes" + (
+            f", last turn {last_input} input tokens" if last_input else ""
+        )
+        return TransientRetry(
+            f"Gemini gateway call to {url} ({size})",
+            logger=_LOGGER,
+            deadline=deadline,
+            attempts=1 if self._retries_spent else None,
+        )
+
+    def _log_call(
+        self,
+        url: str,
+        body: bytes | None,
+        status: Any,
+        retry: TransientRetry,
+        started: float,
+        answer: dict[str, Any] | None = None,
+    ) -> None:
+        """One bounded line for a gateway call that failed with a 5xx or was
+        retried: status, attempt, latency, request size and token counts, never
+        any content. A failed call reports no tokens of its own, so the last
+        agent turn's prompt tokens stand in as its size."""
+        if answer is not None:
+            prompt, completion = answer.get("input_tokens"), answer.get("output_tokens")
+        else:
+            with self._usage_lock:
+                last_input = (self._last_turn or {}).get("input_tokens")
+            prompt, completion = (f"~{last_input} (last turn)" if last_input else "unknown"), "none"
+        _LOGGER.warning(
+            "Gemini gateway call %s: status=%s attempt=%d/%d latency=%.1fs request_bytes=%d "
+            "prompt_tokens=%s completion_tokens=%s",
+            urllib.parse.urlsplit(url).path,
+            status,
+            retry.attempt,
+            retry.attempts,
+            time.monotonic() - started,
+            len(body or b""),
+            prompt,
+            completion,
+        )
+
+    def _gateway_response(
+        self,
+        url: str,
+        body: bytes | None,
+        headers: dict[str, str],
+        method: str,
+        retry: TransientRetry | None = None,
+    ) -> Any:
+        """The gateway's response once rejected generation fields are dropped and
+        transient failures retried, or a final ``_Reply``."""
+        retry = retry or self._retry(url, body)
+        while True:
+            retry.attempt_started = time.monotonic()
+            response = self._open(url, body, headers, method)
+            for _ in range(len(_RETRYABLE_GENERATION_FIELDS)):
+                if not isinstance(response, urllib.error.HTTPError) or response.code != 400:
+                    break
+                error_body = response.read()
+                retry_body = _without_rejected_generation_field(body, error_body)
+                response_headers = _end_to_end(response.headers)
+                response.close()
+                if retry_body is None:
+                    return _Reply(400, response_headers, error_body)
+                _LOGGER.info("Retrying Gemini gateway request without unsupported generation field")
+                body = retry_body
+                response = self._open(url, body, headers, method)
+            status = _status_of(response)
+            transient = response.dropped if isinstance(response, _Reply) else status in TRANSIENT_STATUSES
+            if transient or status >= 500:
+                shown = "connection dropped" if isinstance(response, _Reply) and response.dropped else status
+                self._log_call(url, body, shown, retry, retry.attempt_started)
+            if not transient:
+                self._retries_spent = False
+                return response
+            if isinstance(response, _Reply):
+                failure, retry_after, error_body, error_headers = "connection dropped", None, response.body, response.headers
+            else:
+                error_body = response.read()
+                error_headers = _end_to_end(response.headers)
+                response.close()
+                failure = f"HTTP {status}: {error_body[:200].decode('utf-8', 'replace')}"
+                retry_after = retry_after_seconds(response.headers.get("Retry-After"))
+            if not retry.wait(failure, retry_after=retry_after):
+                self._retries_spent = True
+                return _Reply(status, error_headers, error_body)
+
+    def _read_answer(
+        self, url: str, body: bytes | None, headers: dict[str, str], method: str, deadline: float | None = None
+    ) -> "_Reply":
+        """A model call's whole answer, its usage counted, or the gateway's error.
+
+        A connection dropped while the answer was read is retried like a
+        transient error status, with the same allowance.
+        """
+        retry = self._retry(url, body, deadline)
+        while True:
+            response = self._gateway_response(url, body, headers, method, retry)
+            if isinstance(response, _Reply):
+                return response
+            try:
+                with response:
+                    status = _status_of(response)
+                    response_headers = _end_to_end(response.headers)
+                    raw = response.read()
+            except Exception as exc:
+                if not _dropped_connection(exc):
+                    raise
+                self._log_call(url, body, "answer cut off", retry, retry.attempt_started)
+                if retry.wait(f"answer cut off: {exc!r}"):
+                    continue
+                self._retries_spent = True
+                return _error_reply(502, "UNAVAILABLE", f"gateway answer cut off: {exc}")
+            if 200 <= status < 300:
+                shape = self._record_usage(raw, body)
+                if retry.attempt > 1:
+                    self._log_call(url, body, status, retry, retry.attempt_started, shape or {})
+            return _Reply(status, response_headers, raw)
+
+    def _stream_reply(
+        self, url: str, body: bytes | None, headers: dict[str, str], method: str, deadline: float | None = None
+    ) -> "_Reply":
+        """A streaming call's whole answer: one server-sent event, or the gateway's error."""
+        reply = self._read_answer(url, body, headers, method, deadline)
+        if not 200 <= reply.status < 300:
+            return reply
+        try:
+            event = _sse_event(reply.body)
         except ValueError:
             _LOGGER.warning("Gemini gateway relay got a non-JSON answer from %s", url)
-            return _Reply(502, response_headers, raw)
+            return _Reply(502, reply.headers, reply.body)
         response_headers = {
-            name: value for name, value in response_headers.items() if name.lower() != "content-type"
+            name: value for name, value in reply.headers.items() if name.lower() != "content-type"
         }
         response_headers["Content-Type"] = "text/event-stream"
-        return _Reply(status, response_headers, event)
+        return _Reply(reply.status, response_headers, event)
 
     def _forward(self, handler: BaseHTTPRequestHandler) -> None:
         url, streaming, replaced = _upstream_target(self._upstream_base_url, handler.path, self._model)
@@ -614,20 +728,17 @@ class GeminiGatewayRelay:
             headers["Accept"] = "application/json"
             self._forward_stream(handler, url, body, headers)
             return
+        if urllib.parse.urlsplit(url).path.endswith(_UNARY_METHOD):
+            # A model answer: read it whole to count its tokens before the CLI gets it.
+            reply = self._read_answer(url, body, headers, handler.command)
+            self._send(handler, reply.status, reply.headers, reply.body)
+            return
         response = self._gateway_response(url, body, headers, handler.command)
         if isinstance(response, _Reply):
             self._send(handler, response.status, response.headers, response.body)
             return
         with response:
-            status = int(response.status if hasattr(response, "status") else response.code)
-            response_headers = _end_to_end(response.headers)
-            if urllib.parse.urlsplit(url).path.endswith(_UNARY_METHOD) and 200 <= status < 300:
-                # A model answer: read it whole to count its tokens before the CLI gets it.
-                raw = response.read()
-                self._record_usage(raw, body)
-                self._send(handler, status, response_headers, raw)
-                return
-            self._send_streamed(handler, status, response_headers, response)
+            self._send_streamed(handler, _status_of(response), _end_to_end(response.headers), response)
 
     def _forward_stream(
         self, handler: BaseHTTPRequestHandler, url: str, body: bytes | None, headers: dict[str, str]
@@ -640,7 +751,8 @@ class GeminiGatewayRelay:
         one gets its event-stream headers early and blank lines until the event,
         which the CLI's stream parser skips. A gateway error after the headers
         went out is sent as the Gemini API's error JSON, which the CLI raises
-        with the error's status code.
+        with the error's status code; so is a transient failure that outlasted
+        the relay's retries, so the CLI does not retry it once more.
         """
         headers_sent = False
         reply: _Reply | None = None
@@ -663,9 +775,18 @@ class GeminiGatewayRelay:
                 f"gateway gave no answer within {self._timeout_seconds:g}s, "
                 f"{_TIMED_OUT_CALL_ATTEMPTS} attempts",
             )
-        if not headers_sent:
+        if not headers_sent and not (reply.status in TRANSIENT_STATUSES and self._retries_spent):
             self._send(handler, reply.status, reply.headers, reply.body)
             return
+        if not headers_sent:
+            # The relay already spent the retry allowance on this transient
+            # failure. As an error inside the stream the CLI ends the turn on
+            # it instead of retrying the call again, which would multiply the
+            # attempts and the wait.
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.send_header("Transfer-Encoding", "chunked")
+            handler.end_headers()
         _write_chunk(handler, reply.body if 200 <= reply.status < 300 else _error_chunk(reply))
         handler.wfile.write(b"0\r\n\r\n")
         handler.wfile.flush()
@@ -686,10 +807,11 @@ class GeminiGatewayRelay:
         """
         outcome: list[_Reply] = []
         done = threading.Event()
+        deadline = time.monotonic() + self._timeout_seconds
 
         def call() -> None:
             try:
-                outcome.append(self._stream_reply(url, body, headers, handler.command))
+                outcome.append(self._stream_reply(url, body, headers, handler.command, deadline))
             except Exception as exc:  # the CLI must get an answer
                 _LOGGER.warning("Gemini gateway relay failed on %s: %s", url, exc)
                 outcome.append(_error_reply(502, "UNAVAILABLE", f"gateway relay failed: {exc}"))
@@ -698,7 +820,6 @@ class GeminiGatewayRelay:
 
         # An abandoned call ends at its socket timeout; nothing waits for it.
         threading.Thread(target=call, name="chack-gemini-gateway-call", daemon=True).start()
-        deadline = time.monotonic() + self._timeout_seconds
         wait = self._keepalive_every_seconds if headers_sent else self._keepalive_after_seconds
         while True:
             if done.wait(max(0.0, min(wait, deadline - time.monotonic()))):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import urllib.error
@@ -10,7 +11,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from chack_agent.backends import transient_retry
 from chack_agent.backends.gemini_gateway_relay import GeminiGatewayRelay
+
+
+@pytest.fixture(autouse=True)
+def _fast_backoff(monkeypatch):
+    # Transient gateway failures are retried; keep the backoff short in tests.
+    monkeypatch.setattr(transient_retry, "BASE_DELAY_SECONDS", 0.01)
 
 FAKE_KEY = "fake-gateway-key"
 ANSWER = {
@@ -384,7 +392,7 @@ def test_a_connection_the_gateway_drops_is_tried_again(monkeypatch):
 
     import chack_agent.backends.gemini_gateway_relay as relay_module
 
-    monkeypatch.setattr(relay_module, "_RECONNECT_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(transient_retry, "BASE_DELAY_SECONDS", 0.01)
     calls = []
 
     class Flaky(BaseHTTPRequestHandler):
@@ -425,7 +433,7 @@ def test_an_unreachable_gateway_is_tried_a_bounded_number_of_times(monkeypatch):
 
     import chack_agent.backends.gemini_gateway_relay as relay_module
 
-    monkeypatch.setattr(relay_module, "_RECONNECT_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(transient_retry, "BASE_DELAY_SECONDS", 0.01)
     attempts = []
 
     probe = socket.socket()
@@ -443,9 +451,10 @@ def test_an_unreachable_gateway_is_tried_a_bounded_number_of_times(monkeypatch):
         monkeypatch.setattr(relay._opener, "open", counting_open)
         status, _, body = _post(f"{relay.base_url}/v1beta/models/m:streamGenerateContent?alt=sse")
 
-    assert status == 502
+    # The retries are spent: the error comes inside the stream, which the CLI does not retry again.
+    assert status == 200
     assert json.loads(body)["error"]["code"] == 502
-    assert len(attempts) == relay_module._CONNECTION_ATTEMPTS
+    assert len(attempts) == transient_retry.DEFAULT_ATTEMPTS
 
 
 def test_calls_naming_another_model_go_to_the_runs_model(gateway):
@@ -746,3 +755,226 @@ def test_the_last_agent_turn_answer_shape_is_kept_without_content_and_helper_cal
         "helper_answers_after": 2,
     }
     assert "hidden reasoning" not in json.dumps(shape) and "exec" not in json.dumps(shape)
+
+
+UPSTREAM_TIMEOUT = b'{"error":{"message":"upstream request timeout","code":504}}'
+
+
+def _scripted_gateway(script, delay=0.0):
+    """A gateway answering each model call with the next step of ``script``:
+    ``(status, body)``, or ``"cut"`` for an answer whose body stops short.
+    Steps run out into the last one."""
+
+    calls = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            calls.append(self.path)
+            step = script[min(len(calls), len(script)) - 1]
+            time.sleep(delay)
+            if step == "cut":
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", "5000")
+                self.end_headers()
+                self.wfile.write(b'{"candidates": [')
+                self.wfile.flush()
+                self.close_connection = True
+                return
+            status, payload = step
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, calls
+
+
+def _stream_call(script, *, delay=0.0, keepalive_after=20.0):
+    server, calls = _scripted_gateway(script, delay)
+    try:
+        with GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            keepalive_after_seconds=keepalive_after,
+            keepalive_every_seconds=keepalive_after,
+        ) as relay:
+            if keepalive_after < 20:
+                status, _, _, chunks = _stream_with_timing(relay.base_url)
+                body = b"".join(chunks)
+            else:
+                status, _, body = _post(f"{relay.base_url}/v1beta/models/m:streamGenerateContent?alt=sse")
+            usage = relay.take_usage()
+    finally:
+        server.shutdown()
+        server.server_close()
+    return status, body, usage, calls
+
+
+ANSWER_BYTES = json.dumps(ANSWER).encode()
+
+
+@pytest.mark.parametrize("failure", [(504, UPSTREAM_TIMEOUT), (502, b"bad gateway"), (503, b"overloaded"), "cut"])
+def test_a_transient_gateway_failure_is_retried_and_the_answer_reaches_the_cli(failure, caplog):
+    with caplog.at_level("WARNING", logger="chack.gemini_gateway_relay"):
+        status, body, usage, calls = _stream_call([failure, (200, ANSWER_BYTES)])
+
+    assert status == 200
+    assert json.loads(body[len(b"data: "):]) == ANSWER
+    assert len(calls) == 2
+    # Only the answer that arrived is counted.
+    assert usage == [{"input_tokens": 120, "output_tokens": 30, "cached_tokens": 0}]
+    assert "attempt 1/4; retrying in" in caplog.text
+    assert "(16 request bytes)" in caplog.text
+
+
+def test_each_failed_or_retried_call_is_logged_with_its_size_latency_and_tokens_but_no_content(caplog):
+    error_500 = json.dumps({"error": {"code": 500, "message": "boom"}}).encode()
+    with caplog.at_level("WARNING", logger="chack.gemini_gateway_relay"):
+        _stream_call([(504, UPSTREAM_TIMEOUT), (200, ANSWER_BYTES)])
+        _stream_call([(500, error_500)])
+
+    lines = [r.getMessage() for r in caplog.records if "Gemini gateway call /" in r.getMessage()]
+    path = "/v1beta/models/m:generateContent"
+    assert len(lines) == 3
+    assert lines[0].startswith(f"Gemini gateway call {path}: status=504 attempt=1/4 latency=")
+    assert "request_bytes=16 prompt_tokens=unknown completion_tokens=none" in lines[0]
+    assert lines[1].startswith(f"Gemini gateway call {path}: status=200 attempt=2/4 latency=")
+    assert lines[1].endswith("request_bytes=16 prompt_tokens=120 completion_tokens=30")
+    assert lines[2].startswith(f"Gemini gateway call {path}: status=500 attempt=1/4 latency=")
+    assert all(len(line) < 300 for line in lines)
+
+
+def test_a_504_after_the_keepalive_headers_is_retried_instead_of_failing_the_turn():
+    """The production failure: a slow call's headers went out, then the gateway
+    answered 504; the CLI used to get it as a status-less error and end the run."""
+
+    status, body, usage, calls = _stream_call(
+        [(504, UPSTREAM_TIMEOUT), (200, ANSWER_BYTES)], delay=0.4, keepalive_after=0.1
+    )
+
+    assert status == 200
+    keepalive, _, event = body.partition(b"data: ")
+    assert not keepalive.strip()
+    assert json.loads(event) == ANSWER
+    assert len(calls) == 2
+    assert usage and usage[0]["input_tokens"] == 120
+
+
+def test_a_persistent_504_is_retried_a_bounded_number_of_times_then_reaches_the_cli():
+    status, body, usage, calls = _stream_call([(504, UPSTREAM_TIMEOUT)])
+
+    assert len(calls) == transient_retry.DEFAULT_ATTEMPTS
+    # Inside the stream, so the CLI ends the turn on it instead of retrying the call again.
+    assert status == 200
+    error = json.loads(body)["error"]
+    assert error["code"] == 504 and error["message"] == "upstream request timeout"
+    assert usage == []
+
+
+@pytest.mark.parametrize("status_code", [400, 404, 429, 500])
+def test_other_gateway_errors_are_not_retried(status_code):
+    error = json.dumps({"error": {"code": status_code, "message": "no"}}).encode()
+    status, body, _, calls = _stream_call([(status_code, error), (200, ANSWER_BYTES)])
+
+    assert status == status_code
+    assert len(calls) == 1
+
+
+def test_unstreamed_model_calls_are_retried_too():
+    server, calls = _scripted_gateway([(504, UPSTREAM_TIMEOUT), (200, ANSWER_BYTES)])
+    try:
+        with GeminiGatewayRelay(f"http://127.0.0.1:{server.server_address[1]}") as relay:
+            status, _, body = _post(f"{relay.base_url}/v1beta/models/m:generateContent")
+            usage = relay.take_usage()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    assert json.loads(body) == ANSWER
+    assert len(calls) == 2
+    assert len(usage) == 1
+
+
+def test_retries_back_off_with_jitter_within_their_caps(caplog):
+    sleeps = []
+    values = iter([0.0, 1.0, 0.5, 0.25])
+    retry = transient_retry.TransientRetry(
+        "call", logger=logging.getLogger("test.retry"), attempts=4,
+        max_wait_seconds=1000, sleep=sleeps.append, rng=lambda: next(values),
+    )
+    base = transient_retry.BASE_DELAY_SECONDS
+
+    with caplog.at_level("WARNING", logger="test.retry"):
+        assert [retry.wait("HTTP 504") for _ in range(4)] == [True, True, True, False]
+
+    # Retry n waits between half and all of base * 2**(n-1).
+    assert sleeps == pytest.approx([base / 2, 2 * base, 4 * base * 0.75])
+    assert "HTTP 504" in caplog.text and "attempt 3/4; retrying in" in caplog.text
+    assert "attempt 4/4; no attempts left" in caplog.text
+
+
+def test_jittered_delays_differ_and_stay_in_range():
+    delays = {transient_retry.backoff_delay(3) for _ in range(50)}
+    ceiling = 4 * transient_retry.BASE_DELAY_SECONDS
+    assert len(delays) > 1
+    assert all(ceiling / 2 <= delay <= ceiling for delay in delays)
+    assert transient_retry.backoff_delay(30) <= transient_retry.MAX_DELAY_SECONDS
+
+
+def test_retries_stop_at_the_total_wait_and_the_deadline():
+    sleeps = []
+    capped = transient_retry.TransientRetry(
+        "call", logger=logging.getLogger("test.retry"), attempts=10,
+        max_wait_seconds=3 * transient_retry.BASE_DELAY_SECONDS, sleep=sleeps.append, rng=lambda: 1.0,
+    )
+    while capped.wait("HTTP 503"):
+        pass
+    assert sum(sleeps) <= 3 * transient_retry.BASE_DELAY_SECONDS
+    assert capped.attempt < 10
+
+    due = transient_retry.TransientRetry(
+        "call", logger=logging.getLogger("test.retry"), attempts=10,
+        deadline=time.monotonic(), sleep=sleeps.append,
+    )
+    assert due.wait("HTTP 503") is False
+
+
+def test_retry_after_lengthens_the_backoff_up_to_its_cap():
+    sleeps = []
+    retry = transient_retry.TransientRetry(
+        "call", logger=logging.getLogger("test.retry"), attempts=4,
+        max_wait_seconds=1000, sleep=sleeps.append, rng=lambda: 0.0,
+    )
+    retry.wait("HTTP 503", retry_after=7.0)
+    retry.wait("HTTP 503", retry_after=10_000)
+    assert sleeps == [7.0, transient_retry.MAX_DELAY_SECONDS]
+
+
+def test_once_a_call_spent_its_retries_the_clis_own_resends_get_one_attempt_until_the_gateway_recovers():
+    server, calls = _scripted_gateway([(504, UPSTREAM_TIMEOUT)] * 6 + [(200, ANSWER_BYTES)] + [(504, UPSTREAM_TIMEOUT), (200, ANSWER_BYTES)])
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        with GeminiGatewayRelay(url) as relay:
+            stream = f"{relay.base_url}/v1beta/models/m:streamGenerateContent?alt=sse"
+            first = _post(stream)
+            assert len(calls) == transient_retry.DEFAULT_ATTEMPTS
+            second = _post(stream)
+            third = _post(stream)
+            assert len(calls) == transient_retry.DEFAULT_ATTEMPTS + 2
+            # A re-send that gets an answer restores the full allowance.
+            assert _post(stream)[0] == 200
+            assert _post(stream)[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert [json.loads(reply[2])["error"]["code"] for reply in (first, second, third)] == [504, 504, 504]
+    assert len(calls) == transient_retry.DEFAULT_ATTEMPTS + 2 + 1 + 2

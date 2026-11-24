@@ -1030,6 +1030,40 @@ def test_run_reports_cache_hit_rate_and_cost_per_model_and_attempt(isolated_run_
     assert result.cache_hit_rate == pytest.approx(0.25)
 
 
+class _FailingAfterWorkExecutor(_ToolCountingExecutor):
+    """Makes model calls and a tool call, then the backend fails (a gateway 504)."""
+
+    def invoke(self, payload, context=None):
+        result = super().invoke(payload, context)
+        result["output"] = (
+            'ERROR: Gemini result error: [API Error: got status: undefined. '
+            '{"error":{"message":"upstream request timeout","code":504}}]'
+        )
+        return result
+
+
+def test_a_backend_failure_reports_the_usage_and_cost_it_spent(isolated_run_state):
+    config = _fallback_config()
+    agent = _InjectedExecutorChack(config)
+    agent._pricing = _priced_table(**{"test-model": (2.0, 0.2, 8.0)})
+    agent.executor = _FailingAfterWorkExecutor()
+
+    result = agent.run(
+        "failed-run",
+        "do work",
+        enable_self_critique=False,
+        require_task_steps_manager_init_first=False,
+    )
+
+    assert result.prompt_tokens == 1200
+    assert result.completion_tokens == 80
+    assert result.cached_prompt_tokens == 300
+    expected = (900 * 2.0 + 300 * 0.2 + 80 * 8.0) / 1_000_000
+    assert result.total_cost == pytest.approx(expected)
+    assert [row["attempt"] for row in result.cost_breakdown["by_attempt"]] == [1]
+    assert result.tools_used == 1
+
+
 def test_default_run_does_not_ask_for_more_tool_calls(isolated_run_state):
     config = _fallback_config()
     config.tools = ToolsConfig()

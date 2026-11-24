@@ -208,3 +208,28 @@ def test_load_config_rejects_malformed_gateway_headers(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="LLM_GATEWAY_HEADERS"):
         load_config(path)
+
+
+def test_codex_is_launched_with_its_gateway_retry_allowance():
+    from chack_agent.backends import codex_backend
+
+    executor = _build(_config("codex", "gpt-6-sol", "openrouter", openrouter_api_key=OPENROUTER_KEY))
+    executor._ensure_codex_home_and_config()
+    with open(os.path.join(executor._codex_home, "config.toml"), "rb") as handle:
+        parsed = tomllib.load(handle)
+    provider = parsed["model_providers"][parsed["model_provider"]]
+
+    assert provider["request_max_retries"] == codex_backend.CODEX_REQUEST_MAX_RETRIES > 0
+    assert provider["stream_max_retries"] == codex_backend.CODEX_STREAM_MAX_RETRIES > 0
+
+
+def test_claude_is_launched_with_its_retry_allowance_unless_the_caller_set_one(monkeypatch):
+    from chack_agent.backends import claude_code_backend
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "subscription-token")
+    monkeypatch.delenv("CLAUDE_CODE_MAX_RETRIES", raising=False)
+    executor = _build(_config("claude", "claude-sonnet-5-5", "openrouter", openrouter_api_key=OPENROUTER_KEY))
+
+    assert executor._build_env()["CLAUDE_CODE_MAX_RETRIES"] == str(claude_code_backend.CLAUDE_CODE_MAX_RETRIES)
+    monkeypatch.setenv("CLAUDE_CODE_MAX_RETRIES", "2")
+    assert executor._build_env()["CLAUDE_CODE_MAX_RETRIES"] == "2"
