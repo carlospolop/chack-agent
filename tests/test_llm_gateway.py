@@ -779,7 +779,7 @@ def _gateway_executor_on(monkeypatch, transports, **response):
 
     def _client(**kwargs):
         transport = _LoopBoundTransport(transports, **response)
-        return real_client(**kwargs, http_client=httpx.AsyncClient(transport=transport))
+        return real_client(**{**kwargs, "http_client": httpx.AsyncClient(transport=transport)})
 
     monkeypatch.setattr(backend, "AsyncOpenAI", _client)
     return backend.build_executor(
@@ -819,7 +819,7 @@ def test_openai_runs_of_one_executor_each_get_a_client_on_their_own_event_loop(m
 
     def _client(**kwargs):
         transport = _LoopBoundTransport(transports)
-        return real_client(**kwargs, http_client=httpx.AsyncClient(transport=transport))
+        return real_client(**{**kwargs, "http_client": httpx.AsyncClient(transport=transport)})
 
     monkeypatch.setattr(backend, "AsyncOpenAI", _client)
     executor = backend.build_executor(
