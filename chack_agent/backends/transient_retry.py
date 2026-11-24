@@ -13,9 +13,9 @@ Where Chack sends the requests itself (the Gemini CLI's gateway relay) it uses
 OpenAI, LangGraph) give their OpenAI clients ``CLIENT_MAX_RETRIES`` retries,
 which the OpenAI SDK spends on the same failures with its own jittered
 backoff, and ``openai_http_client``/``openai_async_http_client`` log each
-retried answer. The Codex and Claude Code CLIs retry these failures
-themselves, bounded and with jitter; their backends set the allowance
-explicitly.
+retried answer. The Codex, Claude Code and opencode CLIs retry these
+failures themselves, bounded and with jitter; the Codex and Claude Code
+backends set the allowance explicitly (opencode's is fixed).
 
 Knobs: ``CHACK_TRANSIENT_RETRY_ATTEMPTS`` (attempts per request, including
 the first; default ``DEFAULT_ATTEMPTS``) and
