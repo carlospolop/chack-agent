@@ -389,3 +389,44 @@ def test_a_turn_the_cli_loop_detector_would_stop_keeps_its_answer(fake_gemini, c
     assert json.loads(result["output"]) == VALID
     assert len(fake_gemini.calls) == 1
     assert not any("loop detection" in r.getMessage() for r in caplog.records)
+
+
+def test_an_adopted_session_is_resumed_from_its_own_home(fake_gemini, tmp_path):
+    home = tmp_path / "earlier-run-home"
+    home.mkdir()
+    fake_gemini.script([_run(json.dumps(VALID), session="gem-earlier")])
+    executor = _executor()
+
+    assert executor.adopt_cli_session({"backend": "gemini", "session_id": "gem-earlier", "home": str(home)})
+    executor.invoke({"input": "continue"})
+
+    args = fake_gemini.calls[0]
+    assert args[args.index("-r") + 1] == "gem-earlier"
+    assert (home / ".gemini" / "settings.json").exists()
+    assert executor.cli_session_handle() == {"backend": "gemini", "session_id": "gem-earlier", "home": str(home)}
+
+
+@pytest.mark.parametrize(
+    "handle",
+    [
+        None,
+        {"backend": "codex", "session_id": "gem-earlier", "home": "HOME"},
+        {"backend": "gemini", "session_id": "../escape", "home": "HOME"},
+        {"backend": "gemini", "session_id": "gem-earlier", "home": "relative/home"},
+        {"backend": "gemini", "session_id": "gem-earlier", "home": "MISSING"},
+    ],
+)
+def test_an_unusable_session_handle_leaves_the_run_on_a_new_session(fake_gemini, tmp_path, handle):
+    home = tmp_path / "earlier-run-home"
+    home.mkdir()
+    if handle:
+        handle = {**handle, "home": {"HOME": str(home), "MISSING": str(tmp_path / "gone")}.get(handle["home"], handle["home"])}
+    fake_gemini.script([_run(json.dumps(VALID), session="gem-new")])
+    executor = _executor()
+
+    assert not executor.adopt_cli_session(handle)
+    executor.invoke({"input": "start"})
+
+    assert "-r" not in fake_gemini.calls[0]
+    assert executor.cli_session_handle()["session_id"] == "gem-new"
+    assert not (home / ".gemini").exists()

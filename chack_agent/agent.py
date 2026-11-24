@@ -420,6 +420,8 @@ class Chack:
         self.config_path = resolved_path or os.path.join(os.getcwd(), "chack.yaml")
         self.logger = logging.getLogger("chack.agent")
         self._executors: Dict[str, Any] = {}
+        # The CLI session the last run left, for ``run(resume_cli_session=...)``.
+        self.last_cli_session: Optional[Dict[str, str]] = None
         self._last_activity_at: Dict[str, float] = {}
         self._session_started_at: Dict[str, float] = {}
         self._pricing = load_pricing(resolve_pricing_path())
@@ -1752,6 +1754,7 @@ class Chack:
         resume_compaction_instructions: Optional[str] = None,
         reuse_session_executor: bool = False,
         output_validator: Optional[Callable[[str], str]] = None,
+        resume_cli_session: Optional[Dict[str, str]] = None,
     ) -> RunResult:
         return await asyncio.to_thread(
             self.run,
@@ -1777,6 +1780,7 @@ class Chack:
             resume_compaction_instructions=resume_compaction_instructions,
             reuse_session_executor=reuse_session_executor,
             output_validator=output_validator,
+            resume_cli_session=resume_cli_session,
         )
 
     @_traced_run
@@ -1807,6 +1811,7 @@ class Chack:
         resume_compaction_instructions: Optional[str] = None,
         reuse_session_executor: bool = False,
         output_validator: Optional[Callable[[str], str]] = None,
+        resume_cli_session: Optional[Dict[str, str]] = None,
     ) -> RunResult:
         """Run one turn in a logical session.
 
@@ -1819,6 +1824,12 @@ class Chack:
         unusable ("" when accepted, or raises). A final answer that fails it or
         the output schema is sent back to the same session with that error for
         a repair, instead of being returned for the caller to rerun the task.
+
+        ``resume_cli_session`` is a ``last_cli_session`` an earlier run left
+        (also when it failed): the run continues that CLI session instead of
+        starting a new one, where the backend supports it (Gemini CLI). A
+        handle the backend cannot use is ignored and the run starts a new
+        session.
         """
         # Callers may set an alias such as OPENAI_BEST_QUALITY on the config
         # after construction (provider profiles, failover); resolve it now so
@@ -1842,6 +1853,7 @@ class Chack:
         usage_observer = current_usage_observer()
         usage_sink = self._usage_sink(usage_observer) if usage_observer is not None else None
         executor = None
+        self.last_cli_session = None
         try:
             def _coerce_nonnegative_int(value: Any, default: int = 0) -> int:
                 try:
@@ -1884,6 +1896,12 @@ class Chack:
             if reuse_session_executor:
                 executor_kwargs["reuse_session_executor"] = True
             executor = self._get_executor(session_id, **executor_kwargs)
+            if resume_cli_session:
+                adopt = getattr(executor, "adopt_cli_session", None)
+                if callable(adopt) and adopt(resume_cli_session):
+                    self.logger.info("Run resumes CLI session %s", resume_cli_session.get("session_id"))
+                else:
+                    self.logger.warning("Run cannot resume the given CLI session; starting a new one")
             # A reused executor keeps the model it was built with.
             run_model = executor_run_model(executor) or run_model
             self.run_model = run_model
@@ -3445,6 +3463,12 @@ class Chack:
             raise
         finally:
             self._last_activity_at[session_id] = time.time()
+            handle = getattr(executor, "cli_session_handle", None)
+            if callable(handle):
+                try:
+                    self.last_cli_session = handle()
+                except Exception:
+                    self.last_cli_session = None
             metrics_stop_event.set()
             if metrics_thread is not None:
                 try:

@@ -370,3 +370,85 @@ def test_a_persistent_gateway_504_ends_the_session_with_its_usage_recorded(monke
     # own re-sends of it (three in Gemini CLI 0.67) got one attempt each.
     failing_call_attempts = len(calls) - 1
     assert transient_retry.DEFAULT_ATTEMPTS <= failing_call_attempts <= 2 * transient_retry.DEFAULT_ATTEMPTS
+
+
+def test_a_run_ended_by_a_gateway_504_is_resumed_in_the_same_cli_session_by_a_later_run(monkeypatch, tmp_path):
+    from chack_agent.backends import transient_retry
+
+    monkeypatch.setattr(transient_retry, "BASE_DELAY_SECONDS", 0.05)
+    finished = {"candidates": [{"content": {"role": "model", "parts": [{"text": "finished"}]},
+                                "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 1500, "candidatesTokenCount": 20}}
+    after_tool_call = [_UPSTREAM_TIMEOUT]
+    server, _ = _session_gateway(after_tool_call)
+    monkeypatch.setenv("GEMINI_CLI_PATH", GEMINI)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CHACK_EXEC_CWD", str(tmp_path))
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(name, raising=False)
+    _litellm_catalog(monkeypatch, "corp/flash", "openai/flash")
+    config = _litellm_config("corp/flash", f"http://127.0.0.1:{server.server_address[1]}", llm_gateway_type="litellm")
+    config.session.max_turns = 6
+
+    def _executor():
+        return build_executor(
+            config, system_prompt=SYSTEM_PROMPT, max_turns=6, memory_max_messages=10, memory_reset_to_messages=5
+        )
+
+    try:
+        monkeypatch.setenv("CHACK_GEMINI_HOME", str(tmp_path / "first-process"))
+        first = _executor()
+        failed = first.invoke({"input": "Run the check, then say finished."})
+        handle = first.cli_session_handle()
+
+        # A later process, with a home of its own, gets the handle and the gateway has recovered.
+        after_tool_call[:] = [(200, finished)]
+        monkeypatch.setenv("CHACK_GEMINI_HOME", str(tmp_path / "second-process"))
+        second = _executor()
+        assert second.adopt_cli_session(handle)
+        resumed = second.invoke({"input": "Run the check, then say finished."})
+    finally:
+        server.shutdown()
+        llm_gateway._CATALOG_CACHE.clear()
+
+    assert failed["output"].startswith("ERROR: Gemini")
+    assert any("exec" in step[0].tool for step in failed["intermediate_steps"])
+    assert handle and handle["backend"] == "gemini" and handle["home"].startswith(str(tmp_path / "first-process"))
+    assert "finished" in resumed["output"]
+    # The resumed session already held the tool call and its result, so the check is not run again.
+    assert not any("exec" in step[0].tool for step in resumed["intermediate_steps"])
+    assert second.cli_session_handle()["session_id"] == handle["session_id"]
+
+
+def test_a_handle_to_a_session_the_cli_no_longer_has_starts_a_new_session(monkeypatch, tmp_path):
+    finished = {"candidates": [{"content": {"role": "model", "parts": [{"text": "finished"}]},
+                                "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 1500, "candidatesTokenCount": 20}}
+    server, _ = _session_gateway([(200, finished)])
+    monkeypatch.setenv("GEMINI_CLI_PATH", GEMINI)
+    monkeypatch.setenv("CHACK_GEMINI_HOME", str(tmp_path / "gemini-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CHACK_EXEC_CWD", str(tmp_path))
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(name, raising=False)
+    _litellm_catalog(monkeypatch, "corp/flash", "openai/flash")
+    config = _litellm_config("corp/flash", f"http://127.0.0.1:{server.server_address[1]}", llm_gateway_type="litellm")
+    config.session.max_turns = 6
+    emptied = tmp_path / "emptied-home"
+    emptied.mkdir()
+    try:
+        executor = build_executor(
+            config, system_prompt=SYSTEM_PROMPT, max_turns=6, memory_max_messages=10, memory_reset_to_messages=5
+        )
+        assert executor.adopt_cli_session(
+            {"backend": "gemini", "session_id": "0f6c2f6e-1111-4b7a-9d55-3c1d2a7e9b10", "home": str(emptied)}
+        )
+        result = executor.invoke({"input": "Run the check, then say finished."})
+    finally:
+        server.shutdown()
+        llm_gateway._CATALOG_CACHE.clear()
+
+    # The task ran whole in a new session: the check, then the answer.
+    assert "finished" in result["output"]
+    assert any("exec" in step[0].tool for step in result["intermediate_steps"])
+    assert executor.cli_session_handle()["session_id"] != "0f6c2f6e-1111-4b7a-9d55-3c1d2a7e9b10"
