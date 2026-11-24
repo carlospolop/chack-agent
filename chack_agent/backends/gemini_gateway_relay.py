@@ -63,6 +63,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, NamedTuple
 
+from . import gateway_pressure
 from .transient_retry import TRANSIENT_STATUSES, TransientRetry, retry_after_seconds
 
 
@@ -415,6 +416,17 @@ def _timeout_reply(exc: BaseException) -> _Reply:
     return _error_reply(502, "UNAVAILABLE", f"gateway call timed out: {exc}")._replace(timed_out=True)
 
 
+def _notify_pressure(response: Any, status: int, transient: bool, url: str, *, timeout_reported: bool) -> None:
+    """Tell ``gateway_pressure`` listeners about a timed-out, rate-limited or unavailable call."""
+    if isinstance(response, _Reply) and response.timed_out:
+        if not timeout_reported:
+            gateway_pressure.notify(gateway_pressure.TIMEOUT, f"call to {url} timed out")
+    elif status == 429:
+        gateway_pressure.notify(gateway_pressure.RATE_LIMITED, f"call to {url}: HTTP 429")
+    elif transient or status >= 500:
+        gateway_pressure.notify(gateway_pressure.UNAVAILABLE, f"call to {url}: {_status_label(response)}")
+
+
 def _status_label(response: Any) -> Any:
     """The status a log line shows: the relay's own failures by name, not as their 502."""
     if isinstance(response, _Reply):
@@ -724,6 +736,9 @@ class GeminiGatewayRelay:
                 response = self._open(url, body, headers, method, retry.deadline)
             status = _status_of(response)
             transient = response.dropped if isinstance(response, _Reply) else status in TRANSIENT_STATUSES
+            if not retry.abandoned:
+                # A call with a deadline is waited for by ``_forward_stream``, which reports its timeout.
+                _notify_pressure(response, status, transient, url, timeout_reported=retry.deadline is not None)
             if transient or status >= 500:
                 self._log_call(url, body, _status_label(response), retry, retry.attempt_started)
             if not transient:
@@ -769,6 +784,8 @@ class GeminiGatewayRelay:
             except Exception as exc:
                 if _timed_out(exc):
                     reply = _timeout_reply(exc)
+                    if deadline is None:
+                        gateway_pressure.notify(gateway_pressure.TIMEOUT, f"answer from {url} timed out")
                     self._log_call(url, body, _status_label(reply), retry, retry.attempt_started)
                     return reply
                 if not _dropped_connection(exc):
@@ -858,6 +875,7 @@ class GeminiGatewayRelay:
             reply, headers_sent = self._wait_for_call(handler, url, body, headers, headers_sent, limit)
             if reply is not None:
                 break
+            gateway_pressure.notify(gateway_pressure.TIMEOUT, f"no answer from {url} within {round(limit, 1)}s")
             _LOGGER.warning(
                 "Gemini gateway gave no answer to %s within %ss (attempt %d/%d)%s",
                 url,
