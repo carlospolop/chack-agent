@@ -26,9 +26,10 @@ blank keepalive lines until the answer, or the gateway's error, arrives.
 
 Each gateway call has its own time limit (``CHACK_GEMINI_RELAY_REQUEST_TIMEOUT_SECONDS``,
 never more than the run's limit), well below a run's: a model call the gateway
-never answers is abandoned at that limit and sent once more, and if that one
-also gets no answer the CLI gets a 504 ``DEADLINE_EXCEEDED`` error instead of
-keepalives until the whole run times out. Each attempt's socket timeout is
+never answers is abandoned at half that limit (``_FIRST_ATTEMPT_SHARE``) and sent
+once more with the whole limit, and if that one also gets no answer the CLI gets
+a 504 ``DEADLINE_EXCEEDED`` error instead of keepalives until the whole run times
+out. Each attempt's socket timeout is
 capped at the time left before that limit (``_MIN_ATTEMPT_TIMEOUT_SECONDS`` at
 least), and an abandoned call starts no further retry, so it ends by the limit
 instead of running on, billed, upstream. A call the relay itself gave up on at
@@ -342,6 +343,11 @@ REQUEST_TIMEOUT_ENV = "CHACK_GEMINI_RELAY_REQUEST_TIMEOUT_SECONDS"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
 # A model call that gets no answer within its time limit is sent this many times in all.
 _TIMED_OUT_CALL_ATTEMPTS = 2
+# A gateway that hangs on a call hangs on most attempts for the whole limit, while
+# a slow answer only needs the full limit when its prompt is large. The first
+# attempt therefore gets this share of the limit and the retry the whole of it, so
+# a hang costs half the limit and a slow large answer still gets all of it.
+_FIRST_ATTEMPT_SHARE = 0.5
 # Socket timeout of an attempt started just before its call's limit, so it never gets a zero or negative one.
 _MIN_ATTEMPT_TIMEOUT_SECONDS = 0.5
 
@@ -820,13 +826,14 @@ class GeminiGatewayRelay:
         headers_sent = False
         reply: _Reply | None = None
         for attempt in range(1, _TIMED_OUT_CALL_ATTEMPTS + 1):
-            reply, headers_sent = self._wait_for_call(handler, url, body, headers, headers_sent)
+            limit = self._timeout_seconds * (_FIRST_ATTEMPT_SHARE if attempt == 1 else 1.0)
+            reply, headers_sent = self._wait_for_call(handler, url, body, headers, headers_sent, limit)
             if reply is not None:
                 break
             _LOGGER.warning(
                 "Gemini gateway gave no answer to %s within %ss (attempt %d/%d)%s",
                 url,
-                self._timeout_seconds,
+                round(limit, 1),
                 attempt,
                 _TIMED_OUT_CALL_ATTEMPTS,
                 "; retrying" if attempt < _TIMED_OUT_CALL_ATTEMPTS else "",
@@ -835,8 +842,8 @@ class GeminiGatewayRelay:
             reply = _error_reply(
                 504,
                 "DEADLINE_EXCEEDED",
-                f"gateway gave no answer within {self._timeout_seconds:g}s, "
-                f"{_TIMED_OUT_CALL_ATTEMPTS} attempts",
+                f"gateway gave no answer in {_TIMED_OUT_CALL_ATTEMPTS} attempts, "
+                f"the last within {self._timeout_seconds:g}s",
             )
         if not headers_sent and not (reply.status in TRANSIENT_STATUSES and self._retries_spent):
             self._send(handler, reply.status, reply.headers, reply.body)
@@ -861,8 +868,9 @@ class GeminiGatewayRelay:
         body: bytes | None,
         headers: dict[str, str],
         headers_sent: bool,
+        limit: float,
     ) -> tuple["_Reply | None", bool]:
-        """One gateway call's answer, or None when it has none within the call's time limit.
+        """One gateway call's answer, or None when it has none within ``limit`` seconds.
 
         Keeps the CLI's connection alive meanwhile, sending the event-stream
         headers once the call has taken ``keepalive_after_seconds``. Returns
@@ -873,7 +881,7 @@ class GeminiGatewayRelay:
         outcome: list[_Reply] = []
         done = threading.Event()
         abandoned = threading.Event()
-        deadline = time.monotonic() + self._timeout_seconds
+        deadline = time.monotonic() + limit
 
         def call() -> None:
             try:
