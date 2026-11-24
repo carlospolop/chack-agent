@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import threading
 import time
 from typing import Any, Callable
 
@@ -80,7 +81,8 @@ class TransientRetry:
     Call ``wait`` after each transient failure: it sleeps the backoff and
     returns True when another attempt may be made, or returns False at once
     when the attempts, the total wait or the ``deadline`` (a ``time.monotonic``
-    value) are spent.
+    value) are spent, or when ``abandoned`` is set (the caller stopped waiting
+    for the request, so another attempt would only cost).
     """
 
     def __init__(
@@ -91,6 +93,7 @@ class TransientRetry:
         attempts: int | None = None,
         max_wait_seconds: float | None = None,
         deadline: float | None = None,
+        abandoned: threading.Event | None = None,
         sleep: Callable[[float], None] = time.sleep,
         rng: Callable[[], float] = random.random,
     ) -> None:
@@ -98,7 +101,8 @@ class TransientRetry:
         self._logger = logger
         self.attempts = attempts if attempts is not None else configured_attempts()
         self._max_wait = max_wait_seconds if max_wait_seconds is not None else configured_max_wait_seconds()
-        self._deadline = deadline
+        self.deadline = deadline
+        self._abandoned = abandoned
         self._sleep = sleep
         self._rng = rng
         self.attempt = 1
@@ -106,7 +110,22 @@ class TransientRetry:
         # When the current attempt was sent (``time.monotonic``), for its latency.
         self.attempt_started = time.monotonic()
 
+    @property
+    def abandoned(self) -> bool:
+        return self._abandoned is not None and self._abandoned.is_set()
+
+    def _stop_if_abandoned(self, failure: str) -> bool:
+        if not self.abandoned:
+            return False
+        self._logger.warning(
+            "%s failed transiently (%s) on attempt %d/%d; not retried, its caller stopped waiting",
+            self._label, failure, self.attempt, self.attempts,
+        )
+        return True
+
     def wait(self, failure: str, *, retry_after: float | None = None) -> bool:
+        if self._stop_if_abandoned(failure):
+            return False
         if self.attempt >= self.attempts:
             self._logger.warning(
                 "%s failed transiently (%s) on attempt %d/%d; no attempts left",
@@ -116,7 +135,7 @@ class TransientRetry:
         delay = backoff_delay(self.attempt, rng=self._rng)
         if retry_after is not None:
             delay = max(delay, min(retry_after, MAX_DELAY_SECONDS))
-        over_deadline = self._deadline is not None and time.monotonic() + delay >= self._deadline
+        over_deadline = self.deadline is not None and time.monotonic() + delay >= self.deadline
         if self.waited + delay > self._max_wait or over_deadline:
             self._logger.warning(
                 "%s failed transiently (%s) on attempt %d/%d; no time left to retry",
@@ -129,6 +148,8 @@ class TransientRetry:
         )
         self._sleep(delay)
         self.waited += delay
+        if self._stop_if_abandoned(failure):
+            return False
         self.attempt += 1
         return True
 
