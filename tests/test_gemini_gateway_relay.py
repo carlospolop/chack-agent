@@ -978,3 +978,110 @@ def test_once_a_call_spent_its_retries_the_clis_own_resends_get_one_attempt_unti
 
     assert [json.loads(reply[2])["error"]["code"] for reply in (first, second, third)] == [504, 504, 504]
     assert len(calls) == transient_retry.DEFAULT_ATTEMPTS + 2 + 1 + 2
+
+
+def test_an_abandoned_call_ends_by_its_deadline_even_when_a_retry_started_just_before_it(caplog):
+    """A retry started near the call's limit used to get a full socket timeout of
+    its own, so the abandoned request ran on (and was billed) past the limit."""
+
+    calls = []
+    retry_closed = threading.Event()
+    closed_at = []
+
+    class Gateway(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            calls.append(time.monotonic())
+            if len(calls) == 1:
+                # A transient failure late in the call's 2 s limit: the retry starts with under 1 s left.
+                time.sleep(1.2)
+                payload, status = b"overloaded", 503
+            elif len(calls) == 2:
+                # The retry gets no answer; note when the relay hangs up on it.
+                self.connection.settimeout(10)
+                try:
+                    self.connection.recv(1)
+                except OSError:
+                    pass
+                closed_at.append(time.monotonic())
+                retry_closed.set()
+                return
+            else:
+                payload, status = ANSWER_BYTES, 200
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Gateway)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        relay = GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            timeout_seconds=3840,
+            request_timeout_seconds=2.0,
+            keepalive_after_seconds=0.1,
+            keepalive_every_seconds=0.1,
+        )
+        with caplog.at_level("WARNING", logger="chack.gemini_gateway_relay"), relay:
+            started = time.monotonic()
+            status, _, _, chunks = _stream_with_timing(relay.base_url)
+            assert retry_closed.wait(5)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # The call is sent once more at its limit and that answer reaches the CLI.
+    assert status == 200
+    assert json.loads(b"".join(chunks).partition(b"data: ")[2]) == ANSWER
+    assert len(calls) == 3
+    # The abandoned retry ended at the call's 2 s limit, not 2 s after it started (~3.2 s).
+    assert closed_at[0] - started < 2.0 + 0.5
+    # It ended at the relay's own timeout, which is no gateway 502.
+    lines = [r.getMessage() for r in caplog.records if "Gemini gateway call /" in r.getMessage()]
+    assert any("status=timeout" in line for line in lines)
+    assert not any("status=502" in line for line in lines)
+
+
+def test_a_call_whose_caller_stopped_waiting_starts_no_new_retry():
+    abandoned = threading.Event()
+    retry = transient_retry.TransientRetry(
+        "call", logger=logging.getLogger("test.retry"), attempts=10,
+        abandoned=abandoned, sleep=lambda _delay: abandoned.set(),
+    )
+    # Abandoned during the backoff: no further attempt.
+    assert retry.wait("HTTP 503") is False
+    assert retry.attempt == 1
+    # Already abandoned: no backoff either.
+    slept = []
+    retry = transient_retry.TransientRetry(
+        "call", logger=logging.getLogger("test.retry"), attempts=10,
+        abandoned=abandoned, sleep=slept.append,
+    )
+    assert retry.wait("HTTP 503") is False
+    assert slept == []
+
+
+def test_the_relays_own_socket_timeout_is_logged_as_a_timeout_not_a_gateway_502(caplog):
+    server, calls, release = _silent_gateway(answer_from_call=99)
+    try:
+        with caplog.at_level("WARNING", logger="chack.gemini_gateway_relay"), GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            timeout_seconds=3840,
+            request_timeout_seconds=0.4,
+        ) as relay:
+            status, _, _ = _post(f"{relay.base_url}/v1beta/models/m:countTokens")
+    finally:
+        _stop(server, release)
+
+    # The CLI still gets the same 502 and the call is not retried.
+    assert status == 502
+    assert len(calls) == 1
+    lines = [r.getMessage() for r in caplog.records if "Gemini gateway call /" in r.getMessage()]
+    assert len(lines) == 1
+    assert lines[0].startswith("Gemini gateway call /v1beta/models/m:countTokens: status=timeout attempt=1/")
