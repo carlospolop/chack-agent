@@ -31,7 +31,7 @@ from ..llm_gateway import clone_config_for_gateway, gateway_subprocess_env, get_
 from ..output_schema import repair_schema_output
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import normalize_thinking_effort
-from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds, prefer_oom_kill
+from .cli_process import END_OF_OUTPUT, CliLineReader, apply_pinned_exec_cwd, cli_exec_timeout_seconds, prefer_oom_kill
 from .claude_code_backend import _terminate_process_tree
 from .opencode_cli_backend import _role_env, _toolset_kwargs
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
@@ -281,6 +281,7 @@ class CodeCliExecutor:
             if self._base_url:
                 env["OPENAI_BASE_URL"] = self._base_url
             env["OPENAI_MODEL"] = self._model_name
+        apply_pinned_exec_cwd(self, env)
         return env
 
     def _write_config(self) -> None:
@@ -291,7 +292,7 @@ class CodeCliExecutor:
             "chack_tools": {
                 "command": sys.executable,
                 "args": ["-m", "chack_agent.backends.chack_tools_mcp_server"],
-                "cwd": os.environ.get("CHACK_EXEC_CWD") or os.getcwd(),
+                "cwd": env.get("CHACK_EXEC_CWD") or os.getcwd(),
                 "env": self._mcp_env(env),
             }
         }
@@ -385,6 +386,7 @@ class CodeCliExecutor:
         })
         if self._base_url:
             env[f"{self.backend.upper()}_BASE_URL"] = self._base_url
+        apply_pinned_exec_cwd(self, env)
         return env
 
     def _command(self, prompt: str) -> list[str]:

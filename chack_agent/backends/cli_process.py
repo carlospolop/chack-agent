@@ -65,6 +65,53 @@ def cli_exec_timeout_seconds(timeout_env: str) -> int:
     return CLI_DEFAULT_TIMEOUT_SECONDS
 
 
+# A CLI run that prints nothing for this long beyond its longest Chack command
+# (``tools.exec_timeout_seconds``) is stopped as hung. The grace covers one
+# model answer with the CLI's own retries of a failing provider.
+CLI_IDLE_GRACE_SECONDS = 1800
+
+
+def cli_idle_timeout_seconds(idle_env: str, exec_timeout_seconds: int) -> int:
+    """How long one CLI run may print nothing before it is stopped as hung.
+
+    ``idle_env`` (e.g. CHACK_OPENCODE_IDLE_TIMEOUT_SECONDS) wins when set, and 0
+    turns the limit off; otherwise the run's longest command plus a grace.
+    """
+    explicit = str(os.environ.get(idle_env, "") or "").strip()
+    if explicit:
+        return int(explicit)
+    return max(0, int(exec_timeout_seconds or 0)) + CLI_IDLE_GRACE_SECONDS
+
+
+EXEC_CWD_ENV = "CHACK_EXEC_CWD"
+_EXECUTOR_EXEC_CWD_ATTRIBUTE = "chack_exec_cwd"
+
+
+def pin_exec_cwd(executor: object, config: object) -> None:
+    """Record on ``executor`` the exec working directory of the config it was built from.
+
+    Chack exports a run's ``tools.exec_cwd`` as the process-wide CHACK_EXEC_CWD,
+    which every agent started later in the same process overwrites. A CLI run
+    this executor starts afterwards (a resumed or repair turn) still belongs in
+    its own directory, so CLI backends take it from here.
+    """
+    value = str(getattr(getattr(config, "tools", None), "exec_cwd", "") or "").strip()
+    if value and not os.path.isabs(value):
+        # export_env has just resolved it against the config's directory.
+        value = str(os.environ.get(EXEC_CWD_ENV, "") or "").strip() or os.path.abspath(value)
+    try:
+        setattr(executor, _EXECUTOR_EXEC_CWD_ATTRIBUTE, value)
+    except (AttributeError, TypeError):
+        pass
+
+
+def apply_pinned_exec_cwd(executor: object, env: dict) -> None:
+    """Set CHACK_EXEC_CWD in a CLI child's ``env`` to the executor's own directory, when it has one."""
+    value = str(getattr(executor, _EXECUTOR_EXEC_CWD_ATTRIBUTE, "") or "")
+    if value:
+        env[EXEC_CWD_ENV] = value
+
+
 class CliLineReader:
     """Reads a child's text output on a daemon thread, one line at a time."""
 
