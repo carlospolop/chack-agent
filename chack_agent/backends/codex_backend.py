@@ -22,6 +22,7 @@ import requests
 
 from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
 from chack_tools.agents_toolset import AgentsToolset
+from chack_tools.run_lifecycle import run_state_dir
 from chack_tools.task_steps_manager_state import (
     STORE as TASK_STEPS_STORE,
     current_run_label,
@@ -2777,6 +2778,7 @@ class CodexExecutor:
             "1" if self._require_task_steps_manager_init_first else "0"
         )
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
+        env["CHACK_RUN_STATE_DIR"] = run_state_dir()
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         env["CHACK_MCP_PARENT_PID"] = str(os.getpid())
         # Child processes export into the same place and join this run's trace.
@@ -2932,6 +2934,7 @@ class CodexExecutor:
             "CHACK_MAX_TOOLS_USED",
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
+            "CHACK_RUN_STATE_DIR",
             "CHACK_RUN_LABEL",
             "CHACK_MCP_PARENT_PID",
             "CHACK_RESEARCH_MASTER_DIR",

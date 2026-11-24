@@ -36,7 +36,9 @@ from .subagent_config import (
     researcher_response_from_output,
     subagent_launch_block_reason,
 )
-from .task_steps_manager_state import current_session_id
+from .task_steps_manager_state import current_session_id, set_active_context
+from .run_lifecycle import run_state_dir
+from .tool_usage_state import STORE as TOOL_USAGE_STORE, current_usage_session_id, set_active_usage_session
 from .research_artifacts import (
     add_research_artifact_tools,
     cleanup_research_artifacts,
@@ -503,9 +505,21 @@ def _researcher_process_entry(
     payload: dict[str, Any],
     evidence_dir: str,
     cgroup_path: str,
+    usage_sessions: tuple[str, str, str] = ("", "", ""),
 ) -> None:
     """Invoke one researcher inside a separate, administrator-killable process."""
     cgroup_attached = _attach_current_process_to_cgroup(cgroup_path)
+    # The researcher's model usage counts in the run that started it: agents
+    # keyed by that run's sessions write to the run-state file it reads.
+    task_session_id, usage_session_id, state_dir = (str(value or "") for value in usage_sessions)
+    if state_dir:
+        os.environ["CHACK_RUN_STATE_DIR"] = state_dir
+    for shared_session_id in (task_session_id, usage_session_id):
+        TOOL_USAGE_STORE.share_session_with_parent(shared_session_id)
+    if task_session_id:
+        set_active_context(task_session_id, "Run 1")
+    if usage_session_id:
+        set_active_usage_session(usage_session_id)
     try:
         # Every subprocess launched by the researcher inherits this private
         # session/process group and is terminated together with the child.
@@ -746,7 +760,14 @@ def _run_researcher_in_process(
     cgroup_path = _create_researcher_cgroup()
     process = context.Process(
         target=_researcher_process_entry,
-        args=(child_connection, serialized_tool, payload, str(evidence_dir or ""), cgroup_path),
+        args=(
+            child_connection,
+            serialized_tool,
+            payload,
+            str(evidence_dir or ""),
+            cgroup_path,
+            (str(current_session_id() or ""), str(current_usage_session_id() or ""), run_state_dir()),
+        ),
         name="chack-researcher-child",
     )
     process.daemon = False

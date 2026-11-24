@@ -253,6 +253,9 @@ class RunResult:
     # The model, backend and thinking effort this run was sent to, read from
     # the executor that ran it.
     run_model: RunModel = field(default_factory=RunModel)
+    # Agent runs this run started through its tools (sub-agents, nested runs,
+    # theirs included); their usage is in ``nested_usage_by_model``.
+    nested_agent_runs: int = 0
 
 
 def _cache_hit_rate(usages: Sequence[Sequence[int]]) -> Optional[float]:
@@ -397,6 +400,19 @@ def _traced_run(func: Callable[..., "RunResult"]) -> Callable[..., "RunResult"]:
             )
 
     return _traced
+
+
+@dataclass
+class _RunUsage:
+    """Usage a run settles once when it ends (``Chack._finish_run_usage``)."""
+
+    # Model calls the run made itself, per model.
+    main_spent: dict[str, list[int]] = field(
+        default_factory=lambda: defaultdict(lambda: [0, 0, 0, 0])
+    )
+    # Tool-process usage already reported to the usage observer.
+    observed_tool_process: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
+    settled: bool = False
 
 
 class Chack:
@@ -1069,6 +1085,59 @@ class Chack:
                     cache_write_delta,
                 )
         return delta
+
+    @staticmethod
+    def _add_usage(totals: dict[str, list[int]], model_name: str, usage: Sequence[int]) -> None:
+        model = str(model_name or "").strip()
+        values = [max(0, int(value or 0)) for value in list(usage)[:4]]
+        if not model or not any(values):
+            return
+        row = totals[model]
+        for index, value in enumerate(values):
+            row[index] += value
+
+    def _finish_run_usage(
+        self,
+        usage_sink,
+        usage_session_id: Optional[str],
+        task_session_id: str,
+        run_usage: "_RunUsage",
+    ) -> None:
+        """Settle a run's usage once, before its nested usage is cleared.
+
+        Usage spent by agents in tool processes reached no observer: report
+        what is left of it. A nested run (``usage_session_id`` names the run
+        that started it) then hands its own model calls plus its nested usage
+        to that run, which reads them as its nested usage (``tokens_snapshot``):
+        in memory, or from a tool process through the run-state file.
+        """
+        if not task_session_id or run_usage.settled:
+            return
+        run_usage.settled = True
+        try:
+            tool_process_usage = TOOL_USAGE_STORE.tool_process_tokens_snapshot(task_session_id)
+            if usage_sink is not None:
+                for model_name, values in self._token_usage_delta(
+                    run_usage.observed_tool_process, tool_process_usage
+                ).items():
+                    usage_sink(model_name, *values)
+            run_usage.observed_tool_process.update(tool_process_usage)
+            parent_session_id = str(usage_session_id or "").strip()
+            if not parent_session_id or parent_session_id == task_session_id:
+                return
+            usage: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0])
+            for model_name, values in run_usage.main_spent.items():
+                self._add_usage(usage, model_name, values)
+            for model_name, values in TOOL_USAGE_STORE.tokens_snapshot(task_session_id).items():
+                self._add_usage(usage, model_name, values)
+            for model_name, values in usage.items():
+                TOOL_USAGE_STORE.add_tokens(model_name, *values, session_id=parent_session_id)
+            TOOL_USAGE_STORE.add_agent_runs(
+                1 + TOOL_USAGE_STORE.agent_runs_snapshot(task_session_id),
+                session_id=parent_session_id,
+            )
+        except Exception:
+            self.logger.warning("Settling nested usage failed.", exc_info=True)
 
     def _merge_gateway_pricing(self) -> None:
         """Price gateway model names with the rates the gateway itself bills."""
@@ -1852,6 +1921,7 @@ class Chack:
         run_cancel_event = inherited_cancel_event or threading.Event()
         usage_observer = current_usage_observer()
         usage_sink = self._usage_sink(usage_observer) if usage_observer is not None else None
+        run_usage = _RunUsage()
         executor = None
         self.last_cli_session = None
         try:
@@ -2146,6 +2216,11 @@ class Chack:
                         cache_write_tokens=resume_compaction_usage[3],
                     )
                     estimated_cost_spent += float(resume_cost or 0.0)
+                    self._add_usage(
+                        run_usage.main_spent,
+                        str(self.config.model.primary or ""),
+                        resume_compaction_usage,
+                    )
                     update_spent_usd(estimated_cost_spent)
                     export_spent_usd_env(estimated_cost_spent)
                     log_event(
@@ -2233,6 +2308,18 @@ class Chack:
                     return False
 
             attempt_costs: list[dict[str, Any]] = []
+
+            def _observe_tool_process_usage() -> None:
+                # Agents run in tool processes report to no observer: report
+                # their usage once, here, as it reaches this run.
+                if usage_sink is None or not task_session_id:
+                    return
+                current = TOOL_USAGE_STORE.tool_process_tokens_snapshot(task_session_id)
+                for model_name, values in self._token_usage_delta(
+                    run_usage.observed_tool_process, current
+                ).items():
+                    usage_sink(model_name, *values)
+                run_usage.observed_tool_process.update(current)
 
             def _invoke_with_min_tools(
                 prompt_text: str,
@@ -2342,6 +2429,7 @@ class Chack:
                         _log_timestamp(),
                     )
                     attempt_token_usage_before = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
+                    attempt_live_main_usage: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0])
                     live_cost_callback_holder: dict[str, Any] = {"callback": None}
                     limit_event_callback_holder: dict[str, Any] = {"callback": None}
 
@@ -2419,7 +2507,7 @@ class Chack:
                         if max_runtime_seconds <= 0 and max_cost_usd <= 0:
                             return _invoke_with_cancellation_context()
                         result_queue = queue.Queue()
-                        live_main_usage: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0])
+                        live_main_usage = attempt_live_main_usage
                         live_cost_lock = threading.Lock()
 
                         def _estimate_usage_cost(
@@ -2632,13 +2720,27 @@ class Chack:
                             raise payload
                         return payload
 
-                    result = _invoke_with_budget()
+                    try:
+                        result = _invoke_with_budget()
+                    except BaseException:
+                        # A budget stop ends the attempt without a result: its
+                        # live-reported usage is what it spent.
+                        for model_name, model_usage in list(attempt_live_main_usage.items()):
+                            self._add_usage(run_usage.main_spent, model_name, model_usage)
+                        _observe_tool_process_usage()
+                        raise
                     (
                         attempt_prompt,
                         attempt_completion,
                         attempt_cached,
                         attempt_cache_write,
                     ) = self._usage_from_raw_result(result.get("raw_result"))
+                    self._add_usage(
+                        run_usage.main_spent,
+                        str(self.config.model.primary or ""),
+                        (attempt_prompt, attempt_completion, attempt_cached, attempt_cache_write),
+                    )
+                    _observe_tool_process_usage()
                     attempt_nested_usage = self._token_usage_delta(
                         attempt_token_usage_before,
                         TOOL_USAGE_STORE.tokens_snapshot(task_session_id),
@@ -3150,6 +3252,7 @@ class Chack:
             tool_counts = Counter(run1_tool_counts)
             tool_counts.update(run2_tool_counts)
             nested_usage_by_model = TOOL_USAGE_STORE.tokens_snapshot(task_session_id)
+            nested_agent_runs = TOOL_USAGE_STORE.agent_runs_snapshot(task_session_id)
 
             run1_tools_used = (
                 self._non_task_tool_count_from_counter(run1_observed_counts)
@@ -3252,6 +3355,7 @@ class Chack:
                 or on_task_steps_manager_snapshot_update is not None
             ):
                 STORE.unregister_listener(task_session_id, _listener)
+            self._finish_run_usage(usage_sink, usage_session_id, task_session_id, run_usage)
             TOOL_USAGE_STORE.clear(task_session_id)
 
             if (
@@ -3332,6 +3436,7 @@ class Chack:
                     "tool_counts": dict(tool_counts),
                     "nested_tool_counts": dict(nested_counts_total),
                     "nested_usage_by_model": nested_usage_by_model,
+                    "nested_agent_runs": nested_agent_runs,
                     "limit_reached": str(result.get("limit_reached") or ""),
                     "completion_preserved_after_limit": bool(
                         result.get("completion_preserved_after_limit")
@@ -3362,6 +3467,7 @@ class Chack:
                 tools_used=tools_used,
                 task_session_id=telemetry_task_session_id or task_session_id,
                 nested_usage_by_model=nested_usage_by_model,
+                nested_agent_runs=nested_agent_runs,
                 run1_output=run1_output,
                 run2_output=run2_output,
                 run1_steps=run1_steps,
@@ -3481,6 +3587,7 @@ class Chack:
                         STORE.unregister_listener(task_session_id, task_listener)
                     except Exception:
                         pass
+                self._finish_run_usage(usage_sink, usage_session_id, task_session_id, run_usage)
                 try:
                     TOOL_USAGE_STORE.clear(task_session_id)
                 except Exception:

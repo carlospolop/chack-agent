@@ -33,6 +33,7 @@ from typing import Any
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
+from chack_tools.run_lifecycle import run_state_dir
 from chack_tools.task_steps_manager_state import (
     STORE as TASK_STEPS_STORE,
     current_run_label,
@@ -754,6 +755,7 @@ class OpencodeCliExecutor:
             "1" if self._require_task_steps_manager_init_first else "0"
         )
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
+        env["CHACK_RUN_STATE_DIR"] = run_state_dir()
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         # Export settings and the run's trace context, so the Chack MCP
         # server's tool spans join this run's trace.
