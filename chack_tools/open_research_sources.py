@@ -184,6 +184,39 @@ def _html_to_text(html_text: str) -> str:
     return re.sub(r"\s+", " ", unescape(text)).strip()
 
 
+# Tags that start a new line in saved page text, so artifact readers can
+# address it by line instead of one line holding the whole page.
+_BLOCK_TAG_RE = re.compile(
+    r"(?is)</?(?:address|article|aside|blockquote|br|caption|dd|details|div|dl|dt|figcaption|figure|footer|form"
+    r"|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|summary|table|title|tr|ul)\b[^>]*>"
+)
+
+
+def _html_to_page_text(html_text: str) -> str:
+    """Readable page text with one line per block element."""
+    text = re.sub(r"(?is)<(script|style|noscript|svg|template)\b.*?>.*?</\1>", " ", str(html_text or ""))
+    text = re.sub(r"(?s)<!--.*?-->", " ", text)
+    # Source line breaks are layout, not structure: only block tags break lines.
+    text = _BLOCK_TAG_RE.sub("\n", re.sub(r"\s+", " ", text))
+    text = unescape(re.sub(r"(?s)<[^>]+>", " ", text))
+    lines = (re.sub(r"\s+", " ", line).strip() for line in text.split("\n"))
+    return "\n".join(line for line in lines if line)
+
+
+def _page_text(raw: str, content_type: str) -> tuple[str, bool]:
+    """Saved text for a fetched body, and whether the body was HTML."""
+    if "html" in content_type or "<html" in raw[:500].lower():
+        return _html_to_page_text(raw), True
+    stripped = raw.lstrip()
+    if "json" in content_type or stripped[:1] in {"{", "["}:
+        try:
+            # One value per line instead of one line for the whole document.
+            return json.dumps(json.loads(raw), ensure_ascii=False, indent=1), False
+        except ValueError:
+            pass
+    return raw, False
+
+
 def _xml_to_text(xml_text: str) -> str:
     try:
         root = ET.fromstring(str(xml_text or "").encode("utf-8"))
@@ -344,11 +377,11 @@ class OpenResearchTool:
                 return "ERROR: fetched URL exceeded the response-size limit"
         if hasattr(response, "close"):
             response.close()
-        text = _html_to_text(raw) if "html" in content_type or "<html" in raw[:500].lower() else raw
+        text, is_html = _page_text(raw, content_type)
         if len(text.strip()) < 40:
             return "ERROR: fetched URL did not contain enough extractable text"
         host = urlparse(str(response.url or url)).netloc or "page"
-        raw_ext = "html" if "html" in content_type or "<html" in raw[:500].lower() else "txt"
+        raw_ext = "html" if is_html else "txt"
         final_url = str(response.url or url)
         if not _is_public_https_url(final_url):
             return "ERROR: fetched URL resolved to a non-public destination"
@@ -364,7 +397,7 @@ class OpenResearchTool:
         return (
             "SUCCESS: Fetched page text.\n"
             f"URL: {final_url}\n"
-            f"Characters: {len(text)}\n"
+            f"Characters: {len(text)}, lines: {text.count(chr(10)) + 1}\n"
             f"Saved raw: {raw_path}\n"
             f"Saved text: {text_path}\n"
             f"Excerpt: {_short(text, 900)}"
@@ -478,7 +511,7 @@ class OpenResearchTool:
         except requests.exceptions.HTTPError as exc:
             return f"ERROR: Wayback capture returned HTTP {exc.response.status_code}"
         raw = response.text or ""
-        text = _html_to_text(raw)
+        text = _html_to_page_text(raw)
         if len(text.strip()) < 40:
             return "ERROR: Wayback capture did not contain enough extractable text"
         raw_path, text_path = _write_text_artifacts("wayback-captures", url, "html", raw, text)
@@ -487,7 +520,7 @@ class OpenResearchTool:
             f"Original URL: {url}\n"
             f"Timestamp: {timestamp}\n"
             f"Archive URL: {response.url}\n"
-            f"Characters: {len(text)}\n"
+            f"Characters: {len(text)}, lines: {text.count(chr(10)) + 1}\n"
             f"Saved HTML: {raw_path}\n"
             f"Saved text: {text_path}\n"
             f"Excerpt: {_short(text, 900)}"

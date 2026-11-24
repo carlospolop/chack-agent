@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import contextvars
+import hashlib
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,7 +18,8 @@ except ImportError:
     function_tool = None
 
 from .config import ToolsConfig
-from .formatting import _truncate
+from .run_cache import RunScopedCache
+from .tool_call_policy import reuse_tool_results
 from .telemetry import run_with_tool_logging
 
 
@@ -306,6 +308,33 @@ def cleanup_research_artifacts(path: str, *, save_artifacts: bool) -> None:
     shutil.rmtree(resolved, ignore_errors=True)
 
 
+DEFAULT_READ_MAX_CHARS = 6000
+DEFAULT_CONTEXT_LINES = 10
+DEFAULT_GREP_MAX_MATCHES = 20
+DEFAULT_GREP_MAX_CHARS = 6000
+# A matching line longer than this is shown as a window around the match.
+_LONG_LINE_CHARS = 600
+_LINE_WINDOW_CHARS = 240
+REPEAT_CACHE_ENTRIES = 256
+
+
+def _clip_span(line: str, start: int, end: int) -> str:
+    if len(line) <= _LONG_LINE_CHARS:
+        return line
+    left = max(0, start - _LINE_WINDOW_CHARS)
+    right = min(len(line), max(end, start) + _LINE_WINDOW_CHARS)
+    prefix = f"[...{left} chars] " if left else ""
+    suffix = f" [{len(line) - right} chars...]" if right < len(line) else ""
+    return f"{prefix}{line[left:right]}{suffix}"
+
+
+def _clip_around(line: str, lowered_needle: str) -> str:
+    position = line.lower().find(lowered_needle) if lowered_needle else -1
+    if position < 0:
+        return _clip_span(line, 0, 0)
+    return _clip_span(line, position, position + len(lowered_needle))
+
+
 class ResearchArtifactsTool:
     def __init__(self, config: ToolsConfig, root: str = ""):
         self.config = config
@@ -364,40 +393,73 @@ class ResearchArtifactsTool:
         start_line: int = 1,
         end_line: int = 0,
         around_text: str = "",
-        context_lines: int = 20,
-        max_chars: int = 12000,
+        context_lines: int = DEFAULT_CONTEXT_LINES,
+        max_chars: int = DEFAULT_READ_MAX_CHARS,
     ) -> str:
         file_path = self._resolve_inside_root(path)
         text = file_path.read_text(encoding="utf-8", errors="replace")
         lines = text.splitlines()
+        total = len(lines)
+        budget = max(200, int(max_chars or DEFAULT_READ_MAX_CHARS))
         if around_text:
             needle = str(around_text)
             lowered = needle.lower()
             matches = [idx for idx, line in enumerate(lines) if lowered in line.lower()]
             if not matches:
-                return f"SUCCESS: No matches for '{needle}' in {file_path}"
-            context = max(0, min(int(context_lines or 20), 200))
-            chunks: list[str] = []
-            for match in matches[:20]:
-                start = max(0, match - context)
-                end = min(len(lines), match + context + 1)
-                chunks.append(f"--- lines {start + 1}-{end} ---")
-                chunks.extend(f"{idx + 1}: {lines[idx]}" for idx in range(start, end))
-            body = "\n".join(chunks)
-            return _truncate(f"SUCCESS: Matches in {file_path}\n{body}", max(1, int(max_chars or 12000)))
+                return f"SUCCESS: No matches for '{needle}' in {file_path} ({total} lines)"
+            context = max(0, min(int(context_lines or 0), 200))
+            # Overlapping windows are merged so no line is sent twice.
+            windows: list[list[int]] = []
+            for match in matches:
+                start, end = max(0, match - context), min(total, match + context + 1)
+                if windows and start <= windows[-1][1]:
+                    windows[-1][1] = max(windows[-1][1], end)
+                else:
+                    windows.append([start, end])
+            out = [f"SUCCESS: {len(matches)} line(s) match '{needle}' in {file_path} ({total} lines)"]
+            used = len(out[0])
+            for shown, (start, end) in enumerate(windows):
+                rows = [f"--- lines {start + 1}-{end} ---"] + [
+                    f"{idx + 1}: {_clip_around(lines[idx], lowered)}" for idx in range(start, end)
+                ]
+                chunk = "\n".join(rows)
+                if used + len(chunk) > budget and shown:
+                    out.append(
+                        f"[{len(windows) - shown} more match window(s) not shown; "
+                        f"next starts at line {start + 1}. Narrow around_text or read that line range.]"
+                    )
+                    break
+                out.append(chunk[: max(0, budget - used)])
+                used += len(chunk) + 1
+            return "\n".join(out)
 
-        total = len(lines)
         start = max(1, int(start_line or 1))
         end = int(end_line or 0)
         if end <= 0 or end > total:
             end = total
-        if start > end:
-            return f"ERROR: start_line ({start}) cannot be greater than end_line ({end})"
-        body = "\n".join(f"{idx + 1}: {lines[idx]}" for idx in range(start - 1, end))
-        return _truncate(
-            f"SUCCESS: Read {file_path} lines {start}-{end} of {total}\n{body}",
-            max(1, int(max_chars or 12000)),
-        )
+        if total and start > end:
+            return f"ERROR: start_line ({start}) cannot be greater than end_line ({end}); the file has {total} lines"
+        rows: list[str] = []
+        used = 0
+        last = start - 1
+        for idx in range(start - 1, end):
+            row = f"{idx + 1}: {lines[idx]}"
+            if used + len(row) > budget:
+                if not rows:
+                    rows.append(row[:budget] + f" [line {idx + 1} cut at {budget} chars; use around_text to read inside it]")
+                    last = idx + 1
+                break
+            rows.append(row)
+            used += len(row) + 1
+            last = idx + 1
+        header = f"SUCCESS: Read {file_path} lines {start}-{last} of {total} ({len(text)} chars in file)"
+        footer = ""
+        if last < end:
+            footer = (
+                f"\n[Stopped at max_chars. Continue with start_line={last + 1}, "
+                "or use around_text / grep_research_artifacts to jump to what you need.]"
+            )
+        return header + "\n" + "\n".join(rows) + footer
 
     def grep(
         self,
@@ -405,8 +467,8 @@ class ResearchArtifactsTool:
         glob: str = "*",
         case_sensitive: bool = False,
         context_lines: int = 0,
-        max_matches: int = 50,
-        max_chars: int = 12000,
+        max_matches: int = DEFAULT_GREP_MAX_MATCHES,
+        max_chars: int = DEFAULT_GREP_MAX_CHARS,
     ) -> str:
         root = self._root()
         raw_pattern = str(pattern or "")
@@ -419,10 +481,15 @@ class ResearchArtifactsTool:
             return f"ERROR: invalid regex ({exc})"
         file_pattern = str(glob or "*").strip() or "*"
         context = max(0, min(int(context_lines or 0), 20))
-        limit = max(1, min(int(max_matches or 50), 500))
+        limit = max(1, min(int(max_matches or DEFAULT_GREP_MAX_MATCHES), 500))
+        budget = max(200, int(max_chars or DEFAULT_GREP_MAX_CHARS))
         rows: list[str] = []
+        used = 0
         matches = 0
+        stopped = ""
         for file_path in sorted(root.rglob("*")):
+            if stopped:
+                break
             if not file_path.is_file():
                 continue
             rel = str(file_path.relative_to(root))
@@ -430,20 +497,34 @@ class ResearchArtifactsTool:
                 continue
             lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
             for idx, line in enumerate(lines):
-                if not regex.search(line):
+                found = regex.search(line)
+                if not found:
                     continue
+                if matches >= limit:
+                    stopped = f"max_matches={limit}"
+                    break
                 start = max(0, idx - context)
                 end = min(len(lines), idx + context + 1)
+                block = []
                 for row_idx in range(start, end):
                     marker = ":" if row_idx == idx else "-"
-                    rows.append(f"{rel}{marker}{row_idx + 1}: {lines[row_idx]}")
+                    shown = _clip_span(lines[row_idx], found.start(), found.end()) if row_idx == idx else _clip_span(lines[row_idx], 0, 0)
+                    block.append(f"{rel}{marker}{row_idx + 1}: {shown}")
+                chunk = "\n".join(block)
+                if used + len(chunk) > budget and rows:
+                    stopped = f"max_chars={budget}"
+                    break
+                rows.append(chunk)
+                used += len(chunk) + 1
                 matches += 1
-                if matches >= limit:
-                    body = "\n".join(rows)
-                    return _truncate(f"SUCCESS: Grep matches (truncated at {limit})\n{body}", max(1, int(max_chars or 12000)))
         if not rows:
             return f"SUCCESS: No grep matches for '{raw_pattern}' in {root}"
-        return _truncate("SUCCESS: Grep matches\n" + "\n".join(rows), max(1, int(max_chars or 12000)))
+        if stopped:
+            return (
+                f"SUCCESS: First {matches} grep matches (stopped at {stopped}; more exist: "
+                "narrow the pattern or glob, or read a file around a match)\n" + "\n".join(rows)
+            )
+        return f"SUCCESS: {matches} grep matches\n" + "\n".join(rows)
 
     def delete_file(self, path: str) -> str:
         root = self._root()
@@ -480,10 +561,35 @@ def get_research_artifact_tools(helper: ResearchArtifactsTool, *, readonly: bool
     if function_tool is None:
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
+    # Results already returned in this run, per tool list (one run) and run
+    # scope: an identical call whose result has not changed gets a short notice
+    # once; asking again returns the text, so nothing becomes unreachable.
+    served = RunScopedCache(REPEAT_CACHE_ENTRIES)
+
+    def once(tool: str, tool_input: dict, produce) -> str:
+        def run() -> str:
+            result = produce()
+            if not isinstance(result, str) or not result.startswith("SUCCESS"):
+                return result
+            key = (tool, json.dumps(tool_input, sort_keys=True, default=str))
+            digest = hashlib.sha256(result.encode("utf-8", errors="replace")).hexdigest()
+            earlier = served.get(key)
+            if earlier is not None and earlier[0] == digest and not earlier[1]:
+                served.put(key, (digest, True))
+                return (
+                    f"[Unchanged since the identical {tool} call earlier in this run "
+                    f"({result.splitlines()[0][len('SUCCESS: '):]}); not repeated. "
+                    "Call it again with the same arguments if you need that text once more.]"
+                )
+            served.put(key, (digest, False))
+            return result
+
+        return run_with_tool_logging(tool, tool_input, run)
+
     @function_tool(name_override="list_research_artifacts")
     def list_research_artifacts(glob: str = "*", max_results: int = 200) -> str:
         """List files saved in this research run's evidence folder."""
-        return run_with_tool_logging(
+        return once(
             "list_research_artifacts",
             {"glob": glob, "max_results": max_results},
             lambda: helper.list_files(glob=glob, max_results=max_results),
@@ -495,11 +601,11 @@ def get_research_artifact_tools(helper: ResearchArtifactsTool, *, readonly: bool
         start_line: int = 1,
         end_line: int = 0,
         around_text: str = "",
-        context_lines: int = 20,
-        max_chars: int = 12000,
+        context_lines: int = DEFAULT_CONTEXT_LINES,
+        max_chars: int = DEFAULT_READ_MAX_CHARS,
     ) -> str:
         """Read a saved artifact by relative/absolute path, optionally by line range or around matching text."""
-        return run_with_tool_logging(
+        return once(
             "read_research_artifact",
             {
                 "path": path,
@@ -525,11 +631,11 @@ def get_research_artifact_tools(helper: ResearchArtifactsTool, *, readonly: bool
         glob: str = "*",
         case_sensitive: bool = False,
         context_lines: int = 0,
-        max_matches: int = 50,
-        max_chars: int = 12000,
+        max_matches: int = DEFAULT_GREP_MAX_MATCHES,
+        max_chars: int = DEFAULT_GREP_MAX_CHARS,
     ) -> str:
         """Regex-search saved artifacts inside this research run's evidence folder."""
-        return run_with_tool_logging(
+        return once(
             "grep_research_artifacts",
             {
                 "pattern": pattern,
@@ -596,7 +702,7 @@ def get_research_artifact_tools(helper: ResearchArtifactsTool, *, readonly: bool
         _set_param_descriptions(read_research_artifact, {
             "path": "Relative artifact path from list_research_artifacts, or an absolute path inside this run's evidence folder.",
             "start_line": "First 1-based line number to read when using a line range.",
-            "end_line": "Last 1-based line number to read; use 0 to read from start_line to the file end or max_chars limit.",
+            "end_line": "Last 1-based line number to read; 0 reads from start_line until the file end or max_chars, and the reply says which start_line continues.",
             "around_text": "Optional literal text to find first, then read surrounding lines instead of a fixed line range.",
             "context_lines": "Number of lines before and after around_text to include when around_text is provided.",
             "max_chars": "Maximum number of characters to return from the artifact read.",
@@ -621,6 +727,9 @@ def get_research_artifact_tools(helper: ResearchArtifactsTool, *, readonly: bool
             "label": "Human-readable label for this artifact; defaults to the filename when empty.",
         }),
     ]
+    for tool in built[:3]:
+        # Repeats are handled by ``once`` above, not by generic result reuse.
+        reuse_tool_results(tool, False)
     if readonly:
         # Browse-only subset: list + read + grep (no delete/register). Used to give
         # non-researcher verifier agents safe access to a folder.
