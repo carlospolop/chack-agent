@@ -546,6 +546,70 @@ def test_a_model_call_the_gateway_never_answers_is_sent_again_and_its_answer_rea
     assert usage == [{"input_tokens": 120, "output_tokens": 30, "cached_tokens": 0}]
 
 
+def _delaying_gateway(delays):
+    """A gateway whose n-th model call answers after ``delays[n]`` seconds (the last delay repeats)."""
+    calls = []
+
+    class Slow(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            calls.append(time.monotonic())
+            time.sleep(delays[min(len(calls), len(delays)) - 1])
+            try:
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(ANSWER_BYTES)))
+                self.end_headers()
+                self.wfile.write(ANSWER_BYTES)
+            except OSError:
+                pass  # the relay stopped waiting for this attempt
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, calls
+
+
+@pytest.mark.parametrize(
+    "delays, answered_within",
+    [
+        # A hung first attempt is abandoned at half the 2 s limit and the quick retry answers.
+        ([30, 0], 1.6),
+        # An answer slower than half the limit still arrives on the retry, which gets the whole limit.
+        ([1.5], 2.9),
+    ],
+)
+def test_a_hung_call_is_resent_at_half_its_limit_and_a_slow_answer_still_gets_the_whole_limit(
+    delays, answered_within
+):
+    server, calls = _delaying_gateway(delays)
+    try:
+        relay = GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            timeout_seconds=3840,
+            request_timeout_seconds=2.0,
+            keepalive_after_seconds=0.1,
+            keepalive_every_seconds=0.1,
+        )
+        with relay:
+            started = time.monotonic()
+            status, _, _, chunks = _stream_with_timing(relay.base_url)
+            elapsed = time.monotonic() - started
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    assert json.loads(b"".join(chunks).partition(b"data: ")[2]) == ANSWER
+    assert len(calls) == 2
+    # The retry went out at half the limit, not at the whole of it.
+    assert 0.9 < calls[1] - calls[0] < 1.4
+    assert elapsed < answered_within
+
+
 @pytest.mark.parametrize("keepalive_after", [0.1, 5.0])
 def test_a_gateway_that_never_answers_fails_the_cli_call_fast_with_a_deadline_error(keepalive_after):
     server, calls, release = _silent_gateway(answer_from_call=99)
@@ -996,7 +1060,7 @@ def test_an_abandoned_call_ends_by_its_deadline_even_when_a_retry_started_just_b
             self.rfile.read(int(self.headers.get("content-length") or 0))
             calls.append(time.monotonic())
             if len(calls) == 1:
-                # A transient failure late in the call's 2 s limit: the retry starts with under 1 s left.
+                # A transient failure late in the first attempt's 2 s limit: the retry starts with under 1 s left.
                 time.sleep(1.2)
                 payload, status = b"overloaded", 503
             elif len(calls) == 2:
@@ -1024,7 +1088,7 @@ def test_an_abandoned_call_ends_by_its_deadline_even_when_a_retry_started_just_b
         relay = GeminiGatewayRelay(
             f"http://127.0.0.1:{server.server_address[1]}",
             timeout_seconds=3840,
-            request_timeout_seconds=2.0,
+            request_timeout_seconds=4.0,
             keepalive_after_seconds=0.1,
             keepalive_every_seconds=0.1,
         )
@@ -1040,7 +1104,7 @@ def test_an_abandoned_call_ends_by_its_deadline_even_when_a_retry_started_just_b
     assert status == 200
     assert json.loads(b"".join(chunks).partition(b"data: ")[2]) == ANSWER
     assert len(calls) == 3
-    # The abandoned retry ended at the call's 2 s limit, not 2 s after it started (~3.2 s).
+    # The abandoned retry ended at the first attempt's 2 s limit, not 2 s after it started (~3.2 s).
     assert closed_at[0] - started < 2.0 + 0.5
     # It ended at the relay's own timeout, which is no gateway 502.
     lines = [r.getMessage() for r in caplog.records if "Gemini gateway call /" in r.getMessage()]
