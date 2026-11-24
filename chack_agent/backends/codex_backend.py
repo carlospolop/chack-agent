@@ -3639,6 +3639,13 @@ def _codex_config_with_untrusted_workdir(body: str, exec_cwd: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Retries Codex makes after a gateway request (or a dropped answer stream)
+# fails with a 5xx, a timeout or a connection error; its own defaults
+# (codex-rs model-provider-info DEFAULT_REQUEST_MAX_RETRIES / DEFAULT_STREAM_MAX_RETRIES).
+CODEX_REQUEST_MAX_RETRIES = 4
+CODEX_STREAM_MAX_RETRIES = 5
+
+
 def _codex_gateway_provider_toml(route: GatewayRoute) -> str:
     def _toml_string(value: str) -> str:
         return json.dumps(str(value))
@@ -3661,6 +3668,10 @@ def _codex_gateway_provider_toml(route: GatewayRoute) -> str:
             'wire_api = "responses"',
             "requires_openai_auth = false",
             "supports_websockets = false",
+            # Codex retries 5xx answers, timeouts and dropped connections with
+            # jittered backoff; pin its allowance so a default change cannot drop it.
+            f"request_max_retries = {CODEX_REQUEST_MAX_RETRIES}",
+            f"stream_max_retries = {CODEX_STREAM_MAX_RETRIES}",
         ]
     )
     header_env = _codex_gateway_header_env(route)

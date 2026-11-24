@@ -2615,16 +2615,6 @@ class Chack:
                         return payload
 
                     result = _invoke_with_budget()
-                    if result.get("error") == "stopped":
-                        break
-                    if _looks_like_backend_failure_output(result.get("output")):
-                        # The backend did not produce an agent response. Do not
-                        # resume the same failed thread merely to satisfy tool
-                        # minimums or required-tool reminders; the caller owns
-                        # provider-aware retry, fallback, and quota handling.
-                        result["error"] = _backend_failure_reason(result.get("output"))
-                        break
-
                     (
                         attempt_prompt,
                         attempt_completion,
@@ -2643,6 +2633,24 @@ class Chack:
                             attempt_nested_usage,
                         )
                     )
+                    backend_failed = _looks_like_backend_failure_output(result.get("output"))
+                    if result.get("error") == "stopped" or backend_failed:
+                        # A stopped or failed attempt still spent the model
+                        # calls it made before it ended: count them.
+                        prompt_total += attempt_prompt
+                        completion_total += attempt_completion
+                        cached_total += attempt_cached
+                        cache_write_total += attempt_cache_write
+                        all_steps.extend(result.get("intermediate_steps") or [])
+                    if result.get("error") == "stopped":
+                        break
+                    if backend_failed:
+                        # The backend did not produce an agent response. Do not
+                        # resume the same failed thread merely to satisfy tool
+                        # minimums or required-tool reminders; the caller owns
+                        # provider-aware retry, fallback, and quota handling.
+                        result["error"] = _backend_failure_reason(result.get("output"))
+                        break
                     raw_time_to_first_token = getattr(
                         result.get("raw_result"),
                         "time_to_first_token_seconds",

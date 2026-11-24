@@ -334,6 +334,11 @@ def _malformed_tool_use_names(message: dict[str, Any]) -> list[str]:
 _PROMPT_CACHE_REJECTED: set[tuple[str, str]] = set()
 
 
+# Retries Claude Code makes after a model request fails with a 5xx, 408, 409,
+# 429, a timeout or a connection error; its own default.
+CLAUDE_CODE_MAX_RETRIES = 10
+
+
 def _claude_gateway_env(config: ChackConfig, route: GatewayRoute) -> dict[str, str]:
     """Claude Code environment for a gateway serving the Anthropic Messages API."""
 
@@ -1982,6 +1987,9 @@ PYEOF
         # A run's instructions come from Chack only, never from CLAUDE.md files
         # on the host or in the working directory.
         env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+        # Claude Code retries 5xx answers, timeouts and dropped connections
+        # with jittered backoff; pin its allowance unless the caller set one.
+        env.setdefault("CLAUDE_CODE_MAX_RETRIES", str(CLAUDE_CODE_MAX_RETRIES))
 
         # Claude Code defers MCP schemas through ToolSearch by default, but
         # Haiku does not support the tool_reference blocks that ToolSearch

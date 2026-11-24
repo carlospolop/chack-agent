@@ -31,6 +31,7 @@ from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
 
 from ..config import ChackConfig
 from ..llm_gateway import GatewayRoute, get_gateway_route
+from .transient_retry import CLIENT_MAX_RETRIES, openai_async_http_client
 from ..budget_warning_state import inject_budget_warning
 from ..limit_event_state import emit_limit_reached
 from .sdk_run_hooks import (
@@ -482,10 +483,14 @@ def _configure_client_factory(config: ChackConfig) -> tuple[GatewayRoute, Callab
             headers["X-Title"] = title
 
     def _new_client() -> AsyncOpenAI:
+        # The SDK retries a 408/429/5xx answer or a dropped connection a bounded
+        # number of times with jittered backoff; the hook logs each one.
         return AsyncOpenAI(
             base_url=route.base_url,
             api_key=route.api_key,
             default_headers=headers or None,
+            max_retries=CLIENT_MAX_RETRIES,
+            http_client=openai_async_http_client(_LOGGER),
         )
 
     # Gateways do not serve OpenAI's tracing endpoints.
