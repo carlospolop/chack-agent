@@ -46,6 +46,7 @@ def exa_server(monkeypatch):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setattr(exa_web_search, "EXA_MCP_URL", f"http://127.0.0.1:{server.server_address[1]}/mcp")
     monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.setenv("CHACK_KEYLESS_SEARCH_MIN_INTERVAL_SECONDS", "0")
     yield calls, replies
     server.shutdown()
 
@@ -97,7 +98,7 @@ def test_failures_come_back_as_errors_the_model_can_read(exa_server):
 
     assert exa_web_search.web_search("q") == "ERROR: Invalid arguments"
     assert exa_web_search.web_fetch(["https://example.com"]) == "ERROR: page unreachable"
-    assert exa_web_search.web_search("q").startswith("ERROR: the free web search is rate limited")
+    assert exa_web_search.web_search("q").startswith("ERROR: rate limited")
 
 
 def test_fetch_bounds_what_it_asks_for(exa_server):

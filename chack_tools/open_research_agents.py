@@ -43,7 +43,7 @@ from .open_research_sources import (
     get_wikidata_sparql_tool,
     get_world_bank_indicator_tool,
 )
-from .serpapi_keys import has_serpapi_keys
+from .search_availability import available_research_tools, serpapi_usable
 from .serpapi_web_search import (
     SerpApiWebSearchTool,
     get_bing_web_search_tool,
@@ -172,7 +172,7 @@ class OpenSpecialistResearchAgentTool:
     def _build_subagent_tools(self):
         if function_tool is None:
             raise RuntimeError("OpenAI Agents SDK is not available in this runtime.")
-        return self._build_tools_callback(self)
+        return available_research_tools(self._build_tools_callback(self), self.config, web_search=True)
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
         tools = self._build_subagent_tools()
@@ -319,7 +319,7 @@ def _base_tools(helper: OpenSpecialistResearchAgentTool) -> list[Any]:
             get_gdelt_news_search_tool(helper.open),
         ]
     )
-    if has_serpapi_keys(__import__("os").environ.get("SERPAPI_API_KEY", "")):
+    if serpapi_usable():
         tools.extend([get_google_web_search_tool(helper.web), get_bing_web_search_tool(helper.web)])
     add_research_artifact_tools(tools, helper.config)
     return tools
@@ -338,7 +338,7 @@ def _legal_tools(helper: OpenSpecialistResearchAgentTool) -> list[Any]:
             get_wikidata_sparql_tool(helper.open),
         ]
     )
-    if has_serpapi_keys(__import__("os").environ.get("SERPAPI_API_KEY", "")):
+    if serpapi_usable():
         tools.append(get_google_news_search_tool(helper.forum))
     return tools
 
@@ -358,7 +358,7 @@ def _data_statistics_tools(helper: OpenSpecialistResearchAgentTool) -> list[Any]
 
 def _news_media_tools(helper: OpenSpecialistResearchAgentTool) -> list[Any]:
     tools = _base_tools(helper)
-    if has_serpapi_keys(__import__("os").environ.get("SERPAPI_API_KEY", "")):
+    if serpapi_usable():
         tools.extend(
             [
                 get_google_news_search_tool(helper.forum),

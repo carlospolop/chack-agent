@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from typing import List, Optional
 from urllib.parse import quote
 
@@ -21,6 +23,7 @@ except ImportError:
 
 import requests
 
+from .run_cache import RunScopedCache
 from .telemetry import run_with_tool_logging
 
 EXA_MCP_URL = "https://mcp.exa.ai/mcp"
@@ -28,6 +31,38 @@ MAX_SEARCH_RESULTS = 10
 MAX_FETCH_URLS = 5
 MAX_FETCH_CHARACTERS = 20000
 DEFAULT_FETCH_CHARACTERS = 6000
+# Searches from one process are spaced at least this far apart; a search that
+# would wait longer than the max wait is refused instead of queued.
+_DEFAULT_SEARCH_MIN_INTERVAL_SECONDS = 1.0
+_DEFAULT_SEARCH_MAX_WAIT_SECONDS = 10.0
+SEARCH_CACHE_ENTRIES = 64
+RATE_LIMITED = "ERROR: rate limited by the keyless web search (Exa); retry later or use other sources."
+
+_pace_lock = threading.Lock()
+_next_search_at = 0.0
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+def _reserve_search_slot() -> Optional[float]:
+    """Seconds to wait before the next search, or None when the wait is too long."""
+    global _next_search_at
+    interval = _float_env("CHACK_KEYLESS_SEARCH_MIN_INTERVAL_SECONDS", _DEFAULT_SEARCH_MIN_INTERVAL_SECONDS)
+    max_wait = _float_env("CHACK_KEYLESS_SEARCH_MAX_WAIT_SECONDS", _DEFAULT_SEARCH_MAX_WAIT_SECONDS)
+    with _pace_lock:
+        now = time.monotonic()
+        slot = max(now, _next_search_at)
+        wait = slot - now
+        if wait > max_wait:
+            return None
+        _next_search_at = slot + interval
+    return wait
 
 
 def exa_mcp_url() -> str:
@@ -52,7 +87,7 @@ def call_exa_tool(name: str, arguments: dict, timeout_seconds: int = 30) -> str:
         timeout=timeout_seconds,
     )
     if response.status_code == 429:
-        return "ERROR: the free web search is rate limited right now; retry later or set EXA_API_KEY."
+        return RATE_LIMITED
     response.raise_for_status()
     message = _rpc_message(response)
     if "error" in message:
@@ -71,6 +106,11 @@ def web_search(query: str, num_results: Optional[int] = None, objective: str = "
     if not query:
         return "ERROR: query cannot be empty"
     count = max(1, min(int(num_results or 5), MAX_SEARCH_RESULTS))
+    wait = _reserve_search_slot()
+    if wait is None:
+        return RATE_LIMITED
+    if wait > 0:
+        time.sleep(wait)
     return call_exa_tool(
         "web_search_exa",
         {"query": query, "numResults": count, "objective": (objective or "").strip() or query},
@@ -91,6 +131,19 @@ def get_web_search_tools() -> list:
     if function_tool is None:
         raise RuntimeError("OpenAI Agents SDK is not available.")
 
+    # One cache per built tool list (one run), keyed by run scope too.
+    search_cache = RunScopedCache(SEARCH_CACHE_ENTRIES)
+
+    def cached_web_search(query: str, num_results: Optional[int], objective: str) -> str:
+        key = (" ".join((query or "").lower().split()), int(num_results or 5), " ".join((objective or "").lower().split()))
+        cached = search_cache.get(key)
+        if cached is not None:
+            return cached
+        result = web_search(query, num_results, objective)
+        if not result.startswith("ERROR:"):
+            search_cache.put(key, result)
+        return result
+
     @function_tool(name_override="web_search")
     def web_search_tool(query: str, num_results: Optional[int] = None, objective: str = "") -> str:
         """Search the web and return the best matching pages with their key passages.
@@ -102,7 +155,9 @@ def get_web_search_tools() -> list:
         """
         tool_input = {"query": query, "num_results": num_results, "objective": objective}
         try:
-            return run_with_tool_logging("web_search", tool_input, lambda: web_search(query, num_results, objective))
+            return run_with_tool_logging(
+                "web_search", tool_input, lambda: cached_web_search(query, num_results, objective)
+            )
         except Exception as exc:
             return f"ERROR: web search failed ({exc})"
 

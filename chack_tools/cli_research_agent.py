@@ -2,6 +2,7 @@ import os
 import time
 from typing import Any, Optional
 
+from .search_availability import available_research_tools
 from .brave_search import BraveSearchTool, get_brave_search_tool
 from .config import ToolsConfig
 from .serpapi_web_search import (
@@ -94,7 +95,7 @@ class CliResearchAgentTool:
         tools.append(get_google_web_search_tool(self.web))
         add_research_artifact_tools(tools, self.config)
 
-        return tools
+        return available_research_tools(tools, self.config, web_search=True)
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
         tools = self._build_subagent_tools()

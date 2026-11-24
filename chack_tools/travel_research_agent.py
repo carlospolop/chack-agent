@@ -49,7 +49,7 @@ from .research_artifacts import (
     reset_research_artifact_context,
     set_research_artifact_context,
 )
-from .serpapi_keys import has_serpapi_keys
+from .search_availability import available_research_tools, serpapi_usable
 from .serpapi_web_search import (
     SerpApiWebSearchTool,
     get_bing_web_search_tool,
@@ -194,7 +194,7 @@ class TravelResearchAgentTool:
                 ]
             )
 
-        if has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", "")):
+        if serpapi_usable():
             tools.extend(
                 [
                     get_google_flights_search_tool(self.travel),
@@ -219,8 +219,7 @@ class TravelResearchAgentTool:
                 ]
             )
 
-        # ForumScout calls return a clear configuration error when no key exists,
-        # while still allowing deployments to add the key without changing tools.
+        # Kept only when FORUMSCOUT_API_KEY is set (checked on every run).
         tools.extend(
             [
                 get_forum_search_tool(self.forum),
@@ -231,7 +230,7 @@ class TravelResearchAgentTool:
         if self.config.playwright_enabled and is_playwright_available():
             tools.append(get_playwright_fetch_tool(PlaywrightFetchTool(self.config)))
         add_research_artifact_tools(tools, self.config)
-        return tools
+        return available_research_tools(tools, self.config, web_search=True)
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
         tools = self._build_subagent_tools()

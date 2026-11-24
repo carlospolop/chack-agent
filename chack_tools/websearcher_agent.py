@@ -23,7 +23,7 @@ from .serpapi_web_search import (
     get_google_ai_mode_tool,
     get_bing_copilot_tool,
 )
-from .serpapi_keys import has_serpapi_keys
+from .search_availability import available_research_tools, keyless_web_search_note
 from .task_steps_manager_tool import TaskStepsManagerTool, get_task_steps_manager_tool
 from .research_artifacts import add_research_artifact_tools, cleanup_research_artifacts, reset_research_artifact_context, set_research_artifact_context
 from .subagent_config import (
@@ -52,7 +52,7 @@ except ImportError:
 
 _WEBSEARCHER_AGENT_SYSTEM_PROMPT = """### RULES
 - Your only job is web research: broad discovery, source preservation, historic/current page context, and a concise factual synthesis.
-- Use all relevant web tools repeatedly until coverage is strong: compare Brave/Google/Bing results, use AI-mode only as a discovery bootstrap, and ground conclusions in linked sources.
+- Use all relevant web tools repeatedly until coverage is strong: when several search engines are available compare their results, use AI-mode answers only as a discovery bootstrap, and ground conclusions in linked sources.
 - Fetch readable page text/HTML for concrete URLs; use Playwright for JavaScript-rendered pages; use web archives for deleted/changed pages, old versions, historic claims, and source preservation.
 - Prefer primary/original sources, include relevant URLs, mention saved page/archive artifact filenames only when artifacts are preserved, and mention sources without naming internal tool names.
 
@@ -106,24 +106,14 @@ class WebSearcherAgentTool:
         if self.config.playwright_enabled and is_playwright_available():
             tools.append(get_playwright_fetch_tool(PlaywrightFetchTool(self.config)))
 
-        has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
-        if has_serpapi:
-            tools.append(get_google_web_search_tool(self.web))
-            tools.append(get_bing_web_search_tool(self.web))
-            tools.append(get_google_ai_mode_tool(self.web))
-            tools.append(get_bing_copilot_tool(self.web))
+        tools.append(get_google_web_search_tool(self.web))
+        tools.append(get_bing_web_search_tool(self.web))
+        tools.append(get_google_ai_mode_tool(self.web))
+        tools.append(get_bing_copilot_tool(self.web))
         add_research_artifact_tools(tools, self.config)
-        return tools
+        return available_research_tools(tools, self.config, web_search=True)
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
-        has_brave = bool(os.environ.get("BRAVE_API_KEY", "").strip())
-        has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
-        brave_allowed = True
-        serpapi_allowed = has_serpapi
-        # The web researcher also has keyless archive, GDELT, and page-fetch tools.
-        # Brave/SerpAPI are preferred for broad discovery but are no longer required
-        # for source preservation or URL-specific research.
-
         tools = self._build_subagent_tools()
         model_name = self._resolved_model() or ""
         launch_block = subagent_launch_block_reason(
@@ -144,6 +134,9 @@ class WebSearcherAgentTool:
         parent_memory_reset_to_messages = max(1, int(ctx.get("memory_reset_to_messages") or parent_memory_max_messages))
         parent_root_session_id = str(ctx.get("session_id") or "").strip()
         evidence_dir = create_subagent_evidence_dir("websearcher", parent_root_session_id)
+        search_note = keyless_web_search_note(tools)
+        if search_note:
+            prompt = f"{prompt}\n\n{search_note}"
         prompt = append_evidence_dir_instruction(
             prompt,
             evidence_dir,
@@ -279,7 +272,7 @@ def get_websearcher_research_tool(
         """Run a dedicated web-research sub-agent for extensive web research.
 
         Use when you need broad, iterative web investigation without consuming your main context.
-        The sub-agent uses Brave + Google + Bing (including AI-mode endpoints) to cross-validate.
+        The sub-agent cross-validates results from the web search engines available to it.
 
         Args:
             prompt: A detailed web research request (string) or a list of up to 3 detailed requests. Each request must be at least 500 characters indicating the goals of the subagent, suggested process to obtain proper results, expected output, and relevant information to gather.

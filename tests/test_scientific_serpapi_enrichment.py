@@ -150,7 +150,8 @@ def test_google_patents_details_formats_detail_payload(monkeypatch):
     assert "Citations:" in result
 
 
-def test_scientific_agent_includes_new_serpapi_tools():
+def test_scientific_agent_includes_new_serpapi_tools(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "serp-key")
     helper = ScientificResearchAgentTool(ToolsConfig(), model_provider="openai")
     names = [getattr(tool, "name", "") for tool in helper._build_subagent_tools()]
 

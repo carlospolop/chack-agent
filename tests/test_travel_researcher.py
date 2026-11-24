@@ -708,6 +708,11 @@ def test_marine_holidays_and_ticketmaster_sources(monkeypatch, tmp_path):
 def test_direct_travel_tools_and_researcher_are_registered(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "serp-key")
     monkeypatch.setenv("TICKETMASTER_API_KEY", "tm-key")
+    monkeypatch.setenv("BOOKING_API_TOKEN", "booking-token")
+    monkeypatch.setenv("BOOKING_AFFILIATE_ID", "booking-affiliate")
+    monkeypatch.setenv("AMADEUS_CLIENT_ID", "amadeus-id")
+    monkeypatch.setenv("AMADEUS_CLIENT_SECRET", "amadeus-secret")
+    monkeypatch.setenv("OPENTRIPMAP_API_KEY", "otm-key")
     config = ToolsConfig(
         travel_enabled=True,
         travel_google_flights_enabled=True,
