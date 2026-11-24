@@ -34,6 +34,9 @@ capped at the time left before that limit (``_MIN_ATTEMPT_TIMEOUT_SECONDS`` at
 least), and an abandoned call starts no further retry, so it ends by the limit
 instead of running on, billed, upstream. A call the relay itself gave up on at
 its socket timeout is logged as ``status=timeout``, not as a gateway 5xx.
+Answered calls are not logged one by one; at most once per
+``progress_every_seconds`` an INFO line counts them, with the last request's
+size and prompt tokens, so a quiet log still shows the run is being answered.
 
 The relay also keeps the token usage of every answer it relays, so a run that
 is stopped before the CLI prints its closing stats still counts the calls it
@@ -449,6 +452,7 @@ class GeminiGatewayRelay:
         request_timeout_seconds: float | None = None,
         keepalive_after_seconds: float = 20.0,
         keepalive_every_seconds: float = 15.0,
+        progress_every_seconds: float = 300.0,
     ) -> None:
         self._upstream_base_url = str(upstream_base_url or "").rstrip("/")
         self._model = str(model or "").strip()
@@ -473,6 +477,12 @@ class GeminiGatewayRelay:
         self._helper_answers = 0
         # Set once a call spent its retries on a transient failure, until the gateway answers again.
         self._retries_spent = False
+        # Answered calls are otherwise silent: one progress line at most every
+        # ``progress_every_seconds`` shows a quiet run is still being answered.
+        self._progress_every_seconds = progress_every_seconds
+        self._progress_at = time.monotonic()
+        self._answered = 0
+        self._answered_since_progress = 0
 
     def take_usage(self) -> list[dict[str, int]]:
         """Usage of the answers relayed since the last call, one entry per answer."""
@@ -496,11 +506,29 @@ class GeminiGatewayRelay:
         except ValueError:
             return None
         shape = _answer_shape(answer)
+        now = time.monotonic()
         with self._usage_lock:
             if request_body and b'"functionDeclarations"' in request_body:
                 self._last_turn, self._helper_answers = shape, 0
             else:
                 self._helper_answers += 1
+            self._answered += 1
+            self._answered_since_progress += 1
+            elapsed = now - self._progress_at
+            progress = None
+            if elapsed >= self._progress_every_seconds:
+                progress = (self._answered_since_progress, elapsed, self._answered)
+                self._progress_at, self._answered_since_progress = now, 0
+        if progress is not None:
+            _LOGGER.info(
+                "Gemini gateway relay answered %d model calls in the last %.0fs (%d in total); "
+                "last request_bytes=%d prompt_tokens=%s",
+                progress[0],
+                progress[1],
+                progress[2],
+                len(request_body or b""),
+                shape.get("input_tokens"),
+            )
         empty = _empty_answer_note(answer, request_body)
         if empty is not None:
             _LOGGER.warning(

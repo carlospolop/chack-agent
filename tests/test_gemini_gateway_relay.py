@@ -1149,3 +1149,19 @@ def test_the_relays_own_socket_timeout_is_logged_as_a_timeout_not_a_gateway_502(
     lines = [r.getMessage() for r in caplog.records if "Gemini gateway call /" in r.getMessage()]
     assert len(lines) == 1
     assert lines[0].startswith("Gemini gateway call /v1beta/models/m:countTokens: status=timeout attempt=1/")
+
+
+@pytest.mark.parametrize("every, expected_lines", [(0.0, 2), (3600.0, 0)])
+def test_answered_calls_report_progress_at_most_once_per_interval(gateway, caplog, every, expected_lines):
+    base_url, _, _ = gateway
+    with caplog.at_level("INFO", logger="chack.gemini_gateway_relay"):
+        with GeminiGatewayRelay(base_url, progress_every_seconds=every) as relay:
+            for _ in range(2):
+                _post(f"{relay.base_url}/v1beta/models/m:streamGenerateContent?alt=sse", b'{"secret": 1}')
+
+    lines = [r.getMessage() for r in caplog.records if "model calls in the last" in r.getMessage()]
+    assert len(lines) == expected_lines
+    if lines:
+        assert lines[-1].startswith("Gemini gateway relay answered 1 model calls")
+        assert "(2 in total)" in lines[-1] and "request_bytes=13 prompt_tokens=120" in lines[-1]
+    assert "secret" not in caplog.text
