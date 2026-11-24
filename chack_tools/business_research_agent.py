@@ -61,7 +61,7 @@ from .scientific_search import (
     get_google_patents_details_tool,
     get_google_patents_search_tool,
 )
-from .serpapi_keys import has_serpapi_keys
+from .search_availability import available_research_tools, serpapi_usable
 from .serpapi_web_search import (
     SerpApiWebSearchTool,
     get_bing_web_search_tool,
@@ -156,7 +156,7 @@ class BusinessResearchAgentTool:
         tools.append(get_wikidata_entity_search_tool(self.open))
         tools.append(get_wikidata_sparql_tool(self.open))
 
-        has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
+        has_serpapi = serpapi_usable()
         if has_serpapi:
             tools.append(get_google_finance_search_tool(self.business))
             tools.append(get_google_finance_markets_tool(self.business))
@@ -195,7 +195,7 @@ class BusinessResearchAgentTool:
             tools.append(get_playwright_fetch_tool(PlaywrightFetchTool(self.config)))
         add_research_artifact_tools(tools, self.config)
 
-        return tools
+        return available_research_tools(tools, self.config, web_search=True)
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
         tools = self._build_subagent_tools()

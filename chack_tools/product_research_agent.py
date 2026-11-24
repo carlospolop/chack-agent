@@ -49,7 +49,7 @@ from .scientific_search import (
     get_youtube_video_details_tool,
     get_youtube_video_search_tool,
 )
-from .serpapi_keys import has_serpapi_keys
+from .search_availability import available_research_tools, serpapi_usable
 from .serpapi_web_search import (
     SerpApiWebSearchTool,
     get_bing_web_search_tool,
@@ -145,7 +145,7 @@ class ProductResearchAgentTool:
         tools.append(get_cisa_kev_search_tool(self.open))
         tools.append(get_osv_package_query_tool(self.open))
 
-        has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
+        has_serpapi = serpapi_usable()
         if has_serpapi:
             tools.append(get_google_lens_products_tool(self.product))
             tools.append(get_google_shopping_search_tool(self.business))
@@ -173,7 +173,7 @@ class ProductResearchAgentTool:
             tools.append(get_playwright_fetch_tool(PlaywrightFetchTool(self.config)))
         add_research_artifact_tools(tools, self.config)
 
-        return tools
+        return available_research_tools(tools, self.config, web_search=True)
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
         tools = self._build_subagent_tools()

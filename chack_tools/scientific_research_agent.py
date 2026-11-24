@@ -2,6 +2,7 @@ import os
 import time
 from typing import Any, Optional
 
+from .search_availability import available_research_tools
 from .config import ToolsConfig
 from .pdf_text import PdfTextTool, get_pdf_text_tool
 from .open_research_sources import (
@@ -146,7 +147,7 @@ class ScientificResearchAgentTool:
         tools.append(get_pdf_text_tool(pdf))
         tools.append(get_controlled_shell_command_tool(exec_helper))
         add_research_artifact_tools(tools, self.config)
-        return tools
+        return available_research_tools(tools, self.config, web_search=False)
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
         tools = self._build_subagent_tools()

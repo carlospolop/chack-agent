@@ -2,6 +2,7 @@ import os
 import time
 from typing import Any, Optional
 
+from .search_availability import available_research_tools
 from .config import ToolsConfig
 from .forumscout_search import (
     ForumScoutTool,
@@ -125,7 +126,7 @@ class SocialNetworkAgentTool:
         tools.append(get_youtube_transcript_tool(self.scientific))
         add_research_artifact_tools(tools, self.config)
 
-        return tools
+        return available_research_tools(tools, self.config, web_search=False)
 
     def _run_single(self, prompt: str, ctx: dict[str, Any], save_artifacts: bool = False) -> str:
         tools = self._build_subagent_tools()

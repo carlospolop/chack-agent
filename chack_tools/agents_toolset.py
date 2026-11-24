@@ -292,7 +292,19 @@ def _prepare_queue_runtime_config(
         default_model,
     )
 from .subchack_research_agent import SubChackResearchAgentTool, get_subchack_research_tool
-from .serpapi_keys import has_serpapi_keys
+from .search_availability import available_research_tools, serpapi_usable
+
+# Config switches that ask for general web search in this toolset.
+_WEB_SEARCH_FLAGS = (
+    "brave_enabled",
+    "websearcher_brave_enabled",
+    "serpapi_google_web_enabled",
+    "serpapi_bing_web_enabled",
+    "websearcher_google_web_enabled",
+    "websearcher_bing_web_enabled",
+    "business_google_web_enabled",
+    "business_bing_web_enabled",
+)
 
 
 class AgentsToolset:
@@ -481,7 +493,7 @@ class AgentsToolset:
             playwright_helper = PlaywrightFetchTool(self.config)
             tools.append(get_playwright_fetch_tool(playwright_helper))
 
-        has_serpapi = has_serpapi_keys(os.environ.get("SERPAPI_API_KEY", ""))
+        has_serpapi = serpapi_usable()
         if has_serpapi and (self.config.serpapi_google_web_enabled or self.config.websearcher_google_web_enabled):
             web_helper = SerpApiWebSearchTool(self.config)
             tools.append(get_google_web_search_tool(web_helper))
@@ -1273,4 +1285,11 @@ class AgentsToolset:
             pdf_helper = PdfTextTool(self.config)
             tools.append(get_pdf_text_tool(pdf_helper))
 
+        # Keyed tools whose key cannot serve a request are dropped; a toolset
+        # meant to search the web keeps a keyless search when no paid one works.
+        tools = available_research_tools(
+            tools,
+            self.config,
+            web_search=any(getattr(self.config, flag, False) for flag in _WEB_SEARCH_FLAGS),
+        )
         return self._dedupe_tools(tools)
