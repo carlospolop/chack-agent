@@ -519,6 +519,23 @@ def test_an_empty_reply_is_sent_back_to_finish_the_task():
     assert prompt == MODULE.unfinished_task_prompt(error, _FINDING_SCHEMA)
 
 
+def test_a_prose_plan_instead_of_an_answer_is_sent_back_to_finish_the_task():
+    # Asked to reshape a plan, a model answers with an empty result and the task is never done.
+    reply = "I'll start by reading the details of each item, then group them and save the changes."
+    prompt = _first_turn_prompt(reply)
+    _normalized, error = validate_schema_output(reply, _FINDING_SCHEMA, strict=False)
+
+    assert prompt == MODULE.unfinished_task_prompt(error, _FINDING_SCHEMA)
+
+
+def test_an_answer_whose_json_breaks_gets_the_reshape_repair():
+    answer = '```json\n{"result": {"assessment": "the "admin" panel", "severity": 1}}'
+    prompt = _first_turn_prompt(answer)
+    _normalized, error = validate_schema_output(answer, _FINDING_SCHEMA, strict=False)
+
+    assert prompt == MODULE.schema_repair_prompt(error, _FINDING_SCHEMA)
+
+
 def test_unrepaired_answer_logs_where_its_json_breaks(caplog):
     # An unescaped quote deep in a long field: the log must show that spot, not only the start.
     broken = '{"result": {"assessment": "' + "a" * 300 + ' the "admin" panel", "severity": 1}}'
