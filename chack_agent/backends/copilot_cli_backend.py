@@ -29,7 +29,7 @@ from ..llm_gateway import clone_config_for_gateway, get_gateway_route
 from ..resume_compaction import ResumeCompactionResult
 from ..thinking_effort import copilot_thinking_effort, normalize_thinking_effort
 from .claude_code_backend import _terminate_process_tree
-from .cli_process import END_OF_OUTPUT, CliLineReader, cli_exec_timeout_seconds, prefer_oom_kill
+from .cli_process import END_OF_OUTPUT, CliLineReader, apply_pinned_exec_cwd, cli_exec_timeout_seconds, prefer_oom_kill
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .tool_payloads import (
     configured_mcp_env_names,
@@ -766,6 +766,7 @@ class CopilotCliExecutor:
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         # Child processes export into the same place and join this run's trace.
         env.update(child_process_env())
+        apply_pinned_exec_cwd(self, env)
         return env
 
     # ------------------------------------------------------------------

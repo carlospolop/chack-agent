@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -84,6 +85,7 @@ FAKE_OPENCODE = textwrap.dedent(
             calls = json.load(handle)
     calls.append({
         "argv": sys.argv[1:],
+        "cwd": os.getcwd(),
         "prompt": sys.stdin.read(),
         "config": config,
         "config_text": config_text,
@@ -711,6 +713,52 @@ def test_a_run_past_its_timeout_is_stopped(fake_opencode, monkeypatch):
     result = _build(_gateway_config("gpt-6-sol")).invoke({"input": "hi"})
 
     assert result["output"] == "ERROR: opencode execution timed out after 1s."
+
+
+def test_a_silent_opencode_is_stopped_as_hung_instead_of_holding_the_run(fake_opencode, monkeypatch):
+    # opencode waiting on something that never comes prints nothing and never exits.
+    monkeypatch.setenv("CHACK_OPENCODE_IDLE_TIMEOUT_SECONDS", "1")
+    fake_opencode.script([{"sleep": 120, "events": [_text("late"), _finish(1, 1)]}])
+
+    started = time.monotonic()
+    result = _build(_gateway_config("gpt-6-sol")).invoke({"input": "hi"})
+
+    assert time.monotonic() - started < 30
+    assert result["output"] == "ERROR: opencode execution timed out: no output for 1s."
+
+
+def test_a_repair_turn_runs_in_its_own_directory_after_another_agent_starts(fake_opencode, monkeypatch, tmp_path):
+    own, other = tmp_path / "finding-a", tmp_path / "finding-b"
+    own.mkdir()
+    other.mkdir()
+    monkeypatch.setenv("CHACK_EXEC_CWD", str(tmp_path))
+    fake_opencode.script(
+        [
+            {"events": [_text("draft", session="ses_a"), _finish(1, 1, session="ses_a")]},
+            {"events": [_text("other", session="ses_b"), _finish(1, 1, session="ses_b")]},
+            {"events": [_text("fixed", session="ses_a"), _finish(1, 1, session="ses_a")]},
+        ],
+        env_keys=["CHACK_EXEC_CWD"],
+    )
+    config = _gateway_config("gpt-6-sol")
+    run = dict(enable_self_critique=False, require_task_steps_manager_init_first=False, reuse_session_executor=True)
+
+    def reject_draft_while_another_agent_starts(answer):
+        if answer != "draft":
+            return ""
+        Chack(config).run("finding-b", "check b", exec_cwd=str(other), **run)
+        return "Shorten the description."
+
+    result = Chack(config).run(
+        "finding-a", "check a", exec_cwd=str(own), output_validator=reject_draft_while_another_agent_starts, **run
+    )
+
+    assert result.output == "fixed"
+    first, sibling, repair = fake_opencode.calls
+    assert sibling["cwd"] == str(other)
+    assert repair["argv"][repair["argv"].index("--session") + 1] == "ses_a"
+    assert repair["cwd"] == first["cwd"] == str(own)
+    assert repair["env"]["CHACK_EXEC_CWD"] == str(own)
 
 
 def test_missing_cli_is_reported(monkeypatch, tmp_path):

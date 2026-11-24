@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover - optional dependency / analysis fallback
     MaxTurnsExceeded = None
 
 from .config import ChackConfig, load_config, resolve_api_key_type, resolve_backend_type, resolve_config_aliases
+from .backends.cli_process import pin_exec_cwd
 from .run_model import RunModel, executor_run_model, run_model_for_config, tag_executor
 from .env_utils import export_env
 from .backends import build_executor
@@ -1631,6 +1632,7 @@ class Chack:
                 tools_append=tools_append,
             )
             tag_executor(executor, config)
+            pin_exec_cwd(executor, config)
             return executor
 
         schema_cache_key = json.dumps(output_schema_json_override, sort_keys=True) if output_schema_json_override else ""
@@ -1661,6 +1663,7 @@ class Chack:
                 **executor_tool_kwargs,
             )
             tag_executor(executor, config)
+            pin_exec_cwd(executor, config)
             self._executors[cache_key] = executor
         else:
             self.logger.debug(

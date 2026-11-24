@@ -56,7 +56,14 @@ from ..thinking_effort import (
     opencode_thinking_effort,
 )
 from .claude_code_backend import _terminate_process_tree
-from .cli_process import cli_exec_timeout_seconds, prefer_oom_kill
+from .cli_process import (
+    END_OF_OUTPUT,
+    CliLineReader,
+    apply_pinned_exec_cwd,
+    cli_exec_timeout_seconds,
+    cli_idle_timeout_seconds,
+    prefer_oom_kill,
+)
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .prompt_cache import split_prompt_cache_breakpoint
 from .tool_payloads import (
@@ -77,6 +84,7 @@ from .tool_payloads import (
 _LOGGER = logging.getLogger("chack.opencode_cli_backend")
 
 OPENCODE_EXEC_TIMEOUT_ENV = "CHACK_OPENCODE_EXEC_TIMEOUT_SECONDS"
+OPENCODE_IDLE_TIMEOUT_ENV = "CHACK_OPENCODE_IDLE_TIMEOUT_SECONDS"
 
 OPENCODE_PROVIDER_ID = "chack"
 OPENCODE_AGENT_NAME = "chack"
@@ -360,6 +368,7 @@ class OpencodeCliExecutor:
         max_context_tokens: int = 0,
         memory_max_messages: int = 0,
         memory_reset_to_messages: int = 0,
+        exec_timeout_seconds: int = 0,
     ) -> None:
         self._provider = provider
         self._model_name = provider.model_id
@@ -384,6 +393,7 @@ class OpencodeCliExecutor:
         self._max_context_tokens = max(0, int(max_context_tokens or 0))
         self._memory_limit = max(0, int(memory_max_messages or 0))
         self._memory_reset_to = max(0, int(memory_reset_to_messages or 0))
+        self._exec_timeout_seconds = max(0, int(exec_timeout_seconds or 0))
 
         self._conversation: list[dict[str, Any]] = []
         self._home: str | None = None
@@ -760,6 +770,7 @@ class OpencodeCliExecutor:
         # Export settings and the run's trace context, so the Chack MCP
         # server's tool spans join this run's trace.
         env.update(child_process_env())
+        apply_pinned_exec_cwd(self, env)
         return env
 
     def _build_command(self) -> list[str]:
@@ -796,6 +807,7 @@ class OpencodeCliExecutor:
         env = self._build_env()
         exec_cwd = _clean(env.get("CHACK_EXEC_CWD")) or None
         timeout_seconds = cli_exec_timeout_seconds(OPENCODE_EXEC_TIMEOUT_ENV)
+        idle_seconds = cli_idle_timeout_seconds(OPENCODE_IDLE_TIMEOUT_ENV, self._exec_timeout_seconds)
         _LOGGER.info(
             "Starting opencode process: model=%s timeout_seconds=%s session_id=%s cwd=%s",
             self._model_name,
@@ -832,6 +844,7 @@ class OpencodeCliExecutor:
             )
 
         cancel_registration = register_process(process, _terminate_process_tree)
+        reader = CliLineReader(process.stdout)
         steps: list[tuple[ToolAction, Any]] = []
         raw_lines: list[str] = []
         text_lines: list[str] = []
@@ -840,6 +853,7 @@ class OpencodeCliExecutor:
         answer_texts: list[str] = []
         error_text = ""
         started_at = time.monotonic()
+        last_output_at = started_at
         time_to_first_token: float | None = None
         try:
             # The prompt goes through stdin: argv strings are limited to 128 KiB.
@@ -865,15 +879,28 @@ class OpencodeCliExecutor:
                         steps,
                         _RawResult(raw_responses=raw_responses),
                     )
-                if process.stdout is None:
-                    break
-                line = process.stdout.readline()
-                if line == "" and process.poll() is not None:
-                    break
-                if not line:
-                    time.sleep(0.05)
+                if idle_seconds > 0 and time.monotonic() - last_output_at > idle_seconds:
+                    # A quiet opencode is waiting on something that will not
+                    # come; stop it instead of letting it hold the run.
+                    _LOGGER.warning(
+                        "opencode printed nothing for %ss; stopping it as hung: session_id=%s cwd=%s",
+                        idle_seconds,
+                        self._session_id or "",
+                        exec_cwd or "(inherited)",
+                    )
+                    _terminate_process_tree(process)
+                    return (
+                        f"ERROR: opencode execution timed out: no output for {idle_seconds}s.",
+                        steps,
+                        _RawResult(raw_responses=raw_responses),
+                    )
+                line = reader.next_line()
+                if line is None:
                     continue
-                raw_line = line.rstrip("\n")
+                if line is END_OF_OUTPUT:
+                    break
+                last_output_at = time.monotonic()
+                raw_line = str(line).rstrip("\n")
                 if raw_line:
                     raw_lines.append(raw_line)
                 event = self._parse_event_line(raw_line)
@@ -1167,4 +1194,5 @@ def build_executor(
         max_context_tokens=int(getattr(config.model, "max_context_tokens", 0) or 0),
         memory_max_messages=memory_max_messages,
         memory_reset_to_messages=memory_reset_to_messages,
+        exec_timeout_seconds=int(getattr(config.tools, "exec_timeout_seconds", 0) or 0),
     )

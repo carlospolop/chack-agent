@@ -47,7 +47,7 @@ from ..output_schema import JsonSchemaOutput
 from ..thinking_effort import claude_thinking_effort, normalize_thinking_effort
 from ..environment_credential_pool import rotate_environment_credentials
 from ..provider_launch_hooks import run_provider_pre_launch_hook
-from .cli_process import cli_exec_timeout_seconds, prefer_oom_kill
+from .cli_process import apply_pinned_exec_cwd, cli_exec_timeout_seconds, prefer_oom_kill
 from .playwright_mcp import playwright_mcp_is_available, playwright_mcp_server_config
 from .web_search_fallback import (
     FALLBACK_WEB_MCP_SERVER,
@@ -2167,7 +2167,7 @@ PYEOF
             "MCP_TOOL_TIMEOUT",
             os.environ.get("CHACK_CLAUDE_MCP_TOOL_TIMEOUT_MS", "300000"),
         )
-
+        apply_pinned_exec_cwd(self, env)
         return env
 
     def _set_env_or_file(
