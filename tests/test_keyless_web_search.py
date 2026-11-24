@@ -76,6 +76,16 @@ def test_search_returns_the_result_text(exa_server):
     }
 
 
+def test_search_keeps_non_ascii_result_text_and_unicode_line_separators(exa_server):
+    calls, replies = exa_server
+    text = "Title: Ångström — release notes\u2028line two\x85line three\u2029end"
+    message = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": text}]}},
+                         ensure_ascii=False)
+    replies.append((200, "text/event-stream", f"event: message\r\ndata: {message}\r\n\r\n"))
+
+    assert exa_web_search.web_search("release notes") == text
+
+
 def test_an_api_key_is_sent_when_configured(exa_server, monkeypatch):
     calls, replies = exa_server
     replies.append((200, "text/event-stream", _event_stream({"content": [{"type": "text", "text": "ok"}]})))

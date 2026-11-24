@@ -72,9 +72,16 @@ def exa_mcp_url() -> str:
 
 def _rpc_message(response: requests.Response) -> dict:
     """The JSON-RPC message of a plain JSON or a server-sent-events reply."""
+    # Server-sent events and JSON are UTF-8; requests would decode a charset-less text/event-stream as ISO-8859-1,
+    # garbling non-ASCII text.
+    if "charset" not in response.headers.get("content-type", "").lower():
+        response.encoding = "utf-8"
     body = response.text
     if "text/event-stream" in response.headers.get("content-type", ""):
-        data = [line[5:].lstrip() for line in body.splitlines() if line.startswith("data:")]
+        # Event lines end only at CR/LF; splitlines() would also cut a data line at a separator such as U+2028
+        # or U+0085 inside the result text and drop the rest of the message.
+        lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        data = [line[5:].lstrip() for line in lines if line.startswith("data:")]
         body = "\n".join(data)
     return json.loads(body, strict=False)
 
