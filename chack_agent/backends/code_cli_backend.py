@@ -20,6 +20,7 @@ from typing import Any
 
 from chack_tools.agents_toolset import AgentsToolset
 from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
+from chack_tools.run_lifecycle import run_state_dir
 from chack_tools.task_steps_manager_state import current_run_label, current_session_id
 from chack_tools.telemetry import child_process_env, log_event
 from chack_tools.tool_usage_state import effective_max_tools_used
@@ -261,6 +262,7 @@ class CodeCliExecutor:
             "1" if self.config.agent.require_task_steps_manager_init_first and "task_steps_manager" in self._allowed_tools else "0"
         )
         env["CHACK_TASK_SESSION_ID"] = current_session_id() or ""
+        env["CHACK_RUN_STATE_DIR"] = run_state_dir()
         env["CHACK_RUN_LABEL"] = current_run_label() or "Run 1"
         env["CHACK_MCP_PARENT_PID"] = str(os.getpid())
         home = self._home or self._ensure_home()
@@ -376,6 +378,7 @@ class CodeCliExecutor:
                 "1" if self.config.agent.require_task_steps_manager_init_first and "task_steps_manager" in self._allowed_tools else "0"
             ),
             "CHACK_TASK_SESSION_ID": current_session_id() or "",
+            "CHACK_RUN_STATE_DIR": run_state_dir(),
             "CHACK_RUN_LABEL": current_run_label() or "Run 1",
             "CHACK_MCP_PARENT_PID": str(os.getpid()),
             f"{self.backend.upper()}_API_KEY": self._api_key,

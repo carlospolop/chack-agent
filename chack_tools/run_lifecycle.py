@@ -94,6 +94,11 @@ def _state_root() -> Path:
     return root
 
 
+def run_state_dir() -> str:
+    """The run-state directory, exported to tool processes so they share it."""
+    return str(_state_root())
+
+
 def _state_path(kind: str, session_id: str) -> Path | None:
     sid = active_task_session_id(session_id)
     if not sid:
@@ -266,6 +271,68 @@ def read_mcp_tool_usage(session_id: str = "") -> Counter[str]:
         return Counter()
 
 
+def record_tool_process_usage(
+    session_id: str,
+    model_name: str = "",
+    usage: tuple[int, int, int, int] = (0, 0, 0, 0),
+    *,
+    agent_runs: int = 0,
+) -> None:
+    """Add what an agent inside a tool process spent to the run that owns ``session_id``.
+
+    Tool servers (MCP for CLI backends) and isolated researcher processes run
+    agents outside the parent's memory. They add each agent's model usage
+    (prompt, completion, cached prompt, cache-write tokens) and agent runs here,
+    and the parent merges them into its nested usage (``ToolUsageStore``).
+    """
+    model = str(model_name or "").strip()
+    values = [max(0, int(value or 0)) for value in list(usage)[:4]]
+    values += [0] * (4 - len(values))
+    runs = max(0, int(agent_runs or 0))
+    path = _state_path("token-usage", session_id)
+    if path is None or not ((model and any(values)) or runs):
+        return
+    try:
+        with path.open("a+", encoding="utf-8") as handle:
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            _lock_file(handle, exclusive=True)
+            state = _read_locked_json(handle, {}) or {}
+            models = dict(state.get("models") or {})
+            if model and any(values):
+                previous = [int(value or 0) for value in list(models.get(model) or [])[:4]]
+                previous += [0] * (4 - len(previous))
+                models[model] = [previous[i] + values[i] for i in range(4)]
+            total_runs = max(0, int(state.get("agent_runs") or 0)) + runs
+            _write_locked_json(handle, {"models": models, "agent_runs": total_runs})
+            _unlock_file(handle)
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def read_tool_process_usage(session_id: str) -> tuple[dict[str, tuple[int, int, int, int]], int]:
+    """Return the usage per model and the agent runs tool processes recorded for one run."""
+    path = _state_path("token-usage", session_id)
+    if path is None or not path.exists():
+        return {}, 0
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            _lock_file(handle, exclusive=False)
+            state = _read_locked_json(handle, {}) or {}
+            _unlock_file(handle)
+        usage: dict[str, tuple[int, int, int, int]] = {}
+        for model, raw in (state.get("models") or {}).items():
+            values = [max(0, int(value or 0)) for value in list(raw or [])[:4]]
+            values += [0] * (4 - len(values))
+            if str(model).strip() and any(values):
+                usage[str(model)] = (values[0], values[1], values[2], values[3])
+        return usage, max(0, int(state.get("agent_runs") or 0))
+    except (OSError, TypeError, ValueError, AttributeError):
+        return {}, 0
+
+
 def mark_task_manager_initialized(session_id: str) -> None:
     """Persist init-first state so an MCP restart does not require a second init."""
     path = _state_path("task-manager", session_id)
@@ -419,7 +486,7 @@ def cleanup_process_groups(session_id: str, *, grace_seconds: float = 0.5) -> li
 
 def cleanup_run_state(session_id: str) -> None:
     cleanup_process_groups(session_id)
-    for kind in ("tools", "tool-usage", "budget", "process-groups", "task-manager"):
+    for kind in ("tools", "tool-usage", "token-usage", "budget", "process-groups", "task-manager"):
         path = _state_path(kind, session_id)
         if path is not None:
             try:

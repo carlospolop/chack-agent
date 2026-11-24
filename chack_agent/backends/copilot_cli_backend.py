@@ -15,6 +15,7 @@ from typing import Any
 from chack_tools.cancellation import cancellation_requested, register_process, unregister_process
 from chack_tools.telemetry import OTEL_CHILD_ENV_NAMES, child_process_env
 from chack_tools.agents_toolset import AgentsToolset
+from chack_tools.run_lifecycle import run_state_dir
 from chack_tools.task_steps_manager_state import (
     STORE as TASK_STEPS_STORE,
     current_run_label,
@@ -761,6 +762,7 @@ class CopilotCliExecutor:
             "1" if self._require_task_steps_manager_init_first else "0"
         )
         env["CHACK_TASK_SESSION_ID"] = str(current_session_id() or "")
+        env["CHACK_RUN_STATE_DIR"] = run_state_dir()
         env["CHACK_RUN_LABEL"] = str(current_run_label() or "Run 1")
         # Child processes export into the same place and join this run's trace.
         env.update(child_process_env())
@@ -884,6 +886,7 @@ class CopilotCliExecutor:
             "CHACK_SUBCHACK_MAX_TURNS",
             "CHACK_REQUIRE_TASK_STEPS_MANAGER_INIT_FIRST",
             "CHACK_TASK_SESSION_ID",
+            "CHACK_RUN_STATE_DIR",
             "CHACK_RUN_LABEL",
             "CHACK_RESEARCH_MASTER_DIR",
             "CHACK_RESEARCH_DATA_DIR",

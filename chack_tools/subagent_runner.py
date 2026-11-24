@@ -103,6 +103,7 @@ class SubAgentRunner:
             if sum(nested_counts.values()) > 0:
                 break
 
+        STORE.add_agent_runs(1)
         for tool_name, count in nested_counts.items():
             STORE.add(tool_name, count=count)
         if model_name:

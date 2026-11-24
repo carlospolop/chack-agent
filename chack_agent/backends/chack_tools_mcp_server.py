@@ -25,7 +25,12 @@ from chack_tools.config import ToolsConfig
 from chack_tools.telemetry.otel import end_tool_span, flush_in_background, start_tool_span
 from chack_tools.task_steps_manager_state import STORE, set_active_context
 from chack_tools.tool_call_policy import ToolCallPolicy, has_exec_tool
-from chack_tools.tool_usage_state import is_budget_exempt_tool_name, register_budget_exempt_tools
+from chack_tools.tool_usage_state import (
+    STORE as TOOL_USAGE_STORE,
+    is_budget_exempt_tool_name,
+    register_budget_exempt_tools,
+    set_active_usage_session,
+)
 from chack_tools.run_lifecycle import (
     ToolBudgetClaim,
     claim_non_task_tool_slot,
@@ -802,6 +807,10 @@ def main() -> None:
         if session_id:
             STORE.ensure_run(session_id, run_label)
             set_active_context(session_id, run_label)
+            # Agents the tools start spend on the parent run's budget: their
+            # usage is written where the parent reads its nested usage.
+            TOOL_USAGE_STORE.share_session_with_parent(session_id)
+            set_active_usage_session(session_id)
 
         # Transport: stdio per-agent by default; run as a single long-lived
         # streamable-http/sse service (CHACK_MCP_TRANSPORT=http) so many external
