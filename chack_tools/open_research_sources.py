@@ -22,6 +22,7 @@ import requests
 from pypdf import PdfReader
 
 from .config import ToolsConfig
+from .run_cache import RunScopedCache
 from .research_artifacts import record_research_artifact, record_research_json_artifact, research_artifacts_root
 from .telemetry import run_with_tool_logging
 
@@ -269,6 +270,49 @@ def _suttacentral_bilara_path(uid: str) -> tuple[str, str] | None:
     return None
 
 
+# HTTP answers that will be the same on every retry of the same URL.
+_PERMANENT_HTTP_STATUSES = frozenset({400, 401, 402, 403, 404, 405, 406, 409, 410, 411, 413, 414, 415, 422, 451})
+_HTTP_STATUS_REASONS = {
+    401: "authentication required",
+    402: "payment required",
+    403: "access forbidden",
+    404: "not found",
+    405: "the URL does not accept a plain GET; it may be an API that needs another method",
+    410: "gone",
+    422: "the request was rejected as invalid",
+    451: "unavailable for legal reasons",
+}
+FETCH_PERMANENT_NOTE = "Retrying the same URL will not help; use another URL or source."
+FETCH_CACHE_ENTRIES = 128
+
+
+def _fetch_http_error(status: int) -> str:
+    status = int(status or 0)
+    reason = _HTTP_STATUS_REASONS.get(status)
+    detail = f" ({reason})" if reason else ""
+    if status in _PERMANENT_HTTP_STATUSES:
+        return f"ERROR: URL returned HTTP {status}{detail}. {FETCH_PERMANENT_NOTE}"
+    return f"ERROR: URL returned HTTP {status}; this may be temporary, retry later."
+
+
+def _fetch_result_is_final(result: str) -> bool:
+    """Whether fetching the same URL again in this run would give the same result."""
+    text = str(result or "")
+    if not text.startswith("ERROR:"):
+        return True
+    return FETCH_PERMANENT_NOTE in text or "public HTTPS" in text or "response-size limit" in text
+
+
+def _fetch_cache_key(url: str) -> str:
+    """Same page, same key: trimmed, fragment dropped, scheme and host lowercased."""
+    raw = str(url or "").strip()
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return raw
+    return parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower(), fragment="").geturl()
+
+
 class OpenResearchTool:
     def __init__(self, config: ToolsConfig):
         self.config = config
@@ -318,7 +362,7 @@ class OpenResearchTool:
         except requests.exceptions.ConnectionError:
             return "ERROR: Failed to connect to URL"
         except requests.exceptions.HTTPError as exc:
-            return f"ERROR: URL returned HTTP {exc.response.status_code}"
+            return _fetch_http_error(exc.response.status_code)
         content_type = str(response.headers.get("content-type") or "").lower()
         content_length = str(response.headers.get("content-length") or "").strip()
         if content_length.isdigit() and int(content_length) > _MAX_FETCH_TEXT_BYTES:
@@ -346,7 +390,7 @@ class OpenResearchTool:
             response.close()
         text = _html_to_text(raw) if "html" in content_type or "<html" in raw[:500].lower() else raw
         if len(text.strip()) < 40:
-            return "ERROR: fetched URL did not contain enough extractable text"
+            return f"ERROR: fetched URL did not contain enough extractable text. {FETCH_PERMANENT_NOTE}"
         host = urlparse(str(response.url or url)).netloc or "page"
         raw_ext = "html" if "html" in content_type or "<html" in raw[:500].lower() else "txt"
         final_url = str(response.url or url)
@@ -2136,10 +2180,24 @@ def _require_sdk():
 def get_fetch_url_text_tool(helper: OpenResearchTool):
     _require_sdk()
 
+    # One cache per built tool list (one run), keyed by run scope too: an
+    # identical fetch returns the earlier page or permanent error.
+    cache = RunScopedCache(FETCH_CACHE_ENTRIES)
+
+    def fetch_once(url: str, timeout_seconds: int) -> str:
+        key = _fetch_cache_key(url)
+        earlier = cache.get(key)
+        if earlier is not None:
+            return f"[Same result as the earlier fetch of this URL in this run; not fetched again.]\n{earlier}"
+        result = helper.fetch_url_text(url, timeout_seconds)
+        if _fetch_result_is_final(result):
+            cache.put(key, result)
+        return result
+
     @function_tool(name_override="fetch_url_text")
     def fetch_url_text(url: str, timeout_seconds: int = 30) -> str:
         """Fetch a URL, extract readable text, and save raw/text artifacts."""
-        return _run_logged("fetch_url_text", {"url": url, "timeout_seconds": timeout_seconds}, lambda: helper.fetch_url_text(url, timeout_seconds))
+        return _run_logged("fetch_url_text", {"url": url, "timeout_seconds": timeout_seconds}, lambda: fetch_once(url, timeout_seconds))
 
     return _set_param_descriptions(fetch_url_text, {
         "url": "Absolute HTTP/HTTPS URL to fetch, extract into readable page text, and save as raw/text artifacts.",
