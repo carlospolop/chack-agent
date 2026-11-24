@@ -7,6 +7,7 @@ from unittest.mock import patch
 from chack_agent import Chack
 from chack_agent.config import load_config, resolve_api_key_type
 from chack_agent.model_aliases import (
+    ANTHROPIC_CHEAP_BUT_QUALITY,
     OPENROUTER_BEST_CHEAPEST,
     OPENROUTER_CHEAP_BUT_QUALITY,
     get_default_backend_aliases,
@@ -27,6 +28,9 @@ class ModelAliasResolutionTests(unittest.TestCase):
         self._remote_backend_patcher = patch(
             "chack_agent.model_aliases._REMOTE_BACKEND_CACHE", {}
         )
+        self._logged_resolutions_patcher = patch(
+            "chack_agent.model_aliases._LOGGED_MODEL_RESOLUTIONS", set()
+        )
         self._credential_env_patcher = patch.dict(
             os.environ,
             {
@@ -43,9 +47,11 @@ class ModelAliasResolutionTests(unittest.TestCase):
         self._remote_url_patcher.start()
         self._remote_model_patcher.start()
         self._remote_backend_patcher.start()
+        self._logged_resolutions_patcher.start()
         self._credential_env_patcher.start()
 
     def tearDown(self) -> None:
+        self._logged_resolutions_patcher.stop()
         self._remote_backend_patcher.stop()
         self._remote_model_patcher.stop()
         self._remote_url_patcher.stop()
@@ -214,6 +220,25 @@ class ModelAliasResolutionTests(unittest.TestCase):
             resolved = resolve_model_alias("CHEAP_BUT_QUALITY", openrouter_api_key="or-test")
         self.assertEqual(resolved, OPENROUTER_CHEAP_BUT_QUALITY)
         info_mock.assert_called()
+
+    def test_resolve_model_alias_logs_each_distinct_resolution_once(self) -> None:
+        message = "Resolved model alias"
+        with self.assertLogs("chack.model_aliases", level="INFO") as captured:
+            first = [resolve_model_alias("CHEAP_BUT_QUALITY", openrouter_api_key="or-test") for _ in range(4)]
+            cheapest = [resolve_model_alias("BEST_CHEAPEST", openrouter_api_key="or-test") for _ in range(3)]
+            by_provider = [resolve_model_alias("CHEAP_BUT_QUALITY", provider="claude") for _ in range(3)]
+        info_lines = [r.getMessage() for r in captured.records if r.levelname == "INFO" and message in r.getMessage()]
+        self.assertEqual(
+            info_lines,
+            [
+                f"Resolved model alias 'CHEAP_BUT_QUALITY' using credentials=openrouter -> {OPENROUTER_CHEAP_BUT_QUALITY}",
+                f"Resolved model alias 'BEST_CHEAPEST' using credentials=openrouter -> {OPENROUTER_BEST_CHEAPEST}",
+                f"Resolved model alias 'CHEAP_BUT_QUALITY' using provider=claude -> {ANTHROPIC_CHEAP_BUT_QUALITY}",
+            ],
+        )
+        self.assertEqual(first, [OPENROUTER_CHEAP_BUT_QUALITY] * 4)
+        self.assertEqual(cheapest, [OPENROUTER_BEST_CHEAPEST] * 3)
+        self.assertEqual(by_provider, [ANTHROPIC_CHEAP_BUT_QUALITY] * 3)
 
     def test_resolve_backend_alias_logs_resolution_for_default_backend(self) -> None:
         with patch("chack_agent.model_aliases._LOGGER.info") as info_mock:

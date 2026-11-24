@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -334,9 +335,21 @@ def _log_backend_resolution(*, requested_name: str, key_type: str, resolved_back
     )
 
 
+# Configs re-resolve the same aliases many times per launch (load_config,
+# Chack init/run, gateway clones, per-role defaults); log each distinct
+# resolution at INFO once per process and repeats at DEBUG.
+_LOGGED_MODEL_RESOLUTIONS: set = set()
+_LOGGED_MODEL_RESOLUTIONS_LOCK = threading.Lock()
+
+
 def _log_model_resolution(*, requested_name: str, provider: str = "", key_type: str = "", resolved_name: str) -> None:
     source = f"provider={provider}" if provider else f"credentials={key_type}"
-    _LOGGER.info(
+    entry = (requested_name, source, resolved_name)
+    with _LOGGED_MODEL_RESOLUTIONS_LOCK:
+        first = entry not in _LOGGED_MODEL_RESOLUTIONS
+        if first:
+            _LOGGED_MODEL_RESOLUTIONS.add(entry)
+    (_LOGGER.info if first else _LOGGER.debug)(
         "Resolved model alias %r using %s -> %s",
         requested_name,
         source,
