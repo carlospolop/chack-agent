@@ -159,3 +159,23 @@ def test_the_fetch_cache_is_bounded(monkeypatch, tmp_path, run_a):
 
     # "a" was evicted by "c", so it is fetched again.
     assert web.requests == [f"https://example.com/{name}" for name in ("a", "b", "c", "a")]
+
+
+def test_tools_shipped_to_a_cli_backend_tool_process_still_fetch_and_serve_repeats_once(monkeypatch, tmp_path, run_a):
+    from chack_agent.backends.tool_payloads import deserialize_tools_payload, serialize_tools_payload
+    from chack_tools.exa_web_search import get_web_search_tools
+    from chack_tools.research_artifacts import add_research_artifact_tools
+
+    web = _Web(monkeypatch, tmp_path, {})
+    research_tools: list = []
+    add_research_artifact_tools(research_tools, ToolsConfig(), root=str(tmp_path))
+    # Every tool that keeps a per-run cache, as a researcher sub-agent on a CLI backend receives them.
+    shipped = deserialize_tools_payload(serialize_tools_payload([_tool(), *get_web_search_tools(), *research_tools]))
+    fetch = next(tool for tool in shipped if tool.name == "fetch_url_text")
+    url = "https://example.com/advisory"
+
+    first = _fetch(fetch, url)
+    again = _fetch(fetch, url)
+
+    assert first.startswith("SUCCESS") and first in again
+    assert web.requests == [url]

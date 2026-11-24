@@ -43,6 +43,14 @@ class RunScopedCache:
             while len(self._items) > self.max_entries:
                 self._items.popitem(last=False)
 
+    def __getstate__(self) -> dict:
+        # CLI backends ship the tool list to their tool process with cloudpickle; that process starts with its own
+        # empty cache, since a lock cannot be pickled and cached results belong to this process's run.
+        return {"max_entries": self.max_entries}
+
+    def __setstate__(self, state: dict) -> None:
+        self.__init__(state["max_entries"])
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._items)
