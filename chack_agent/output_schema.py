@@ -586,7 +586,8 @@ def schema_repair_prompt(schema_error: str, schema: Any, *, name: str = "output_
 
 
 def unfinished_task_prompt(schema_error: str, schema: Any, *, name: str = "output_schema") -> str:
-    """The user turn for a reply that is empty or a JSON object with none of the answer's fields.
+    """The user turn for a reply that is empty, prose with no JSON answer, or a JSON object with none of the
+    answer's fields.
 
     Such a reply means the model stopped before answering (often after a tool
     call, or writing one as text), so asking it to reshape that reply would
@@ -609,14 +610,20 @@ def unfinished_task_prompt(schema_error: str, schema: Any, *, name: str = "outpu
 
 
 def _shares_no_answer_field(output: str, schema: Any) -> bool:
-    if not str(output or "").strip():
+    """Whether the reply is not an attempt at the answer: empty, prose with no JSON answer in it (a plan or a
+    progress note), or a JSON object with none of the answer's fields."""
+    text = str(output or "").strip()
+    if not text:
         return True
     loaded = _load_schema(schema)
     fields = (loaded or {}).get("properties")
-    answer = extract_last_json_value(output or "")
-    return isinstance(fields, dict) and bool(fields) and isinstance(answer, dict) and bool(answer) and not (
-        set(answer) & set(fields)
-    )
+    if not isinstance(fields, dict) or not fields:
+        return False
+    answer = extract_last_json_value(text)
+    if answer is None:
+        # A reply that starts as JSON but breaks is a malformed answer; one that starts as prose is not an answer.
+        return not text.removeprefix("```json").removeprefix("```").lstrip().startswith(("{", "["))
+    return isinstance(answer, dict) and bool(answer) and not (set(answer) & set(fields))
 
 
 _EXCERPT_CHARS = 60
