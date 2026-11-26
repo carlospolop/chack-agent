@@ -60,6 +60,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, NamedTuple
 
@@ -241,6 +242,10 @@ _CACHE_MARGIN_TOKENS = 64
 _CACHE_MIN_TOKENS = 1024
 _CACHE_HISTORY = 16
 _CACHE_TTL_SECONDS = 600.0
+# Prompts kept per session, and sessions kept per process: a session's next
+# turn repeats its own last prompts, however many other sessions call between.
+_CACHE_SESSION_HISTORY = 4
+_CACHE_SESSIONS = 128
 
 
 def _prompt_text(request_body: bytes | None) -> str:
@@ -278,37 +283,52 @@ def _common_prefix_length(left: str, right: str) -> int:
 class PrefixCacheEstimator:
     """Estimates the prompt tokens a provider served from its prefix cache.
 
-    Keeps the last ``_CACHE_HISTORY`` prompts per gateway and model for
-    ``_CACHE_TTL_SECONDS``. A prompt's estimate is its share of characters
-    that repeat the longest-matching earlier prompt, applied to its token count,
-    never above that earlier prompt's own tokens, less a small margin and
-    rounded down to whole cache blocks; under ``_CACHE_MIN_TOKENS`` it is zero.
+    Keeps the last ``_CACHE_HISTORY`` prompts per gateway and model, and the
+    last ``_CACHE_SESSION_HISTORY`` of each of the ``_CACHE_SESSIONS`` most
+    recent sessions, for ``_CACHE_TTL_SECONDS``. A prompt's estimate is its
+    share of characters that repeat the longest-matching earlier prompt,
+    applied to its token count, never above that earlier prompt's own tokens,
+    less a small margin and rounded down to whole cache blocks; under
+    ``_CACHE_MIN_TOKENS`` it is zero.
     """
 
     def __init__(self, clock: Any = time.monotonic) -> None:
         self._clock = clock
         self._lock = threading.Lock()
         self._history: dict[tuple[str, str], list[tuple[float, str, int]]] = {}
+        self._sessions: OrderedDict[tuple[str, str, Any], list[tuple[float, str, int]]] = OrderedDict()
 
-    def estimate(self, key: tuple[str, str], text: str, prompt_tokens: int) -> int:
+    def estimate(self, key: tuple[str, str], text: str, prompt_tokens: int, session: Any = None) -> int:
         now = self._clock()
         with self._lock:
             recent = [
                 entry for entry in self._history.get(key, []) if now - entry[0] <= _CACHE_TTL_SECONDS
             ]
+            while self._sessions and now - next(iter(self._sessions.values()))[-1][0] > _CACHE_TTL_SECONDS:
+                self._sessions.popitem(last=False)
+            own_key = (*key, session)
+            own = [
+                entry for entry in self._sessions.pop(own_key, []) if now - entry[0] <= _CACHE_TTL_SECONDS
+            ] if session is not None else []
             cached = 0
             if text and prompt_tokens > 0:
-                for _, earlier, earlier_tokens in recent:
+                for _, earlier, earlier_tokens in recent + own:
                     shared = _common_prefix_length(text, earlier)
                     tokens = min(prompt_tokens * shared // len(text), earlier_tokens)
                     tokens = (tokens - _CACHE_MARGIN_TOKENS) // _CACHE_BLOCK_TOKENS * _CACHE_BLOCK_TOKENS
                     cached = max(cached, tokens)
                 recent.append((now, text, prompt_tokens))
+                own.append((now, text, prompt_tokens))
             self._history[key] = recent[-_CACHE_HISTORY:]
+            if own:
+                self._sessions[own_key] = own[-_CACHE_SESSION_HISTORY:]
+                while len(self._sessions) > _CACHE_SESSIONS:
+                    self._sessions.popitem(last=False)
         return cached if cached >= _CACHE_MIN_TOKENS else 0
 
 
-# Shared by every relay of a process, so each turn of a run sees the prompts of its earlier turns.
+# Shared by every relay of a process: a run's relays name their session, so
+# each turn sees its own earlier prompts however many other runs call between.
 _PREFIX_CACHE = PrefixCacheEstimator()
 
 
@@ -465,7 +485,10 @@ class GeminiGatewayRelay:
         keepalive_after_seconds: float = 20.0,
         keepalive_every_seconds: float = 15.0,
         progress_every_seconds: float = 300.0,
+        cache_session: Any = None,
     ) -> None:
+        # Names the run whose turns this relay carries, for its cache estimates.
+        self._cache_session = cache_session
         self._upstream_base_url = str(upstream_base_url or "").rstrip("/")
         self._model = str(model or "").strip()
         self._replaced_models: set[str] = set()
@@ -558,7 +581,9 @@ class GeminiGatewayRelay:
         if usage is None:
             return shape
         key = (self._upstream_base_url, self._model)
-        estimated = _PREFIX_CACHE.estimate(key, _prompt_text(request_body), usage["input_tokens"])
+        estimated = _PREFIX_CACHE.estimate(
+            key, _prompt_text(request_body), usage["input_tokens"], self._cache_session
+        )
         if usage["cached_tokens"] is None:
             usage["cached_tokens"] = min(estimated, usage["input_tokens"])
             if not self._estimating:

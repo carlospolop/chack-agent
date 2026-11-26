@@ -748,6 +748,61 @@ def test_prefix_cache_estimates_expire_and_skip_short_prompts():
     assert estimator.estimate(key, "short prompt", 500) == 0
 
 
+def _session_prompt(session, turns):
+    contents = [{"role": "user", "parts": [{"text": f"Task {session}. " + "context " * 300}]}]
+    for turn in range(turns):
+        contents += [{"role": "model", "parts": [{"text": f"answer {turn}"}]},
+                     {"role": "user", "parts": [{"text": f"tool result {session}/{turn} " + "output " * 600}]}]
+    return json.dumps({"systemInstruction": {"parts": [{"text": "Follow the scan rules. " * 400}]},
+                       "contents": contents}, separators=(",", ":"))
+
+
+def _interleaved_estimates(estimator, sessions, turns, tag):
+    """Cached-token estimates of each session's turns, every turn of all sessions called in round-robin."""
+    key = ("https://gateway", "model")
+    tokens = lambda turn: 2_000 + 1_000 * turn
+    estimates = {session: [] for session in range(sessions)}
+    for turn in range(turns):
+        for session in range(sessions):
+            text = _session_prompt(session, turn)
+            estimates[session].append(estimator.estimate(key, text, tokens(turn), tag(session)))
+    return estimates
+
+
+def test_concurrent_sessions_keep_their_own_prefix_estimates():
+    from chack_agent.backends.gemini_gateway_relay import PrefixCacheEstimator
+
+    # 40 runs share the process: between two turns of one run, 39 other prompts arrive.
+    sessions, turns = 40, 4
+    scoped = _interleaved_estimates(PrefixCacheEstimator(clock=lambda: 0.0), sessions, turns, lambda s: f"run-{s}")
+    for session, estimates in scoped.items():
+        assert estimates[0] < 2_000
+        # Each later turn repeats the run's previous prompt, whose tokens it was.
+        for turn in range(1, turns):
+            earlier = 2_000 + 1_000 * (turn - 1)
+            assert earlier - 256 < estimates[turn] <= earlier
+
+    # Untagged calls only match the other runs' shared instructions, never the run's own history.
+    shared = _interleaved_estimates(PrefixCacheEstimator(clock=lambda: 0.0), sessions, turns, lambda s: None)
+    assert all(shared[s][t] < scoped[s][t] for s in range(sessions) for t in range(1, turns))
+
+
+def test_session_prefix_history_expires_and_forgets_the_least_recent_runs():
+    from chack_agent.backends.gemini_gateway_relay import _CACHE_SESSIONS, PrefixCacheEstimator
+
+    now = [0.0]
+    estimator = PrefixCacheEstimator(clock=lambda: now[0])
+    key = ("https://gateway", "model")
+    estimator.estimate(key, _session_prompt("first", 3), 6_000, "first")
+    for session in range(_CACHE_SESSIONS):
+        estimator.estimate(key, _session_prompt(session, 3), 6_000, session)
+    # The first run was pushed out by more recent ones; a recent one still matches its own prompt.
+    assert estimator.estimate(key, _session_prompt("first", 4), 7_000, "first") < 5_000
+    assert estimator.estimate(key, _session_prompt(_CACHE_SESSIONS - 1, 4), 7_000, _CACHE_SESSIONS - 1) > 5_700
+    now[0] = 3_600.0
+    assert estimator.estimate(key, _session_prompt(_CACHE_SESSIONS - 1, 5), 8_000, _CACHE_SESSIONS - 1) == 0
+
+
 def test_an_answer_without_text_or_tool_call_logs_why_without_its_content(gateway, caplog):
     base_url, _, answers = gateway
     url_path = "/v1beta/models/bakkt/deepseek:streamGenerateContent?alt=sse"
