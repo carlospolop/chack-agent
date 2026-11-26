@@ -25,15 +25,23 @@ headers, so a slow streaming call gets its event-stream headers early and
 blank keepalive lines until the answer, or the gateway's error, arrives.
 
 Each gateway call has its own time limit (``CHACK_GEMINI_RELAY_REQUEST_TIMEOUT_SECONDS``,
-never more than the run's limit), well below a run's: a model call the gateway
-never answers is abandoned at half that limit (``_FIRST_ATTEMPT_SHARE``) and sent
-once more with the whole limit, and if that one also gets no answer the CLI gets
-a 504 ``DEADLINE_EXCEEDED`` error instead of keepalives until the whole run times
-out. Each attempt's socket timeout is
-capped at the time left before that limit (``_MIN_ATTEMPT_TIMEOUT_SECONDS`` at
-least), and an abandoned call starts no further retry, so it ends by the limit
-instead of running on, billed, upstream. A call the relay itself gave up on at
-its socket timeout is logged as ``status=timeout``, not as a gateway 5xx.
+never more than the run's limit), well below a run's. A streaming model call
+with no answer after half that limit (``_HEDGE_AFTER_SHARE``) gets one duplicate
+request sent alongside it (a hedge), while the first keeps waiting: whichever
+answers first with a success reaches the CLI and the other's connection is
+closed. A call never has more than these two requests in flight, and both end at
+the call's deadline, the hedge point plus the whole limit; with no answer by
+then the CLI gets a 504 ``DEADLINE_EXCEEDED`` error instead of keepalives until
+the whole run times out. A request that fails with an error before the hedge
+point is returned as it is; after it, the other request is waited for. Each
+attempt's socket timeout is capped at the time left before the deadline
+(``_MIN_ATTEMPT_TIMEOUT_SECONDS`` at least), and a request the relay stopped
+waiting for starts no further retry, so it ends by the deadline instead of
+running on, billed, upstream. A call the relay itself gave up on at its socket
+timeout is logged as ``outcome=timeout``, not as a gateway 5xx, and a request
+closed because the other one answered as ``outcome=cancelled``; a hedged call
+also logs one ``Gemini gateway hedge`` line (``primary_won``, ``hedge_won``,
+``both_timeout``, ``both_failed`` or ``abandoned``).
 Answered calls are not logged one by one; at most once per
 ``progress_every_seconds`` an INFO line counts them, with the last request's
 size and prompt tokens, so a quiet log still shows the run is being answered.
@@ -54,7 +62,9 @@ import http.client
 import json
 import logging
 import os
+import queue
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -105,6 +115,77 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     # A redirect goes back to the CLI as it is, like any other answer.
     def redirect_request(self, *args: Any, **kwargs: Any) -> None:
         return None
+
+
+def _hang_up(sock: Any) -> None:
+    try:
+        # The plain socket's shutdown wakes a thread blocked reading it, a TLS one
+        # too, without touching the TLS state that thread is using.
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except (OSError, TypeError):
+        pass
+
+
+class _AttemptControl(threading.Event):
+    """Ends one gateway request of a call. Set, the request starts no further
+    attempt (its caller stopped waiting); ``cancel`` also hangs up its open
+    connection at once, for a request whose answer is no longer needed.
+
+    Each request has its own control, so concurrent calls share none of it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self._sockets: list[Any] = []
+        self.cancelled = False
+
+    def connected(self, sock: Any) -> None:
+        with self._lock:
+            if not self.cancelled:
+                # One socket per attempt, and a request has a bounded number of attempts.
+                self._sockets.append(sock)
+                return
+        _hang_up(sock)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self.cancelled = True
+            sockets, self._sockets = self._sockets, []
+        self.set()
+        for sock in sockets:
+            _hang_up(sock)
+
+
+class _CancellableConnections:
+    """Registers each gateway connection with its request's ``_AttemptControl``
+    (``Request.chack_control``) once connected, so ``cancel`` can hang it up."""
+
+    def do_open(self, http_class: Any, req: Any, **kwargs: Any) -> Any:
+        control = getattr(req, "chack_control", None)
+        if control is None:
+            return super().do_open(http_class, req, **kwargs)  # type: ignore[misc]
+
+        def connection(*args: Any, **connection_kwargs: Any) -> Any:
+            conn = http_class(*args, **connection_kwargs)
+            connect = conn.connect
+
+            def connect_and_register() -> None:
+                connect()
+                control.connected(conn.sock)
+
+            conn.connect = connect_and_register
+            return conn
+
+        return super().do_open(connection, req, **kwargs)  # type: ignore[misc]
+
+
+class _HTTPHandler(_CancellableConnections, urllib.request.HTTPHandler):
+    pass
+
+
+class _HTTPSHandler(_CancellableConnections, urllib.request.HTTPSHandler):
+    pass
 
 
 _MODELS_SEGMENT = "/models/"
@@ -373,14 +454,13 @@ def _without_rejected_generation_field(request_body: bytes | None, error_body: b
 
 REQUEST_TIMEOUT_ENV = "CHACK_GEMINI_RELAY_REQUEST_TIMEOUT_SECONDS"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
-# A model call that gets no answer within its time limit is sent this many times in all.
-_TIMED_OUT_CALL_ATTEMPTS = 2
-# A gateway that hangs on a call hangs on most attempts for the whole limit, while
-# a slow answer only needs the full limit when its prompt is large. The first
-# attempt therefore gets this share of the limit and the retry the whole of it, so
-# a hang costs half the limit and a slow large answer still gets all of it.
-_FIRST_ATTEMPT_SHARE = 0.5
-# Socket timeout of an attempt started just before its call's limit, so it never gets a zero or negative one.
+# A gateway that hangs on a call hangs on most requests for the whole limit, while
+# a slow answer may still come after this share of it. A streaming call with no
+# answer by then gets one duplicate request alongside the first (a hedge), which
+# keeps waiting; the hedge gets the whole limit, and both end at the hedge point
+# plus that limit, so a hang costs this share and a slow answer is not discarded.
+_HEDGE_AFTER_SHARE = 0.5
+# Socket timeout of an attempt started just before its call's deadline, so it never gets a zero or negative one.
 _MIN_ATTEMPT_TIMEOUT_SECONDS = 0.5
 
 
@@ -508,7 +588,7 @@ class GeminiGatewayRelay:
         )
         self._keepalive_after_seconds = keepalive_after_seconds
         self._keepalive_every_seconds = keepalive_every_seconds
-        self._opener = urllib.request.build_opener(_NoRedirect())
+        self._opener = urllib.request.build_opener(_NoRedirect(), _HTTPHandler(), _HTTPSHandler())
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._usage_lock = threading.Lock()
@@ -658,14 +738,19 @@ class GeminiGatewayRelay:
         self.close()
 
     def _attempt_timeout(self, deadline: float | None) -> float:
-        """Socket timeout of one attempt: the call's limit, capped at the time left before ``deadline``."""
+        """Socket timeout of one attempt: the call's limit, or the time left before its ``deadline``."""
         if deadline is None:
             return self._timeout_seconds
-        left = deadline - time.monotonic()
-        return min(self._timeout_seconds, max(_MIN_ATTEMPT_TIMEOUT_SECONDS, left))
+        return max(_MIN_ATTEMPT_TIMEOUT_SECONDS, deadline - time.monotonic())
 
     def _open(
-        self, url: str, body: bytes | None, headers: dict[str, str], method: str, deadline: float | None = None
+        self,
+        url: str,
+        body: bytes | None,
+        headers: dict[str, str],
+        method: str,
+        deadline: float | None = None,
+        control: _AttemptControl | None = None,
     ) -> Any:
         """The gateway's response, or a 502 ``_Reply`` when it cannot be reached.
 
@@ -674,15 +759,17 @@ class GeminiGatewayRelay:
         ``_gateway_response`` may retry it.
         """
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
+        request.chack_control = control  # type: ignore[attr-defined]
         try:
             return self._opener.open(request, timeout=self._attempt_timeout(deadline))
         except urllib.error.HTTPError as exc:
             return exc
         except Exception as exc:
-            if _timed_out(exc):
+            cancelled = control is not None and control.cancelled
+            if _timed_out(exc) and not cancelled:
                 _LOGGER.warning("Gemini gateway relay timed out waiting for %s: %s", url, exc)
                 return _timeout_reply(exc)
-            _LOGGER.warning("Gemini gateway relay could not reach %s: %s", url, exc)
+            (_LOGGER.debug if cancelled else _LOGGER.warning)("Gemini gateway relay could not reach %s: %s", url, exc)
             reply = _error_reply(502, "UNAVAILABLE", f"gateway unreachable: {exc}")
             return reply._replace(dropped=_dropped_connection(exc))
 
@@ -719,10 +806,14 @@ class GeminiGatewayRelay:
         outcome: str | None = None,
         usage: dict[str, int] | None = None,
         finished_at: float | None = None,
+        control: _AttemptControl | None = None,
     ) -> None:
         """Report the attempt without the URL, headers, request or answer body."""
         if outcome is None:
             outcome = "answered" if status is not None and 200 <= status < 300 else "http_error"
+        if outcome != "answered" and control is not None and control.cancelled:
+            # Hung up by the relay because the call's other request answered.
+            outcome = "cancelled"
         elapsed = (time.monotonic() if finished_at is None else finished_at) - retry.attempt_started
         usage = usage or {}
         _CALL_LOGGER.info(
@@ -746,19 +837,20 @@ class GeminiGatewayRelay:
         headers: dict[str, str],
         method: str,
         retry: TransientRetry,
+        control: _AttemptControl | None = None,
     ) -> tuple[Any, bytes | None]:
         """The gateway's response once rejected generation fields are dropped and
         transient failures retried, with the body actually sent."""
         while True:
             retry.attempt_started = time.monotonic()
-            response = self._open(url, body, headers, method, retry.deadline)
+            response = self._open(url, body, headers, method, retry.deadline, control)
             for _ in range(len(_RETRYABLE_GENERATION_FIELDS)):
                 if not isinstance(response, urllib.error.HTTPError) or response.code != 400:
                     break
                 try:
                     error_body = response.read()
                 finally:
-                    self._log_call(body, 400, retry)
+                    self._log_call(body, 400, retry, control=control)
                 retry_body = _without_rejected_generation_field(body, error_body)
                 response_headers = _end_to_end(response.headers)
                 response.close()
@@ -767,7 +859,7 @@ class GeminiGatewayRelay:
                 _LOGGER.info("Retrying Gemini gateway request without unsupported generation field")
                 body = retry_body
                 retry.attempt_started = time.monotonic()
-                response = self._open(url, body, headers, method, retry.deadline)
+                response = self._open(url, body, headers, method, retry.deadline, control)
             status = _status_of(response)
             transient = response.dropped if isinstance(response, _Reply) else status in TRANSIENT_STATUSES
             if not retry.abandoned:
@@ -775,7 +867,10 @@ class GeminiGatewayRelay:
                 _notify_pressure(response, status, transient, url, timeout_reported=retry.deadline is not None)
             if isinstance(response, _Reply):
                 outcome = "timeout" if response.timed_out else "connection_error"
-                self._log_call(body, None, retry, outcome=outcome)
+                self._log_call(body, None, retry, outcome=outcome, control=control)
+            if control is not None and control.cancelled:
+                # The call's other request answered; this one's failure needs no retry.
+                return response, body
             if not transient:
                 self._retries_spent = False
                 return response, body
@@ -785,7 +880,7 @@ class GeminiGatewayRelay:
                 try:
                     error_body = response.read()
                 finally:
-                    self._log_call(body, status, retry)
+                    self._log_call(body, status, retry, control=control)
                 error_headers = _end_to_end(response.headers)
                 response.close()
                 failure = f"HTTP {status}: {error_body[:200].decode('utf-8', 'replace')}"
@@ -801,7 +896,7 @@ class GeminiGatewayRelay:
         headers: dict[str, str],
         method: str,
         deadline: float | None = None,
-        abandoned: threading.Event | None = None,
+        abandoned: _AttemptControl | None = None,
     ) -> "_Reply":
         """A model call's whole answer, its usage counted, or the gateway's error.
 
@@ -811,7 +906,7 @@ class GeminiGatewayRelay:
         """
         retry = self._retry(url, body, deadline, abandoned)
         while True:
-            response, sent_body = self._gateway_response(url, body, headers, method, retry)
+            response, sent_body = self._gateway_response(url, body, headers, method, retry, abandoned)
             if isinstance(response, _Reply):
                 return response
             status = _status_of(response)
@@ -824,12 +919,14 @@ class GeminiGatewayRelay:
                     reply = _timeout_reply(exc)
                     if deadline is None:
                         gateway_pressure.notify(gateway_pressure.TIMEOUT, f"answer from {url} timed out")
-                    self._log_call(sent_body, status, retry, outcome="timeout")
+                    self._log_call(sent_body, status, retry, outcome="timeout", control=abandoned)
                     return reply
                 if not _dropped_connection(exc):
-                    self._log_call(sent_body, status, retry, outcome="read_error")
+                    self._log_call(sent_body, status, retry, outcome="read_error", control=abandoned)
                     raise
-                self._log_call(sent_body, status, retry, outcome="answer_cut_off")
+                self._log_call(sent_body, status, retry, outcome="answer_cut_off", control=abandoned)
+                if abandoned is not None and abandoned.cancelled:
+                    return _error_reply(502, "UNAVAILABLE", "gateway request cancelled")
                 if retry.wait(f"answer cut off: {exc!r}"):
                     continue
                 self._retries_spent = True
@@ -840,7 +937,7 @@ class GeminiGatewayRelay:
                 if 200 <= status < 300:
                     usage = self._record_usage(raw, body)
             finally:
-                self._log_call(sent_body, status, retry, usage=usage, finished_at=finished_at)
+                self._log_call(sent_body, status, retry, usage=usage, finished_at=finished_at, control=abandoned)
             return _Reply(status, response_headers, raw)
 
     def _stream_reply(
@@ -850,7 +947,7 @@ class GeminiGatewayRelay:
         headers: dict[str, str],
         method: str,
         deadline: float | None = None,
-        abandoned: threading.Event | None = None,
+        abandoned: _AttemptControl | None = None,
     ) -> "_Reply":
         """A streaming call's whole answer: one server-sent event, or the gateway's error."""
         reply = self._read_answer(url, body, headers, method, deadline, abandoned)
@@ -918,28 +1015,13 @@ class GeminiGatewayRelay:
         with the error's status code; so is a transient failure that outlasted
         the relay's retries, so the CLI does not retry it once more.
         """
-        headers_sent = False
-        reply: _Reply | None = None
-        for attempt in range(1, _TIMED_OUT_CALL_ATTEMPTS + 1):
-            limit = self._timeout_seconds * (_FIRST_ATTEMPT_SHARE if attempt == 1 else 1.0)
-            reply, headers_sent = self._wait_for_call(handler, url, body, headers, headers_sent, limit)
-            if reply is not None:
-                break
-            gateway_pressure.notify(gateway_pressure.TIMEOUT, f"no answer from {url} within {round(limit, 1)}s")
-            _LOGGER.warning(
-                "Gemini gateway gave no answer to %s within %ss (attempt %d/%d)%s",
-                url,
-                round(limit, 1),
-                attempt,
-                _TIMED_OUT_CALL_ATTEMPTS,
-                "; retrying" if attempt < _TIMED_OUT_CALL_ATTEMPTS else "",
-            )
+        reply, headers_sent = self._hedged_call(handler, url, body, headers)
         if reply is None:
             reply = _error_reply(
                 504,
                 "DEADLINE_EXCEEDED",
-                f"gateway gave no answer in {_TIMED_OUT_CALL_ATTEMPTS} attempts, "
-                f"the last within {self._timeout_seconds:g}s",
+                f"gateway gave no answer within {self._timeout_seconds * (1 + _HEDGE_AFTER_SHARE):g}s, "
+                f"a duplicate request sent after {self._timeout_seconds * _HEDGE_AFTER_SHARE:g}s included",
             )
         if not headers_sent and not (reply.status in TRANSIENT_STATUSES and self._retries_spent):
             self._send(handler, reply.status, reply.headers, reply.body)
@@ -957,59 +1039,137 @@ class GeminiGatewayRelay:
         handler.wfile.write(b"0\r\n\r\n")
         handler.wfile.flush()
 
-    def _wait_for_call(
+    def _hedged_call(
         self,
         handler: BaseHTTPRequestHandler,
         url: str,
         body: bytes | None,
         headers: dict[str, str],
-        headers_sent: bool,
-        limit: float,
     ) -> tuple["_Reply | None", bool]:
-        """One gateway call's answer, or None when it has none within ``limit`` seconds.
+        """A streaming call's answer, or None when none of its requests answered by its deadline.
+
+        Sends the call once and, when it has no answer after ``_HEDGE_AFTER_SHARE``
+        of the limit, once more alongside it, never more than these two. The
+        first success is the answer and the other request is hung up; an error
+        is the answer only when no other request is still running. Both end at
+        the deadline (the hedge point plus the whole limit): their attempts'
+        socket timeouts end there and they start no attempt after it.
 
         Keeps the CLI's connection alive meanwhile, sending the event-stream
         headers once the call has taken ``keepalive_after_seconds``. Returns
-        whether those headers have gone out. A call this stops waiting for
-        starts no further attempt, and its attempts' socket timeouts end at
-        the limit, so it does not outlive it.
+        whether those headers have gone out. Everything a call tracks is its
+        own, so concurrent calls share no state here.
         """
-        outcome: list[_Reply] = []
-        done = threading.Event()
-        abandoned = threading.Event()
-        deadline = time.monotonic() + limit
+        started = time.monotonic()
+        hedge_after = self._timeout_seconds * _HEDGE_AFTER_SHARE
+        hedge_at = started + hedge_after
+        deadline = hedge_at + self._timeout_seconds
+        finished: "queue.SimpleQueue[tuple[str, _Reply]]" = queue.SimpleQueue()
+        controls: dict[str, _AttemptControl] = {}
 
-        def call() -> None:
-            try:
-                outcome.append(self._stream_reply(url, body, headers, handler.command, deadline, abandoned))
-            except Exception as exc:  # the CLI must get an answer
-                _LOGGER.warning("Gemini gateway relay failed on %s: %s", url, exc)
-                outcome.append(_error_reply(502, "UNAVAILABLE", f"gateway relay failed: {exc}"))
-            finally:
-                done.set()
+        def launch(name: str) -> None:
+            control = controls[name] = _AttemptControl()
 
-        # An abandoned call ends by its deadline (socket timeouts capped, no new attempt); nothing waits for it.
-        threading.Thread(target=call, name="chack-gemini-gateway-call", daemon=True).start()
-        wait = self._keepalive_every_seconds if headers_sent else self._keepalive_after_seconds
+            def call() -> None:
+                try:
+                    reply = self._stream_reply(url, body, headers, handler.command, deadline, control)
+                except Exception as exc:  # the CLI must get an answer
+                    if not control.cancelled:
+                        _LOGGER.warning("Gemini gateway relay failed on %s: %s", url, exc)
+                    reply = _error_reply(502, "UNAVAILABLE", f"gateway relay failed: {exc}")
+                finished.put((name, reply))
+
+            # Nothing joins it: it ends by the deadline (socket timeouts capped, no
+            # attempt after it), or at once when hung up.
+            threading.Thread(target=call, name=f"chack-gemini-gateway-{name}", daemon=True).start()
+
+        headers_sent = False
+        keepalive_at = started + self._keepalive_after_seconds
+        running = 0
+        winner: str | None = None
+        failure: _Reply | None = None
+        reply: _Reply | None = None
+        outcome = "abandoned"
+        launch("primary")
+        running += 1
         try:
             while True:
-                if done.wait(max(0.0, min(wait, deadline - time.monotonic()))):
-                    # The relay's own timeout comes only at the limit: the call had no answer within it.
-                    return (None if outcome[0].timed_out else outcome[0]), headers_sent
-                if time.monotonic() >= deadline:
-                    return None, headers_sent
-                if not headers_sent:
-                    handler.send_response(200)
-                    handler.send_header("Content-Type", "text/event-stream")
-                    handler.send_header("Transfer-Encoding", "chunked")
-                    handler.end_headers()
-                    headers_sent = True
-                else:
-                    _write_chunk(handler, b"\n")
-                wait = self._keepalive_every_seconds
+                now = time.monotonic()
+                if now >= deadline:
+                    gateway_pressure.notify(
+                        gateway_pressure.TIMEOUT, f"no answer from {url} within {round(deadline - started, 1)}s"
+                    )
+                    _LOGGER.warning(
+                        "Gemini gateway gave no answer to %s within %ss, with a duplicate request sent after %ss",
+                        url,
+                        round(deadline - started, 1),
+                        round(hedge_after, 1),
+                    )
+                    reply = failure
+                    outcome = "both_failed" if failure is not None else "both_timeout"
+                    break
+                if "hedge" not in controls and now >= hedge_at:
+                    gateway_pressure.notify(
+                        gateway_pressure.TIMEOUT, f"no answer from {url} within {round(hedge_after, 1)}s"
+                    )
+                    _LOGGER.warning(
+                        "Gemini gateway gave no answer to %s within %ss; sending it once more alongside the first",
+                        url,
+                        round(hedge_after, 1),
+                    )
+                    launch("hedge")
+                    running += 1
+                if now >= keepalive_at:
+                    if not headers_sent:
+                        handler.send_response(200)
+                        handler.send_header("Content-Type", "text/event-stream")
+                        handler.send_header("Transfer-Encoding", "chunked")
+                        handler.end_headers()
+                        headers_sent = True
+                    else:
+                        _write_chunk(handler, b"\n")
+                    keepalive_at = time.monotonic() + self._keepalive_every_seconds
+                wake = min(deadline, keepalive_at, deadline if "hedge" in controls else hedge_at)
+                try:
+                    name, answer = finished.get(timeout=max(0.0, wake - time.monotonic()))
+                except queue.Empty:
+                    continue
+                running -= 1
+                if 200 <= answer.status < 300:
+                    winner, reply = name, answer
+                    outcome = f"{name}_won"
+                    break
+                if not answer.timed_out:
+                    # The relay's own timeout comes only at the deadline: it is no answer.
+                    failure = answer
+                    if "hedge" not in controls:
+                        # An error before the hedge point is the call's answer, as without a hedge.
+                        reply = failure
+                        break
+                if running == 0:
+                    if "hedge" not in controls:
+                        hedge_at = time.monotonic()
+                        continue
+                    reply = failure
+                    outcome = "both_failed" if failure is not None else "both_timeout"
+                    break
         finally:
-            if not done.is_set():
-                abandoned.set()
+            for name, control in controls.items():
+                if winner is not None and name != winner:
+                    control.cancel()
+                else:
+                    control.set()
+            if "hedge" in controls:
+                _CALL_LOGGER.info(
+                    "Gemini gateway hedge outcome=%s status=%s hedge_after_seconds=%.3f elapsed_seconds=%.3f "
+                    "request_bytes=%d",
+                    outcome,
+                    None if reply is None else reply.status,
+                    hedge_after,
+                    time.monotonic() - started,
+                    len(body or b""),
+                )
+        return reply, headers_sent
 
     @staticmethod
     def _send(handler: BaseHTTPRequestHandler, status: int, headers: dict[str, str], body: bytes) -> None:

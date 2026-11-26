@@ -286,7 +286,7 @@ def _slow_gateway(delay, status=200, payload=None):
     return server
 
 
-def _stream_with_timing(relay_url):
+def _stream_with_timing(relay_url, body=b'{"contents": []}'):
     """POSTs a streaming call; returns status, content type, seconds to headers, and body chunks."""
 
     import http.client
@@ -297,7 +297,7 @@ def _stream_with_timing(relay_url):
     connection.request(
         "POST",
         "/v1beta/models/bakkt/glm-5.2:streamGenerateContent?alt=sse",
-        body=b'{"contents": []}',
+        body=body,
         headers={"Content-Type": "application/json"},
     )
     response = connection.getresponse()
@@ -547,68 +547,244 @@ def test_a_model_call_the_gateway_never_answers_is_sent_again_and_its_answer_rea
     assert usage == [{"input_tokens": 120, "output_tokens": 30, "cached_tokens": 0}]
 
 
-def _delaying_gateway(delays):
-    """A gateway whose n-th model call answers after ``delays[n]`` seconds (the last delay repeats)."""
-    calls = []
 
-    class Slow(BaseHTTPRequestHandler):
+def _racing_gateway(steps):
+    """A gateway whose n-th model call follows ``steps[n]`` (the last step repeats):
+    a number answers after that many seconds, with the request's text in the answer;
+    ``"hang"`` never answers and notes when the relay hangs up on it, or ``(status, delay)``
+    answers that error status after the delay.
+
+    Returns the server, each call's start time, and ``{call index: hang-up time}``.
+    """
+    calls = []
+    closed = {}
+    lock = threading.Lock()
+
+    class Racing(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_POST(self):
-            self.rfile.read(int(self.headers.get("content-length") or 0))
-            calls.append(time.monotonic())
-            time.sleep(delays[min(len(calls), len(delays)) - 1])
+            request = self.rfile.read(int(self.headers.get("content-length") or 0))
+            with lock:
+                index = len(calls)
+                calls.append(time.monotonic())
+            step = steps[min(index, len(steps) - 1)]
+            if step == "hang":
+                self.connection.settimeout(30)
+                try:
+                    self.connection.recv(1)
+                except OSError:
+                    pass
+                closed[index] = time.monotonic()
+                self.close_connection = True
+                return
+            status = 200
+            if isinstance(step, tuple):
+                status, step = step
+            time.sleep(step)
+            text = json.loads(request or b"{}").get("contents", [{}])[0].get("parts", [{}])[0].get("text", "")
+            answer = json.loads(ANSWER_BYTES)
+            answer["candidates"][0]["content"]["parts"][0]["text"] = f"answer to {text}"
+            payload = json.dumps(answer).encode() if status == 200 else b'{"error": {"code": %d}}' % status
             try:
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header("content-type", "application/json")
-                self.send_header("content-length", str(len(ANSWER_BYTES)))
+                self.send_header("content-length", str(len(payload)))
                 self.end_headers()
-                self.wfile.write(ANSWER_BYTES)
+                self.wfile.write(payload)
             except OSError:
-                pass  # the relay stopped waiting for this attempt
+                closed[index] = time.monotonic()  # the relay hung up first
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Racing)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, calls
+    return server, calls, closed
 
 
-@pytest.mark.parametrize(
-    "delays, answered_within",
-    [
-        # A hung first attempt is abandoned at half the 2 s limit and the quick retry answers.
-        ([30, 0], 1.6),
-        # An answer slower than half the limit still arrives on the retry, which gets the whole limit.
-        ([1.5], 2.9),
-    ],
-)
-def test_a_hung_call_is_resent_at_half_its_limit_and_a_slow_answer_still_gets_the_whole_limit(
-    delays, answered_within
-):
-    server, calls = _delaying_gateway(delays)
+def _hedged_stream(steps, limit, body=b'{"contents": [{"parts": [{"text": "q"}]}]}'):
+    """One streaming call through a relay with a ``limit`` s call limit (hedge at half of it)."""
+    server, calls, closed = _racing_gateway(steps)
     try:
         relay = GeminiGatewayRelay(
             f"http://127.0.0.1:{server.server_address[1]}",
             timeout_seconds=3840,
-            request_timeout_seconds=2.0,
+            request_timeout_seconds=limit,
             keepalive_after_seconds=0.1,
             keepalive_every_seconds=0.1,
         )
         with relay:
             started = time.monotonic()
-            status, _, _, chunks = _stream_with_timing(relay.base_url)
+            status, _, _, chunks = _stream_with_timing(relay.base_url, body)
             elapsed = time.monotonic() - started
+            # Leave the relay time to hang up on the other request.
+            time.sleep(0.3)
+            usage = relay.take_usage()
+    finally:
+        server.shutdown()
+        server.server_close()
+    return status, b"".join(chunks), elapsed, started, calls, closed, usage
+
+
+def _call_lines(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == "chack.gemini_gateway_relay.calls"]
+
+
+def test_a_first_request_answering_after_the_hedge_point_wins_and_the_hedge_is_closed(caplog):
+    """A slow but viable first request is no longer thrown away at the hedge point."""
+    with caplog.at_level("INFO", logger="chack.gemini_gateway_relay.calls"):
+        status, body, elapsed, started, calls, closed, usage = _hedged_stream([1.3, "hang"], limit=2.0)
+
+    assert status == 200
+    assert json.loads(body.partition(b"data: ")[2])["candidates"][0]["content"]["parts"][0]["text"] == "answer to q"
+    # The hedge went out at half the limit, alongside the first request.
+    assert len(calls) == 2
+    assert 0.9 < calls[1] - calls[0] < 1.2
+    # The answer came at the first request's latency, not later.
+    assert elapsed < 1.3 + 0.4
+    # The hedge was hung up as soon as the first request answered.
+    assert 1 in closed and closed[1] - started < 1.3 + 0.4
+    assert usage == [{"input_tokens": 120, "output_tokens": 30, "cached_tokens": 0}]
+    lines = _call_lines(caplog)
+    assert any(line.startswith("Gemini gateway hedge outcome=primary_won status=200 ") for line in lines)
+    assert any("outcome=cancelled" in line for line in lines)
+    assert not any("outcome=timeout" in line for line in lines)
+
+
+def test_a_hung_first_request_is_overtaken_by_the_hedge(caplog):
+    with caplog.at_level("INFO", logger="chack.gemini_gateway_relay.calls"):
+        status, body, elapsed, started, calls, closed, usage = _hedged_stream(["hang", 0.3], limit=2.0)
+
+    assert status == 200
+    assert json.loads(body.partition(b"data: ")[2])["candidates"][0]["content"]["parts"][0]["text"] == "answer to q"
+    assert len(calls) == 2
+    # Answered at the hedge point (1 s) plus the hedge's own latency.
+    assert 1.2 < elapsed < 1.3 + 0.4
+    # The hung first request was hung up then, not left running to the deadline.
+    assert 0 in closed and closed[0] - started < 1.3 + 0.4
+    assert len(usage) == 1
+    lines = _call_lines(caplog)
+    assert any(line.startswith("Gemini gateway hedge outcome=hedge_won status=200 ") for line in lines)
+    assert all(len(line) < 300 for line in lines)
+
+
+def test_a_call_whose_requests_both_hang_times_out_at_its_unchanged_deadline(caplog):
+    with caplog.at_level("INFO", logger="chack.gemini_gateway_relay.calls"):
+        status, body, elapsed, started, calls, closed, usage = _hedged_stream(["hang"], limit=0.6)
+
+    # The deadline is the hedge point (0.3 s) plus the whole 0.6 s limit, as before the hedge.
+    assert 0.85 < elapsed < 1.4
+    assert len(calls) == 2
+    error = json.loads(body.strip())["error"]
+    assert error["code"] == 504 and error["status"] == "DEADLINE_EXCEEDED"
+    assert status == 200  # keepalives went out first
+    # Neither request outlived the deadline upstream.
+    assert sorted(closed) == [0, 1]
+    assert all(at - started < 0.9 + 0.3 for at in closed.values())
+    assert usage == []
+    lines = _call_lines(caplog)
+    assert sum("outcome=timeout status=None" in line for line in lines) == 2
+    assert any(line.startswith("Gemini gateway hedge outcome=both_timeout status=None ") for line in lines)
+
+
+def test_a_first_request_failing_after_the_hedge_point_leaves_the_answer_to_the_hedge(caplog):
+    with caplog.at_level("INFO", logger="chack.gemini_gateway_relay.calls"):
+        status, body, elapsed, _, calls, _, _ = _hedged_stream([(500, 1.2), 0.5], limit=2.0)
+
+    assert status == 200
+    assert b"answer to q" in body
+    assert len(calls) == 2
+    assert any(line.startswith("Gemini gateway hedge outcome=hedge_won ") for line in _call_lines(caplog))
+
+
+def test_a_5xx_on_the_first_request_is_retried_as_before_without_a_hedge(caplog):
+    with caplog.at_level("INFO", logger="chack.gemini_gateway_relay.calls"):
+        status, body, _, _, calls, _, usage = _hedged_stream([(503, 0.0), 0.0], limit=2.0)
+
+    assert status == 200
+    assert b"answer to q" in body
+    assert len(calls) == 2
+    assert len(usage) == 1
+    lines = _call_lines(caplog)
+    assert lines[0].startswith("Gemini gateway call outcome=http_error status=503 attempt=1/4 ")
+    assert lines[1].startswith("Gemini gateway call outcome=answered status=200 attempt=2/4 ")
+    assert not any("hedge" in line for line in lines)
+
+
+def test_concurrent_hedged_calls_each_get_their_own_answer():
+    seen = {}
+    lock = threading.Lock()
+
+    class Gateway(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)))
+            text = request["contents"][0]["parts"][0]["text"]
+            with lock:
+                seen[text] = seen.get(text, 0) + 1
+                first = seen[text] == 1
+            number = int(text.rsplit("-", 1)[1])
+            if first and number % 2:
+                # Odd calls hang on their first request and are answered by the hedge.
+                self.connection.settimeout(30)
+                try:
+                    self.connection.recv(1)
+                except OSError:
+                    pass
+                return
+            time.sleep(0.05 * (number % 3))
+            answer = json.loads(ANSWER_BYTES)
+            answer["candidates"][0]["content"]["parts"][0]["text"] = f"answer to {text}"
+            answer["usageMetadata"]["promptTokenCount"] = 1000 + number
+            payload = json.dumps(answer).encode()
+            try:
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except OSError:
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Gateway)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    results = {}
+    try:
+        relay = GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            timeout_seconds=3840,
+            request_timeout_seconds=1.0,
+            keepalive_after_seconds=0.1,
+            keepalive_every_seconds=0.1,
+        )
+        with relay:
+
+            def one(number):
+                body = json.dumps({"contents": [{"parts": [{"text": f"call-{number}"}]}]}).encode()
+                status, _, _, chunks = _stream_with_timing(relay.base_url, body)
+                results[number] = (status, json.loads(b"".join(chunks).partition(b"data: ")[2]))
+
+            threads = [threading.Thread(target=one, args=(number,)) for number in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+            usage = relay.take_usage()
     finally:
         server.shutdown()
         server.server_close()
 
-    assert status == 200
-    assert json.loads(b"".join(chunks).partition(b"data: ")[2]) == ANSWER
-    assert len(calls) == 2
-    # The retry went out at half the limit, not at the whole of it.
-    assert 0.9 < calls[1] - calls[0] < 1.4
-    assert elapsed < answered_within
+    assert sorted(results) == list(range(8))
+    for number, (status, answer) in results.items():
+        assert status == 200
+        assert answer["candidates"][0]["content"]["parts"][0]["text"] == f"answer to call-{number}"
+        assert answer["usageMetadata"]["promptTokenCount"] == 1000 + number
+    # Only the hung calls were hedged, each once.
+    assert seen == {f"call-{number}": 2 if number % 2 else 1 for number in range(8)}
+    assert sorted(entry["input_tokens"] for entry in usage) == [1000 + number for number in range(8)]
 
 
 @pytest.mark.parametrize("keepalive_after", [0.1, 5.0])
@@ -1150,9 +1326,9 @@ def test_once_a_call_spent_its_retries_the_clis_own_resends_get_one_attempt_unti
     assert len(calls) == transient_retry.DEFAULT_ATTEMPTS + 2 + 1 + 2
 
 
-def test_an_abandoned_call_ends_by_its_deadline_even_when_a_retry_started_just_before_it(caplog):
-    """A retry started near the call's limit used to get a full socket timeout of
-    its own, so the abandoned request ran on (and was billed) past the limit."""
+def test_a_hung_retry_of_the_first_request_is_hung_up_once_the_hedge_answers(caplog):
+    """A retry started near the hedge point must not run on (and be billed)
+    after the call already has its answer."""
 
     calls = []
     retry_closed = threading.Event()
@@ -1206,15 +1382,15 @@ def test_an_abandoned_call_ends_by_its_deadline_even_when_a_retry_started_just_b
         server.shutdown()
         server.server_close()
 
-    # The call is sent once more at its limit and that answer reaches the CLI.
+    # The call is hedged at half its limit and that answer reaches the CLI.
     assert status == 200
     assert json.loads(b"".join(chunks).partition(b"data: ")[2]) == ANSWER
     assert len(calls) == 3
-    # The abandoned retry ended at the first attempt's 2 s limit, not 2 s after it started (~3.2 s).
+    # The first request's hung retry was hung up once the hedge answered (~2 s), not left running.
     assert closed_at[0] - started < 2.0 + 0.5
-    # It ended at the relay's own timeout, which is no gateway 502.
+    # It is logged as cancelled by the relay, which is no gateway 502.
     lines = [r.getMessage() for r in caplog.records if r.name == "chack.gemini_gateway_relay.calls"]
-    assert any("outcome=timeout status=None" in line for line in lines)
+    assert any("outcome=cancelled status=None" in line for line in lines)
     assert not any("status=502" in line for line in lines)
 
 
