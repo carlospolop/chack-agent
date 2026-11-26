@@ -498,7 +498,10 @@ class GeminiCliExecutor:
         # It also sends the CLI's helper calls (compression, loop detection,
         # routing), which name Google models of their own, to the run's model.
         with GeminiGatewayRelay(
-            self._gemini_base_url, model=self._model_name, timeout_seconds=timeout_seconds
+            self._gemini_base_url,
+            model=self._model_name,
+            timeout_seconds=timeout_seconds,
+            cache_session=id(self),
         ) as relay:
             return self._run_gemini_cli(prompt, timeout_seconds=timeout_seconds, relay=relay)
 
