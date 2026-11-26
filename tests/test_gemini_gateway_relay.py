@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import urllib.error
@@ -909,7 +910,10 @@ def _scripted_gateway(script, delay=0.0):
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(payload)))
             self.end_headers()
-            self.wfile.write(payload)
+            try:
+                self.wfile.write(payload)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -955,19 +959,66 @@ def test_a_transient_gateway_failure_is_retried_and_the_answer_reaches_the_cli(f
 
 def test_each_failed_or_retried_call_is_logged_with_its_size_latency_and_tokens_but_no_content(caplog):
     error_500 = json.dumps({"error": {"code": 500, "message": "boom"}}).encode()
-    with caplog.at_level("WARNING", logger="chack.gemini_gateway_relay"):
+    with caplog.at_level("INFO", logger="chack.gemini_gateway_relay.calls"):
         _stream_call([(504, UPSTREAM_TIMEOUT), (200, ANSWER_BYTES)])
         _stream_call([(500, error_500)])
 
-    lines = [r.getMessage() for r in caplog.records if "Gemini gateway call /" in r.getMessage()]
-    path = "/v1beta/models/m:generateContent"
+    lines = [r.getMessage() for r in caplog.records if r.name == "chack.gemini_gateway_relay.calls"]
     assert len(lines) == 3
-    assert lines[0].startswith(f"Gemini gateway call {path}: status=504 attempt=1/4 latency=")
-    assert "request_bytes=16 prompt_tokens=unknown completion_tokens=none" in lines[0]
-    assert lines[1].startswith(f"Gemini gateway call {path}: status=200 attempt=2/4 latency=")
-    assert lines[1].endswith("request_bytes=16 prompt_tokens=120 completion_tokens=30")
-    assert lines[2].startswith(f"Gemini gateway call {path}: status=500 attempt=1/4 latency=")
+    assert lines[0].startswith("Gemini gateway call outcome=http_error status=504 attempt=1/4 elapsed_seconds=")
+    assert "request_bytes=16 prompt_tokens=None completion_tokens=None" in lines[0]
+    assert lines[1].startswith("Gemini gateway call outcome=answered status=200 attempt=2/4 elapsed_seconds=")
+    assert "request_bytes=16 prompt_tokens=120 completion_tokens=30" in lines[1]
+    assert lines[2].startswith("Gemini gateway call outcome=http_error status=500 attempt=1/4 elapsed_seconds=")
     assert all(len(line) < 300 for line in lines)
+
+
+@pytest.mark.parametrize(
+    ("delay", "timeout", "method", "status", "outcome", "minimum_elapsed"),
+    [
+        (0.0, 2.0, "streamGenerateContent", 200, "answered", 0.0),
+        (0.2, 2.0, "streamGenerateContent", 200, "answered", 0.18),
+        (0.5, 0.15, "generateContent", 502, "timeout", 0.13),
+    ],
+    ids=["fast-answer", "slow-answer", "timeout"],
+)
+def test_gateway_call_logs_observed_latency_and_usage(
+    caplog, delay, timeout, method, status, outcome, minimum_elapsed,
+):
+    server, calls = _scripted_gateway([(200, ANSWER_BYTES)], delay)
+    private_body = b'{"contents":[{"parts":[{"text":"private prompt"}]}]}'
+    try:
+        with caplog.at_level("INFO", logger="chack.gemini_gateway_relay.calls"), GeminiGatewayRelay(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            request_timeout_seconds=timeout,
+            keepalive_after_seconds=0.05,
+            keepalive_every_seconds=0.05,
+        ) as relay:
+            actual_status, _, answer = _post(
+                f"{relay.base_url}/v1beta/models/m:{method}?private=private-query",
+                private_body,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert actual_status == status
+    assert len(calls) == 1
+    if outcome == "answered":
+        assert b"data: " in answer
+    records = [r for r in caplog.records if r.name == "chack.gemini_gateway_relay.calls"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    line = records[0].getMessage()
+    fields = dict(re.findall(r"(\w+)=([^ ]+)", line))
+    assert fields["outcome"] == outcome
+    assert fields["status"] == ("200" if outcome == "answered" else "None")
+    assert fields["attempt"].startswith("1/")
+    assert int(fields["request_bytes"]) == len(private_body)
+    assert float(fields["elapsed_seconds"]) >= minimum_elapsed
+    assert fields["prompt_tokens"] == ("120" if outcome == "answered" else "None")
+    assert fields["completion_tokens"] == ("30" if outcome == "answered" else "None")
+    assert all(value not in line for value in (FAKE_KEY, "private prompt", "private-query", "line one"))
 
 
 def test_a_504_after_the_keepalive_headers_is_retried_instead_of_failing_the_turn():
@@ -1147,7 +1198,7 @@ def test_an_abandoned_call_ends_by_its_deadline_even_when_a_retry_started_just_b
             keepalive_after_seconds=0.1,
             keepalive_every_seconds=0.1,
         )
-        with caplog.at_level("WARNING", logger="chack.gemini_gateway_relay"), relay:
+        with caplog.at_level("INFO", logger="chack.gemini_gateway_relay.calls"), relay:
             started = time.monotonic()
             status, _, _, chunks = _stream_with_timing(relay.base_url)
             assert retry_closed.wait(5)
@@ -1162,8 +1213,8 @@ def test_an_abandoned_call_ends_by_its_deadline_even_when_a_retry_started_just_b
     # The abandoned retry ended at the first attempt's 2 s limit, not 2 s after it started (~3.2 s).
     assert closed_at[0] - started < 2.0 + 0.5
     # It ended at the relay's own timeout, which is no gateway 502.
-    lines = [r.getMessage() for r in caplog.records if "Gemini gateway call /" in r.getMessage()]
-    assert any("status=timeout" in line for line in lines)
+    lines = [r.getMessage() for r in caplog.records if r.name == "chack.gemini_gateway_relay.calls"]
+    assert any("outcome=timeout status=None" in line for line in lines)
     assert not any("status=502" in line for line in lines)
 
 
@@ -1189,7 +1240,7 @@ def test_a_call_whose_caller_stopped_waiting_starts_no_new_retry():
 def test_the_relays_own_socket_timeout_is_logged_as_a_timeout_not_a_gateway_502(caplog):
     server, calls, release = _silent_gateway(answer_from_call=99)
     try:
-        with caplog.at_level("WARNING", logger="chack.gemini_gateway_relay"), GeminiGatewayRelay(
+        with caplog.at_level("INFO", logger="chack.gemini_gateway_relay.calls"), GeminiGatewayRelay(
             f"http://127.0.0.1:{server.server_address[1]}",
             timeout_seconds=3840,
             request_timeout_seconds=0.4,
@@ -1201,9 +1252,9 @@ def test_the_relays_own_socket_timeout_is_logged_as_a_timeout_not_a_gateway_502(
     # The CLI still gets the same 502 and the call is not retried.
     assert status == 502
     assert len(calls) == 1
-    lines = [r.getMessage() for r in caplog.records if "Gemini gateway call /" in r.getMessage()]
+    lines = [r.getMessage() for r in caplog.records if r.name == "chack.gemini_gateway_relay.calls"]
     assert len(lines) == 1
-    assert lines[0].startswith("Gemini gateway call /v1beta/models/m:countTokens: status=timeout attempt=1/")
+    assert lines[0].startswith("Gemini gateway call outcome=timeout status=None attempt=1/")
 
 
 @pytest.mark.parametrize("every, expected_lines", [(0.0, 2), (3600.0, 0)])
