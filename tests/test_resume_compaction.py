@@ -1,5 +1,8 @@
 from types import SimpleNamespace
 
+from chack_agent.backends import build_executor
+from chack_agent.config import load_config
+
 from chack_agent.backends.claude_code_backend import ClaudeCodeExecutor
 from chack_agent.backends.codex_backend import CodexExecutor
 from chack_agent.backends.copilot_cli_backend import CopilotCliExecutor
@@ -309,3 +312,40 @@ def test_langgraph_threshold_compaction_runs_before_the_next_turn_not_after_the_
     assert thread != "thread-1"
     assert follow_up["summary"] == "summary"
     assert follow_up["messages"][0].content == "Follow-up"
+
+
+def test_gemini_compacts_at_the_context_window_set_in_the_agent_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CHACK_GEMINI_HOME", str(tmp_path / "gemini-homes"))
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    config_path = tmp_path / "agent.yaml"
+    config_path.write_text(
+        "agent:\n"
+        "  primary: gemini-3-flash\n"
+        "  provider: gemini\n"
+        "  main_action: test\n"
+        "  sub_action: test\n"
+        "  max_context_tokens: 20\n"
+        "  compaction_threshold_ratio: 0.5\n"
+        "system_prompt: System.\n",
+        encoding="utf-8",
+    )
+    executor = build_executor(
+        load_config(str(config_path)),
+        system_prompt="System.",
+        max_turns=2,
+        memory_max_messages=4,
+        memory_reset_to_messages=2,
+    )
+    executor._gemini_session_id = "session-1"
+    calls = []
+    executor._run_gemini = lambda prompt: (
+        calls.append(prompt) or ("Compressed" if prompt == "/compress" else "Answer"),
+        [],
+        _raw_result(),
+    )
+
+    result = executor.invoke({"input": "Question"})
+
+    assert result["output"] == "Answer"
+    assert calls[-1] == "/compress"

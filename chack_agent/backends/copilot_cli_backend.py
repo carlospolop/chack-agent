@@ -1214,7 +1214,7 @@ def build_executor(
             else ""
         ),
         thinking_effort=normalize_thinking_effort(config.agent.thinking_effort),
-        max_context_tokens=int(getattr(config.agent, "max_context_tokens", 0) or 0),
+        max_context_tokens=int(getattr(config.model, "max_context_tokens", 0) or 0),
         compaction_threshold_ratio=float(
             getattr(config.agent, "compaction_threshold_ratio", 0.75) or 0.75
         ),
