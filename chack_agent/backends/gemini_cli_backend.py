@@ -67,6 +67,19 @@ GEMINI_CANCELLED_OUTPUT = "ERROR: Gemini execution cancelled."
 # of an answer. It counts turns per process, so the resumed run asking for the
 # answer gets its own short budget.
 _TURN_LIMIT_ERROR = "ERROR: Gemini result error: Reached max session turns"
+# With compaction configured, one CLI run gets at most this many turns and the
+# task continues in a resumed run. The CLI compresses history only before a
+# user message that is not a tool result, and one headless run has a single
+# one (the task), so a long tool loop grew until the gateway timed out. Each
+# continuation adds one, and model.compressionThreshold sets where the CLI
+# compresses the history before it: Chack's compaction point, as a fraction of
+# the window the CLI assumes for models it does not know (gateway names
+# included) and for current Gemini models.
+_RUN_TURNS = 40
+_GEMINI_CLI_TOKEN_LIMIT = 1_048_576
+_CONTINUE_PROMPT = (
+    "Continue the task from where you stopped. When it is done, give the final answer."
+)
 # The CLI deletes a session that recorded nothing it can resume (a turn that
 # ended without text, tool calls or thoughts), yet its init event already gave
 # the id; resuming it then fails with one of these.
@@ -302,6 +315,22 @@ class GeminiCliExecutor:
         user_input = str(payload.get("input", "") or "")
         prompt = self._compose_prompt(user_input)
         output, steps, raw_result = self._run_gemini(prompt)
+        turns_used = self._run_turns() if output.startswith(_TURN_LIMIT_ERROR) else 0
+        while (
+            output.startswith(_TURN_LIMIT_ERROR)
+            and self._gemini_session_id
+            and 0 < turns_used < self._max_turns
+        ):
+            # The last run gets only the turns left, so all runs share max_turns.
+            run_turns = min(self._run_turns(), self._max_turns - turns_used)
+            self._turn_budget_override = run_turns
+            try:
+                output, more_steps, more_raw = self._run_gemini(_CONTINUE_PROMPT)
+            finally:
+                self._turn_budget_override = 0
+            steps.extend(more_steps)
+            raw_result.raw_responses.extend(more_raw.raw_responses)
+            turns_used += run_turns
         if output.startswith(_TURN_LIMIT_ERROR) and self._gemini_session_id:
             output, final_steps, final_raw = self._run_final_answer_turn()
             steps.extend(final_steps)
@@ -332,7 +361,7 @@ class GeminiCliExecutor:
                 reset_to = 1
             self._conversation = self._conversation[-reset_to:]
 
-        threshold_tokens = int(self._max_context_tokens * self._compaction_threshold_ratio)
+        threshold_tokens = self._compaction_threshold_tokens()
         input_tokens = max(
             (
                 int(response.get("usage", {}).get("input_tokens", 0) or 0)
@@ -448,6 +477,17 @@ class GeminiCliExecutor:
 
         prompt_parts = [p for p in (user_input, policy_block, schema_block) if p.strip()]
         return "\n".join(prompt_parts)
+
+    def _compaction_threshold_tokens(self) -> int:
+        return int(self._max_context_tokens * self._compaction_threshold_ratio)
+
+    def _run_turns(self) -> int:
+        """Turns one CLI run may take; 0 when unbounded."""
+        if self._max_turns <= 0:
+            return 0
+        if self._compaction_threshold_tokens() > 0:
+            return min(self._max_turns, _RUN_TURNS)
+        return self._max_turns
 
     def _run_final_answer_turn(self) -> tuple[str, list[tuple[ToolAction, Any]], _RawResult]:
         _LOGGER.warning(
@@ -930,15 +970,19 @@ class GeminiCliExecutor:
         settings_dir = os.path.join(gemini_home, ".gemini")
         os.makedirs(settings_dir, exist_ok=True)
         settings_path = os.path.join(settings_dir, "settings.json")
+        model_settings: dict[str, Any] = {
+            "name": self._model_name,
+            "maxSessionTurns": self._turn_budget_override or self._run_turns() or -1,
+            # The CLI's loop detector ends turns that had already produced
+            # their answer, discarding it (seen on long web-audit turns).
+            # max_turns, tool and cost limits still bound real loops.
+            "disableLoopDetection": True,
+        }
+        threshold_tokens = self._compaction_threshold_tokens()
+        if threshold_tokens > 0:
+            model_settings["compressionThreshold"] = min(1.0, threshold_tokens / _GEMINI_CLI_TOKEN_LIMIT)
         settings_payload = {
-            "model": {
-                "name": self._model_name,
-                "maxSessionTurns": self._turn_budget_override or (self._max_turns if self._max_turns > 0 else -1),
-                # The CLI's loop detector ends turns that had already produced
-                # their answer, discarding it (seen on long web-audit turns).
-                # max_turns, tool and cost limits still bound real loops.
-                "disableLoopDetection": True,
-            },
+            "model": model_settings,
             "modelConfigs": {
                 "overrides": [
                     {
