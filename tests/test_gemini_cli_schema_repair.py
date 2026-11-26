@@ -190,6 +190,47 @@ def test_valid_answer_is_not_repaired(fake_gemini):
     assert len(fake_gemini.calls) == 1
 
 
+_STEP = {
+    "type": "object",
+    "properties": {"code": {"type": "string"}, "flow_title": {"type": "string"}, "branch_id": {"type": "string"}},
+    "required": ["code"],
+    "additionalProperties": False,
+}
+OPTIONAL_FIELDS_SCHEMA = {
+    "type": "object",
+    "properties": {"result": {
+        "type": "object",
+        "properties": {"steps": {"type": "array", "items": _STEP}},
+        "required": ["steps"],
+        "additionalProperties": False,
+    }},
+    "required": ["result"],
+    "additionalProperties": False,
+}
+
+
+def test_an_answer_leaving_out_optional_fields_is_not_repaired(fake_gemini):
+    answer = {"result": {"steps": [{"code": "x"}]}}
+    fake_gemini.script([_run(json.dumps(answer))])
+
+    result = _executor(schema=OPTIONAL_FIELDS_SCHEMA).invoke({"input": "Describe the flow."})
+
+    assert json.loads(result["output"]) == answer
+    assert len(fake_gemini.calls) == 1
+
+
+def test_an_answer_leaving_out_a_required_field_is_repaired(fake_gemini):
+    repaired = {"result": {"steps": [{"code": "x", "flow_title": "login"}]}}
+    fake_gemini.script([_run(json.dumps({"result": {"steps": [{"flow_title": "login"}]}})), _run(json.dumps(repaired), tool_id="t2")])
+
+    result = _executor(schema=OPTIONAL_FIELDS_SCHEMA).invoke({"input": "Describe the flow."})
+
+    assert json.loads(result["output"]) == repaired
+    assert len(fake_gemini.calls) == 2
+    assert "'code' is a required property (at result.steps[0])" in fake_gemini.prompts[1]
+    assert "flow_title' is a required" not in fake_gemini.prompts[1]
+
+
 def test_answer_still_drifting_after_the_repair_is_returned_as_given(fake_gemini):
     fake_gemini.script([_run(json.dumps(DRIFTED)), _run("still prose")])
 

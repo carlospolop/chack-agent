@@ -336,12 +336,13 @@ class GeminiCliExecutor:
             steps.extend(final_steps)
             raw_result.raw_responses.extend(final_raw.raw_responses)
         # The schema is only a prompt contract here. A drifting answer gets one
-        # repair turn in the resumed session.
+        # repair turn in the resumed session. It is checked against the schema
+        # the prompt shows: strictifying would require the fields it leaves optional.
         output, repair_steps, repair_raw = repair_schema_output(
             output,
             schema=self._output_schema_json,
             name=self._output_schema_name,
-            strict=self._output_schema_strict,
+            strict=False,
             resumable=bool(self._gemini_session_id),
             run_turn=self._run_gemini,
             label="gemini",
