@@ -3334,15 +3334,18 @@ class Chack:
             else:
                 cost_text = f"${total_cost:.4f}"
 
-            output = self._append_budget_limit_warning(
-                output,
-                total_cost=total_cost,
-                max_cost_usd=max_cost_usd,
-                tools_used=tools_used,
-                max_tools_used=max_tools_used,
-                warning_ratio=budget_warning_ratio,
-                critical_ratio=budget_critical_ratio,
-            )
+            # A schema or validated answer is read by a program, and the notice after it breaks strict
+            # parsing; the limits stay visible in the run's telemetry.
+            if not answer_schema and output_validator is None:
+                output = self._append_budget_limit_warning(
+                    output,
+                    total_cost=total_cost,
+                    max_cost_usd=max_cost_usd,
+                    tools_used=tools_used,
+                    max_tools_used=max_tools_used,
+                    warning_ratio=budget_warning_ratio,
+                    critical_ratio=budget_critical_ratio,
+                )
 
             run1_steps = len(run1_all_steps)
             run2_steps = len(run2_all_steps)
