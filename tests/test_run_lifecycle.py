@@ -875,6 +875,38 @@ def test_exact_tool_cap_is_terminal_and_skips_critique(isolated_run_state, compl
     assert executor.calls == 1
 
 
+class _StructuredToolCapExecutor(_ToolCapExecutor):
+    answer = {"status": "IMPROVED", "summary": "patched"}
+
+    def invoke(self, payload, context=None):
+        return {**super().invoke(payload, context), "output": json.dumps(self.answer)}
+
+
+def test_schema_answer_at_tool_cap_stays_parseable_json(isolated_run_state):
+    config = _fallback_config()
+    config = replace(
+        config,
+        agent=replace(
+            config.agent,
+            max_cost_usd=0,
+            output_schema_json={
+                "type": "object",
+                "properties": {"status": {"type": "string"}, "summary": {"type": "string"}},
+                "required": ["status", "summary"],
+                "additionalProperties": False,
+            },
+        ),
+        tools=replace(config.tools, min_tools_used=0, max_tools_used=2),
+    )
+    agent = _InjectedExecutorChack(config)
+    agent.executor = _StructuredToolCapExecutor()
+
+    result = agent.run("tool-cap-structured", "do work", require_task_steps_manager_init_first=False)
+
+    assert json.loads(result.output) == _StructuredToolCapExecutor.answer
+    assert result.limit_reached == "tools_after_completion"
+
+
 def test_runtime_watchdog_preserves_success_queued_during_cancellation(
     isolated_run_state,
     monkeypatch,
