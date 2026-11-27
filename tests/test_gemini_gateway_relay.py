@@ -1447,3 +1447,137 @@ def test_answered_calls_report_progress_at_most_once_per_interval(gateway, caplo
         assert lines[-1].startswith("Gemini gateway relay answered 1 model calls")
         assert "(2 in total)" in lines[-1] and "request_bytes=13 prompt_tokens=120" in lines[-1]
     assert "secret" not in caplog.text
+
+
+# DeepSeek behind LiteLLM's Gemini route can write its tool calls as text markup.
+TOOLS_REQUEST = json.dumps({
+    "contents": [{"role": "user", "parts": [{"text": "go"}]}],
+    "tools": [{"functionDeclarations": [
+        {"name": "mcp_chack_tools_get_units", "parametersJsonSchema": {
+            "type": "object", "properties": {"aliases": {"type": "array"}}, "required": ["aliases"]}},
+        {"name": "mcp_chack_tools_search_checks", "parametersJsonSchema": {
+            "type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+            "required": ["query"]}},
+        {"name": "mcp_chack_tools_submit", "parametersJsonSchema": {
+            "type": "object", "additionalProperties": False, "required": ["checks"],
+            "properties": {"checks": {"type": "array", "items": {
+                "type": "object", "required": ["title", "severity"], "additionalProperties": False,
+                "properties": {"title": {"type": "string"}, "severity": {"enum": ["high", "low"]}}}}}}},
+        {"name": "reset_state", "parametersJsonSchema": {"type": "object", "additionalProperties": False}},
+    ]}],
+}).encode()
+
+
+def _dsml(*invokes):
+    body = "".join(
+        f'<｜DSML｜ invoke name="{name}">\n'
+        + "".join(f'<｜DSML｜ parameter name="{key}" string="{kind}">{value}</｜DSML｜ parameter>\n'
+                  for key, kind, value in params)
+        + "</｜DSML｜ invoke>\n"
+        for name, params in invokes
+    )
+    return f"<｜DSML｜ calls>\n{body}</｜DSML｜ calls>"
+
+
+def _relayed_parts(gateway, text, request=TOOLS_REQUEST, method="streamGenerateContent"):
+    base_url, _, answers = gateway
+    answer = {"candidates": [{"content": {"role": "model", "parts": [{"text": text}]}, "finishReason": "STOP"}],
+              "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5}}
+    answers["generateContent"] = (200, json.dumps(answer).encode())
+    with GeminiGatewayRelay(base_url) as relay:
+        status, _, body = _post(f"{relay.base_url}/v1beta/models/bakkt/deepseek:{method}?alt=sse", request)
+    assert status == 200
+    if method == "streamGenerateContent":
+        body = body[len(b"data: "):]
+    return json.loads(body)["candidates"][0]["content"]["parts"]
+
+
+def test_a_call_valid_against_a_nested_schema_is_converted(gateway):
+    text = _dsml(("submit", [("checks", "false", '[{"title": "t", "severity": "high"}]')]), ("reset_state", []))
+
+    assert _relayed_parts(gateway, text)[0:] == [
+        {"functionCall": {"name": "mcp_chack_tools_submit", "args": {"checks": [{"title": "t", "severity": "high"}]}}},
+        {"functionCall": {"name": "reset_state", "args": {}}},
+    ]
+
+
+@pytest.mark.parametrize("method", ["streamGenerateContent", "generateContent"])
+def test_tool_call_markup_ending_the_text_becomes_the_declared_function_calls(gateway, method):
+    text = "I'll look at the units first.\n\n" + _dsml(
+        ("get_units", [("aliases", "false", '["OP1", "OP2"]')]),
+        ("search_checks", [("query", "true", '["not", "json"]'), ("limit", "false", "5")]),
+    )
+
+    parts = _relayed_parts(gateway, text, method=method)
+
+    assert parts == [
+        {"text": "I'll look at the units first."},
+        {"functionCall": {"name": "mcp_chack_tools_get_units", "args": {"aliases": ["OP1", "OP2"]}}},
+        {"functionCall": {"name": "mcp_chack_tools_search_checks",
+                          "args": {"query": '["not", "json"]', "limit": 5}}},
+    ]
+
+
+def test_only_the_last_block_runs_when_an_earlier_one_is_quoted_in_a_code_fence(gateway):
+    quoted = "Example:\n```\n" + _dsml(("get_units", [("aliases", "false", '["OP9"]')])) + "\n```\nNow:\n"
+    real = _dsml(("get_units", [("aliases", "false", '["OP1"]')]))
+
+    parts = _relayed_parts(gateway, quoted + real)
+
+    assert parts[0]["text"].startswith("Example:") and parts[0]["text"].endswith("Now:")
+    assert parts[1:] == [{"functionCall": {"name": "mcp_chack_tools_get_units", "args": {"aliases": ["OP1"]}}}]
+
+
+@pytest.mark.parametrize("text", [
+    # Quoted, not called: inside an open code fence.
+    "Like this:\n```\n" + _dsml(("get_units", [("aliases", "false", '["OP1"]')])),
+    # Discussed mid-text, not ending it.
+    _dsml(("get_units", [("aliases", "false", '["OP1"]')])) + "\nis what the call would look like.",
+    # A tool the request did not declare.
+    _dsml(("run_shell", [("command", "true", "id")])),
+    # One invalid call keeps the whole block as text.
+    _dsml(("get_units", [("aliases", "false", '["OP1"]')]), ("delete_everything", [])),
+    # Arguments that do not fit the declared schema.
+    _dsml(("get_units", [("aliases", "false", "[OP1, OP2")])),
+    _dsml(("get_units", [("aliases", "true", "OP1")])),
+    _dsml(("search_checks", [("query", "true", "x"), ("limit", "false", "true")])),
+    _dsml(("search_checks", [("limit", "false", "5")])),
+    _dsml(("get_units", [("aliases", "false", '["OP1"]'), ("extra", "true", "x")])),
+    _dsml(("get_units", [("aliases", "false", '["OP1"]'), ("aliases", "false", '["OP2"]')])),
+    # The whole declared schema counts: nested items, enums and closed objects.
+    _dsml(("submit", [("checks", "false", '[{"title": "t", "severity": "critical"}]')])),
+    _dsml(("submit", [("checks", "false", '[{"title": "t"}]')])),
+    _dsml(("submit", [("checks", "false", '[{"title": "t", "severity": "low", "x": 1}]')])),
+    _dsml(("reset_state", [("everything", "false", "true")])),
+    # Only the CLI's MCP prefix is implied: "state" does not mean "reset_state".
+    _dsml(("state", [])),
+])
+def test_markup_that_is_not_a_valid_declared_call_stays_text(gateway, text):
+    assert _relayed_parts(gateway, text) == [{"text": text}]
+
+
+def test_markup_is_not_converted_for_a_request_without_tools(gateway):
+    text = _dsml(("get_units", [("aliases", "false", '["OP1"]')]))
+
+    assert _relayed_parts(gateway, text, request=b'{"contents": []}') == [{"text": text}]
+
+
+def test_an_unprefixed_name_matching_two_declared_tools_stays_text(gateway):
+    request = json.loads(TOOLS_REQUEST)
+    request["tools"][0]["functionDeclarations"].append(
+        {"name": "mcp_other_get_units", "parametersJsonSchema": {"type": "object"}})
+    text = _dsml(("get_units", [("aliases", "false", '["OP1"]')]))
+
+    assert _relayed_parts(gateway, text, request=json.dumps(request).encode()) == [{"text": text}]
+
+
+def test_converted_calls_count_as_the_turns_tool_calls(gateway):
+    base_url, _, answers = gateway
+    text = _dsml(("get_units", [("aliases", "false", '["OP1"]')]))
+    answers["generateContent"] = (200, json.dumps(
+        {"candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP"}]}).encode())
+    with GeminiGatewayRelay(base_url) as relay:
+        _post(f"{relay.base_url}/v1beta/models/bakkt/deepseek:streamGenerateContent?alt=sse", TOOLS_REQUEST)
+        shape = relay.last_answer_shape()
+
+    assert shape["function_call"] == 1 and shape["text"] == 0
