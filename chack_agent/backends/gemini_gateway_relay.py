@@ -55,6 +55,14 @@ omits that field, the relay estimates the cached tokens from the longest prefix
 the request shares with a recent request to the same gateway and model
 (``PrefixCacheEstimator``); an answer that reports the field is trusted as is. A CLI that goes away while the relay answers it (a cancelled or timed-out
 run) is no error: the answer is dropped quietly.
+
+Some models (DeepSeek behind LiteLLM's Gemini route) answer a request that
+offers tools with their own tool-call markup in the text (``<｜DSML｜ calls>``)
+instead of function calls, so the CLI would run no tool. The relay reads each
+answer whole before the CLI gets it, so it turns such a block into
+``functionCall`` parts (``_with_text_tool_calls``) when the block ends the text
+outside a code fence and every call in it names a tool the request declared
+with valid arguments; otherwise the answer is passed on unchanged.
 """
 from __future__ import annotations
 
@@ -419,6 +427,147 @@ class PrefixCacheEstimator:
 # Shared by every relay of a process: a run's relays name their session, so
 # each turn sees its own earlier prompts however many other runs call between.
 _PREFIX_CACHE = PrefixCacheEstimator()
+
+
+# DeepSeek's tool-call markup: special tokens with fullwidth bars (U+FF5C).
+_DSML_CALLS_OPEN = re.compile(r"<｜DSML｜\s*(?:function_)?calls>")
+_DSML_CALLS_REST = re.compile(r"(?P<body>.*?)</｜DSML｜\s*(?:function_)?calls>\s*", re.S)
+
+_DSML_INVOKE = re.compile(
+    r'<｜DSML｜\s*invoke\s+name="(?P<name>[^"]+)"\s*>(?P<body>.*?)</｜DSML｜\s*invoke>', re.S
+)
+_DSML_PARAMETER = re.compile(
+    r'<｜DSML｜\s*parameter\s+name="(?P<name>[^"]+)"(?:\s+string="(?P<string>true|false)")?\s*>'
+    r"(?P<value>.*?)</｜DSML｜\s*parameter>",
+    re.S,
+)
+
+
+def _declared_tools(request_body: bytes | None) -> dict[str, dict[str, Any]]:
+    """The function declarations a model request offers, by name."""
+    try:
+        request = json.loads(request_body or b"{}")
+    except ValueError:
+        return {}
+    tools = request.get("tools") if isinstance(request, dict) else None
+    declared: dict[str, dict[str, Any]] = {}
+    for tool in tools if isinstance(tools, list) else []:
+        functions = tool.get("functionDeclarations") if isinstance(tool, dict) else None
+        for function in functions if isinstance(functions, list) else []:
+            if isinstance(function, dict) and isinstance(function.get("name"), str):
+                schema = function.get("parametersJsonSchema")
+                if schema is None and isinstance(function.get("parameters"), dict):
+                    schema = _lower_types(function["parameters"])  # Gemini's OpenAPI subset: "OBJECT".
+                declared[function["name"]] = schema if isinstance(schema, dict) else {"type": "object"}
+    return declared
+
+
+def _lower_types(schema: Any) -> Any:
+    if isinstance(schema, dict):
+        return {key: value.lower() if key == "type" and isinstance(value, str) else _lower_types(value)
+                for key, value in schema.items()}
+    if isinstance(schema, list):
+        return [_lower_types(item) for item in schema]
+    return schema
+
+
+def _declared_name(name: str, declared: dict[str, dict[str, Any]]) -> str | None:
+    """The declared tool a call means: its exact name, else the one MCP tool
+    whose name only adds the CLI's server prefix (``mcp_<server>_<name>``)."""
+    if name in declared:
+        return name
+    matches = [candidate for candidate in declared
+               if candidate.startswith("mcp_") and candidate.endswith(f"_{name}") and len(candidate) > len(name) + 5]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _valid_arguments(args: dict[str, Any], schema: dict[str, Any]) -> bool:
+    """Whether the arguments satisfy the tool's whole declared schema (an unusable schema rejects them)."""
+    import jsonschema
+
+    try:
+        validator = jsonschema.validators.validator_for(schema)
+        validator.check_schema(schema)
+        return not any(True for _ in validator(schema).iter_errors(args))
+    except jsonschema.SchemaError:
+        return False
+
+
+def _markup_calls(markup: str, declared: dict[str, dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Function calls of one markup block, or None unless every call is valid."""
+    calls = []
+    if _DSML_INVOKE.sub("", markup).strip():
+        return None
+    for invoke in _DSML_INVOKE.finditer(markup):
+        name = _declared_name(invoke["name"], declared)
+        if name is None or _DSML_PARAMETER.sub("", invoke["body"]).strip():
+            return None
+        args: dict[str, Any] = {}
+        for parameter in _DSML_PARAMETER.finditer(invoke["body"]):
+            key, value = parameter["name"], parameter["value"]
+            if key in args:
+                return None
+            if parameter["string"] == "false":
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    return None
+            args[key] = value
+        properties = declared[name].get("properties")
+        # A parameter the tool never declared is debris, even where its schema would allow extra keys.
+        if isinstance(properties, dict) and any(key not in properties for key in args):
+            return None
+        if not _valid_arguments(args, declared[name]):
+            return None
+        calls.append({"functionCall": {"name": name, "args": args}})
+    return calls or None
+
+
+def _with_text_tool_calls(body: bytes, request_body: bytes | None) -> bytes:
+    """The answer with tool-call markup in its text turned into function calls.
+
+    Only a block that ends a text part, outside a code fence, and whose calls
+    all name declared tools with arguments valid against their declared schema is converted; the text before
+    it stays a text part. Any other answer is returned unchanged.
+    """
+    if b"DSML" not in body:  # The bars may arrive JSON-escaped (\uff5c).
+        return body
+    declared = _declared_tools(request_body)
+    if not declared:
+        return body
+    try:
+        answer = json.loads(body)
+    except ValueError:
+        return body
+    changed = False
+    candidates = answer.get("candidates") if isinstance(answer, dict) else None
+    for candidate in candidates if isinstance(candidates, list) else []:
+        content = candidate.get("content") if isinstance(candidate, dict) else None
+        parts = content.get("parts") if isinstance(content, dict) else None
+        if not isinstance(parts, list):
+            continue
+        rewritten = []
+        for part in parts:
+            text = part.get("text") if isinstance(part, dict) and not part.get("thought") else None
+            opening = list(_DSML_CALLS_OPEN.finditer(text)) if isinstance(text, str) else []
+            block = _DSML_CALLS_REST.fullmatch(text, opening[-1].end()) if opening else None
+            calls = None
+            if block and text[: opening[-1].start()].count("```") % 2 == 0:
+                calls = _markup_calls(block["body"], declared)
+            if calls is None:
+                if opening:
+                    _LOGGER.warning("Gemini gateway answer kept tool-call markup it could not read as declared tool calls")
+                rewritten.append(part)
+                continue
+            prefix = text[: opening[-1].start()].rstrip()
+            if prefix:
+                rewritten.append({**part, "text": prefix})
+            rewritten.extend(calls)
+            changed = True
+        content["parts"] = rewritten
+    if not changed:
+        return body
+    return json.dumps(answer, ensure_ascii=False).encode("utf-8")
 
 
 def _sse_event(body: bytes) -> bytes:
@@ -935,6 +1084,7 @@ class GeminiGatewayRelay:
             usage = None
             try:
                 if 200 <= status < 300:
+                    raw = _with_text_tool_calls(raw, body)
                     usage = self._record_usage(raw, body)
             finally:
                 self._log_call(sent_body, status, retry, usage=usage, finished_at=finished_at, control=abandoned)
